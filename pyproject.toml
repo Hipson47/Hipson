@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hipson"
+version = "0.1.0"
+description = "Codex-native local developer workflow tool"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "Hipson Contributors" }]
+dependencies = []
+keywords = ["codex", "agents", "developer-tools", "rag", "workflow"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/hipson/hipson"
+Repository = "https://github.com/hipson/hipson"
+Issues = "https://github.com/hipson/hipson/issues"
+
+[project.optional-dependencies]
+dev = ["ruff>=0.8.0"]
+
+[dependency-groups]
+dev = ["ruff>=0.8.0"]
+
+[project.scripts]
+hipson = "hipson.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hipson = ["assets/**/*"]
+
+[tool.setuptools.exclude-package-data]
+hipson = ["assets/**/__pycache__/*", "assets/**/*.pyc", "assets/**/*.pyo"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = ["skills/external"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+"scripts/hipson_agents.py" = ["E402"]
+"scripts/hipson_project.py" = ["E402"]

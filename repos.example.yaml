@@ -1,0 +1,38 @@
+# Copy to repos.yaml and adjust paths for your machine.
+# Keep repos.yaml local and uncommitted.
+
+repos:
+  - name: Hipson
+    path: .
+    type: orchestrator
+    progress: docs/hipson-progress.md
+    owners:
+      - Hipson
+    tags:
+      - orchestrator
+      - local-first
+    verification:
+      - python3 scripts/run_tests.py
+    risk_paths:
+      - scripts
+      - codex-workflow-kit/global
+      - codex-workflow-kit/skills
+      - skills/hipson-gpt
+
+  # Example:
+  # - name: MyProject
+  #   path: ../MyProject
+  #   type: app
+  #   progress: docs/hipson-progress.md
+  #   owners:
+  #     - You
+  #   tags:
+  #     - frontend
+  #     - production
+  #   verification:
+  #     - npm run test
+  #     - npm run build
+  #   risk_paths:
+  #     - auth
+  #     - migrations
+  #     - infra

@@ -1,0 +1,89 @@
+{
+  "updated": "2026-05-12",
+  "purpose": "Vendored public agent skills for Hipson orchestrator, sidecars, and Codex workflows.",
+  "runtime_note": "Project copies are versioned references. Active Codex runtime skills are loaded from ~/.codex/skills after Codex restart.",
+  "sources": [
+    {
+      "id": "openai-curated",
+      "url": "https://github.com/openai/skills",
+      "path": "skills/.curated",
+      "installed": [
+        "chatgpt-apps",
+        "cli-creator",
+        "cloudflare-deploy",
+        "figma",
+        "figma-code-connect-components",
+        "figma-create-design-system-rules",
+        "figma-create-new-file",
+        "figma-generate-design",
+        "figma-generate-library",
+        "figma-implement-design",
+        "figma-use",
+        "gh-address-comments",
+        "gh-fix-ci",
+        "linear",
+        "netlify-deploy",
+        "notion-meeting-intelligence",
+        "notion-research-documentation",
+        "notion-spec-to-implementation",
+        "openai-docs",
+        "pdf",
+        "playwright-interactive",
+        "render-deploy",
+        "screenshot",
+        "security-ownership-map",
+        "security-threat-model",
+        "sentry",
+        "vercel-deploy",
+        "yeet"
+      ],
+      "why": "Official Codex-oriented catalog with design, Figma, browser, GitHub, security, docs, and deployment workflows."
+    },
+    {
+      "id": "vercel-labs",
+      "url": "https://github.com/vercel-labs/agent-skills",
+      "path": "skills",
+      "installed": [
+        "composition-patterns",
+        "deploy-to-vercel",
+        "react-best-practices",
+        "react-view-transitions",
+        "web-design-guidelines"
+      ],
+      "why": "Strong web product guidance for React, composition, transitions, Vercel deployment, and visual design rules."
+    },
+    {
+      "id": "anthropic",
+      "url": "https://github.com/anthropics/skills",
+      "path": "skills",
+      "installed": [
+        "algorithmic-art",
+        "brand-guidelines",
+        "canvas-design",
+        "docx",
+        "frontend-design",
+        "mcp-builder",
+        "pptx",
+        "theme-factory",
+        "web-artifacts-builder",
+        "webapp-testing",
+        "xlsx"
+      ],
+      "why": "Useful design, brand, theme, browser-app testing, artifact, MCP, and document workflows."
+    }
+  ],
+  "skipped_examples": [
+    {
+      "name": "vercel-cli-with-tokens",
+      "reason": "Avoid default skills that normalize direct token handling. Use deployment helpers with explicit secret review instead."
+    },
+    {
+      "name": "hatch-pet",
+      "reason": "Demo/novelty skill with no current Hipson value."
+    },
+    {
+      "name": "anthropic/pdf",
+      "reason": "Skipped globally because openai-curated/pdf was already installed. Project can add it later if a different PDF workflow is needed."
+    }
+  ]
+}

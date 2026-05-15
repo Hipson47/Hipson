@@ -1,0 +1,2 @@
+include src/hipson/assets/.env.example
+recursive-include src/hipson/assets *.md *.json *.env *.sh
