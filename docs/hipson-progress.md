@@ -14,6 +14,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Packet generation is compiled through structured packet specs.
 - Local JSONL memory is available through `hipson memory add/search/list`.
 - Sidecar agents include routing metadata and can be suggested with `hipson sidecar route`.
+- Optional LLM routing is available behind `hipson sidecar route --llm` and sends only redacted routing summaries.
 - Canonical source docs live under `knowledge/source/`.
 
 ## Decisions
@@ -28,15 +29,15 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Use `HIPSON_HOME` for Hipson config and `CODEX_HOME` for Codex config.
 - Redact secrets before scan output, packet persistence, and sidecar send paths.
 - Keep memory writes orchestrator-owned and redacted; agents receive bounded packet context.
-- Use deterministic routing metadata before considering model-based routing.
+- Use deterministic routing metadata by default; use model-based routing only behind an explicit flag.
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 48/48 tests.
+- `python3 scripts/run_tests.py`: passed, 51/51 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke from a temporary venv outside the repo: passed.
-- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
+- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
 - `bash -n codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 - Secret scan excluding generated reports and test fixtures: passed.
@@ -48,7 +49,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Cheap paid models can produce false positives; Architect must verify findings.
 
 ## Next Task
-Review the final public GitHub page after pushing, then add retrieval-backed packet context with strict size caps.
+Run the public remote CI after pushing rewritten `main`, then decide whether bundled external skills should ship in the 1.0 artifact.
 
 ## Handoff Notes
 For a fresh local setup:

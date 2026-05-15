@@ -40,6 +40,27 @@ from `config/agents.json`. The router reads `expertise`, `use_when`,
 `avoid_when`, `context_budget`, and `can_handle_sensitive_context`; it is a
 gate, not an autonomous decision maker.
 
+## Optional LLM Router
+
+`hipson sidecar route --llm` is available for complex, multi-dimensional routing
+decisions. It is explicitly not the default. The model receives only a redacted
+summary and filtered candidate metadata, never the full packet:
+
+```json
+{"task_type":"review","risk":"security","files":["src/auth.py"],"chars":4200,"skills":["hipson-backend"]}
+```
+
+Expected output:
+
+```json
+{"agent":"reviewer_cheap","confidence":0.82,"reason":"Security review maps to reviewer_cheap."}
+```
+
+Use it when task type, risk, files, and skills point in different directions.
+Avoid it in the normal flow because it adds provider cost, latency, and less
+deterministic behavior. If provider routing fails, Hipson falls back to the
+deterministic router.
+
 Use `reviewer_lite` for:
 - simple sanity checks;
 - prompt critique;

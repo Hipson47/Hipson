@@ -42,6 +42,7 @@ jobs:
           hipson doctor
           hipson memory --memory-dir /tmp/hipson-memory list
           hipson sidecar route --task "security review of release diff" --risk security
+          hipson sidecar route --task "security review of release diff" --risk security --task-type review --file src/hipson/agents.py --skills hipson-backend --context-chars 4200 --llm --llm-dry-run
           hipson install codex --dry-run
           hipson packet review --help
           hipson packet exec --help
