@@ -10,12 +10,16 @@ from hipson import project as hipson_project
 from hipson.assets import packaged_asset, runtime_asset
 from hipson.codex_install import END_MARKER, START_MARKER, detect_codex_home, install_codex, merge_managed_block
 from hipson.home import detect_hipson_home
+from hipson.paths import package_root
 from hipson.redaction import REDACTION, is_sensitive_path, redact_sensitive_paths, redact_text
 from hipson.skills import parse_frontmatter, validate_skill_file, validate_skills
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CLI_TIMEOUT = 30
+
 
 def run_git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, text=True, capture_output=True)
+    subprocess.run(["git", *args], cwd=repo, check=True, text=True, capture_output=True, timeout=DEFAULT_CLI_TIMEOUT)
 
 
 def init_git_repo(tmp_path: Path) -> Path:
@@ -30,19 +34,32 @@ def init_git_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def run_cli(cwd: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run_cli(
+    cwd: Path,
+    *args: str,
+    env: dict[str, str] | None = None,
+    timeout: int = DEFAULT_CLI_TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
     merged_env = os.environ.copy()
-    merged_env["PYTHONPATH"] = str(Path.cwd() / "src")
+    merged_env["PYTHONPATH"] = str(REPO_ROOT / "src")
     if env:
         merged_env.update(env)
-    return subprocess.run(
-        [sys.executable, "-m", "hipson.cli", *args],
-        cwd=cwd,
-        env=merged_env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    command = [sys.executable, "-m", "hipson.cli", *args]
+    try:
+        return subprocess.run(
+            command,
+            cwd=cwd,
+            env=merged_env,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        diagnostic = f"Command timed out after {timeout}s: {' '.join(command)}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+        return subprocess.CompletedProcess(command, 124, stdout, diagnostic)
 
 
 def with_provider_env_defaults(root_env: Path, fallback_env: Path, fn) -> None:
@@ -97,6 +114,32 @@ def test_redact_secrets_masks_quoted_json_and_url_tokens():
 
     assert "super-secret-value" not in redacted
     assert "abc123secret" not in redacted
+    assert REDACTION in redacted
+
+
+def test_redact_secrets_masks_quoted_env_style_values():
+    text = "\n".join(
+        [
+            'password="hunter2"',
+            'password = "hunter2"',
+            "token='abc123secretlong'",
+            "token = 'abc123secretlong'",
+            'AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"',
+            'OPENROUTER_API_KEY: "sk-or-v1-abc123"',
+        ]
+    )
+
+    redacted = redact_text(text)
+
+    for secret in [
+        "hunter2",
+        "abc123secretlong",
+        "wJalrXUtnFEMI",
+        "sk-or-v1-abc123",
+    ]:
+        assert secret not in redacted
+    assert "password" in redacted
+    assert "OPENROUTER_API_KEY" in redacted
     assert REDACTION in redacted
 
 
@@ -361,6 +404,28 @@ def test_scan_redacts_tracked_secret_diff(tmp_path: Path):
     assert REDACTION in scan
 
 
+def test_scan_redacts_quoted_env_style_secret_diff(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text('base\npassword = "hunter2"\ntoken=\'abc123secretlong\'\n', encoding="utf-8")
+
+    scan = hipson_project.build_scan(repo, include_diff=True, diff_lines=1)
+
+    assert "hunter2" not in scan
+    assert "abc123secretlong" not in scan
+    assert "password" in scan
+    assert REDACTION in scan
+
+
+def test_cli_scan_missing_path_fails_hard(tmp_path: Path):
+    missing = tmp_path / "does-not-exist"
+
+    result = run_cli(tmp_path, "scan", str(missing))
+
+    assert result.returncode != 0
+    assert "Project path does not exist" in result.stderr
+    assert "clean or unavailable" not in result.stdout
+
+
 def test_scan_summarizes_sensitive_untracked_file(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     (repo / ".env").write_text("OPENROUTER_API_KEY=sk-test-secret1234567890\n", encoding="utf-8")
@@ -466,6 +531,45 @@ def test_packaged_assets_are_available_outside_repo_cwd(tmp_path: Path):
 
 def test_runtime_asset_finds_default_agent_config():
     assert runtime_asset("config/agents.json").exists()
+
+
+def test_runtime_asset_ignores_hipson_looking_cwd(tmp_path: Path):
+    fake = tmp_path / "fake-project"
+    (fake / "config").mkdir(parents=True)
+    (fake / "codex-workflow-kit" / "global").mkdir(parents=True)
+    (fake / "ORCHESTRATOR.md").write_text("FAKE ORCHESTRATOR\n", encoding="utf-8")
+    (fake / "config" / "agents.json").write_text('{"agents":{"fake":{}}}\n', encoding="utf-8")
+    fake_agent = fake / "codex-workflow-kit" / "global" / "AGENTS.md"
+    fake_agent.write_text("FAKE AGENTS\n", encoding="utf-8")
+    old_cwd = Path.cwd()
+    try:
+        os.chdir(fake)
+        asset = runtime_asset("codex-workflow-kit/global/AGENTS.md")
+    finally:
+        os.chdir(old_cwd)
+
+    assert asset.resolve() != fake_agent.resolve()
+    assert asset.read_text(encoding="utf-8") != "FAKE AGENTS\n"
+
+
+def test_package_root_honors_valid_hipson_dev_root_and_rejects_invalid(tmp_path: Path):
+    old_dev_root = os.environ.get("HIPSON_DEV_ROOT")
+    try:
+        os.environ["HIPSON_DEV_ROOT"] = str(REPO_ROOT)
+        assert package_root() == REPO_ROOT
+
+        os.environ["HIPSON_DEV_ROOT"] = str(tmp_path)
+        try:
+            package_root()
+        except SystemExit as exc:
+            assert "Invalid HIPSON_DEV_ROOT" in str(exc)
+        else:
+            raise AssertionError("Expected invalid HIPSON_DEV_ROOT to fail")
+    finally:
+        if old_dev_root is None:
+            os.environ.pop("HIPSON_DEV_ROOT", None)
+        else:
+            os.environ["HIPSON_DEV_ROOT"] = old_dev_root
 
 
 def test_agent_router_uses_metadata():
@@ -777,6 +881,30 @@ def test_packet_generation_redacts_before_persistence(tmp_path: Path):
     assert REDACTION in text
 
 
+def test_packet_generation_redacts_quoted_secret_diff(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text('base\npassword = "hunter2"\n', encoding="utf-8")
+    output = tmp_path / "packet.md"
+
+    result = run_cli(
+        tmp_path,
+        "packet",
+        "review",
+        str(repo),
+        "--title",
+        "Quoted secret review",
+        "--include-diff",
+        "-o",
+        str(output),
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = output.read_text(encoding="utf-8")
+    assert "hunter2" not in text
+    assert "password" in text
+    assert REDACTION in text
+
+
 def test_packet_generation_uses_compiled_sections(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     (repo / "scripts").mkdir()
@@ -837,6 +965,17 @@ def test_sidecar_dry_run_redacts_packet_before_send_path(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert "sk-test-secret1234567890" not in result.stdout
     assert "redacted packet omitted" in result.stdout
+
+
+def test_sidecar_read_packet_redacts_quoted_secret(tmp_path: Path):
+    packet = tmp_path / "packet.md"
+    packet.write_text('password = "hunter2"\n', encoding="utf-8")
+
+    text = hipson_agents.read_packet(str(packet), max_chars=1000)
+
+    assert "hunter2" not in text
+    assert "password" in text
+    assert REDACTION in text
 
 
 def test_sidecar_run_without_key_fails_gracefully(tmp_path: Path):

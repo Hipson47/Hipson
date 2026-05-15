@@ -89,9 +89,13 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 
 def command_scan(args: argparse.Namespace) -> int:
-    project = Path(args.path).expanduser().resolve()
-    write_output(build_scan(project, include_diff=args.include_diff, diff_lines=args.diff_lines), args.output)
-    return 0
+    try:
+        project = project_mod.resolve_project(args.path)
+        write_output(build_scan(project, include_diff=args.include_diff, diff_lines=args.diff_lines), args.output)
+        return 0
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
 
 
 def command_scan_many(args: argparse.Namespace) -> int:

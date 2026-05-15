@@ -22,6 +22,8 @@ jobs:
         run: ruff check .
       - name: Run tests
         run: python scripts/run_tests.py
+      - name: Pytest
+        run: python -m pytest -q
       - name: Compile Python
         run: python -m compileall src scripts tests
       - name: Build wheel and sdist
@@ -31,9 +33,16 @@ jobs:
           tmp="$(mktemp -d)"
           python -m venv "$tmp/venv"
           "$tmp/venv/bin/python" -m pip install dist/*.whl
-          cd "$tmp"
+          mkdir -p "$tmp/fake-project/config" "$tmp/fake-project/codex-workflow-kit/global"
+          printf 'fake orchestrator\n' > "$tmp/fake-project/ORCHESTRATOR.md"
+          printf '{"agents":{"fake":{}}}\n' > "$tmp/fake-project/config/agents.json"
+          printf 'fake agents\n' > "$tmp/fake-project/codex-workflow-kit/global/AGENTS.md"
+          cd "$tmp/fake-project"
           "$tmp/venv/bin/hipson" --help
           "$tmp/venv/bin/hipson" doctor
+          "$tmp/venv/bin/hipson" skill validate
+          "$tmp/venv/bin/hipson" install codex --dry-run
+          "$tmp/venv/bin/hipson" sidecar list | grep reviewer_cheap
       - name: Validate skills
         run: hipson skill validate
       - name: CLI smoke

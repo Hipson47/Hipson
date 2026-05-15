@@ -17,6 +17,7 @@ SECRET_PATTERNS = [
     re.compile(r"sk-or-v1-[A-Za-z0-9_\-]{20,}"),
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"(?i)\b((?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|openrouter[_-]?api[_-]?key)\s*[:=]\s*[\"'])([^\"'\n]+)([\"'])"),
     re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*)([^\s'\"`,}]+)"),
     re.compile(r"(?i)([\"'](?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)[\"']\s*:\s*[\"'])([^\"']+)([\"'])"),
 ]

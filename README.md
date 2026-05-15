@@ -132,6 +132,12 @@ cp config/providers.example.env ~/.config/hipson/agents.env
 
 Keep real provider keys out of git.
 
+Runtime assets are loaded from the installed Hipson package or from the imported
+source checkout. Hipson does not trust the current project directory for its own
+runtime assets, so it is safe to run inside arbitrary repositories that happen
+to contain Hipson-looking files. `HIPSON_DEV_ROOT` can override this boundary
+for local development only; invalid values fail hard.
+
 ## Optional LLM Router
 
 The default router is deterministic and metadata-based. For complex,
@@ -150,15 +156,19 @@ latency, or deterministic behavior matters more.
 
 Hipson is intentionally packet-based:
 
+- project repo files are treated as data, not trusted runtime assets;
 - sidecars receive bounded packets, not whole repos;
 - sidecar output is advisory;
 - sensitive files are skipped or summarized;
-- common API keys, bearer tokens, private keys, and structured secret values are redacted;
+- common API keys, bearer tokens, private keys, quoted env-style secrets, and structured secret values are redacted;
 - local memory stores compact facts, not transcripts;
 - git diff and verification commands remain the final contract.
 
 Redaction is a safety layer, not a substitute for reviewing packet contents before
 sending them to external providers.
+
+Invalid scan paths fail with a non-zero exit and a clear error instead of
+producing a misleading clean scan.
 
 ## Development
 
@@ -166,6 +176,7 @@ sending them to external providers.
 uv sync --all-extras
 uv run ruff check .
 uv run python scripts/run_tests.py
+uv run python -m pytest -q
 uv run python -m compileall src scripts tests
 uv build
 ```
@@ -180,7 +191,7 @@ python scripts/run_tests.py
 ## CI
 
 GitHub Actions validates Python 3.11 and 3.12, runs Ruff, executes the local test
-runner, compiles source files, builds wheel/sdist artifacts, smoke-tests the
+runner and pytest, compiles source files, builds wheel/sdist artifacts, smoke-tests the
 installed wheel CLI, and checks both deterministic and dry-run LLM routing.
 
 ## Repository Hygiene
