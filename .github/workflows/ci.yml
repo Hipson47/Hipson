@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v5
+      - name: Install package and dev tools
+        run: uv pip install --system -e ".[dev]"
+      - name: Ruff
+        run: ruff check .
+      - name: Run tests
+        run: python scripts/run_tests.py
+      - name: Compile Python
+        run: python -m compileall src scripts tests
+      - name: Build wheel and sdist
+        run: uv build
+      - name: Wheel smoke
+        run: |
+          tmp="$(mktemp -d)"
+          python -m venv "$tmp/venv"
+          "$tmp/venv/bin/python" -m pip install dist/*.whl
+          cd "$tmp"
+          "$tmp/venv/bin/hipson" --help
+          "$tmp/venv/bin/hipson" doctor
+      - name: Validate skills
+        run: hipson skill validate
+      - name: CLI smoke
+        run: |
+          hipson --help
+          hipson doctor
+          hipson memory --memory-dir /tmp/hipson-memory list
+          hipson sidecar route --task "security review of release diff" --risk security
+          hipson install codex --dry-run
+          hipson packet review --help
+          hipson packet exec --help
+          hipson sidecar list
+      - name: Doctor
+        run: |
+          cp repos.example.yaml repos.yaml
+          hipson doctor
+      - name: Scan temporary git repo
+        run: |
+          tmp="$(mktemp -d)"
+          git -C "$tmp" init -b main
+          git -C "$tmp" config user.email test@example.com
+          git -C "$tmp" config user.name "Test User"
+          printf 'base\n' > "$tmp/file.txt"
+          git -C "$tmp" add file.txt
+          git -C "$tmp" commit -m base
+          printf 'base\nchange\n' > "$tmp/file.txt"
+          hipson scan "$tmp"

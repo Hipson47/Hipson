@@ -1,0 +1,129 @@
+{
+  "providers": {
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "app_title": "Hipson Orchestrator",
+      "http_referer": "http://localhost/hipson"
+    }
+  },
+  "agents": {
+    "reviewer_lite": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.2,
+      "max_tokens": 1400,
+      "expertise": ["review", "tests", "security", "sanity"],
+      "use_when": ["quick review", "sanity check", "test gaps", "small diff"],
+      "avoid_when": ["large context", "premium ui", "hard architecture"],
+      "context_budget": 60000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a read-only code review sidecar. Review only the provided packet. Do not ask for repo access. Do not invent commands or files. Prioritize concrete bugs, missing verification, security risks, and test gaps. Output concise Markdown."
+    },
+    "reviewer_cheap": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.15,
+      "max_tokens": 1800,
+      "expertise": ["review", "regressions", "security", "data loss", "tests"],
+      "use_when": ["repo delta review", "security risk", "data loss", "regression", "missing verification"],
+      "avoid_when": ["premium ui", "very large context"],
+      "context_budget": 100000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a careful read-only code review sidecar. Review only the provided packet. Prioritize concrete bugs, regressions, missing verification, security and data-loss risks. Distinguish evidence from assumptions. Output concise Markdown."
+    },
+    "coder_review_cheap": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.15,
+      "max_tokens": 1800,
+      "expertise": ["code", "types", "api misuse", "tests", "implementation"],
+      "use_when": ["implementation review", "type issue", "api misuse", "code diff", "test gap"],
+      "avoid_when": ["visual design", "large docs", "product strategy"],
+      "context_budget": 90000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a coding-focused read-only reviewer. Review the provided patch for implementation bugs, type issues, API misuse, and test gaps. Do not edit. Output concise Markdown."
+    },
+    "premium_ui_ux": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.18,
+      "max_tokens": 2200,
+      "expertise": ["ui", "ux", "accessibility", "visual design", "responsive"],
+      "use_when": ["premium ui", "ux review", "screenshot", "accessibility", "responsive polish"],
+      "avoid_when": ["backend only", "no screenshots", "security review"],
+      "context_budget": 120000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a premium UI/UX review sidecar for modern web apps and landing pages. Review only the provided bounded packet and screenshots. Do not ask for repo access. Focus on high-end visual quality, typography hierarchy, spacing rhythm, image quality/crops, form controls, accessibility, responsive behavior, interaction polish, and brand consistency. Call out anything that feels default, cheap, mismatched, pixelated, cramped, inaccessible, or visually below premium level. Distinguish evidence from assumptions. Output concise Markdown with: critical visual issues, UX/accessibility issues, concrete implementation recommendations, and verification checklist."
+    },
+    "critic_lite": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.3,
+      "max_tokens": 1000,
+      "expertise": ["architecture", "assumptions", "tradeoffs", "risk"],
+      "use_when": ["architecture critique", "weak assumptions", "tradeoffs", "risk review"],
+      "avoid_when": ["mechanical code review", "visual polish"],
+      "context_budget": 70000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a skeptical architecture critic. Review only the provided packet. Identify weak assumptions, missing constraints, risky abstractions, and cheaper alternatives. Output concise Markdown."
+    },
+    "memory_summarizer_cheap": {
+      "provider": "openrouter",
+      "model": "google/gemini-3-flash-lite",
+      "temperature": 0.1,
+      "max_tokens": 900,
+      "expertise": ["memory", "summary", "handoff", "progress"],
+      "use_when": ["memory summary", "handoff", "progress update", "changelog compression"],
+      "avoid_when": ["code review", "security decision", "final approval"],
+      "context_budget": 80000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You summarize project work for durable memory. Preserve only decisions, files touched, verification, risks, and next steps. Do not include private reasoning. Output concise Markdown."
+    },
+    "long_context_cheap": {
+      "provider": "openrouter",
+      "model": "x-ai/grok-4.1-fast",
+      "temperature": 0.2,
+      "max_tokens": 2500,
+      "expertise": ["long context", "large docs", "contradictions", "synthesis"],
+      "use_when": ["large packet", "long docs", "broad scan", "contradictions"],
+      "avoid_when": ["small diff", "sensitive context"],
+      "context_budget": 500000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You analyze large bounded packets cheaply. Extract risks, decisions, contradictions, and next actions. Do not invent missing repo state. Output concise Markdown."
+    },
+    "architect_strong": {
+      "provider": "openrouter",
+      "model": "openai/gpt-5.5-mini",
+      "temperature": 0.2,
+      "max_tokens": 2500,
+      "expertise": ["architecture", "maintainability", "security", "task decomposition"],
+      "use_when": ["architecture", "maintainability", "security", "high risk", "task decomposition"],
+      "avoid_when": ["tiny task", "cheap sanity check"],
+      "context_budget": 180000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a senior software architecture sidecar. Review the provided bounded packet for architecture, maintainability, security, verification, and task decomposition risks. Output concise Markdown with concrete recommendations."
+    },
+    "architect_max": {
+      "provider": "openrouter",
+      "model": "openai/gpt-5.5-mini",
+      "temperature": 0.2,
+      "max_tokens": 3000,
+      "expertise": ["architecture", "security", "hard decisions", "risk", "review"],
+      "use_when": ["hard architecture", "security", "max review", "high risk", "competing approaches"],
+      "avoid_when": ["small diff", "low risk"],
+      "context_budget": 220000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a senior architecture and code review sidecar for difficult decisions. Review only the provided packet. Separate findings, assumptions, tradeoffs, and recommended next action. Output concise Markdown."
+    }
+  }
+}
