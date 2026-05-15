@@ -11,6 +11,7 @@ Important paths:
 - `scripts/hipson_project.py`: scans and packet generation.
 - `scripts/hipson_agents.py`: OpenRouter sidecar runner.
 - `config/agents.json`: sidecar agent definitions.
+- `docs/release-1.0.md`: release-readiness gates and remaining blockers.
 - `memory/`: local JSONL memory store, with generated `*.jsonl` ignored.
 - `skills/hipson-gpt/`: reference knowledge package.
 - `knowledge/source/`: canonical source reference documents.
@@ -27,11 +28,11 @@ Important paths:
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 48/48 tests.
+- `python3 scripts/run_tests.py`: passed, 51/51 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke: `hipson --help`, `hipson doctor`, and `hipson memory list` passed from a temporary venv outside the repo.
-- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
+- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
 - `bash -n codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 
@@ -50,3 +51,4 @@ uv run hipson install codex --dry-run
 ## Remaining Risks
 - Sidecar packets must be generated carefully to avoid leaking sensitive project context.
 - Sidecar reports are advisory and must be verified locally.
+- Stable 1.0 should wait for remote CI on the rewritten public branch and an explicit decision on bundled external skills.

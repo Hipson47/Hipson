@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import sys
@@ -491,6 +492,112 @@ def test_agent_router_uses_metadata():
 
     assert routed[0][0] == "ui"
     assert hipson_agents.route_agents(config, task="premium ui", sensitive=True) == []
+
+
+def test_llm_router_summary_redacts_sensitive_metadata():
+    summary = hipson_agents.route_summary(
+        task_type="review",
+        risk="security",
+        task="review OPENROUTER_API_KEY=sk-test-secret1234567890",
+        files=["src/auth.py", ".env.production"],
+        chars=4200,
+        skills=["hipson-backend", "token=abc123secret"],
+        sensitive=False,
+    )
+
+    text = json.dumps(summary)
+    assert "sk-test-secret1234567890" not in text
+    assert ".env.production" not in text
+    assert "abc123secret" not in text
+    assert summary["files"] == ["src/auth.py", "[sensitive file skipped]"]
+    assert summary["chars"] == 4200
+
+
+def test_llm_router_normalizes_model_choice():
+    config = {
+        "providers": {
+            "openrouter": {
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key_env": "OPENROUTER_API_KEY",
+            }
+        },
+        "router": {
+            "provider": "openrouter",
+            "model": "cheap-router",
+            "temperature": 0,
+            "max_tokens": 120,
+        },
+        "agents": {
+            "reviewer_cheap": {
+                "expertise": ["review", "security"],
+                "use_when": ["security review"],
+                "avoid_when": [],
+                "context_budget": 10000,
+                "can_handle_sensitive_context": False,
+            }
+        },
+    }
+    seen_payload = {}
+
+    def fake_provider_chat(provider, payload, *, timeout=90):
+        seen_payload.update(payload)
+        return {"choices": [{"message": {"content": '{"agent":"reviewer_cheap","confidence":0.82,"reason":"security fit"}'}}]}
+
+    old_provider_chat = hipson_agents.provider_chat
+    try:
+        hipson_agents.provider_chat = fake_provider_chat
+        summary = hipson_agents.route_summary(
+            task_type="review",
+            risk="security",
+            task="security review",
+            files=["src/auth.py"],
+            chars=4200,
+            skills=["hipson-backend"],
+            sensitive=False,
+        )
+
+        choice = hipson_agents.route_with_llm(config, summary)
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+
+    assert choice == {
+        "agent": "reviewer_cheap",
+        "confidence": 0.82,
+        "reason": "security fit",
+        "source": "llm",
+        "model": "cheap-router",
+    }
+    payload_text = json.dumps(seen_payload)
+    assert "<packet>" not in payload_text
+    assert "src/auth.py" in payload_text
+
+
+def test_llm_router_dry_run_cli_sends_redacted_summary_only(tmp_path: Path):
+    result = run_cli(
+        tmp_path,
+        "sidecar",
+        "route",
+        "--task",
+        "review OPENAI_API_KEY=sk-test-secret1234567890",
+        "--risk",
+        "security",
+        "--task-type",
+        "review",
+        "--file",
+        ".env.production",
+        "--skills",
+        "hipson-backend",
+        "--context-chars",
+        "4200",
+        "--llm",
+        "--llm-dry-run",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "sk-test-secret1234567890" not in result.stdout
+    assert ".env.production" not in result.stdout
+    assert "[sensitive file skipped]" in result.stdout
+    assert "candidates" in result.stdout
 
 
 def test_memory_add_redacts_and_searches(tmp_path: Path):

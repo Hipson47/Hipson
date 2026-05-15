@@ -14,6 +14,7 @@ source of truth.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
 - **MoE-like sidecar routing** from explicit agent metadata in `config/agents.json`.
+- **Optional LLM router** behind `hipson sidecar route --llm`, using only a redacted JSON summary.
 - **OpenRouter sidecars** for optional bounded second opinions.
 - **Codex installer** with dry-run mode, backups, and managed marker blocks.
 - **Secret redaction and sensitive-path guards** before persistence or provider calls.
@@ -75,6 +76,7 @@ hipson memory list
 
 hipson sidecar list
 hipson sidecar route --task "architecture security review" --risk security
+hipson sidecar route --task "security review" --risk security --task-type review --file src/auth.py --skills hipson-backend --context-chars 4200 --llm
 hipson sidecar run --agent reviewer_cheap --packet runs/review-packet.md --dry-run
 
 hipson skill validate
@@ -130,6 +132,20 @@ cp config/providers.example.env ~/.config/hipson/agents.env
 
 Keep real provider keys out of git.
 
+## Optional LLM Router
+
+The default router is deterministic and metadata-based. For complex,
+multi-dimensional tasks, `hipson sidecar route --llm` can ask a small configured
+model to choose one sidecar agent. This path sends only a redacted JSON summary,
+not the packet:
+
+```json
+{"task_type":"review","risk":"security","files":["src/auth.py"],"chars":4200,"skills":["hipson-backend"]}
+```
+
+Use it when task shape is ambiguous. Avoid it in the normal flow when cost,
+latency, or deterministic behavior matters more.
+
 ## Safety Model
 
 Hipson is intentionally packet-based:
@@ -164,8 +180,8 @@ python scripts/run_tests.py
 ## CI
 
 GitHub Actions validates Python 3.11 and 3.12, runs Ruff, executes the local test
-runner, compiles source files, builds wheel/sdist artifacts, and smoke-tests the
-installed wheel CLI.
+runner, compiles source files, builds wheel/sdist artifacts, smoke-tests the
+installed wheel CLI, and checks both deterministic and dry-run LLM routing.
 
 ## Repository Hygiene
 

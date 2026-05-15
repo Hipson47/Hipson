@@ -7,6 +7,15 @@
       "http_referer": "http://localhost/hipson"
     }
   },
+  "router": {
+    "provider": "openrouter",
+    "model": "google/gemini-3-flash-lite",
+    "temperature": 0,
+    "max_tokens": 220,
+    "timeout": 45,
+    "enabled_by_default": false,
+    "send_packet": false
+  },
   "agents": {
     "reviewer_lite": {
       "provider": "openrouter",

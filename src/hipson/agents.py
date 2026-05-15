@@ -24,6 +24,7 @@ from hipson.redaction import is_sensitive_path, redact_text, sanitize_path
 ROOT = package_root()
 DEFAULT_CONFIG = runtime_asset("config/agents.json")
 DEFAULT_MAX_PACKET_CHARS = 120_000
+DEFAULT_LLM_ROUTER_CONFIDENCE = 0.55
 
 
 DEFAULT_ROOT_ENV = Path.cwd() / ".env"
@@ -152,6 +153,182 @@ def route_agents(
     return sorted(scored, key=lambda item: (-item[2], item[0]))[:limit]
 
 
+def parse_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def route_summary(
+    *,
+    task_type: str,
+    risk: str,
+    task: str,
+    files: list[str],
+    chars: int,
+    skills: list[str],
+    sensitive: bool,
+) -> dict[str, Any]:
+    return {
+        "task_type": redact_text(task_type or "review"),
+        "risk": redact_text(risk or "normal"),
+        "task": redact_text(task),
+        "files": [sanitize_path(redact_text(file_name)) for file_name in files],
+        "chars": max(0, int(chars or 0)),
+        "skills": [redact_text(skill) for skill in skills],
+        "sensitive": bool(sensitive),
+    }
+
+
+def router_candidates(config: dict[str, Any], summary: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = []
+    sensitive = bool(summary.get("sensitive"))
+    chars = int(summary.get("chars", 0) or 0)
+    for name, agent in sorted(config.get("agents", {}).items()):
+        if sensitive and agent.get("can_handle_sensitive_context") is False:
+            continue
+        context_budget = int(agent.get("context_budget", 0) or 0)
+        if context_budget and chars > context_budget:
+            continue
+        candidates.append(
+            {
+                "name": name,
+                "expertise": agent.get("expertise", []),
+                "use_when": agent.get("use_when", []),
+                "avoid_when": agent.get("avoid_when", []),
+                "context_budget": context_budget,
+            }
+        )
+    return candidates
+
+
+def build_router_messages(summary: dict[str, Any], candidates: list[dict[str, Any]]) -> list[dict[str, str]]:
+    system = (
+        "You are Hipson's optional sidecar routing model. Choose one candidate agent for a bounded AI engineering task. "
+        "You receive only a redacted routing summary, never the full packet. Return strict JSON only with keys: "
+        "agent, confidence, reason. Confidence must be a number from 0 to 1. If no candidate fits, use agent null."
+    )
+    user = json.dumps({"summary": summary, "candidates": candidates}, ensure_ascii=False, sort_keys=True)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def provider_chat(provider: dict[str, Any], payload: dict[str, Any], *, timeout: int = 90) -> dict[str, Any]:
+    key_name = provider.get("api_key_env", "OPENROUTER_API_KEY")
+    api_key = os.environ.get(key_name)
+    if not api_key:
+        raise SystemExit(f"Missing {key_name}. {format_provider_env_help()}")
+
+    data = json.dumps(payload).encode("utf-8")
+    base_url = provider.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
+    request = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": provider.get("http_referer", "http://localhost/hipson"),
+            "X-Title": provider.get("app_title", "Hipson Orchestrator"),
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"OpenRouter returned non-JSON response: {exc}") from None
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise SystemExit(f"OpenRouter HTTP {exc.code}: {body}") from None
+    except urllib.error.URLError as exc:
+        raise SystemExit(f"OpenRouter request failed: {exc}") from None
+
+
+def router_config(config: dict[str, Any]) -> dict[str, Any]:
+    return config.get(
+        "router",
+        {
+            "provider": "openrouter",
+            "model": "google/gemini-3-flash-lite",
+            "temperature": 0,
+            "max_tokens": 220,
+        },
+    )
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", stripped, re.DOTALL)
+        if not match:
+            raise SystemExit("Router model returned no JSON object") from None
+        data = json.loads(match.group(0))
+    if not isinstance(data, dict):
+        raise SystemExit("Router model returned JSON that is not an object")
+    return data
+
+
+def normalize_router_choice(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    agent_name = data.get("agent")
+    if agent_name is not None:
+        agent_name = str(agent_name)
+        if agent_name not in config.get("agents", {}):
+            raise SystemExit(f"Router model selected unknown agent: {agent_name}")
+    try:
+        confidence = float(data.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(1.0, max(0.0, confidence))
+    return {
+        "agent": agent_name,
+        "confidence": confidence,
+        "reason": redact_text(str(data.get("reason", "")))[:500],
+    }
+
+
+def route_with_llm(config: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    router = router_config(config)
+    provider = provider_config(config, router)
+    candidates = router_candidates(config, summary)
+    payload = {
+        "model": router["model"],
+        "messages": build_router_messages(summary, candidates),
+        "temperature": router.get("temperature", 0),
+        "max_tokens": router.get("max_tokens", 220),
+        "response_format": {"type": "json_object"},
+    }
+    response = provider_chat(provider, payload, timeout=int(router.get("timeout", 45)))
+    choice = normalize_router_choice(extract_json_object(extract_content(response)), config)
+    choice["source"] = "llm"
+    choice["model"] = router["model"]
+    return choice
+
+
+def fallback_route_choice(config: dict[str, Any], summary: dict[str, Any], reason: str) -> dict[str, Any]:
+    routed = route_agents(
+        config,
+        task=str(summary.get("task", "")),
+        risk=str(summary.get("risk", "normal")),
+        context_chars=int(summary.get("chars", 0) or 0),
+        sensitive=bool(summary.get("sensitive")),
+        limit=1,
+    )
+    agent_name = routed[0][0] if routed else None
+    return {
+        "agent": agent_name,
+        "confidence": DEFAULT_LLM_ROUTER_CONFIDENCE if agent_name else 0.0,
+        "reason": redact_text(reason),
+        "source": "deterministic_fallback",
+    }
+
+
 def redact_secrets(text: str) -> str:
     return redact_text(text)
 
@@ -197,43 +374,13 @@ def build_messages(agent: dict[str, Any], packet: str) -> list[dict[str, str]]:
 
 
 def openrouter_chat(provider: dict[str, Any], agent: dict[str, Any], packet: str) -> dict[str, Any]:
-    key_name = provider.get("api_key_env", "OPENROUTER_API_KEY")
-    api_key = os.environ.get(key_name)
-    if not api_key:
-        raise SystemExit(f"Missing {key_name}. {format_provider_env_help()}")
-
     payload = {
         "model": agent["model"],
         "messages": build_messages(agent, packet),
         "temperature": agent.get("temperature", 0.2),
         "max_tokens": agent.get("max_tokens", 1200),
     }
-    data = json.dumps(payload).encode("utf-8")
-    base_url = provider.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
-    request = urllib.request.Request(
-        f"{base_url}/chat/completions",
-        data=data,
-        method="POST",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": provider.get("http_referer", "http://localhost/hipson"),
-            "X-Title": provider.get("app_title", "Hipson Orchestrator"),
-        },
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            try:
-                return json.loads(body)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(f"OpenRouter returned non-JSON response: {exc}") from None
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"OpenRouter HTTP {exc.code}: {body}") from None
-    except urllib.error.URLError as exc:
-        raise SystemExit(f"OpenRouter request failed: {exc}") from None
+    return provider_chat(provider, payload)
 
 
 def extract_content(response: dict[str, Any]) -> str:
@@ -283,7 +430,33 @@ def command_list(args: argparse.Namespace) -> None:
 
 def command_route(args: argparse.Namespace) -> None:
     config = load_json(Path(args.config).expanduser().resolve())
-    sensitive = args.sensitive or has_sensitive_terms(args.task)
+    sensitive = args.sensitive or has_sensitive_terms(args.task) or any(is_sensitive_path(file_name) for file_name in (args.file or []))
+    if args.llm:
+        load_provider_envs(args.env)
+        summary = route_summary(
+            task_type=args.task_type,
+            risk=args.risk,
+            task=args.task,
+            files=args.file or [],
+            chars=args.context_chars,
+            skills=parse_csv(args.skills),
+            sensitive=sensitive,
+        )
+        if args.llm_dry_run:
+            print(json.dumps({"summary": summary, "candidates": router_candidates(config, summary)}, indent=2, ensure_ascii=False))
+            return
+        try:
+            print(json.dumps(route_with_llm(config, summary), indent=2, ensure_ascii=False))
+        except SystemExit as exc:
+            print(
+                json.dumps(
+                    fallback_route_choice(config, summary, f"LLM router unavailable: {exc}"),
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        return
+
     routed = route_agents(
         config,
         task=args.task,
@@ -343,6 +516,11 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument("--risk", default="normal", help="Risk hint, e.g. normal, high, security, architecture, ui")
     route_cmd.add_argument("--context-chars", type=int, default=0, help="Estimated packet size")
     route_cmd.add_argument("--sensitive", action="store_true", help="Whether the packet contains sensitive context")
+    route_cmd.add_argument("--file", action="append", help="Relevant file path for LLM routing summary; repeatable")
+    route_cmd.add_argument("--skills", help="Comma-separated skills for LLM routing summary")
+    route_cmd.add_argument("--task-type", default="review", help="Task type for LLM routing summary")
+    route_cmd.add_argument("--llm", action="store_true", help="Use optional provider-backed router on redacted summary")
+    route_cmd.add_argument("--llm-dry-run", action="store_true", help="Print LLM router summary without calling provider")
     route_cmd.add_argument("--limit", type=int, default=3)
     route_cmd.set_defaults(func=command_route)
 
