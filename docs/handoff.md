@@ -28,10 +28,10 @@ Important paths:
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 51/51 tests.
+- `python3 scripts/run_tests.py`: passed, 58/58 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
-- Wheel install smoke: `hipson --help`, `hipson doctor`, and `hipson memory list` passed from a temporary venv outside the repo.
+- Wheel install smoke: `hipson --help`, `hipson doctor`, `hipson skill validate`, `hipson install codex --dry-run`, and fake-CWD asset shadowing checks passed from a temporary venv outside the repo.
 - `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
 - `bash -n codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.

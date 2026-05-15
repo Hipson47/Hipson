@@ -28,10 +28,10 @@ Repository = "https://github.com/hipson/hipson"
 Issues = "https://github.com/hipson/hipson/issues"
 
 [project.optional-dependencies]
-dev = ["ruff>=0.8.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.8.0"]
 
 [dependency-groups]
-dev = ["ruff>=0.8.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.8.0"]
 
 [project.scripts]
 hipson = "hipson.cli:main"
@@ -58,3 +58,7 @@ ignore = ["E501"]
 "tests/*" = ["B011"]
 "scripts/hipson_agents.py" = ["E402"]
 "scripts/hipson_project.py" = ["E402"]
+
+[tool.pytest.ini_options]
+addopts = "-s"
+testpaths = ["tests"]

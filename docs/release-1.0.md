@@ -23,6 +23,8 @@ and CI coverage for packaging and smoke workflows.
   `uv build`, and wheel install smoke.
 - Run a final secret/path scan on the pushed branch, excluding tests and known
   external fixture examples.
+- Keep the runtime asset trust boundary intact: installed package assets or
+  explicit valid `HIPSON_DEV_ROOT` only, never implicit CWD lookup.
 
 ## Non-Blocking Before 1.0
 
@@ -37,10 +39,12 @@ and CI coverage for packaging and smoke workflows.
 uv sync --all-extras
 uv run ruff check .
 uv run python scripts/run_tests.py
+uv run python -m pytest -q
 uv run python -m compileall src scripts tests
 uv build
 hipson doctor
 hipson skill validate
+python -m hipson.cli scan /definitely/missing/path
 hipson sidecar route --task "security review" --risk security
 hipson sidecar route --task "security review" --risk security --task-type review --file src/hipson/agents.py --skills hipson-backend --context-chars 4200 --llm --llm-dry-run
 ```

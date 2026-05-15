@@ -7,6 +7,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - The repository has its own `.git` root and no longer relies on a parent user-profile git root.
 - Python package entrypoint `hipson` lives under `src/hipson/`.
 - Runtime assets are bundled under `src/hipson/assets/` so installed packages can run without a source checkout.
+- Runtime asset lookup ignores untrusted CWD files unless `HIPSON_DEV_ROOT` is explicitly set to a valid source checkout.
 - `repos.yaml` is local-only and ignored.
 - `repos.example.yaml` is the portable template for other developers.
 - OpenRouter provider keys live outside the repo.
@@ -28,15 +29,16 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Keep legacy scripts as wrappers around packaged modules.
 - Use `HIPSON_HOME` for Hipson config and `CODEX_HOME` for Codex config.
 - Redact secrets before scan output, packet persistence, and sidecar send paths.
+- Fail hard for invalid scan paths instead of returning a misleading clean/unavailable report.
 - Keep memory writes orchestrator-owned and redacted; agents receive bounded packet context.
 - Use deterministic routing metadata by default; use model-based routing only behind an explicit flag.
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 51/51 tests.
+- `python3 scripts/run_tests.py`: passed, 58/58 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
-- Wheel install smoke from a temporary venv outside the repo: passed.
+- Wheel install smoke from a temporary venv outside the repo, including fake-CWD asset shadowing checks: passed.
 - `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
 - `bash -n codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
