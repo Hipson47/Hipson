@@ -206,7 +206,9 @@ def build_router_messages(summary: dict[str, Any], candidates: list[dict[str, An
     system = (
         "You are Hipson's optional sidecar routing model. Choose one candidate agent for a bounded AI engineering task. "
         "You receive only a redacted routing summary, never the full packet. Return strict JSON only with keys: "
-        "agent, confidence, reason. Confidence must be a number from 0 to 1. If no candidate fits, use agent null."
+        "agent, confidence, reason. Confidence must be a number from 0 to 1. The agent value must be exactly one "
+        "candidate.name from the candidates list, or null if no candidate fits. Do not choose task skills, file names, "
+        "roles, or tools as the agent."
     )
     user = json.dumps({"summary": summary, "candidates": candidates}, ensure_ascii=False, sort_keys=True)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -251,7 +253,7 @@ def router_config(config: dict[str, Any]) -> dict[str, Any]:
         "router",
         {
             "provider": "openrouter",
-            "model": "google/gemini-3-flash-lite",
+            "model": "google/gemini-3.1-flash-lite",
             "temperature": 0,
             "max_tokens": 220,
         },

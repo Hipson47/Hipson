@@ -13,9 +13,14 @@ def packaged_asset(path: str) -> Path:
 
 
 def runtime_asset(path: str) -> Path:
-    """Return a source-checkout asset when present, otherwise packaged data."""
-    source = package_root() / path
-    if source.exists():
+    """Return a canonical source asset when present, otherwise packaged data."""
+    root = package_root()
+    source_asset = root / "src" / "hipson" / "assets" / path
+    if source_asset.exists():
+        return source_asset
+
+    source = root / path
+    if source.exists() and "codex-workflow-kit" not in Path(path).parts:
         return source
     return packaged_asset(path)
 

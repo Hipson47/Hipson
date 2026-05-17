@@ -15,7 +15,7 @@ Important paths:
 - `memory/`: local JSONL memory store, with generated `*.jsonl` ignored.
 - `skills/hipson-gpt/`: reference knowledge package.
 - `knowledge/source/`: canonical source reference documents.
-- `codex-workflow-kit/`: installable Codex workflow kit.
+- `src/hipson/assets/codex-workflow-kit/`: canonical installable Codex workflow kit.
 - Runtime assets are bundled under `src/hipson/assets/` for installed-package use.
 
 ## Decisions
@@ -33,7 +33,7 @@ Important paths:
 - `uv build`: passed.
 - Wheel install smoke: `hipson --help`, `hipson doctor`, `hipson skill validate`, `hipson install codex --dry-run`, and fake-CWD asset shadowing checks passed from a temporary venv outside the repo.
 - `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
-- `bash -n codex-workflow-kit/install.sh`: passed.
+- `bash -n src/hipson/assets/codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 
 ## Setup
@@ -51,4 +51,4 @@ uv run hipson install codex --dry-run
 ## Remaining Risks
 - Sidecar packets must be generated carefully to avoid leaking sensitive project context.
 - Sidecar reports are advisory and must be verified locally.
-- Stable 1.0 should wait for remote CI on the rewritten public branch and an explicit decision on bundled external skills.
+- Stable 1.0 should wait for remote CI on the rewritten public branch.

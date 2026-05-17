@@ -4,9 +4,14 @@ Hipson keeps a curated local library of public agent skills in `skills/external/
 The first batch focuses on design quality, frontend testing, Figma workflows,
 GitHub review workflows, deployment, documentation, and security planning.
 
-Hipson also includes a local wrapper skill at `skills/hipson-premium-ui-ux/`.
-Use it as the default entrypoint for premium UI/UX work; it points to the relevant
-vendored references without loading the whole library.
+Hipson also includes local wrapper skills for Hipson-specific workflows:
+
+- `skills/hipson-premium-ui-ux/`: default entrypoint for screenshot-backed
+  premium UI/UX review.
+- `skills/hipson-visual-experience-director/`: visual direction, art direction,
+  motion interaction design, Codex implementation briefs, and visual QA.
+- `skills/hipson-hyperframes-video/`: optional HyperFrames website/document to
+  video brief and timeline QA workflow.
 
 ## Installed Sources
 
@@ -31,10 +36,10 @@ There are two copies with different jobs:
 
 After installing new global skills, restart Codex so the runtime skill list refreshes.
 
-## UI/UX Agent Usage
+## UI/UX And Motion Agent Usage
 
-For premium frontend work, use the `premium_ui_ux` sidecar together with these
-skills as source material:
+For premium frontend review, use the `premium_ui_ux` sidecar together with
+these skills as source material:
 
 - `skills/hipson-premium-ui-ux`
 - `skills/external/anthropic/frontend-design`
@@ -46,6 +51,16 @@ skills as source material:
 - `skills/external/openai-curated/playwright-interactive`
 - `skills/external/openai-curated/figma-implement-design`
 - `skills/external/openai-curated/figma-generate-design`
+
+Use `visual_experience_director` when the task needs a new direction, motion
+system, studio-mode concept, interactive hero plan, implementation brief, or
+visual QA acceptance criteria. Prefer `premium_ui_ux` for screenshot-backed
+review of an already rendered UI.
+
+Use `hyperframes_video_director` only for HyperFrames or rendered video
+composition workflows such as website-to-video, launch videos, animated case
+studies, pitch videos, or social shorts. Do not route normal static UI design
+there.
 
 Good UI/UX packets should include:
 - screenshot paths or embedded screenshots;

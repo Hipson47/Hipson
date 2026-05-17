@@ -9,7 +9,7 @@
   },
   "router": {
     "provider": "openrouter",
-    "model": "google/gemini-3-flash-lite",
+    "model": "google/gemini-3.1-flash-lite",
     "temperature": 0,
     "max_tokens": 220,
     "timeout": 45,
@@ -69,6 +69,32 @@
       "can_handle_sensitive_context": false,
       "system": "You are a premium UI/UX review sidecar for modern web apps and landing pages. Review only the provided bounded packet and screenshots. Do not ask for repo access. Focus on high-end visual quality, typography hierarchy, spacing rhythm, image quality/crops, form controls, accessibility, responsive behavior, interaction polish, and brand consistency. Call out anything that feels default, cheap, mismatched, pixelated, cramped, inaccessible, or visually below premium level. Distinguish evidence from assumptions. Output concise Markdown with: critical visual issues, UX/accessibility issues, concrete implementation recommendations, and verification checklist."
     },
+    "visual_experience_director": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.22,
+      "max_tokens": 2600,
+      "expertise": ["visual direction", "web design", "motion design", "studio mode", "interactive hero", "codex brief", "visual qa"],
+      "use_when": ["visual direction", "premium ui direction", "studio mode", "motion effects", "interactive hero", "visual polish", "design critique", "codex brief", "visual qa"],
+      "avoid_when": ["backend only", "security only", "database", "api work", "pure code review", "video render", "hyperframes"],
+      "context_budget": 120000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a Creative Web Design Director, Motion Interaction Designer, Codex Brief Writer, and Visual QA Reviewer. Review only the provided bounded packet and screenshots. Use references as a pattern library, not templates to copy. First identify business goal, audience, brand maturity, technical constraints, and desired emotional effect. Select only fitting visual patterns. Reject effects that hurt clarity, conversion, accessibility, or performance. Always include mobile and reduced-motion fallbacks. Output Markdown using: # Visual Experience Brief, ## Goal, ## Project Fit, ## Visual Direction, ## Motion Direction, ## Component / Section Spec, ## Codex Implementation Brief, ## Performance & Accessibility, ## Acceptance Criteria."
+    },
+    "hyperframes_video_director": {
+      "provider": "openrouter",
+      "model": "deepseek/deepseek-v3.2",
+      "temperature": 0.22,
+      "max_tokens": 2600,
+      "expertise": ["hyperframes", "video composition", "website to video", "timeline qa", "launch video", "product intro", "motion timeline"],
+      "use_when": ["hyperframes", "website to video", "launch video", "product intro", "animated case study", "pitch video", "social short", "motion timeline", "rendered video", "mp4"],
+      "avoid_when": ["normal static interface", "static web design", "backend only", "security only", "pure react component", "image generation only"],
+      "context_budget": 120000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a Video Composition Director, Website-to-Video Strategist, HyperFrames Brief Writer, and Timeline QA Reviewer. Review only the provided bounded packet. Do not generate video. Prefer deterministic plain HTML HyperFrames compositions unless a framework is explicitly required. Include root data-composition-id, data-width, data-height; timed clip data-start, data-duration, data-track-index; paused GSAP timelines on window.__timelines; no Math.random; muted videos with separate audio. Output Markdown using: # HyperFrames Video Brief, ## Goal, ## Source Material, ## Format, ## Creative Direction, ## Scene Breakdown, ## HyperFrames Implementation Notes, ## Codex Brief, ## QA Checklist."
+    },
     "critic_lite": {
       "provider": "openrouter",
       "model": "deepseek/deepseek-v3.2",
@@ -84,7 +110,7 @@
     },
     "memory_summarizer_cheap": {
       "provider": "openrouter",
-      "model": "google/gemini-3-flash-lite",
+      "model": "google/gemini-3.1-flash-lite",
       "temperature": 0.1,
       "max_tokens": 900,
       "expertise": ["memory", "summary", "handoff", "progress"],

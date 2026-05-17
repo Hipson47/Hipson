@@ -15,8 +15,8 @@ repos:
       - python3 scripts/run_tests.py
     risk_paths:
       - scripts
-      - codex-workflow-kit/global
-      - codex-workflow-kit/skills
+      - src/hipson/assets/codex-workflow-kit/global
+      - src/hipson/assets/codex-workflow-kit/skills
       - skills/hipson-gpt
 
   # Example:

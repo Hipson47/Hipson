@@ -40,7 +40,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - `uv build`: passed.
 - Wheel install smoke from a temporary venv outside the repo, including fake-CWD asset shadowing checks: passed.
 - `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
-- `bash -n codex-workflow-kit/install.sh`: passed.
+- `bash -n src/hipson/assets/codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 - Secret scan excluding generated reports and test fixtures: passed.
 - Sensitive `.env` packet refusal: passed.
@@ -51,7 +51,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Cheap paid models can produce false positives; Architect must verify findings.
 
 ## Next Task
-Run the public remote CI after pushing rewritten `main`, then decide whether bundled external skills should ship in the 1.0 artifact.
+Run the public remote CI after pushing rewritten `main`, then tag `v1.0.0` if the matrix is green.
 
 ## Handoff Notes
 For a fresh local setup:
