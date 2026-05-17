@@ -12,7 +12,9 @@ import os
 import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -55,12 +57,12 @@ def load_env(path: Path) -> None:
         os.environ.setdefault(key.strip(), value)
 
 
-def provider_env_paths(env_arg: str | None = None, env: dict[str, str] | None = None) -> list[Path]:
-    env = env or os.environ
+def provider_env_paths(env_arg: str | None = None, env: Mapping[str, str] | None = None) -> list[Path]:
+    effective_env = env if env is not None else os.environ
     if env_arg:
         return [Path(env_arg).expanduser().resolve()]
-    if env.get("HIPSON_AGENTS_ENV"):
-        return [Path(env["HIPSON_AGENTS_ENV"]).expanduser().resolve()]
+    if effective_env.get("HIPSON_AGENTS_ENV"):
+        return [Path(effective_env["HIPSON_AGENTS_ENV"]).expanduser().resolve()]
     paths = [DEFAULT_ROOT_ENV, DEFAULT_HIPSON_ENV]
     unique = []
     for path in paths:
@@ -222,6 +224,9 @@ def provider_chat(provider: dict[str, Any], payload: dict[str, Any], *, timeout:
 
     data = json.dumps(payload).encode("utf-8")
     base_url = provider.get("base_url", "https://openrouter.ai/api/v1").rstrip("/")
+    parsed_base_url = urllib.parse.urlparse(base_url)
+    if parsed_base_url.scheme not in {"http", "https"}:
+        raise SystemExit(f"Unsupported provider URL scheme: {parsed_base_url.scheme or 'missing'}")
     request = urllib.request.Request(
         f"{base_url}/chat/completions",
         data=data,
@@ -235,7 +240,7 @@ def provider_chat(provider: dict[str, Any], payload: dict[str, Any], *, timeout:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
             body = response.read().decode("utf-8", errors="replace")
             try:
                 return json.loads(body)
@@ -277,12 +282,20 @@ def extract_json_object(text: str) -> dict[str, Any]:
     return data
 
 
-def normalize_router_choice(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+def normalize_router_choice(
+    data: dict[str, Any],
+    config: dict[str, Any],
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     agent_name = data.get("agent")
     if agent_name is not None:
         agent_name = str(agent_name)
         if agent_name not in config.get("agents", {}):
             raise SystemExit(f"Router model selected unknown agent: {agent_name}")
+        if candidates is not None:
+            allowed_agents = {str(candidate.get("name", "")) for candidate in candidates}
+            if agent_name not in allowed_agents:
+                raise SystemExit(f"Router model selected disallowed agent for this request: {agent_name}")
     try:
         confidence = float(data.get("confidence", 0))
     except (TypeError, ValueError):
@@ -307,7 +320,7 @@ def route_with_llm(config: dict[str, Any], summary: dict[str, Any]) -> dict[str,
         "response_format": {"type": "json_object"},
     }
     response = provider_chat(provider, payload, timeout=int(router.get("timeout", 45)))
-    choice = normalize_router_choice(extract_json_object(extract_content(response)), config)
+    choice = normalize_router_choice(extract_json_object(extract_content(response)), config, candidates)
     choice["source"] = "llm"
     choice["model"] = router["model"]
     return choice

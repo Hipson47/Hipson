@@ -137,8 +137,8 @@ def add_note(
         confidence=confidence,
     )
     append_jsonl(notes_path(root), asdict(note))
-    for source in source_records:
-        append_jsonl(sources_path(root), asdict(source))
+    for source_record in source_records:
+        append_jsonl(sources_path(root), asdict(source_record))
     return note
 
 

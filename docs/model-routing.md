@@ -15,9 +15,15 @@ Use cheap paid models only. Do not use free models automatically.
 | HyperFrames video | `hyperframes_video_director` | `deepseek/deepseek-v3.2` | website-to-video, launch videos, timeline QA, rendered video briefs |
 | Cheap critic | `critic_lite` | `deepseek/deepseek-v3.2` | assumptions and architecture critique |
 | Cheap memory | `memory_summarizer_cheap` | `google/gemini-3.1-flash-lite` | progress summaries, changelog compression |
+<<<<<<< HEAD
 | Cheap long context | `long_context_cheap` | `x-ai/grok-4.1-fast` | large packets, long docs, broad scans |
 | Strong architecture | `architect_strong` | `openai/gpt-5.5-mini` | important architecture/review decisions |
 | Max review | `architect_max` | `openai/gpt-5.5-mini` | hard design/security review only |
+=======
+| Cheap long context | `long_context_cheap` | `x-ai/grok-4.20` | large packets, long docs, broad scans |
+| Strong architecture | `architect_strong` | `openai/gpt-5.5` | important architecture/review decisions |
+| Max review | `architect_max` | `openai/gpt-5.5` | hard design/security review only |
+>>>>>>> 90e4184 (Prepare Hipson 1.0 release)
 
 ## Cost Snapshot
 Snapshot from OpenRouter model listings on 2026-05-17:
@@ -29,12 +35,12 @@ Snapshot from OpenRouter model listings on 2026-05-17:
 | `xiaomi/mimo-v2-flash` | $0.10 | $0.30 | 262,144 |
 | `z-ai/glm-4.7-flash` | $0.06 | $0.40 | 202,752 |
 | `qwen/qwen3.6-35b-a3b` | $0.15 | $1.00 | 262,144 |
-| `x-ai/grok-4.1-fast` | $0.20 | $0.50 | 2,000,000 |
+| `x-ai/grok-4.20` | $1.25 | $2.50 | 2,000,000 |
 | `deepseek/deepseek-v3.2` | $0.252 | $0.378 | 131,072 |
 | `qwen/qwen3.6-plus` | $0.325 | $1.95 | 1,000,000 |
 | `minimax/minimax-m2.5` | $0.15 | $1.15 | 196,608 |
 | `minimax/minimax-m2.7` | $0.299 | $1.20 | 196,608 |
-| `openai/gpt-5.4-mini` | $0.75 | $4.50 | 400,000 |
+| `openai/gpt-5.5` | $5.00 | $30.00 | 1,050,000 |
 
 ## Practical Routing
 

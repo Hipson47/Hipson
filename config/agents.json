@@ -123,7 +123,7 @@
     },
     "long_context_cheap": {
       "provider": "openrouter",
-      "model": "x-ai/grok-4.1-fast",
+      "model": "x-ai/grok-4.20",
       "temperature": 0.2,
       "max_tokens": 2500,
       "expertise": ["long context", "large docs", "contradictions", "synthesis"],
@@ -136,7 +136,7 @@
     },
     "architect_strong": {
       "provider": "openrouter",
-      "model": "openai/gpt-5.5-mini",
+      "model": "openai/gpt-5.5",
       "temperature": 0.2,
       "max_tokens": 2500,
       "expertise": ["architecture", "maintainability", "security", "task decomposition"],
@@ -149,7 +149,7 @@
     },
     "architect_max": {
       "provider": "openrouter",
-      "model": "openai/gpt-5.5-mini",
+      "model": "openai/gpt-5.5",
       "temperature": 0.2,
       "max_tokens": 3000,
       "expertise": ["architecture", "security", "hard decisions", "risk", "review"],

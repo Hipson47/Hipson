@@ -35,7 +35,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 58/58 tests.
+- `python3 scripts/run_tests.py`: passed, 63/63 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke from a temporary venv outside the repo, including fake-CWD asset shadowing checks: passed.

@@ -20,10 +20,19 @@ jobs:
         run: uv pip install --system -e ".[dev]"
       - name: Ruff
         run: ruff check .
+      - name: Mypy
+        run: mypy src/hipson
+      - name: Bandit
+        run: bandit -q -r src -c pyproject.toml
+      - name: Dependency audit
+        run: pip-audit
       - name: Run tests
         run: python scripts/run_tests.py
       - name: Pytest
         run: python -m pytest -q
+      - name: Mutation testing
+        run: mutmut run --max-children 2
+        timeout-minutes: 8
       - name: Compile Python
         run: python -m compileall src scripts tests
       - name: Build wheel and sdist

@@ -28,7 +28,7 @@ Important paths:
 
 ## Verification
 - `uv run ruff check .`: passed.
-- `python3 scripts/run_tests.py`: passed, 58/58 tests.
+- `python3 scripts/run_tests.py`: passed, 63/63 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke: `hipson --help`, `hipson doctor`, `hipson skill validate`, `hipson install codex --dry-run`, and fake-CWD asset shadowing checks passed from a temporary venv outside the repo.

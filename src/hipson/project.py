@@ -288,7 +288,12 @@ def untracked_files(project: Path, root: Path | None) -> list[str]:
     result = run(["git", "ls-files", "--others", "--exclude-standard", *git_scope_args(project, root)], root)
     if result.code != 0:
         return []
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    files: list[str] = []
+    for line in result.stdout.splitlines():
+        file_name = sanitize_path(line.strip())
+        if file_name and file_name not in files:
+            files.append(file_name)
+    return files
 
 
 def should_embed_file(path: str) -> bool:
@@ -473,6 +478,8 @@ def build_scan_record(repo: dict[str, object], include_diff: bool = False) -> di
 def render_multi_scan(records: list[dict[str, object]]) -> str:
     lines = ["# Hipson Multi-Repo Scan", ""]
     for record in records:
+        owners = ensure_string_list(record.get("owners"))
+        tags = ensure_string_list(record.get("tags"))
         lines.extend(
             [
                 f"## {record['name']}",
@@ -480,8 +487,8 @@ def render_multi_scan(records: list[dict[str, object]]) -> str:
                 f"- Type: `{record.get('type') or 'unknown'}`",
                 f"- Branch: `{record.get('branch') or 'unknown'}`",
                 f"- Progress: `{record.get('progress') or 'not found'}`",
-                f"- Owners: `{', '.join(record.get('owners', [])) or 'none'}`",
-                f"- Tags: `{', '.join(record.get('tags', [])) or 'none'}`",
+                f"- Owners: `{', '.join(owners) or 'none'}`",
+                f"- Tags: `{', '.join(tags) or 'none'}`",
                 "",
                 "### Risk Paths",
                 markdown_list(record.get("risk_paths", [])),  # type: ignore[arg-type]
