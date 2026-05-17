@@ -28,10 +28,24 @@ Repository = "https://github.com/hipson/hipson"
 Issues = "https://github.com/hipson/hipson/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff>=0.8.0"]
+dev = [
+    "bandit>=1.9.4",
+    "mutmut>=3.5.0",
+    "mypy>=2.1.0",
+    "pip-audit>=2.10.0",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
 
 [dependency-groups]
-dev = ["pytest>=8.0.0", "ruff>=0.8.0"]
+dev = [
+    "bandit>=1.9.4",
+    "mutmut>=3.5.0",
+    "mypy>=2.1.0",
+    "pip-audit>=2.10.0",
+    "pytest>=8.0.0",
+    "ruff>=0.8.0",
+]
 
 [project.scripts]
 hipson = "hipson.cli:main"
@@ -62,3 +76,39 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 addopts = "-s"
 testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/hipson"]
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "skills/external", ".venv", "build", "dist"]
+skips = ["B404", "B603", "B607"]
+
+[tool.mutmut]
+also_copy = ["src/hipson"]
+paths_to_mutate = [
+    "src/hipson/agents.py",
+    "src/hipson/packets.py",
+    "src/hipson/redaction.py",
+]
+tests_dir = [
+    "tests/test_hipson_helpers.py::test_redact_secrets_masks_common_key_patterns",
+    "tests/test_hipson_helpers.py::test_redact_secrets_masks_quoted_json_and_url_tokens",
+    "tests/test_hipson_helpers.py::test_redact_secrets_masks_quoted_env_style_values",
+    "tests/test_hipson_helpers.py::test_sensitive_paths_are_case_insensitive_and_redacted",
+    "tests/test_hipson_helpers.py::test_redact_secrets_masks_private_key_blocks",
+    "tests/test_hipson_helpers.py::test_sensitive_packet_paths_are_blocked",
+    "tests/test_hipson_helpers.py::test_normal_packet_paths_are_allowed",
+    "tests/test_hipson_helpers.py::test_agent_router_uses_metadata",
+    "tests/test_hipson_helpers.py::test_llm_router_summary_redacts_sensitive_metadata",
+    "tests/test_hipson_helpers.py::test_llm_router_normalizes_model_choice",
+    "tests/test_hipson_helpers.py::test_llm_router_rejects_agent_outside_filtered_candidates",
+    "tests/test_hipson_helpers.py::test_sidecar_read_packet_redacts_quoted_secret",
+    "tests/test_hipson_helpers.py::test_packet_compilers_render_structured_review_and_executor_packets",
+]
+pytest_add_cli_args = ["-q"]
+mutate_only_covered_lines = true

@@ -38,6 +38,8 @@ def command_doctor(args: argparse.Namespace) -> int:
     config_path = runtime_asset("config/agents.json")
     provider_env_paths = agents.provider_env_paths()
     existing_provider_env = next((path for path in provider_env_paths if path.exists()), None)
+    commands = discover_commands(Path.cwd())
+    warnings = codex_warnings + hipson_warnings
     assets = {
         "codex_agents": runtime_asset("codex-workflow-kit/global/AGENTS.md").exists(),
         "hipson_skill": runtime_asset("codex-workflow-kit/skills/hipson-workflow/SKILL.md").exists(),
@@ -57,8 +59,8 @@ def command_doctor(args: argparse.Namespace) -> int:
         "assets": assets,
         "skills_checked": len(skill_results),
         "skills_failed": len(skill_failures),
-        "commands": discover_commands(Path.cwd()),
-        "warnings": codex_warnings + hipson_warnings,
+        "commands": commands,
+        "warnings": warnings,
     }
     failed = (not git_available) or (not config_path.exists()) or any(not ok for ok in assets.values()) or bool(skill_failures)
     if args.json:
@@ -79,11 +81,11 @@ def command_doctor(args: argparse.Namespace) -> int:
         print(f"- {name}: {'ok' if ok else 'missing'}")
     print(f"skills: {len(skill_results)} checked, {len(skill_failures)} failed")
     print("commands:")
-    for command in checks["commands"] or ["none discovered"]:
+    for command in commands or ["none discovered"]:
         print(f"- {command}")
-    if checks["warnings"]:
+    if warnings:
         print("warnings:")
-        for warning in checks["warnings"]:
+        for warning in warnings:
             print(f"- {warning}")
     return 1 if failed else 0
 
@@ -110,7 +112,7 @@ def command_scan_many(args: argparse.Namespace) -> int:
     records = []
     for repo in repos:
         repo = dict(repo)
-        repo["path"] = str(resolve_project_from_registry(repo["path"], registry))
+        repo["path"] = str(resolve_project_from_registry(str(repo["path"]), registry))
         records.append(build_scan_record(repo, include_diff=args.include_diff))
     write_output(render_multi_scan(records), args.output)
     if args.json_output:

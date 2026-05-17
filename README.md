@@ -182,8 +182,12 @@ producing a misleading clean scan.
 ```bash
 uv sync --all-extras
 uv run ruff check .
+uv run mypy src/hipson
+uv run bandit -q -r src -c pyproject.toml
+uv run pip-audit
 uv run python scripts/run_tests.py
 uv run python -m pytest -q
+uv run mutmut run --max-children 2
 uv run python -m compileall src scripts tests
 uv build
 ```
@@ -197,8 +201,9 @@ python scripts/run_tests.py
 
 ## CI
 
-GitHub Actions validates Python 3.11 and 3.12, runs Ruff, executes the local test
-runner and pytest, compiles source files, builds wheel/sdist artifacts, smoke-tests the
+GitHub Actions validates Python 3.11 and 3.12, runs Ruff, mypy, Bandit,
+pip-audit, the local test runner, pytest, and the configured mutmut target set,
+then compiles source files, builds wheel/sdist artifacts, smoke-tests the
 installed wheel CLI, and checks both deterministic and dry-run LLM routing.
 
 ## Repository Hygiene
@@ -206,6 +211,7 @@ installed wheel CLI, and checks both deterministic and dry-run LLM routing.
 Committed:
 
 - source code, tests, templates, docs, skills, and runtime assets;
+- vendored skill provenance in `docs/vendored-skills-provenance.json`;
 - `uv.lock` for reproducible development tooling;
 - `.gitkeep` markers for generated artifact directories.
 

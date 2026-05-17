@@ -46,8 +46,12 @@ Runtime toolkit assets are canonically loaded from
 ```bash
 uv sync --all-extras
 uv run ruff check .
+uv run mypy src/hipson
+uv run bandit -q -r src -c pyproject.toml
+uv run pip-audit
 uv run python scripts/run_tests.py
 uv run python -m pytest -q
+uv run mutmut run --max-children 2
 uv run python -m compileall src scripts tests
 uv build
 hipson doctor

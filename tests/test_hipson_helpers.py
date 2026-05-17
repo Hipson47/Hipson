@@ -10,9 +10,10 @@ from hipson import project as hipson_project
 from hipson.assets import packaged_asset, runtime_asset
 from hipson.codex_install import END_MARKER, START_MARKER, detect_codex_home, install_codex, merge_managed_block
 from hipson.home import detect_hipson_home
+from hipson.packets import compile_executor_packet, compile_review_packet
 from hipson.paths import package_root
 from hipson.redaction import REDACTION, is_sensitive_path, redact_sensitive_paths, redact_text
-from hipson.skills import parse_frontmatter, validate_skill_file, validate_skills
+from hipson.skills import find_skill_files, parse_frontmatter, validate_skill_file, validate_skills
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CLI_TIMEOUT = 30
@@ -485,6 +486,17 @@ def test_skill_validator_accepts_repo_skills():
     assert all(result.ok for result in results), results
 
 
+def test_skill_discovery_ignores_generated_mutants_tree(tmp_path: Path):
+    real_skill = tmp_path / "skills" / "example"
+    generated_skill = tmp_path / "mutants" / "skills" / "example"
+    real_skill.mkdir(parents=True)
+    generated_skill.mkdir(parents=True)
+    (real_skill / "SKILL.md").write_text("---\nname: example\ndescription: Useful example skill for tests.\n---\n", encoding="utf-8")
+    (generated_skill / "SKILL.md").write_text("not real\n", encoding="utf-8")
+
+    assert find_skill_files(tmp_path) == [real_skill / "SKILL.md"]
+
+
 def test_skill_validator_rejects_missing_frontmatter(tmp_path: Path):
     skill = tmp_path / "SKILL.md"
     skill.write_text("# Bad Skill\n", encoding="utf-8")
@@ -674,6 +686,63 @@ def test_llm_router_normalizes_model_choice():
     payload_text = json.dumps(seen_payload)
     assert "<packet>" not in payload_text
     assert "src/auth.py" in payload_text
+
+
+def test_llm_router_rejects_agent_outside_filtered_candidates():
+    config = {
+        "providers": {
+            "openrouter": {
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key_env": "OPENROUTER_API_KEY",
+            }
+        },
+        "router": {
+            "provider": "openrouter",
+            "model": "cheap-router",
+            "temperature": 0,
+            "max_tokens": 120,
+        },
+        "agents": {
+            "reviewer_cheap": {
+                "expertise": ["review", "security"],
+                "use_when": ["security review"],
+                "avoid_when": [],
+                "context_budget": 10000,
+                "can_handle_sensitive_context": False,
+            },
+            "architect_strong": {
+                "expertise": ["architecture"],
+                "use_when": ["architecture review"],
+                "avoid_when": [],
+                "context_budget": 10000,
+                "can_handle_sensitive_context": True,
+            },
+        },
+    }
+
+    def fake_provider_chat(provider, payload, *, timeout=90):
+        return {"choices": [{"message": {"content": '{"agent":"reviewer_cheap","confidence":0.92,"reason":"global match"}'}}]}
+
+    old_provider_chat = hipson_agents.provider_chat
+    try:
+        hipson_agents.provider_chat = fake_provider_chat
+        summary = hipson_agents.route_summary(
+            task_type="review",
+            risk="security",
+            task="security review",
+            files=[".env.production"],
+            chars=4200,
+            skills=["hipson-backend"],
+            sensitive=True,
+        )
+        try:
+            hipson_agents.route_with_llm(config, summary)
+        except SystemExit as exc:
+            assert "disallowed agent" in str(exc)
+        else:
+            raise AssertionError("Expected filtered-out router choice to fail")
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
 
 
 def test_llm_router_dry_run_cli_sends_redacted_summary_only(tmp_path: Path):
@@ -905,6 +974,41 @@ def test_packet_generation_redacts_quoted_secret_diff(tmp_path: Path):
     assert REDACTION in text
 
 
+def test_packet_compilers_render_structured_review_and_executor_packets():
+    review = compile_review_packet(
+        title="Review release hardening",
+        project="/repo",
+        scope="current git delta",
+        scan="# Scan\n",
+        changed_files=["src/hipson/agents.py"],
+        commands=["pytest"],
+        selected_skills=["hipson-testing"],
+    )
+    executor = compile_executor_packet(
+        title="Fix router validation",
+        goal="Validate model-selected agents against filtered candidates.",
+        project="/repo",
+        scope="bounded patch",
+        scan="# Scan\n",
+        changed_files=["src/hipson/agents.py"],
+        commands=["pytest"],
+        files_to_inspect=["src/hipson/agents.py"],
+        allowed_edit=["src/hipson/agents.py", "tests/test_hipson_helpers.py"],
+        acceptance="Filtered-out agents fail hard.",
+        verification="pytest",
+        selected_skills=["hipson-testing"],
+    )
+
+    assert "# Agent Review Packet" in review
+    assert "REVIEWER_MODE" in review
+    assert "- `src/hipson/agents.py`" in review
+    assert "Inspect reported or discovered command: `pytest`" in review
+    assert "# Agent Executor Packet" in executor
+    assert "EXECUTOR_MODE" in executor
+    assert "Filtered-out agents fail hard." in executor
+    assert "Run: `pytest`" in executor
+
+
 def test_packet_generation_uses_compiled_sections(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     (repo / "scripts").mkdir()
@@ -1032,3 +1136,22 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
     for command in commands:
         result = run_cli(tmp_path, *command, env=env)
         assert result.returncode == 0, f"{command}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+
+def test_scan_many_redacts_untracked_sensitive_paths_in_markdown_and_json(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    (repo / ".env.production").write_text("OPENROUTER_API_KEY=sk-test-secret1234567890\n", encoding="utf-8")
+    registry = tmp_path / "repos.yaml"
+    markdown = tmp_path / "scan.md"
+    json_output = tmp_path / "scan.json"
+    registry.write_text(f"repos:\n  - name: Sample\n    path: {repo}\n", encoding="utf-8")
+
+    result = run_cli(tmp_path, "scan-many", str(registry), "-o", str(markdown), "--json", str(json_output), "--include-diff")
+
+    assert result.returncode == 0, result.stderr
+    markdown_text = markdown.read_text(encoding="utf-8")
+    json_text = json_output.read_text(encoding="utf-8")
+    combined = f"{markdown_text}\n{json_text}"
+    assert ".env.production" not in combined
+    assert "sk-test-secret1234567890" not in combined
+    assert "[sensitive file skipped]" in combined
