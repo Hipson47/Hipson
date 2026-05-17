@@ -63,7 +63,7 @@ python3 scripts/hipson_agents.py run --agent reviewer_lite --packet /tmp/packet.
 
 ## Knowledge Skills
 - `skills/hipson-gpt/`: Hipson browser knowledge package, now structured as local hub skills.
-- `codex-workflow-kit/skills/hipson-workflow/`: installable workflow skill for Codex.
+- `src/hipson/assets/codex-workflow-kit/skills/hipson-workflow/`: canonical installable workflow skill for Codex.
 - `knowledge/source/`: canonical source references used by skills.
 
 ## Subagent Pattern

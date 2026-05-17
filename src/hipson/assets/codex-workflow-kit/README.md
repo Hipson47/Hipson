@@ -59,7 +59,7 @@ the diff remains the source of truth.
 In any project directory:
 
 ```bash
-cp /path/to/codex-workflow-kit/templates/repo-AGENTS.md ./AGENTS.md
+cp /path/to/Hipson/src/hipson/assets/codex-workflow-kit/templates/repo-AGENTS.md ./AGENTS.md
 ```
 
 Then fill in:

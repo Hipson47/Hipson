@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hipson"
-version = "0.1.0"
+version = "1.0.0"
 description = "Codex-native local developer workflow tool"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -13,7 +13,7 @@ authors = [{ name = "Hipson Contributors" }]
 dependencies = []
 keywords = ["codex", "agents", "developer-tools", "rag", "workflow"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",

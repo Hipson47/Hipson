@@ -946,6 +946,12 @@ def test_packaged_assets_stay_in_sync():
         assert Path(source).read_text(encoding="utf-8") == Path(asset).read_text(encoding="utf-8")
 
 
+def test_root_toolkit_mirror_is_absent():
+    assert not Path("codex-workflow-kit").exists()
+    assert Path("src/hipson/assets/codex-workflow-kit/global/AGENTS.md").exists()
+    assert Path("src/hipson/assets/codex-workflow-kit/skills/hipson-workflow/SKILL.md").exists()
+
+
 def test_sidecar_dry_run_redacts_packet_before_send_path(tmp_path: Path):
     packet = tmp_path / "packet.md"
     packet.write_text("token=sk-test-secret1234567890\n", encoding="utf-8")

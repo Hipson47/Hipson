@@ -10,6 +10,7 @@ source of truth.
 
 ## Features
 
+- **Stable 1.0 local-first CLI** for bounded, human-reviewed AI software work.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
@@ -19,6 +20,8 @@ source of truth.
 - **Codex installer** with dry-run mode, backups, and managed marker blocks.
 - **Secret redaction and sensitive-path guards** before persistence or provider calls.
 - **Dependency-light runtime** with `uv` and `ruff` for mature development workflow.
+- **Visual direction and optional HyperFrames video sidecars** for bounded UI,
+  motion, and website-to-video briefs.
 
 ## Install
 
@@ -76,6 +79,8 @@ hipson memory list
 
 hipson sidecar list
 hipson sidecar route --task "architecture security review" --risk security
+hipson sidecar route --task "studio mode interactive hero visual direction" --risk ui
+hipson sidecar route --task "HyperFrames website to video launch short" --risk ui
 hipson sidecar route --task "security review" --risk security --task-type review --file src/auth.py --skills hipson-backend --context-chars 4200 --llm
 hipson sidecar run --agent reviewer_cheap --packet runs/review-packet.md --dry-run
 
@@ -100,7 +105,6 @@ hipson install codex --apply
 ```text
 .
   .github/workflows/ci.yml
-  codex-workflow-kit/
   config/agents.json
   docs/
   knowledge/
@@ -110,9 +114,12 @@ hipson install codex --apply
   src/hipson/
   templates/
   tests/
+  CHANGELOG.md
   pyproject.toml
   uv.lock
 ```
+
+The canonical toolkit copy is `src/hipson/assets/codex-workflow-kit/`.
 
 ## Configuration
 
@@ -207,7 +214,12 @@ Ignored:
 - `.env`, `.env.*`, nested env files, and provider env files;
 - local `repos.yaml`;
 - generated `runs/*.md`, `scans/*.md`, and `memory/*.jsonl`;
+- generated `reports/`, `exports/`, `tmp/`, `hyperframes-output/`, logs, video,
+  audio, and subtitle render outputs;
 - build outputs, virtualenvs, caches, and bytecode.
+
+Source PDFs, docs, spreadsheets, and archives are not globally ignored because
+some vendored skills intentionally include reviewed source assets.
 
 ## License
 

@@ -9,22 +9,30 @@ model is stable: local-first execution, bounded packets, deterministic routing b
 default, optional provider calls, redaction before persistence/provider paths,
 and CI coverage for packaging and smoke workflows.
 
-## Blocking Before 1.0
+## Final External Gates
 
-- Publish from the rewritten public `main` only; do not push
-  `backup/pre-public-history`.
-- Run the full CI matrix on GitHub after the force-with-lease push.
-- Confirm external bundled skills are intentionally shipped, with acceptable
-  size, license posture, and maintenance policy.
-- Decide whether public package metadata should point to the final repository
-  URL before tagging.
-- Perform one clean clone test outside this working directory:
-  `uv sync --all-extras`, `uv run hipson doctor`, `uv run python scripts/run_tests.py`,
-  `uv build`, and wheel install smoke.
-- Run a final secret/path scan on the pushed branch, excluding tests and known
-  external fixture examples.
-- Keep the runtime asset trust boundary intact: installed package assets or
-  explicit valid `HIPSON_DEV_ROOT` only, never implicit CWD lookup.
+- Run the full GitHub Actions matrix after pushing the rewritten public `main`.
+- Tag `v1.0.0` only after remote CI is green.
+- Do not push `backup/pre-public-history`.
+
+## Resolved 1.0 Decisions
+
+- External bundled skills are intentionally shipped as reviewed reference
+  material. `skills/external/manifest.json` records source, installed folders,
+  skipped items, and purpose. License files are vendored with the skill folders
+  where upstream provides them.
+- Public package metadata points to the intended public repository URL.
+- Runtime assets must come from installed package assets, the imported source
+  checkout under `src/hipson/assets/`, or explicit valid `HIPSON_DEV_ROOT`; never
+  from implicit CWD.
+- The root `codex-workflow-kit/` mirror is removed. Canonical toolkit assets live
+  only under `src/hipson/assets/codex-workflow-kit/`.
+
+## Toolkit Canonicalization
+
+Runtime toolkit assets are canonically loaded from
+`src/hipson/assets/codex-workflow-kit/`. Do not recreate a root
+`codex-workflow-kit/` mirror.
 
 ## Non-Blocking Before 1.0
 
@@ -45,12 +53,12 @@ uv build
 hipson doctor
 hipson skill validate
 python -m hipson.cli scan /definitely/missing/path
+hipson install codex --dry-run
 hipson sidecar route --task "security review" --risk security
-hipson sidecar route --task "security review" --risk security --task-type review --file src/hipson/agents.py --skills hipson-backend --context-chars 4200 --llm --llm-dry-run
+hipson sidecar route --task "release verification packaging CI gates docs review" --risk architecture --task-type review --file pyproject.toml --skills hipson-gpt --context-chars 4200 --llm
 ```
 
 ## Release Decision
 
-Tag `v1.0.0` only after the blocking items pass on the public remote. Until then,
-keep the package version below 1.0 and treat the repository as release-candidate
-quality rather than final 1.0.
+The package is prepared as `1.0.0`. Publish the rewritten public branch, wait for
+remote CI, then tag `v1.0.0`.

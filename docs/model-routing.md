@@ -11,17 +11,20 @@ Use cheap paid models only. Do not use free models automatically.
 | Cheap reliable review | `reviewer_cheap` | `deepseek/deepseek-v3.2` | normal repo delta review |
 | Cheap code review | `coder_review_cheap` | `deepseek/deepseek-v3.2` | code-specific review |
 | Premium UI/UX review | `premium_ui_ux` | `deepseek/deepseek-v3.2` | visual quality, UX, accessibility and premium polish |
+| Visual direction | `visual_experience_director` | `deepseek/deepseek-v3.2` | art direction, motion interaction design, studio mode, Codex UI briefs |
+| HyperFrames video | `hyperframes_video_director` | `deepseek/deepseek-v3.2` | website-to-video, launch videos, timeline QA, rendered video briefs |
 | Cheap critic | `critic_lite` | `deepseek/deepseek-v3.2` | assumptions and architecture critique |
-| Cheap memory | `memory_summarizer_cheap` | `google/gemini-3-flash-lite` | progress summaries, changelog compression |
+| Cheap memory | `memory_summarizer_cheap` | `google/gemini-3.1-flash-lite` | progress summaries, changelog compression |
 | Cheap long context | `long_context_cheap` | `x-ai/grok-4.1-fast` | large packets, long docs, broad scans |
 | Strong architecture | `architect_strong` | `openai/gpt-5.5-mini` | important architecture/review decisions |
 | Max review | `architect_max` | `openai/gpt-5.5-mini` | hard design/security review only |
 
 ## Cost Snapshot
-Snapshot from OpenRouter model API on 2026-05-10:
+Snapshot from OpenRouter model listings on 2026-05-17:
 
 | Model | Input / 1M | Output / 1M | Context |
 |---|---:|---:|---:|
+| `google/gemini-3.1-flash-lite` | $0.25 | $1.50 | 1,048,576 |
 | `google/gemini-2.5-flash-lite` | $0.10 | $0.40 | 1,048,576 |
 | `xiaomi/mimo-v2-flash` | $0.10 | $0.30 | 262,144 |
 | `z-ai/glm-4.7-flash` | $0.06 | $0.40 | 202,752 |
@@ -81,6 +84,24 @@ Use `premium_ui_ux` for:
 - screenshot-driven visual critique;
 - typography, spacing, image crop/quality, controls, accessibility, and responsive polish;
 - catching anything that feels default, cheap, visually mismatched, or below premium level.
+
+Use `visual_experience_director` for:
+- premium UI direction before implementation;
+- studio mode, motion effects, interactive hero, visual polish, and design critique;
+- Codex-ready UI implementation briefs;
+- visual QA acceptance criteria after UI changes.
+
+Avoid `visual_experience_director` for backend-only, security-only, database/API,
+or pure code review tasks.
+
+Use `hyperframes_video_director` for:
+- HyperFrames;
+- website-to-video workflows;
+- launch videos, product intros, animated case studies, pitch videos, social shorts;
+- motion timeline and rendered video QA.
+
+Avoid `hyperframes_video_director` for normal static UI design, backend/API/security
+work, pure React implementation, or image generation only.
 
 Note: `qwen/qwen3.6-35b-a3b` is a promising cheap coding model, but returned empty content in one Hipson smoke test, so `deepseek/deepseek-v3.2` remains the default.
 
