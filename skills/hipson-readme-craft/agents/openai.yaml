@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hipson README Craft"
+  short_description: "Create polished README docs"
+  default_prompt: "Use $hipson-readme-craft to draft a polished, developer-focused README for this repository."

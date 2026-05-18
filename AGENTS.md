@@ -7,6 +7,7 @@ Be concise, direct, practical. Informal chat ok. All code, docs, and comments in
 ## Default Behavior
 - Inspect before editing.
 - Understand repo structure first.
+- For non-trivial repo tasks, run `hipson route --task "..."` and consult `SKILLS.md` before choosing scan, packet, sidecar, memory, or handoff flow.
 - Prefer minimal diffs.
 - Fix root cause, not symptoms.
 - Preserve working behavior unless change is required.

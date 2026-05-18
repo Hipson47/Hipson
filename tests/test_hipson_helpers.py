@@ -7,6 +7,7 @@ from pathlib import Path
 from hipson import agents as hipson_agents
 from hipson import memory as hipson_memory
 from hipson import project as hipson_project
+from hipson import router as hipson_router
 from hipson.assets import packaged_asset, runtime_asset
 from hipson.codex_install import END_MARKER, START_MARKER, detect_codex_home, install_codex, merge_managed_block
 from hipson.home import detect_hipson_home
@@ -675,8 +676,11 @@ license: MIT
 
 
 def test_packaged_assets_are_available_outside_repo_cwd(tmp_path: Path):
+    assert Path("SKILLS.md").exists()
+    assert packaged_asset("SKILLS.md").exists()
     assert packaged_asset("codex-workflow-kit/global/AGENTS.md").exists()
     assert packaged_asset("codex-workflow-kit/skills/hipson-workflow/SKILL.md").exists()
+    assert packaged_asset("codex-workflow-kit/skills/hipson-workflow/references/hipson-agent-skills.md").exists()
     result = run_cli(
         tmp_path,
         "install",
@@ -1518,6 +1522,7 @@ def test_install_codex_apply_preserves_existing_agents_content(tmp_path: Path):
     assert START_MARKER in text
     assert END_MARKER in text
     assert (codex_home / "skills" / "hipson-workflow" / "SKILL.md").exists()
+    assert (codex_home / "skills" / "hipson-workflow" / "references" / "hipson-agent-skills.md").exists()
     assert list(codex_home.glob("AGENTS.md.backup-*"))
 
 
@@ -1804,6 +1809,7 @@ def test_packet_generation_uses_compiled_sections(tmp_path: Path):
 
 def test_packaged_assets_stay_in_sync():
     pairs = [
+        ("SKILLS.md", "src/hipson/assets/SKILLS.md"),
         ("ORCHESTRATOR.md", "src/hipson/assets/ORCHESTRATOR.md"),
         ("config/agents.json", "src/hipson/assets/config/agents.json"),
         ("templates/agent-review-packet.md", "src/hipson/assets/templates/agent-review-packet.md"),
@@ -1818,6 +1824,187 @@ def test_root_toolkit_mirror_is_absent():
     assert not Path("codex-workflow-kit").exists()
     assert Path("src/hipson/assets/codex-workflow-kit/global/AGENTS.md").exists()
     assert Path("src/hipson/assets/codex-workflow-kit/skills/hipson-workflow/SKILL.md").exists()
+
+
+def test_codex_assets_reference_agent_playbook_and_router():
+    paths = [
+        Path("AGENTS.md"),
+        Path("src/hipson/assets/codex-workflow-kit/global/AGENTS.md"),
+        Path("src/hipson/assets/codex-workflow-kit/skills/hipson-workflow/SKILL.md"),
+    ]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "hipson route --task" in text
+    assert "references/hipson-agent-skills.md" in paths[-1].read_text(encoding="utf-8")
+
+
+def test_workflow_router_security_review_requires_human_review():
+    route = hipson_router.route_task("security review of auth")
+
+    assert route["mode"] == "review"
+    assert route["risk"] == "security"
+    assert route["recommended_skill"] == "review-packet"
+    assert route["requires_human_review"] is True
+
+
+def test_workflow_router_implementation_includes_scan_and_exec_packet():
+    route = hipson_router.route_task("implement parser fix")
+
+    assert route["mode"] == "exec"
+    assert route["risk"] == "normal"
+    assert route["commands"][0] == "hipson scan . --include-diff"
+    assert any(command.startswith("hipson packet exec .") for command in route["commands"])
+    assert any("--allowed-edit" in command for command in route["commands"])
+
+
+def test_workflow_router_risk_human_review_rules_are_contractual():
+    cases = [
+        ("fix auth token parser", "exec", "security", True),
+        ("refactor cross-module parser", "exec", "architecture", True),
+        ("fix database migration", "exec", "data-loss", True),
+        ("review UI accessibility", "review", "ui", True),
+        ("get sidecar second opinion", "sidecar-review", "normal", True),
+        ("implement parser fix", "exec", "normal", False),
+        ("", "scan", "unknown", False),
+    ]
+
+    for task, mode, risk, requires_human_review in cases:
+        route = hipson_router.route_task(task)
+        assert route["mode"] == mode
+        assert route["risk"] == risk
+        assert route["requires_human_review"] is requires_human_review
+
+
+def test_workflow_router_core_modes_are_deterministic():
+    cases = [
+        ("verify release gates", "verify"),
+        ("handoff current work", "handoff"),
+        ("get sidecar second opinion", "sidecar-review"),
+        ("remember parser decision", "memory"),
+        ("status of current state", "scan"),
+    ]
+
+    for task, mode in cases:
+        assert hipson_router.route_task(task)["mode"] == mode
+
+
+def test_workflow_router_json_shape_and_text_output_are_stable():
+    route = hipson_router.route_task("implement parser fix")
+    text = hipson_router.format_text_route(route)
+
+    assert list(route.keys()) == list(hipson_router.ROUTE_KEYS)
+    assert json.loads(json.dumps(route))["mode"] == "exec"
+    assert "recommended_skill: executor-packet" in text
+    assert "commands:" in text.splitlines()
+    assert len(text.splitlines()) <= 12
+
+
+def test_workflow_router_is_provider_free():
+    def fail_provider_call(*_args, **_kwargs):
+        raise AssertionError("workflow router must not call providers")
+
+    old_provider_chat = hipson_agents.provider_chat
+    try:
+        hipson_agents.provider_chat = fail_provider_call
+        route = hipson_router.route_task("get sidecar second opinion")
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+
+    assert route["mode"] == "sidecar-review"
+    assert any(command.startswith("hipson sidecar route") for command in route["commands"])
+    assert all("sidecar run" not in command for command in route["commands"])
+
+
+def test_workflow_router_commands_are_exact_and_ordered():
+    review = hipson_router.route_task("security review of auth")
+    exec_route = hipson_router.route_task("implement parser fix")
+    verify = hipson_router.route_task("verify release gates")
+    handoff = hipson_router.route_task("handoff current work")
+    sidecar = hipson_router.route_task("get sidecar second opinion for auth token")
+    memory = hipson_router.route_task("remember parser decision")
+
+    assert review["commands"] == [
+        "hipson scan . --include-diff",
+        'hipson packet review . --title "security review of auth" --include-diff -o runs/review-packet.md',
+    ]
+    assert exec_route["commands"] == [
+        "hipson scan . --include-diff",
+        (
+            'hipson packet exec . --title "implement parser fix" --goal "implement parser fix" '
+            '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
+            "-o runs/executor-packet.md"
+        ),
+    ]
+    assert verify["commands"] == ["git diff --check", "[run project test/build/typecheck commands]"]
+    assert handoff["commands"] == [
+        "hipson scan . --include-diff",
+        'hipson memory add --scope repo --repo . --kind handoff --summary "[compact handoff]"',
+    ]
+    assert sidecar["commands"] == [
+        "hipson scan . --include-diff",
+        (
+            'hipson packet review . --title "get sidecar second opinion for auth token" '
+            "--include-diff -o runs/review-packet.md"
+        ),
+        'hipson sidecar route --task "get sidecar second opinion for auth token" --risk security',
+    ]
+    assert memory["commands"] == [
+        'hipson memory search "remember parser decision"',
+        'hipson memory add --scope repo --repo . --kind decision --summary "[decision]"',
+    ]
+
+
+def test_workflow_router_quotes_normalizes_and_formats_text_contract():
+    route = hipson_router.route_task('  implement   "parser"   fix  ')
+    path_route = hipson_router.route_task(r"implement C:\tmp parser fix")
+    security_route = hipson_router.route_task("fix auth token parser")
+    empty_route = hipson_router.route_task("")
+    text = hipson_router.format_text_route(route)
+
+    assert route["reason"] == "implementation task"
+    assert security_route["reason"] == "implementation task; security-sensitive task"
+    assert empty_route["recommended_skill"] == "repo-delta-scan"
+    assert empty_route["reason"] == "empty task; unknown risk"
+    assert hipson_router.route_task("status")["commands"] == ["hipson scan . --include-diff"]
+    assert route["commands"][1] == (
+        'hipson packet exec . --title "implement \\"parser\\" fix" --goal "implement \\"parser\\" fix" '
+        '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
+        "-o runs/executor-packet.md"
+    )
+    assert path_route["commands"][1] == (
+        'hipson packet exec . --title "implement C:\\\\tmp parser fix" --goal "implement C:\\\\tmp parser fix" '
+        '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
+        "-o runs/executor-packet.md"
+    )
+    assert "requires_human_review: false" in text
+    assert "requires_human_review: FALSE" not in text
+    repo_state_route = hipson_router.route_task("current   state")
+    assert repo_state_route["mode"] == "scan"
+    assert repo_state_route["reason"] == "repo-state task"
+
+
+def test_workflow_router_exec_placeholder_fallback_is_safe():
+    command = hipson_router._commands_for("exec", "unknown", "")[1]
+    review_command = hipson_router._commands_for("review", "unknown", "")[1]
+    sidecar_packet_command = hipson_router._commands_for("sidecar-review", "unknown", "")[1]
+    sidecar_task_command = hipson_router._commands_for("sidecar-review", "unknown", "")[2]
+    sidecar_command = hipson_router._commands_for("sidecar-review", "unknown", "second opinion")[2]
+
+    assert hipson_router._title("x" * 81, "fallback") == "x" * 80
+    assert command == (
+        'hipson packet exec . --title "Implement task" --goal "[goal]" '
+        '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
+        "-o runs/executor-packet.md"
+    )
+    assert review_command == (
+        'hipson packet review . --title "Review task" --include-diff -o runs/review-packet.md'
+    )
+    assert sidecar_packet_command == (
+        'hipson packet review . --title "Sidecar review" --include-diff -o runs/review-packet.md'
+    )
+    assert sidecar_task_command == 'hipson sidecar route --task "[task]" --risk normal'
+    assert sidecar_command == 'hipson sidecar route --task "second opinion" --risk normal'
 
 
 def test_sidecar_dry_run_redacts_packet_before_send_path(tmp_path: Path):
@@ -2220,6 +2407,8 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
         ("check-setup", "--help"),
         ("scan", str(repo)),
         ("scan-many", str(registry)),
+        ("route", "--task", "security review of auth", "--json"),
+        ("route", "--task", "implement parser fix"),
         ("skill", "validate"),
         ("install", "codex", "--dry-run"),
         ("packet", "review", "--help"),
@@ -2232,6 +2421,22 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
     for command in commands:
         result = run_cli(tmp_path, *command, env=env)
         assert result.returncode == 0, f"{command}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+
+def test_route_command_subprocess_json_and_text(tmp_path: Path):
+    json_result = run_cli(tmp_path, "route", "--task", "security review of auth", "--json")
+    text_result = run_cli(tmp_path, "route", "--task", "implement parser fix")
+
+    assert json_result.returncode == 0, json_result.stderr
+    payload = json.loads(json_result.stdout)
+    assert list(payload.keys()) == list(hipson_router.ROUTE_KEYS)
+    assert payload["mode"] == "review"
+    assert payload["risk"] == "security"
+    assert payload["requires_human_review"] is True
+    assert text_result.returncode == 0, text_result.stderr
+    assert "recommended_skill: executor-packet" in text_result.stdout
+    assert "hipson scan . --include-diff" in text_result.stdout
+    assert "hipson packet exec ." in text_result.stdout
 
 
 def test_scan_many_redacts_untracked_sensitive_paths_in_markdown_and_json(tmp_path: Path):

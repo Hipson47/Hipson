@@ -8,6 +8,8 @@ Hipson also includes local wrapper skills for Hipson-specific workflows:
 
 - `skills/hipson-premium-ui-ux/`: default entrypoint for screenshot-backed
   premium UI/UX review.
+- `skills/hipson-readme-craft/`: README creation, rewrite, and audit workflow
+  for Hipson projects, CLI tools, developer workflow kits, and skill libraries.
 - `skills/hipson-visual-experience-director/`: visual direction, art direction,
   motion interaction design, Codex implementation briefs, and visual QA.
 - `skills/hipson-hyperframes-video/`: optional HyperFrames website/document to

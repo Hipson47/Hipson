@@ -23,6 +23,7 @@ from hipson.project import (
     resolve_project_from_registry,
     write_output,
 )
+from hipson.router import format_text_route, route_task
 from hipson.skills import format_validation_results, validate_skills
 
 PACKAGE_ROOT = package_root()
@@ -155,6 +156,15 @@ def command_install_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_route(args: argparse.Namespace) -> int:
+    route = route_task(args.task)
+    if args.json:
+        print(json.dumps(route, indent=2))
+    else:
+        print(format_text_route(route))
+    return 0
+
+
 def command_packet_review(args: argparse.Namespace) -> int:
     try:
         project_mod.command_review_packet(args)
@@ -220,6 +230,11 @@ def build_parser() -> argparse.ArgumentParser:
     scan_many.add_argument("-o", "--output", help="Write markdown to a file")
     scan_many.add_argument("--json", dest="json_output", help="Write JSON scan records to a file")
     scan_many.set_defaults(func=command_scan_many)
+
+    route = subparsers.add_parser("route", help="Suggest a deterministic Hipson workflow for a task")
+    route.add_argument("--task", required=True, help="Task description")
+    route.add_argument("--json", action="store_true", help="Print machine-readable route output")
+    route.set_defaults(func=command_route)
 
     init = subparsers.add_parser("init", help="Create docs/hipson-progress.md in a project")
     init.add_argument("project", help="Project directory")

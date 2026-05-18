@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- Add agent-readable `SKILLS.md` playbook and packaged asset copy.
+- Add deterministic `hipson route --task "..."` workflow router.
+- Update Codex workflow assets to point agents at the router and playbook.
+- Include router coverage in the configured mutmut target set.
+
 ## 1.0.0
 
 - Harden runtime asset loading so Hipson never trusts project CWD for its own
