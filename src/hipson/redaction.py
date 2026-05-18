@@ -18,7 +18,7 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"(?i)\b((?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key|aws[_-]?secret[_-]?access[_-]?key|openrouter[_-]?api[_-]?key)\s*[:=]\s*[\"'])([^\"'\n]+)([\"'])"),
-    re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*)([^\s'\"`,}]+)"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)(\s*[:=]\s*)([^\s'\"`,}&]+)"),
     re.compile(r"(?i)([\"'](?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)[\"']\s*:\s*[\"'])([^\"']+)([\"'])"),
 ]
 
@@ -72,7 +72,7 @@ def sanitize_path(path: str | Path) -> str:
 def redact_sensitive_paths(text: str) -> str:
     lines = []
     for line in text.splitlines():
-        tokens = [token.strip("'\"`") for token in re.split(r"\s+", line) if token.strip()]
+        tokens = [token.strip("'\"`()[]{}<>:;,") for token in re.split(r"\s+", line) if token.strip()]
         if any(is_sensitive_path(token) for token in tokens):
             lines.append(SKIPPED)
         else:

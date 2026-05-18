@@ -312,6 +312,8 @@ def route_with_llm(config: dict[str, Any], summary: dict[str, Any]) -> dict[str,
     router = router_config(config)
     provider = provider_config(config, router)
     candidates = router_candidates(config, summary)
+    if not candidates:
+        raise SystemExit("No eligible router candidates for this request")
     payload = {
         "model": router["model"],
         "messages": build_router_messages(summary, candidates),
