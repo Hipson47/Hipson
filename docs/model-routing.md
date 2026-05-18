@@ -15,15 +15,10 @@ Use cheap paid models only. Do not use free models automatically.
 | HyperFrames video | `hyperframes_video_director` | `deepseek/deepseek-v3.2` | website-to-video, launch videos, timeline QA, rendered video briefs |
 | Cheap critic | `critic_lite` | `deepseek/deepseek-v3.2` | assumptions and architecture critique |
 | Cheap memory | `memory_summarizer_cheap` | `google/gemini-3.1-flash-lite` | progress summaries, changelog compression |
-<<<<<<< HEAD
-| Cheap long context | `long_context_cheap` | `x-ai/grok-4.1-fast` | large packets, long docs, broad scans |
-| Strong architecture | `architect_strong` | `openai/gpt-5.5-mini` | important architecture/review decisions |
-| Max review | `architect_max` | `openai/gpt-5.5-mini` | hard design/security review only |
-=======
 | Cheap long context | `long_context_cheap` | `x-ai/grok-4.20` | large packets, long docs, broad scans |
 | Strong architecture | `architect_strong` | `openai/gpt-5.5` | important architecture/review decisions |
 | Max review | `architect_max` | `openai/gpt-5.5` | hard design/security review only |
->>>>>>> 90e4184 (Prepare Hipson 1.0 release)
+
 
 ## Cost Snapshot
 Snapshot from OpenRouter model listings on 2026-05-17:
