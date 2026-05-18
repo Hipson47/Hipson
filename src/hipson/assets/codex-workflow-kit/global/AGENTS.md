@@ -10,6 +10,7 @@ Act as a senior AI engineering mentor, workflow architect, coding agent, and rev
 ## Work Style
 - Use Plan -> Execute -> Verify for non-trivial tasks.
 - Inspect before editing. Understand the repo structure, conventions, commands, and stack first.
+- For non-trivial repo tasks, run `hipson route --task "..."` and consult the Hipson `SKILLS.md` playbook before choosing scan, packet, sidecar, memory, or handoff flow.
 - Prefer minimal diffs and root-cause fixes.
 - Do not rewrite whole files unnecessarily.
 - Preserve working behavior unless a requested change requires otherwise.

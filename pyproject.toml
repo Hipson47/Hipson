@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hipson"
-version = "1.0.0"
+version = "1.1.0"
 description = "Codex-native local developer workflow tool"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hipson/hipson"
-Repository = "https://github.com/hipson/hipson"
-Issues = "https://github.com/hipson/hipson/issues"
+Homepage = "https://github.com/Hipson47/hipson"
+Repository = "https://github.com/Hipson47/hipson"
+Issues = "https://github.com/Hipson47/hipson/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -94,6 +94,7 @@ paths_to_mutate = [
     "src/hipson/agents.py",
     "src/hipson/packets.py",
     "src/hipson/redaction.py",
+    "src/hipson/router.py",
 ]
 tests_dir = [
     "tests/test_hipson_helpers.py::test_redact_secrets_masks_common_key_patterns",
@@ -154,6 +155,15 @@ tests_dir = [
     "tests/test_hipson_helpers.py::test_packet_spec_omits_empty_text_sections_but_keeps_contract_sections",
     "tests/test_hipson_helpers.py::test_review_packet_contract_sections_are_ordered_and_read_only",
     "tests/test_hipson_helpers.py::test_executor_packet_contract_sections_include_scope_and_block_rule",
+    "tests/test_hipson_helpers.py::test_workflow_router_security_review_requires_human_review",
+    "tests/test_hipson_helpers.py::test_workflow_router_implementation_includes_scan_and_exec_packet",
+    "tests/test_hipson_helpers.py::test_workflow_router_risk_human_review_rules_are_contractual",
+    "tests/test_hipson_helpers.py::test_workflow_router_core_modes_are_deterministic",
+    "tests/test_hipson_helpers.py::test_workflow_router_json_shape_and_text_output_are_stable",
+    "tests/test_hipson_helpers.py::test_workflow_router_is_provider_free",
+    "tests/test_hipson_helpers.py::test_workflow_router_commands_are_exact_and_ordered",
+    "tests/test_hipson_helpers.py::test_workflow_router_quotes_normalizes_and_formats_text_contract",
+    "tests/test_hipson_helpers.py::test_workflow_router_exec_placeholder_fallback_is_safe",
 ]
 pytest_add_cli_args = ["-q"]
 mutate_only_covered_lines = true

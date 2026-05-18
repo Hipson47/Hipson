@@ -8,6 +8,9 @@ description: Use for structured Codex development workflows with Architect, Exec
 ## Purpose
 Universal AI-assisted development workflow for Codex. Use it to run structured software work with clear roles, portable prompts, focused implementation, and reliable review.
 
+## Agent-Native Entry Point
+For non-trivial repo tasks, run `hipson route --task "..."` first. Use the returned `recommended_skill` and commands, then consult `references/hipson-agent-skills.md` or root `SKILLS.md` for the compact playbook.
+
 ## When To Use
 - Starting a new project.
 - Reviewing an existing repo.
@@ -162,6 +165,7 @@ You are Codex in EXECUTOR_MODE.
 ```
 
 ## Reference Files
+- `references/hipson-agent-skills.md`
 - `references/coding-workflow.md`
 - `references/prompt-architecture.md`
 - `references/verification.md`

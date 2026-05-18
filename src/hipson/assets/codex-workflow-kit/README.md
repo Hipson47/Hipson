@@ -25,15 +25,16 @@ The installer:
 - copies the current kit files into the Codex home.
 
 ## Usage
-In any repository, ask Codex to use the workflow:
+In any repository, ask Codex to route non-trivial work first:
 
 ```text
-Use hipson-workflow in ARCHITECT_MODE
+Run hipson route --task "implement parser fix"
 ```
 
 Useful prompts:
 
 ```text
+Use the Hipson SKILLS.md playbook for this task
 Create an Executor prompt for this task
 Review the last diff as Architect
 Generate repo-specific AGENTS.md

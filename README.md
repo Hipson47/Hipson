@@ -4,13 +4,13 @@ Hipson is a local-first orchestration CLI for AI-assisted software work. It scan
 Git repositories, creates bounded agent packets, routes advisory sidecars, stores
 compact local memory, and installs a Codex workflow kit.
 
-The project is designed for developer control rather than autonomous background
-work: the repository, git diff, tests, and human-reviewed decisions stay the
-source of truth.
+The project is designed as an agent-native tool-use layer rather than a human
+dashboard: the repository, git diff, tests, and human-reviewed decisions stay
+the source of truth.
 
 ## Features
 
-- **Stable 1.0 local-first CLI** for bounded, human-reviewed AI software work.
+- **Stable 1.1 local-first CLI** for bounded, human-reviewed AI software work.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
@@ -18,6 +18,7 @@ source of truth.
 - **Optional LLM router** behind `hipson sidecar route --llm`, using only a redacted JSON summary.
 - **OpenRouter sidecars** for optional bounded second opinions.
 - **Codex installer** with dry-run mode, backups, and managed marker blocks.
+- **Agent-readable `SKILLS.md` and deterministic workflow router** for autonomous tool choice.
 - **Secret redaction and sensitive-path guards** before persistence or provider calls.
 - **Dependency-light runtime** with `uv` and `ruff` for mature development workflow.
 - **Visual direction and optional HyperFrames video sidecars** for bounded UI,
@@ -52,6 +53,7 @@ cp repos.example.yaml repos.yaml
 cp .env.example .env
 
 uv run hipson doctor
+uv run hipson route --task "security review of auth"
 uv run hipson scan .
 uv run hipson packet review . --title "Review current delta" --include-diff -o runs/review-packet.md
 uv run hipson sidecar route --task "security review of release diff" --risk security
@@ -66,6 +68,8 @@ not require API keys or cloud services.
 
 ```bash
 hipson doctor
+hipson route --task "implement parser fix"
+hipson route --task "security review of auth" --json
 hipson scan . --include-diff
 hipson scan . --include-diff -o runs/latest-scan.md
 hipson scan-many repos.yaml -o scans/latest.md --json scans/latest.json
@@ -90,15 +94,29 @@ hipson install codex --dry-run
 hipson install codex --apply
 ```
 
+## Agent-Native Usage
+
+Hipson is designed for coding agents. For non-trivial tasks, ask the agent to run:
+
+```bash
+hipson route --task "..."
+```
+
+The router returns the recommended Hipson skill and exact safe commands. It works
+with Codex-style CLI workflows; Claude and Cursor can consume Hipson packets
+manually. Codex has the most native install support. Core Hipson requires no API
+key.
+
 ## Workflow
 
 1. Run `hipson doctor`.
-2. Run `hipson scan .` or `hipson scan-many repos.yaml`.
-3. Search memory when prior decisions matter.
-4. Generate a bounded review or executor packet.
-5. Route advisory sidecars when a second opinion is useful.
-6. Review the resulting git diff and verification output.
-7. Fold durable decisions back into project memory or progress docs.
+2. Run `hipson route --task "..."` for non-trivial work.
+3. Run `hipson scan .` or `hipson scan-many repos.yaml`.
+4. Search memory when prior decisions matter.
+5. Generate a bounded review or executor packet.
+6. Route advisory sidecars when a second opinion is useful.
+7. Review the resulting git diff and verification output.
+8. Fold durable decisions back into project memory or progress docs.
 
 ## Project Layout
 
