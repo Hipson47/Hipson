@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
@@ -9,6 +10,10 @@ Mode = Literal["review", "exec", "scan", "verify", "handoff", "sidecar-review", 
 Risk = Literal["normal", "security", "architecture", "ui", "data-loss", "unknown"]
 
 ROUTE_KEYS = ("mode", "risk", "recommended_skill", "commands", "requires_human_review", "reason")
+TOKEN_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+BUILD_VERIFY_SIGNALS = frozenset(
+    {"run", "verify", "failed", "failing", "failure", "check", "test", "tests", "ci", "release", "gate", "gates"}
+)
 
 
 class RouteResult(TypedDict):
@@ -83,8 +88,11 @@ def format_text_route(route: RouteResult) -> str:
 
 
 def _detect_mode(task: str) -> tuple[Mode, str, str]:
+    tokens = _tokens(task)
+    if _is_build_implementation_task(tokens):
+        return "exec", "executor-packet", "implementation task"
     for rule in MODE_RULES:
-        if any(keyword in task for keyword in rule.keywords):
+        if any(_matches_keyword(tokens, keyword) for keyword in rule.keywords):
             return rule.mode, rule.recommended_skill, rule.reason
     if task:
         return "scan", "repo-delta-scan", "default repo-state task"
@@ -94,8 +102,9 @@ def _detect_mode(task: str) -> tuple[Mode, str, str]:
 def _detect_risk(task: str) -> tuple[Risk, str]:
     if not task:
         return "unknown", "unknown risk"
+    tokens = _tokens(task)
     for risk, keywords, reason in RISK_RULES:
-        if any(keyword in task for keyword in keywords):
+        if any(_matches_keyword(tokens, keyword) for keyword in keywords):
             return risk, reason
     return "normal", ""
 
@@ -143,6 +152,32 @@ def _commands_for(mode: Mode, risk: Risk, task: str) -> list[str]:
 
 def _normalize(task: str) -> str:
     return " ".join(task.casefold().split())
+
+
+def _tokens(task: str) -> tuple[str, ...]:
+    return tuple(TOKEN_RE.findall(task))
+
+
+def _matches_keyword(tokens: tuple[str, ...], keyword: str) -> bool:
+    keyword_tokens = _tokens(_normalize(keyword))
+    if not keyword_tokens:
+        return False
+    if len(keyword_tokens) == 1:
+        return keyword_tokens[0] in tokens
+    return _contains_token_sequence(tokens, keyword_tokens)
+
+
+def _contains_token_sequence(tokens: tuple[str, ...], keyword_tokens: tuple[str, ...]) -> bool:
+    if len(keyword_tokens) > len(tokens):
+        return False
+    return any(
+        tokens[index : index + len(keyword_tokens)] == keyword_tokens
+        for index in range(len(tokens) - len(keyword_tokens) + 1)
+    )
+
+
+def _is_build_implementation_task(tokens: tuple[str, ...]) -> bool:
+    return "build" in tokens and len(tokens) > 1 and not BUILD_VERIFY_SIGNALS.intersection(tokens)
 
 
 def _title(task: str, fallback: str) -> str:

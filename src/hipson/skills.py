@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from hipson.redaction import redact_text
+
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
@@ -14,6 +16,10 @@ class SkillValidationResult:
     path: Path
     ok: bool
     errors: list[str]
+
+
+class SkillLookupError(ValueError):
+    """Raised when a requested skill cannot be resolved safely."""
 
 
 def find_skill_files(root: Path) -> list[Path]:
@@ -73,6 +79,46 @@ def validate_skills(root: Path) -> list[SkillValidationResult]:
     return [validate_skill_file(path) for path in find_skill_files(root)]
 
 
+def list_skill_metadata(root: Path, query: str = "") -> list[dict[str, object]]:
+    normalized_query = query.strip().lower()
+    skills: list[dict[str, object]] = []
+    for path in find_skill_files(root):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        frontmatter, _parse_errors = parse_frontmatter(text)
+        name = frontmatter.get("name") or path.parent.name
+        description = frontmatter.get("description", "")
+        haystack = f"{name} {description} {path}".lower()
+        if normalized_query and normalized_query not in haystack:
+            continue
+        validation = validate_skill_file(path)
+        skills.append(
+            {
+                "name": redact_text(name),
+                "description": redact_text(description),
+                "path": str(path),
+                "ok": validation.ok,
+                "errors": [redact_text(error) for error in validation.errors],
+            }
+        )
+    return skills
+
+
+def view_skill(root: Path, *, name: str | None = None, path: str | None = None, max_chars: int = 4000) -> dict[str, object]:
+    skill_path = _resolve_skill_path(root, name=name, path=path)
+    text = skill_path.read_text(encoding="utf-8", errors="replace")
+    frontmatter, _errors = parse_frontmatter(text)
+    skill_name = frontmatter.get("name") or skill_path.parent.name
+    description = frontmatter.get("description", "")
+    content, truncated = _bounded(redact_text(text), max_chars)
+    return {
+        "name": redact_text(skill_name),
+        "description": redact_text(description),
+        "path": str(skill_path),
+        "content": _untrusted_skill_block(skill_name, content),
+        "truncated": truncated,
+    }
+
+
 def format_validation_results(results: list[SkillValidationResult]) -> str:
     lines: list[str] = []
     for result in results:
@@ -83,3 +129,42 @@ def format_validation_results(results: list[SkillValidationResult]) -> str:
     if not lines:
         return "No SKILL.md files found."
     return "\n".join(lines)
+
+
+def _resolve_skill_path(root: Path, *, name: str | None, path: str | None) -> Path:
+    resolved_root = root.expanduser().resolve()
+    if path:
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = resolved_root / candidate
+        candidate = candidate.resolve()
+        if candidate.name != "SKILL.md":
+            raise SkillLookupError("Skill path must point to SKILL.md")
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            raise SkillLookupError("Skill path must stay inside the selected root") from None
+        if not candidate.exists():
+            raise SkillLookupError(f"Skill path does not exist: {candidate}")
+        return candidate
+    if not name:
+        raise SkillLookupError("Skill name or path is required")
+    matches = [skill for skill in list_skill_metadata(resolved_root) if skill["name"] == name]
+    if not matches:
+        raise SkillLookupError(f"Skill not found: {name}")
+    if len(matches) > 1:
+        raise SkillLookupError(f"Skill name is ambiguous: {name}")
+    return Path(str(matches[0]["path"]))
+
+
+def _bounded(text: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0:
+        return "", bool(text)
+    if len(text) <= max_chars:
+        return text, False
+    marker = f"\n[truncated to {max_chars} chars]"
+    return text[: max(0, max_chars - len(marker))].rstrip() + marker, True
+
+
+def _untrusted_skill_block(name: str, content: str) -> str:
+    return f"<untrusted_data name=\"skill:{redact_text(name)}\">\n{content}\n</untrusted_data>"
