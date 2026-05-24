@@ -9,11 +9,19 @@ from pathlib import Path
 from hipson.approvals import ApprovalPolicy
 from hipson.home import detect_hipson_home
 from hipson.project import git_root
-from hipson.prompt import PromptContext, assemble_prompt
+from hipson.prompt import PromptContext, assemble_prompt_messages
 from hipson.providers import ChatProvider, FakeProvider, ProviderError, ProviderRequest, ProviderToolCall
 from hipson.redaction import redact_text
 from hipson.session import SessionStore, open_session_store
-from hipson.tools import ToolContext, ToolRegistry, ToolRegistryError, ToolResult, ToolSpec, build_default_registry
+from hipson.tools import (
+    ToolContext,
+    ToolRegistry,
+    ToolRegistryError,
+    ToolResult,
+    ToolSpec,
+    bounded_tool_output,
+    build_default_registry,
+)
 
 DEFAULT_MODEL = "fake"
 DEFAULT_MAX_TOOL_ITERATIONS = 3
@@ -71,17 +79,12 @@ class HipsonRuntime:
                 response = provider.complete(
                     ProviderRequest(
                         model=self.model,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": self._prompt(
-                                    request=request,
-                                    cwd=runtime_cwd,
-                                    session_id=active_session_id,
-                                    tool_summaries=tool_summaries,
-                                ),
-                            }
-                        ],
+                        messages=self._prompt_messages(
+                            request=request,
+                            cwd=runtime_cwd,
+                            session_id=active_session_id,
+                            tool_summaries=tool_summaries,
+                        ),
                         tools=[_provider_tool_payload(spec) for spec in self.registry.list()],
                     )
                 )
@@ -146,9 +149,9 @@ class HipsonRuntime:
             raise RuntimeError(f"Session does not exist: {session_id}")
         return session_id
 
-    def _prompt(self, *, request: str, cwd: Path, session_id: str, tool_summaries: list[str]) -> str:
+    def _prompt_messages(self, *, request: str, cwd: Path, session_id: str, tool_summaries: list[str]) -> list[dict[str, str]]:
         session_summary = "\n".join(tool_summaries) if tool_summaries else ""
-        return assemble_prompt(
+        return assemble_prompt_messages(
             PromptContext(
                 current_request=request,
                 session_summary=session_summary,
@@ -174,6 +177,17 @@ class HipsonRuntime:
                 assistant_message_id=assistant_message_id,
                 risk_level="dangerous",
                 approval_status="rejected",
+                error=str(exc),
+            )
+        try:
+            self.registry.validate_input(tool_call.name, tool_call.input)
+        except ToolRegistryError as exc:
+            return self._persist_rejected_tool_call(
+                session_id,
+                tool_call,
+                assistant_message_id=assistant_message_id,
+                risk_level=spec.risk_level,
+                approval_status="invalid_input",
                 error=str(exc),
             )
 
@@ -226,13 +240,13 @@ class HipsonRuntime:
     ) -> RuntimeToolCallRecord:
         status = "completed" if result.ok else "failed"
         tool_name = _safe_tool_name(tool_call.name)
-        summary = redact_text(result.summary if result.ok else result.error or result.summary)
+        summary = redact_text(_tool_result_summary(result))
         self.store.add_tool_call(
             session_id,
             message_id=assistant_message_id,
             tool_name=tool_name,
             input_data=tool_call.input,
-            output_data=result.output,
+            output_data=bounded_tool_output(result),
             risk_level=risk_level,
             approval_status="approved",
             status=status,
@@ -316,13 +330,16 @@ def _answer_with_tool_rejections(answer: str, tool_records: list[RuntimeToolCall
 
 
 def _rejection_summary(tool_records: list[RuntimeToolCallRecord]) -> str:
-    rejected = [record for record in tool_records if record.status == "rejected"]
+    rejected = [record for record in tool_records if record.status in {"rejected", "failed"}]
     if not rejected:
         return ""
     visible = rejected[:MAX_REJECTION_NOTICES]
     lines = ["Tool call rejection(s):"]
     for record in visible:
-        lines.append(f"- {_bounded(redact_text(record.name), 80)}: {_bounded(redact_text(record.summary), MAX_REJECTION_SUMMARY_CHARS)}")
+        lines.append(
+            f"- {_bounded(redact_text(record.name), 80)} ({record.status}): "
+            f"{_bounded(redact_text(record.summary), MAX_REJECTION_SUMMARY_CHARS)}"
+        )
     remaining = len(rejected) - len(visible)
     if remaining > 0:
         lines.append(f"- ... {remaining} more rejected tool call(s)")
@@ -331,6 +348,14 @@ def _rejection_summary(tool_records: list[RuntimeToolCallRecord]) -> str:
 
 def _safe_tool_name(tool_name: str) -> str:
     return _bounded(redact_text(tool_name), 120)
+
+
+def _tool_result_summary(result: ToolResult) -> str:
+    if result.ok:
+        return result.summary
+    if result.error and result.summary:
+        return f"{result.summary}: {result.error}"
+    return result.error or result.summary
 
 
 def _bounded(value: str, limit: int) -> str:

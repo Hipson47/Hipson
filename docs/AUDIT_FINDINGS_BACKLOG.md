@@ -1,9 +1,22 @@
 # Audit Findings Backlog
 
+## Status Update — Runtime Tool Boundary Hardening
+
+The runtime tool boundary hardening pass addressed the audit findings for explicit per-tool path policies, exception-safe tool execution, bounded persisted/provider-visible tool outputs, enforced output contracts, and pre-approval input validation. These should remain covered by regression tests before any real provider adapter is added.
+
+## Status Update — Provider/Prompt Boundary Hardening
+
+The provider/sidecar prompt hardening pass addressed the audit findings for remote provider URL policy, redacted and bounded provider HTTP/error bodies, advisory sidecar provider output, and role-separated prompt assembly. Real-provider chat runtime support is still intentionally absent.
+
+## Status Update — Focused Fault-Injection Hardening
+
+The focused fault-injection passes added regression tests for approval fail-closed behavior, path-policy blocking before handler execution, registry primitive/composite type strictness and JSONDecodeError containment, provider URL/redaction helper behavior, runtime provider request/tool descriptor shape, capped rejected-tool summaries, untrusted-data delimiter escaping in prompts and sidecar reports, direct session-store bounding/redaction, scheduler dangerous-job refusal, MCP approval-required read-tool refusal, precise sandbox generated write roots, symlink escape rejection, and absence of `shell.run` in the default runtime registry. `pyproject.toml` now points mutmut at runtime-critical modules. Time-boxed mutmut runs did not complete, and partial results still need survivor triage.
+
 ## P0 — Must Fix Before Using Runtime
 
 ### [P0] Make `hipson chat` honest and fail-closed outside explicit fake mode
 - Severity: P0
+- Status: Fixed by `fix(runtime): make chat mode and approvals fail closed`; keep regression tests.
 - Evidence: CLI smoke `HIPSON_HOME=<temp> uv run hipson chat -q "scan this repo and propose the next safe PR"` printed `Fake provider response`. `src/hipson/cli.py` constructs `FakeProvider.with_text(args.fake_response)` for `chat`; no CLI path exercises provider tool calls.
 - Affected files: `src/hipson/cli.py`, `src/hipson/runtime.py`, `tests/test_runtime.py`
 - Why it matters: The public command looks like a runtime MVP, but it cannot perform the requested scan/planning workflow. Users may trust a facade as if it were an agent loop.
@@ -15,6 +28,7 @@
 
 ### [P0] Remove hardcoded fake-provider approval context from runtime tool execution
 - Severity: P0
+- Status: Fixed by `fix(runtime): make chat mode and approvals fail closed`; keep regression tests.
 - Evidence: `src/hipson/runtime.py:162` calls `approval_policy.evaluate_tool(..., fake_provider=True)` for every runtime tool call.
 - Affected files: `src/hipson/runtime.py`, `src/hipson/approvals.py`, `tests/test_runtime.py`, `tests/test_approvals.py`
 - Why it matters: If an external-risk tool is registered later, the runtime would treat it as fake-provider approved even when a real provider object is injected.
@@ -28,6 +42,7 @@
 
 ### [P1] Make approval path checks schema-aware for every path-bearing tool input
 - Severity: P1
+- Status: Fixed by runtime tool boundary hardening for current registered tools; future tools must declare path policies.
 - Evidence: `src/hipson/approvals.py` checks only `path`, `project`, `packet`, and `source`. `memory.search` accepts `memory_dir`; a manual probe approved `memory_dir=str(Path.home())` with reason `Read allowed after sandbox checks`.
 - Affected files: `src/hipson/approvals.py`, `src/hipson/sandbox.py`, `src/hipson/tools/memory.py`, `src/hipson/tools/skills.py`, tests
 - Why it matters: Sensitive or broad paths can bypass policy when a tool uses a different field name.
@@ -39,6 +54,7 @@
 
 ### [P1] Bound and summarize tool outputs before SQLite persistence
 - Severity: P1
+- Status: Fixed for runtime tool-call persistence and scheduler/MCP visible outputs; keep size/redaction regression tests.
 - Evidence: `src/hipson/runtime.py` persists `result.output` directly. `repo.scan` returns `markdown` in `src/hipson/tools/repo.py`; manual probe found persisted keys `artifact`, `changed_files`, `commands`, and `markdown`.
 - Affected files: `src/hipson/runtime.py`, `src/hipson/session.py`, `src/hipson/tools/repo.py`, tests
 - Why it matters: The spec says no full repo dumps in SQLite. Large scan outputs can persist sensitive or excessive repository context.
@@ -50,7 +66,8 @@
 
 ### [P1] Harden sidecar provider URL and error redaction
 - Severity: P1
-- Evidence: `src/hipson/agents.py` allows `http` and `https` provider base URLs, and raises raw HTTP response bodies in `OpenRouter HTTP ...` errors.
+- Status: Fixed by provider/sidecar prompt hardening; keep regression tests.
+- Evidence: Prior audit found `src/hipson/agents.py` allowed `http` and `https` provider base URLs and raised raw HTTP response bodies in `OpenRouter HTTP ...` errors. The hardening pass centralizes provider URL validation, rejects arbitrary remote `http://` URLs, requires explicit local HTTP opt-in, and bounds/redacts `HTTPError`/`URLError` bodies before `SystemExit`.
 - Affected files: `src/hipson/agents.py`, `tests/test_hipson_helpers.py`
 - Why it matters: Sidecar/provider errors can leak provider response bodies or secrets, and HTTP endpoints weaken transport safety.
 - Recommended fix: Use HTTPS-only defaults, require explicit opt-in for local HTTP if needed, and redact/truncate provider error bodies before display/persistence.
@@ -61,6 +78,7 @@
 
 ### [P1] Enforce tool output contracts, not only JSON serializability
 - Severity: P1
+- Status: Fixed by lightweight registry output validation; expand contracts as tools grow.
 - Evidence: `ToolRegistry.run` only checks JSON serializability of `ToolResult.output`; it does not validate the declared `output_contract` shape.
 - Affected files: `src/hipson/tools/registry.py`, tool wrappers, `tests/test_tools.py`
 - Why it matters: Runtime prompt/persistence layers depend on stable outputs. A tool can drift while tests still pass.
@@ -72,6 +90,7 @@
 
 ### [P1] Surface rejected tool calls in runtime answers
 - Severity: P1
+- Status: Fixed for rejected and failed runtime tool calls; keep CLI/runtime regression tests.
 - Evidence: Runtime persists rejected tool calls, but tests such as the gateway path still return `Fake provider response`; user-facing answers may hide rejected/blocked tool calls.
 - Affected files: `src/hipson/runtime.py`, `src/hipson/gateway/cli.py`, `tests/test_runtime.py`, `tests/test_gateway.py`
 - Why it matters: Silent rejection makes the runtime misleading and weakens auditability for users.
@@ -80,6 +99,18 @@
 - Acceptance criteria: Rejected tool calls are persisted and visible to the caller.
 - Estimated PR size: Small
 - Dependencies: Runtime result UX decision.
+
+### [P1] Triage focused mutation survivors in safety-critical boundaries
+- Severity: P1
+- Status: Partially fixed. New direct helper/fault-injection tests were added, but full survivor triage remains open.
+- Evidence: `timeout 180s uv run mutmut run --max-children 2` used the focused configuration but exited 124 before completion after roughly 1,597/2,219 mutants. Partial `uv run mutmut results` output still listed survivors or unchecked mutants in `hipson.approvals`, `hipson.sandbox`, `hipson.tools.registry`, `hipson.agents`, `hipson.prompt`, and `hipson.runtime`.
+- Affected files: `src/hipson/approvals.py`, `src/hipson/sandbox.py`, `src/hipson/tools/registry.py`, `src/hipson/agents.py`, `src/hipson/prompt.py`, `src/hipson/runtime.py`, tests
+- Why it matters: Fault-injection tests improved the boundary, but mutation survivors in approval/path/registry/redaction/prompt code can still hide logic inversions before real-provider usage.
+- Recommended fix: Run mutmut in smaller batches by module/function, inspect high-risk survivors first, and add requirement-level tests for real approval, path, output-contract, redaction, and untrusted-delimiter mutants.
+- Tests to add: Targeted tests for specific high-risk survivors discovered in each module batch.
+- Acceptance criteria: No known high-risk survivors remain in approval/path/redaction/registry/prompt/runtime safety logic, or each survivor is documented as equivalent/low-risk.
+- Estimated PR size: Medium
+- Dependencies: Focused mutmut batching or CI support.
 
 ## P2 — Hardening Before Release
 
@@ -107,7 +138,8 @@
 
 ### [P2] Add prompt-injection tests for tool summaries and skill excerpts
 - Severity: P2
-- Evidence: User request and skill view can be enclosed as untrusted data, but session/tool summaries are inserted as plain text into prompts.
+- Status: Fixed for the current prompt assembler; future dynamic context sources must keep using labeled untrusted blocks.
+- Evidence: Prior audit found user request and skill view could be enclosed as untrusted data while session/tool summaries were inserted as plain text. The hardening pass separates stable system policy from untrusted user content and wraps current request, session summary/tool summaries, skill excerpts, repo facts, memory, and dynamic suffix content in labeled untrusted data blocks.
 - Affected files: `src/hipson/prompt.py`, `src/hipson/runtime.py`, `tests/test_prompt.py`
 - Why it matters: Tool output and session summaries are untrusted data and can carry prompt injection.
 - Recommended fix: Enclose all dynamic user/file/tool/skill/provider content in labeled untrusted data blocks, then add snapshot tests.
@@ -118,7 +150,8 @@
 
 ### [P2] Add mutation or targeted fault-injection coverage for runtime-critical files
 - Severity: P2
-- Evidence: `uv run pytest` passes, but optional mutation check was skipped; `pyproject.toml` mutmut paths do not yet target new runtime modules.
+- Status: Partially fixed. Focused fault-injection tests and mutmut configuration were added; complete mutation survivor triage remains open as P1.
+- Evidence: `pyproject.toml` now targets `agents.py`, `approvals.py`, `prompt.py`, `runtime.py`, `sandbox.py`, and `tools/registry.py`; `uv run pytest -q -k "security or injection or redaction or approval or sandbox or mutation or contract or persistence or mcp or scheduler"` passed 41 selected tests. A complete mutmut run still timed out and produced partial survivors.
 - Affected files: test configuration, runtime-critical tests
 - Why it matters: Current tests cover happy paths and some failures, but may not catch logic inversions in approvals, bounds, and registry validation.
 - Recommended fix: Add focused mutation configuration for `runtime.py`, `approvals.py`, `sandbox.py`, `tools/registry.py`, and `prompt.py`.

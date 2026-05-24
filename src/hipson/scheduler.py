@@ -9,7 +9,14 @@ from pathlib import Path
 from hipson.approvals import ApprovalDecision, ApprovalPolicy
 from hipson.redaction import redact_text
 from hipson.session import SessionStore, timestamp
-from hipson.tools import ToolContext, ToolRegistry, ToolRegistryError, ToolSpec, build_default_registry
+from hipson.tools import (
+    ToolContext,
+    ToolRegistry,
+    ToolRegistryError,
+    ToolSpec,
+    bounded_tool_output,
+    build_default_registry,
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,7 @@ class Scheduler:
             return self._fail(job_id, payload, now, "Tool job payload must include tool and input")
         try:
             spec = self.registry.get(tool_name)
+            self.registry.validate_input(tool_name, input_data)
         except ToolRegistryError as exc:
             return self._fail(job_id, payload, now, str(exc))
 
@@ -88,9 +96,10 @@ class Scheduler:
         except ToolRegistryError as exc:
             return self._fail(job_id, payload, now, str(exc))
 
+        safe_output = bounded_tool_output(result)
         if not result.ok:
-            return self._fail(job_id, {**payload, "last_result": result.output}, now, result.error or result.summary)
-        stored_payload = {**payload, "last_result": result.output, "last_summary": result.summary}
+            return self._fail(job_id, {**payload, "last_result": safe_output}, now, result.error or result.summary)
+        stored_payload = {**payload, "last_result": safe_output, "last_summary": result.summary}
         self.store.update_job(job_id, status="completed", payload=stored_payload, last_run_at=now)
         return SchedulerResult(job_id=job_id, status="completed", summary=redact_text(result.summary))
 
