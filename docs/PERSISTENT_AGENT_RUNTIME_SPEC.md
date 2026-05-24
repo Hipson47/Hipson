@@ -443,15 +443,18 @@ Runtime constraints:
 
 | Command | Status | Notes |
 |---|---|---|
-| `hipson chat` | MVP | Interactive local session loop. |
-| `hipson chat -q "..."` | MVP | Non-interactive single request, useful for tests and scripts. |
-| `hipson session list` | Next | List local sessions from SQLite. |
-| `hipson session show <id>` | Next | Show redacted session transcript and tool call summaries. |
-| `hipson session search "..."` | Next | Search messages/memories with FTS fallback. |
-| `hipson tool list` | Next | List registry tools, risk levels, and approval requirements. |
+| `hipson chat` | MVP | Fails closed without a configured provider; explicit `--fake` remains the offline test/demo path. |
+| `hipson chat -q "..."` | MVP | Non-interactive single request, useful for tests and scripts; same provider/fake constraint. |
+| `hipson session list` | MVP | List local sessions from SQLite with redacted bounded summaries. |
+| `hipson session show <id>` | MVP | Show redacted session transcript and tool call summaries. |
+| `hipson session search "..."` | MVP | Search redacted session messages through safe fallback search; FTS population remains future work. |
+| `hipson tool list` | MVP | List registry tools, risk levels, approval requirements, contracts, and path policies. |
+| `hipson tool show <name>` | MVP | Show one registered tool's schemas, output contract, risk, approval, and path policy metadata. |
 | `hipson tool run <name> <json>` | Future | Manual tool execution for debugging; must respect approvals. |
 | `hipson skill list` | Next | Expose skill metadata, likely via existing `skill` command group. |
 | `hipson skill view <name>` | Next | View bounded skill reference text. |
+| `hipson learn propose --session-id <id>` | MVP | Print approval-gated memory/skill-reference proposals without durable writes. |
+| `hipson learn apply-memory --session-id <id> --proposal-id <id> --memory-dir <path>` | MVP | Explicitly persist one selected memory proposal with redacted summary and provenance. |
 
 ## 13. Implementation Sequence
 

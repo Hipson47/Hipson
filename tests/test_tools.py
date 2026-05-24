@@ -1,6 +1,9 @@
+import contextlib
+import io
 import json
 from pathlib import Path
 
+from hipson import cli
 from hipson import memory as hipson_memory
 from hipson.tools import (
     PathPolicy,
@@ -12,6 +15,17 @@ from hipson.tools import (
     bounded_tool_output,
     build_default_registry,
 )
+
+
+def run_cli(*args: str) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = cli.main(list(args))
+    except SystemExit as exc:
+        rc = int(exc.code or 0) if isinstance(exc.code, int) else 1
+    return rc, stdout.getvalue(), stderr.getvalue()
 
 
 def test_tool_registry_rejects_duplicates_unknown_tools_and_bad_input(tmp_path: Path):
@@ -257,6 +271,33 @@ def test_bounded_tool_output_redacts_and_summarizes_nested_large_values():
     assert "[REDACTED]" in rendered
     assert "truncated" in rendered
     assert len(rendered) < 4_500
+
+
+def test_tool_cli_lists_and_shows_registry_metadata():
+    rc, stdout, stderr = run_cli("tool", "list")
+    assert rc == 0
+    assert stderr == ""
+    assert "repo.scan risk=read" in stdout
+    assert "packet.review.create risk=write" in stdout
+
+    rc, stdout, stderr = run_cli("tool", "show", "memory.search", "--json")
+    assert rc == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["name"] == "memory.search"
+    assert payload["risk_level"] == "read"
+    assert payload["approval_required"] is False
+    assert payload["input_schema"]["required"]["query"] == "str"
+    assert payload["path_policies"] == [
+        {"field": "memory_dir", "mode": "read_memory_store", "base_field": ""}
+    ]
+
+
+def test_tool_cli_unknown_tool_fails_cleanly():
+    rc, stdout, stderr = run_cli("tool", "show", "missing.tool")
+    assert rc == 1
+    assert stdout == ""
+    assert "Unknown tool: missing.tool" in stderr
 
 
 def test_default_tool_registry_exposes_initial_mvp_tools():

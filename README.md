@@ -14,6 +14,9 @@ the source of truth.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
+- **Runtime session observability** for inspecting SQLite-backed fake/offline chat sessions.
+- **Approval-gated learning proposals** that can be explicitly applied to local memory.
+- **Tool registry observability** for reviewing tool risk levels, contracts, and path policies.
 - **MoE-like sidecar routing** from explicit agent metadata in `config/agents.json`.
 - **Optional LLM router** behind `hipson sidecar route --llm`, using only a redacted JSON summary.
 - **OpenRouter sidecars** for optional bounded second opinions.
@@ -81,6 +84,16 @@ hipson memory add --scope repo --repo Hipson --kind decision --summary "..."
 hipson memory search "release checklist"
 hipson memory list
 
+hipson chat -q "scan this repo"
+hipson chat --fake -q "offline runtime smoke"
+hipson session list
+hipson session show <session-id>
+hipson session search "runtime hardening"
+hipson tool list
+hipson tool show repo.scan
+hipson learn propose --session-id <session-id>
+hipson learn apply-memory --session-id <session-id> --proposal-id <proposal-id> --memory-dir memory
+
 hipson sidecar list
 hipson sidecar route --task "architecture security review" --risk security
 hipson sidecar route --task "studio mode interactive hero visual direction" --risk ui
@@ -106,6 +119,41 @@ The router returns the recommended Hipson skill and exact safe commands. It work
 with Codex-style CLI workflows; Claude and Cursor can consume Hipson packets
 manually. Codex has the most native install support. Core Hipson requires no API
 key.
+
+## Runtime Preview
+
+The persistent runtime is local and provider-free by default. `hipson chat`
+fails closed unless a real provider adapter is intentionally added later or the
+explicit fake/offline path is selected with `--fake`:
+
+```bash
+hipson chat -q "scan this repo"
+hipson chat --fake -q "offline runtime smoke"
+```
+
+Runtime sessions are stored in SQLite under Hipson home by default, with
+`--session-db` available for tests and local debugging. Observability commands
+are read-only:
+
+```bash
+hipson session list --session-db ~/.config/hipson/runtime.sqlite
+hipson session show <session-id> --session-db ~/.config/hipson/runtime.sqlite
+hipson session search "approval" --session-db ~/.config/hipson/runtime.sqlite
+hipson tool list
+hipson tool show memory.search
+```
+
+Learning is approval-gated. `learn propose` reads a session and prints memory or
+skill-reference candidates without writing durable memory. `learn apply-memory`
+writes one selected memory proposal only when invoked explicitly:
+
+```bash
+hipson learn propose --session-id <session-id>
+hipson learn apply-memory --session-id <session-id> --proposal-id <proposal-id> --memory-dir memory
+```
+
+Skill proposals are reference-only drafts; Hipson does not auto-create or
+auto-activate skills.
 
 ## Workflow
 
@@ -187,6 +235,8 @@ Hipson is intentionally packet-based:
 - sensitive files are skipped or summarized;
 - common API keys, bearer tokens, private keys, quoted env-style secrets, and structured secret values are redacted;
 - local memory stores compact facts, not transcripts;
+- runtime sessions store redacted, bounded transcripts/tool-call summaries for local debugging;
+- learning proposals never become durable memory without an explicit apply command;
 - git diff and verification commands remain the final contract.
 
 Redaction is a safety layer, not a substitute for reviewing packet contents before

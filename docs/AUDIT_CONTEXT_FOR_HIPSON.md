@@ -2,16 +2,16 @@
 
 ## 1. Current Verified State
 
-The repository is on branch `main` at `/home/hipson47/code/Hipson`. The working tree already contains tracked source/test modifications and many untracked runtime modules/tests/docs from the previous implementation session. The audit did not treat those changes as trusted until verified.
+The repository is on branch `main` at `/home/hipson47/code/Hipson`. The Hermes-style repair pass started from a clean git scan and then added runtime observability and approval-gated learning CLI changes.
 
 Verified local checks:
 
-- `uv run pytest -q`: 201 tests passed.
+- `uv run pytest -q`: 209 tests passed.
 - `uv run ruff check .`: passed.
 - `uv run mypy src/hipson`: passed.
 - `uv run bandit -q -r src/hipson -c pyproject.toml`: passed.
 - `python -m compileall src/hipson`: passed.
-- `uv run python scripts/run_tests.py`: 201/201 passed.
+- `uv run python scripts/run_tests.py`: 209/209 passed.
 - `uv run hipson doctor`: passed.
 - `uv run hipson skill validate`: passed.
 
@@ -41,6 +41,16 @@ Self-audit repair pass added after the first fault-injection hardening:
 - Registry tests now cover composite type contracts, unsupported output types, and bounded/redacted nested output summaries.
 - Sandbox tests now cover symlink escape, sensitive path names/suffixes, and precise generated write roots.
 
+Hermes-style runtime observability and learning repair pass:
+
+- `src/hipson/cli.py` now exposes `session`, `tool`, and `learn` command groups.
+- `src/hipson/session.py` now exposes read helpers for session counts and safe fallback message search.
+- `src/hipson/learning.py` now emits deterministic proposal IDs so proposals can be reviewed and explicitly applied.
+- `hipson session list/show/search` read SQLite runtime sessions without requiring provider credentials or network access.
+- `hipson tool list/show` inspect registered tools, risk levels, approval requirements, schemas, output contracts, and path policies.
+- `hipson learn propose` prints approval-gated memory/skill-reference proposals without durable writes.
+- `hipson learn apply-memory` explicitly persists one selected memory proposal into JSONL memory with redacted summary and session/message provenance.
+
 ## 2. Implemented Runtime Modules
 
 Runtime-related modules observed in the working tree:
@@ -61,7 +71,7 @@ Runtime-related modules observed in the working tree:
 Observed with `uv run hipson --help`:
 
 - Existing/core: `doctor`, `scan`, `scan-many`, `route`, `init`, `check-setup`, `install`, `packet`, `sidecar`, `memory`.
-- New/modified: `chat`, `skill`, `scheduler`.
+- New/modified: `chat`, `skill`, `scheduler`, `session`, `tool`, `learn`.
 
 Observed behavior:
 
@@ -69,8 +79,9 @@ Observed behavior:
 - `uv run hipson chat -q "scan this repo and propose the next safe PR"` fails closed when no chat provider is configured.
 - `uv run hipson chat --fake -q "scan this repo and propose the next safe PR"` runs the explicit fake/offline provider path.
 - `uv run hipson skill list` succeeds.
-- `uv run hipson session list` fails with argparse invalid choice.
-- `uv run hipson tool list` fails with argparse invalid choice.
+- `uv run hipson session list --session-db <temp>/runtime.sqlite` succeeds and reports no sessions without creating the missing temp DB.
+- `uv run hipson tool list` succeeds and lists registered runtime tools with risk and approval metadata.
+- `uv run hipson learn --help` succeeds and exposes `propose` and `apply-memory`.
 
 ## 4. Verified Behaviors
 
@@ -99,12 +110,13 @@ Observed behavior:
 
 - Real provider support is still intentionally absent; `hipson chat` remains fake/offline only when explicitly requested with `--fake`.
 - Future tools must declare path policy metadata before registration.
-- Session history retention/search behavior remains minimal.
+- Session history retention remains minimal.
+- Session search uses a safe SQLite `LIKE` fallback; FTS tables are still schema placeholders until population/search is implemented.
 
 ## 7. Test Gaps
 
 - No test that CLI `chat` can execute a tool call.
-- No FTS search/population test.
+- No FTS population test; fallback message search is covered by `tests/test_session.py`.
 - Focused fault-injection tests exist for runtime-critical modules, including direct provider helper, runtime tool-descriptor/rejection, registry composite-contract, bounded-output, and sandbox symlink/sensitive-path cases. Full mutation survivor triage is still incomplete.
 - No live provider/network test by design; sidecar provider hardening is covered with local fakes only.
 
@@ -117,10 +129,10 @@ Observed behavior:
 
 ## 9. Documentation Drift
 
-- `README.md` does not document `hipson chat`, scheduler, runtime DB behavior, or fake-only limitations.
+- `README.md` now documents fake-only chat behavior, runtime DB observability, tool inspection, and approval-gated learning. Scheduler docs remain minimal.
 - `docs/PERSISTENT_AGENT_RUNTIME_SPEC.md` still describes some modules as proposed/future, while implementations exist in the working tree.
 - `docs/PROJECT_DEVELOPMENT_PLAN.md` frames scheduler/MCP as future/optional, but implementation files already exist.
-- The spec lists `hipson session list` and `hipson tool list` as next commands; they are not implemented, which is acceptable only if not claimed complete.
+- The spec now lists `hipson session list/show/search`, `hipson tool list/show`, and `hipson learn propose/apply-memory` as MVP commands. It still keeps `hipson tool run` as future work.
 
 ## 10. Recommended Next PR
 
@@ -146,4 +158,4 @@ Do not add a real primary runtime provider adapter in this PR.
 
 ## 12. Handoff Summary
 
-The runtime implementation has a more defensible dependency-light tool boundary: registered tools declare path policies, inputs are validated before approval, handler/output failures are contained, persisted/provider-visible tool outputs are bounded and redacted, remote sidecar provider URLs are HTTPS-only by default, provider error bodies are redacted/bounded, prompt assembly separates stable policy from untrusted dynamic data, and focused fault-injection tests now cover several previously untested safety inversions. It is still not ready for real provider usage. The next session should triage focused mutmut survivors before any real primary runtime provider adapter or expanded external tool surface.
+The runtime implementation has a more defensible dependency-light tool boundary: registered tools declare path policies, inputs are validated before approval, handler/output failures are contained, persisted/provider-visible tool outputs are bounded and redacted, remote sidecar provider URLs are HTTPS-only by default, provider error bodies are redacted/bounded, prompt assembly separates stable policy from untrusted dynamic data, focused fault-injection tests cover several safety inversions, and Hipson can now inspect runtime sessions/tools plus explicitly apply approved memory proposals. It is still not ready for real provider usage. The next session should triage focused mutmut survivors before any real primary runtime provider adapter or expanded external tool surface.
