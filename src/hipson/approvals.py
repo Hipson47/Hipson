@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hipson.sandbox import check_read_path, check_write_path, is_allowlisted_read_only_command
+from hipson.sandbox import (
+    SandboxDecision,
+    check_read_path,
+    check_skill_file_path,
+    check_skill_root_path,
+    check_write_path,
+    is_allowlisted_read_only_command,
+)
 from hipson.tools.registry import RiskLevel, ToolContext, ToolSpec
 
 
@@ -38,13 +45,17 @@ class ApprovalPolicy:
         fake_provider: bool = False,
         dry_run: bool | None = None,
     ) -> ApprovalDecision:
-        return self.evaluate(
+        path_decision = _check_tool_path_policies(spec, input_data, context)
+        if path_decision is not None:
+            return path_decision
+        return self._evaluate_risk(
             spec.risk_level,
             input_data,
             context,
             approved=approved,
             fake_provider=fake_provider,
             dry_run=dry_run,
+            check_legacy_paths=False,
         )
 
     def evaluate(
@@ -57,12 +68,34 @@ class ApprovalPolicy:
         fake_provider: bool = False,
         dry_run: bool | None = None,
     ) -> ApprovalDecision:
+        return self._evaluate_risk(
+            risk_level,
+            input_data,
+            context,
+            approved=approved,
+            fake_provider=fake_provider,
+            dry_run=dry_run,
+            check_legacy_paths=True,
+        )
+
+    def _evaluate_risk(
+        self,
+        risk_level: RiskLevel,
+        input_data: dict[str, object],
+        context: ToolContext,
+        *,
+        approved: bool,
+        fake_provider: bool,
+        dry_run: bool | None,
+        check_legacy_paths: bool,
+    ) -> ApprovalDecision:
         effective_dry_run = context.dry_run if dry_run is None else dry_run
         if risk_level == "dangerous":
             return _blocked(risk_level, "Dangerous actions are blocked by default")
-        path_decision = _check_input_paths(input_data, context, risk_level)
-        if path_decision is not None:
-            return path_decision
+        if check_legacy_paths:
+            path_decision = _check_input_paths(input_data, context, risk_level)
+            if path_decision is not None:
+                return path_decision
         if risk_level == "read":
             return _allowed(risk_level, "Read allowed after sandbox checks")
         if risk_level == "write":
@@ -79,6 +112,51 @@ class ApprovalPolicy:
                 return _allowed(risk_level, "Exec action allowed by explicit approval")
             return _requires_approval(risk_level, "Exec actions require explicit approval unless allowlisted")
         return _blocked(risk_level, f"Unsupported risk level: {risk_level}")
+
+
+def _check_tool_path_policies(
+    spec: ToolSpec,
+    input_data: dict[str, object],
+    context: ToolContext,
+) -> ApprovalDecision | None:
+    for policy in spec.path_policies:
+        value = _field_value(input_data, policy.field)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return _blocked(spec.risk_level, f"{policy.field} path value must be a string")
+        decision = _path_policy_decision(policy.mode, value, policy.base_field, input_data, context)
+        if not decision.allowed:
+            return _blocked(spec.risk_level, decision.reason)
+    return None
+
+
+def _field_value(data: dict[str, object], field: str) -> object:
+    value: object = data
+    for part in field.split("."):
+        if not isinstance(value, dict) or part not in value:
+            return None
+        value = value[part]
+    return value
+
+
+def _path_policy_decision(
+    mode: str,
+    value: str,
+    base_field: str,
+    input_data: dict[str, object],
+    context: ToolContext,
+) -> SandboxDecision:
+    if mode in {"read_workspace", "read_memory_store"}:
+        return check_read_path(value, context.cwd)
+    if mode == "write_generated":
+        return check_write_path(value, context.cwd)
+    if mode == "read_skill_root":
+        return check_skill_root_path(value, context.cwd)
+    if mode == "read_skill_file":
+        root = _field_value(input_data, base_field) if base_field else None
+        return check_skill_file_path(value, root if isinstance(root, str) else None, context.cwd)
+    return check_read_path(value, context.cwd)
 
 
 def _check_input_paths(

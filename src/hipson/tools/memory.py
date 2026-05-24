@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hipson import memory as hipson_memory
-from hipson.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
+from hipson.tools.registry import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 
 def register_memory_tools(registry: ToolRegistry) -> None:
@@ -21,6 +21,7 @@ def register_memory_tools(registry: ToolRegistry) -> None:
             risk_level="read",
             approval_required=False,
             handler=memory_search,
+            path_policies=(PathPolicy("memory_dir", "read_memory_store"),),
         )
     )
 

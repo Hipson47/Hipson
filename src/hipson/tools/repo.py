@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from hipson import project as hipson_project
-from hipson.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
+from hipson.tools.registry import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 
 def register_repo_tools(registry: ToolRegistry) -> None:
@@ -26,6 +26,7 @@ def register_repo_tools(registry: ToolRegistry) -> None:
             risk_level="read",
             approval_required=False,
             handler=repo_scan,
+            path_policies=(PathPolicy("path", "read_workspace"),),
         )
     )
     registry.register(
@@ -37,6 +38,7 @@ def register_repo_tools(registry: ToolRegistry) -> None:
             risk_level="read",
             approval_required=False,
             handler=repo_changed_files,
+            path_policies=(PathPolicy("path", "read_workspace"),),
         )
     )
 

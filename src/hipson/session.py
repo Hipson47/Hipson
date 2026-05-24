@@ -8,10 +8,15 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from hipson.redaction import redact_text
 
 SCHEMA_VERSION = 1
+MAX_SESSION_JSON_CHARS = 4_000
+MAX_SESSION_STRING_CHARS = 1_000
+MAX_SESSION_LIST_ITEMS = 20
+MAX_SESSION_DICT_KEYS = 30
 
 INITIAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -356,7 +361,42 @@ def timestamp() -> str:
 
 
 def _json_dumps_redacted(value: dict[str, object]) -> str:
-    return redact_text(json.dumps(value, ensure_ascii=False, sort_keys=True))
+    bounded = _bound_session_value(value)
+    encoded = redact_text(json.dumps(bounded, ensure_ascii=False, sort_keys=True))
+    if len(encoded) <= MAX_SESSION_JSON_CHARS:
+        return encoded
+    fallback = {
+        "summary": "Session JSON omitted after bounding",
+        "truncated": True,
+    }
+    return json.dumps(fallback, ensure_ascii=False, sort_keys=True)
+
+
+def _bound_session_value(value: object) -> object:
+    if isinstance(value, str):
+        return _bound_session_string(value)
+    if isinstance(value, list):
+        list_items = [_bound_session_value(item) for item in value[:MAX_SESSION_LIST_ITEMS]]
+        if len(value) > MAX_SESSION_LIST_ITEMS:
+            list_items.append({"truncated_items": len(value) - MAX_SESSION_LIST_ITEMS})
+        return list_items
+    if isinstance(value, dict):
+        output: dict[str, object] = {}
+        dict_items = list(cast(dict[object, object], value).items())
+        for key, item in dict_items[:MAX_SESSION_DICT_KEYS]:
+            output[str(key)] = _bound_session_value(item)
+        if len(dict_items) > MAX_SESSION_DICT_KEYS:
+            output["_truncated_keys"] = len(dict_items) - MAX_SESSION_DICT_KEYS
+        return output
+    return value
+
+
+def _bound_session_string(value: str) -> str:
+    redacted = redact_text(value)
+    if len(redacted) <= MAX_SESSION_STRING_CHARS:
+        return redacted
+    marker = f"... [truncated to {MAX_SESSION_STRING_CHARS} chars]"
+    return redacted[: max(0, MAX_SESSION_STRING_CHARS - len(marker))].rstrip() + marker
 
 
 def _json_loads_object(value: str) -> dict[str, object]:

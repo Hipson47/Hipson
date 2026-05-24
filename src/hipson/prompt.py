@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from hipson.redaction import redact_text
@@ -37,22 +38,42 @@ class PromptContext:
     section_char_limit: int = 2_000
 
 
+@dataclass(frozen=True)
+class PromptMessages:
+    system: str
+    user: str
+
+
 def assemble_prompt(context: PromptContext) -> str:
-    sections = [
+    messages = assemble_prompt_parts(context)
+    return _cap(f"{messages.system}\n\n{messages.user}".rstrip() + "\n", context.max_chars)
+
+
+def assemble_prompt_messages(context: PromptContext) -> list[dict[str, str]]:
+    messages = assemble_prompt_parts(context)
+    return [{"role": "system", "content": messages.system}, {"role": "user", "content": messages.user}]
+
+
+def assemble_prompt_parts(context: PromptContext) -> PromptMessages:
+    system_sections = [
         redact_text(STABLE_SYSTEM_PREFIX.strip()),
-        _section("Current Request", _untrusted_block("user_request", context.current_request), context),
-        _section("Session Summary", context.session_summary or "none", context),
-        _section("Memory Snapshot", _json_block(context.memory_snippets), context),
-        _section("Selected Skill Index", _json_block(context.skill_index), context),
-        _section("Selected Skill Excerpts", _json_block(context.skill_excerpts), context),
         _section("Available Tools", _json_block([_tool_spec_payload(spec) for spec in context.tool_specs]), context),
         _section("Risk Policy", RISK_POLICY_SUMMARY, context),
-        _section("Bounded Repo Facts", _json_block(context.repo_facts), context),
         _section("Runtime Notes", "Memory updates become visible in the next session or explicit compaction step.", context),
     ]
-    if context.dynamic_suffix:
-        sections.append(_section("Dynamic Suffix", context.dynamic_suffix, context))
-    return _cap("\n\n".join(sections).rstrip() + "\n", context.max_chars)
+    user_sections = [
+        _section("Current Request", _untrusted_block("user_request", context.current_request), context),
+        _section("Session Summary", _untrusted_block("session_summary", context.session_summary or "none"), context),
+        _section("Memory Snapshot", _untrusted_block("memory_snapshot", _json_block(context.memory_snippets)), context),
+        _section("Selected Skill Index", _untrusted_block("skill_index", _json_block(context.skill_index)), context),
+        _section("Selected Skill Excerpts", _untrusted_block("skill_excerpts", _json_block(context.skill_excerpts)), context),
+        _section("Bounded Repo Facts", _untrusted_block("repo_facts", _json_block(context.repo_facts)), context),
+        _section("Dynamic Suffix", _untrusted_block("dynamic_suffix", context.dynamic_suffix or "none"), context),
+    ]
+    return PromptMessages(
+        system=_cap("\n\n".join(system_sections).rstrip() + "\n", context.max_chars),
+        user=_cap("\n\n".join(user_sections).rstrip() + "\n", context.max_chars),
+    )
 
 
 def _section(title: str, content: str, context: PromptContext) -> str:
@@ -60,7 +81,12 @@ def _section(title: str, content: str, context: PromptContext) -> str:
 
 
 def _untrusted_block(label: str, content: str) -> str:
-    return f"<untrusted_data name=\"{label}\">\n{content}\n</untrusted_data>"
+    return f"<untrusted_data name=\"{label}\">\n{_escape_untrusted_delimiters(content)}\n</untrusted_data>"
+
+
+def _escape_untrusted_delimiters(content: str) -> str:
+    escaped = content.replace("</untrusted_data>", "&lt;/untrusted_data&gt;")
+    return re.sub(r"<untrusted_data([^>]*)>", r"&lt;untrusted_data\1&gt;", escaped)
 
 
 def _json_block(value: object) -> str:

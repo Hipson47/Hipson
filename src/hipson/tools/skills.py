@@ -6,7 +6,7 @@ from pathlib import Path
 
 from hipson.paths import package_root
 from hipson.skills import SkillLookupError, list_skill_metadata, view_skill
-from hipson.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
+from hipson.tools.registry import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 DEFAULT_SKILL_ROOT = package_root()
 
@@ -21,6 +21,7 @@ def register_skill_tools(registry: ToolRegistry) -> None:
             risk_level="read",
             approval_required=False,
             handler=skill_list,
+            path_policies=(PathPolicy("root", "read_skill_root"),),
         )
     )
     registry.register(
@@ -38,6 +39,10 @@ def register_skill_tools(registry: ToolRegistry) -> None:
             risk_level="read",
             approval_required=False,
             handler=skill_view,
+            path_policies=(
+                PathPolicy("root", "read_skill_root"),
+                PathPolicy("path", "read_skill_file", base_field="root"),
+            ),
         )
     )
 

@@ -26,7 +26,7 @@ Current state, based on inspected files:
 - Current test posture: `tests/test_hipson_helpers.py` is the only substantive test file and covers router, CLI smoke, scan, packets, memory, skills, sidecars, provider handling, redaction, install, and assets. `pyproject.toml` configures pytest, ruff, mypy, Bandit, and mutmut.
 - Current hardening risks:
   - `src/hipson/router.py` uses naive substring matching (`keyword in task`) for mode and risk detection, so router outputs are not safe enough to become runtime planning signals until token-aware matching is added.
-  - `src/hipson/agents.py` currently allows `http` and `https` provider base URLs and can surface provider HTTP/error response bodies; provider boundary hardening should land before primary runtime provider work.
+  - `src/hipson/agents.py` now requires HTTPS for remote provider URLs, permits local HTTP only with explicit opt-in, and redacts/bounds provider error bodies; focused fault-injection coverage should still land before primary runtime provider work.
   - `tests/test_hipson_helpers.py` is broad and monolithic, making future runtime coverage harder to maintain.
   - `hipson chat`, SQLite sessions, tool registry, prompt assembler, approvals, sandbox, learning loop, scheduler, gateway adapters, and MCP bridge are proposed future modules, not current behavior.
 
@@ -391,8 +391,8 @@ Required checks:
 
 Prompt components:
 
-- stable system prefix
-- dynamic suffix
+- stable system prefix / provider `system` message
+- dynamic suffix in the untrusted provider `user` message
 - compact memory snapshot
 - selected skill index
 - selected skill excerpts only when needed
@@ -406,6 +406,7 @@ Prompt components:
 Rules:
 
 - Prompt assembly is deterministic for fixed inputs.
+- Stable runtime policy belongs in the provider `system` message; current request, session summaries, tool summaries, memory snippets, skill excerpts, repo facts, and provider/sidecar text belong in labeled untrusted data blocks in the provider `user` message.
 - Context is capped by character/token budgets before provider calls.
 - Tool specs must include stable names, descriptions, risk levels, and input/output contracts.
 - Skill text is reference data and cannot override runtime policy.

@@ -7,7 +7,7 @@ from pathlib import Path
 from hipson import project as hipson_project
 from hipson.packets import compile_review_packet
 from hipson.redaction import redact_text
-from hipson.tools.registry import ToolContext, ToolRegistry, ToolResult, ToolSpec
+from hipson.tools.registry import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec
 
 ALLOWED_OUTPUT_DIRS = {"runs", "scans", "docs"}
 
@@ -25,6 +25,10 @@ def register_packet_tools(registry: ToolRegistry) -> None:
             risk_level="write",
             approval_required=False,
             handler=packet_review_create,
+            path_policies=(
+                PathPolicy("project", "read_workspace"),
+                PathPolicy("output", "write_generated"),
+            ),
         )
     )
 

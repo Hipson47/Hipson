@@ -12,7 +12,14 @@ from pathlib import Path
 
 from hipson.approvals import ApprovalPolicy
 from hipson.redaction import redact_text
-from hipson.tools import ToolContext, ToolRegistry, ToolRegistryError, ToolSpec, build_default_registry
+from hipson.tools import (
+    ToolContext,
+    ToolRegistry,
+    ToolRegistryError,
+    ToolSpec,
+    bounded_tool_output,
+    build_default_registry,
+)
 
 
 @dataclass
@@ -36,6 +43,7 @@ class MCPBridge:
     ) -> dict[str, object]:
         try:
             spec = self.registry.get(name)
+            self.registry.validate_input(name, input_data)
         except ToolRegistryError as exc:
             return _rejected("rejected", str(exc))
 
@@ -56,14 +64,14 @@ class MCPBridge:
             return {
                 "ok": False,
                 "status": "failed",
-                "output": _redact_value(result.output),
+                "output": _redact_value(bounded_tool_output(result)),
                 "summary": redact_text(result.summary),
                 "error": redact_text(result.error),
             }
         return {
             "ok": True,
             "status": "completed",
-            "output": _redact_value(result.output),
+            "output": _redact_value(bounded_tool_output(result)),
             "summary": redact_text(result.summary),
             "error": "",
         }

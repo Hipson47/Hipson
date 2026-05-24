@@ -6,16 +6,40 @@ The repository is on branch `main` at `/home/hipson47/code/Hipson`. The working 
 
 Verified local checks:
 
-- `uv run pytest -q`: 167 tests passed.
+- `uv run pytest -q`: 201 tests passed.
 - `uv run ruff check .`: passed.
 - `uv run mypy src/hipson`: passed.
 - `uv run bandit -q -r src/hipson -c pyproject.toml`: passed.
 - `python -m compileall src/hipson`: passed.
-- `uv run python scripts/run_tests.py`: 167/167 passed.
+- `uv run python scripts/run_tests.py`: 201/201 passed.
 - `uv run hipson doctor`: passed.
 - `uv run hipson skill validate`: passed.
 
 Unconfigured Bandit (`uv run bandit -q -r src/hipson`) failed on existing low-severity subprocess findings in `src/hipson/project.py`.
+
+Provider/prompt boundary hardening added after the audit:
+
+- Remote sidecar provider URLs are HTTPS-only by default; local HTTP requires explicit opt-in for localhost-style endpoints.
+- Sidecar provider `HTTPError`/`URLError` bodies are redacted and bounded before display.
+- Sidecar provider output is written as advisory untrusted report data, with redaction and deterministic truncation.
+- Runtime prompt assembly now separates stable system policy from dynamic untrusted user/session/tool/skill/repo content.
+
+Focused fault-injection hardening added after provider/prompt hardening:
+
+- Approval tests now cover dangerous override attempts, explicit approval not bypassing unsafe write paths, and declared path fields with wrong types.
+- Registry tests now reject `bool` values for `int` contracts, contain `JSONDecodeError`, and validate output type failures.
+- Prompt and sidecar report tests now cover escaped `</untrusted_data>` delimiter injection.
+- Session-store tests now verify direct message/tool-call persistence is redacted and bounded.
+- Runtime, scheduler, and MCP tests now cover path-policy handler suppression, no default `shell.run`, dangerous scheduler jobs blocked even with `--approved`, and approval-required read tools blocked through the MCP bridge.
+- `pyproject.toml` mutmut configuration now includes `src/hipson/runtime.py`, `src/hipson/approvals.py`, `src/hipson/sandbox.py`, `src/hipson/tools/registry.py`, `src/hipson/prompt.py`, and `src/hipson/agents.py`.
+
+Self-audit repair pass added after the first fault-injection hardening:
+
+- `docs/SELF_AUDIT_FINDINGS.md` and `docs/SELF_AUDIT_REPAIR_PLAN.md` capture the current self-audit, Hipson command results, chosen repair package, and deferred findings.
+- Provider helper tests now directly pin HTTPS/local-HTTP URL policy, provider error text redaction/bounds, and untrusted data delimiter escaping.
+- Runtime tests now assert the provider request contains role-separated messages and stable tool descriptors, and that multiple rejected tool calls are capped/redacted in the final answer.
+- Registry tests now cover composite type contracts, unsupported output types, and bounded/redacted nested output summaries.
+- Sandbox tests now cover symlink escape, sensitive path names/suffixes, and precise generated write roots.
 
 ## 2. Implemented Runtime Modules
 
@@ -41,8 +65,9 @@ Observed with `uv run hipson --help`:
 
 Observed behavior:
 
-- `uv run hipson chat --help` exists and exposes `--session-db`, `--session-id`, and `--fake-response`.
-- `HIPSON_HOME=<temp> uv run hipson chat -q "scan this repo and propose the next safe PR"` prints `Fake provider response`.
+- `uv run hipson chat --help` exists and exposes `--session-db`, `--session-id`, `--fake`, and `--fake-response`.
+- `uv run hipson chat -q "scan this repo and propose the next safe PR"` fails closed when no chat provider is configured.
+- `uv run hipson chat --fake -q "scan this repo and propose the next safe PR"` runs the explicit fake/offline provider path.
 - `uv run hipson skill list` succeeds.
 - `uv run hipson session list` fails with argparse invalid choice.
 - `uv run hipson tool list` fails with argparse invalid choice.
@@ -53,7 +78,11 @@ Observed behavior:
 - Runtime creates a session, persists user and assistant messages, validates tool names/inputs through the registry, checks approval before execution, executes allowed tools, persists tool calls/results, and stops after a bounded number of tool iterations.
 - Session store redacts message and tool-call fields before persistence.
 - Approval policy blocks dangerous risk, requires approval for exec except allowlisted read-only commands, and blocks common sensitive/path traversal cases.
-- Prompt assembler is deterministic, bounded, redacts content, and treats the current user request as untrusted data.
+- Registered tools now declare path policies for path-bearing inputs, and runtime/scheduler/MCP validate inputs before approval.
+- Tool handler exceptions and output contract failures become failed tool results rather than runtime crashes.
+- Runtime tool-call persistence and scheduler/MCP tool outputs use bounded, redacted output views.
+- Prompt assembler is deterministic, bounded, redacts content, emits role-separated system/user messages for provider requests, and treats dynamic content as untrusted data.
+- Sidecar provider errors and report output are redacted/bounded; arbitrary remote HTTP provider URLs are rejected by default.
 - Scheduler is tick-only, not a daemon.
 - Gateway adapter calls runtime rather than duplicating tool execution.
 - MCP-style adapter is optional/internal and exposes read-only tools by default.
@@ -62,38 +91,29 @@ Observed behavior:
 
 - Raw Bandit failed without project config because `src/hipson/project.py` imports and uses `subprocess`; configured Bandit passes.
 - Live provider/network checks were skipped by requirement.
-- Optional mutmut run was skipped because it is heavier, creates mutation artifacts, and current mutation config does not target the new runtime modules.
+- `uv run mutmut run --paths-to-mutate ...` failed because this mutmut version does not support that CLI flag.
+- `timeout 180s uv run mutmut run --max-children 2` started from the focused project config, generated 2,219 mutants, and exited 124 before completion. Last observed progress was roughly 1,597/2,219 mutants, with roughly 1,381 killed and 216 surviving. Partial `uv run mutmut results` output still listed survivors/not-checked mutants, including safety-adjacent survivors in approvals, sandbox, registry, provider, prompt, and runtime helpers.
 - `hipson session list` and `hipson tool list` were attempted and failed because those CLI commands do not exist.
 
 ## 6. Known Bugs / Risks
 
-- `hipson chat` is fake-only and can mislead users into thinking a real runtime scan/planning loop ran.
-- `src/hipson/runtime.py` hardcodes `fake_provider=True` when evaluating approvals.
-- Approval path checks miss path-bearing fields such as `memory_dir` and `root`.
-- Runtime persists full tool outputs directly; `repo.scan` output includes markdown.
-- Sidecar provider code still allows HTTP URLs and raw HTTP provider error bodies.
-- Tool output contracts are not structurally enforced.
-- Rejected tool calls are persisted but may not be visible in the final user-facing answer.
+- Real provider support is still intentionally absent; `hipson chat` remains fake/offline only when explicitly requested with `--fake`.
+- Future tools must declare path policy metadata before registration.
+- Session history retention/search behavior remains minimal.
 
 ## 7. Test Gaps
 
-- No test for `memory_dir` sandbox bypass.
-- No test for runtime with a non-fake provider object and an external-risk tool.
 - No test that CLI `chat` can execute a tool call.
-- No test that tool output contracts are enforced beyond JSON serializability.
 - No FTS search/population test.
-- No test for malicious tool summaries injected into subsequent prompts.
-- No test for raw sidecar provider error body redaction.
-- No mutation/fault-injection coverage for runtime-critical modules.
+- Focused fault-injection tests exist for runtime-critical modules, including direct provider helper, runtime tool-descriptor/rejection, registry composite-contract, bounded-output, and sandbox symlink/sensitive-path cases. Full mutation survivor triage is still incomplete.
+- No live provider/network test by design; sidecar provider hardening is covered with local fakes only.
 
 ## 8. Security Gaps
 
 - Approval enforcement is caller-dependent; direct registry callers can bypass approvals unless they explicitly use `ApprovalPolicy`.
-- Runtime approval context is incorrectly biased toward fake-provider approval.
-- Path policy is not tied to each tool's declared input schema.
-- Tool outputs can be persisted too broadly.
-- Sidecar provider hardening remains incomplete.
 - Scheduler `--approved` is a boolean flag, not a durable approval record.
+- Partial mutmut results show remaining approval/path/registry/provider/prompt/runtime survivors that must be triaged before real-provider work.
+- Real-provider prompt/tool exposure remains intentionally unimplemented and must not be added until provider, prompt, runtime, and tool-boundary mutmut survivors are triaged.
 
 ## 9. Documentation Drift
 
@@ -104,16 +124,16 @@ Observed behavior:
 
 ## 10. Recommended Next PR
 
-`fix(runtime): make chat mode and approvals fail closed`
+`test(security): complete focused mutmut survivor triage in smaller batches`
 
 Scope:
 
-- Make fake/offline chat mode explicit and truthful in CLI output.
-- Remove hardcoded `fake_provider=True` from runtime approval evaluation.
-- Add runtime tests for non-fake provider context plus external-risk tool rejection.
-- Surface rejected tool-call summaries in runtime answers when no later assistant response explains them.
+- Run mutmut in smaller module/function batches for `agents.py`, `prompt.py`, `runtime.py`, `approvals.py`, `sandbox.py`, and `tools/registry.py`.
+- Add requirement-level tests for remaining high-risk survivors; document only equivalent/low-risk survivors.
+- Keep tests credential-free and network-free.
+- Preserve provider-free defaults and do not add a real chat provider adapter.
 
-Do not add a real provider adapter in this PR.
+Do not add a real primary runtime provider adapter in this PR.
 
 ## 11. Open Product Decisions
 
@@ -126,4 +146,4 @@ Do not add a real provider adapter in this PR.
 
 ## 12. Handoff Summary
 
-The runtime implementation has a useful dependency-light skeleton, and the local test suite passes. It is not ready for real provider usage or trusted development work. The next session should fix runtime truthfulness and approval semantics first, then harden tool contracts, path checks, persistence bounds, and sidecar provider redaction before adding any real provider adapter or expanding tools.
+The runtime implementation has a more defensible dependency-light tool boundary: registered tools declare path policies, inputs are validated before approval, handler/output failures are contained, persisted/provider-visible tool outputs are bounded and redacted, remote sidecar provider URLs are HTTPS-only by default, provider error bodies are redacted/bounded, prompt assembly separates stable policy from untrusted dynamic data, and focused fault-injection tests now cover several previously untested safety inversions. It is still not ready for real provider usage. The next session should triage focused mutmut survivors before any real primary runtime provider adapter or expanded external tool surface.

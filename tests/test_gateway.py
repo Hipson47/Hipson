@@ -59,5 +59,5 @@ def test_cli_gateway_cannot_bypass_runtime_approval_policy(tmp_path: Path):
     assert "Write path must be under runs/" in response.answer
     assert tool_calls[0]["tool_name"] == "packet.review.create"
     assert tool_calls[0]["status"] == "rejected"
-    assert tool_calls[0]["approval_status"] == "requires_approval"
+    assert tool_calls[0]["approval_status"] == "blocked"
     assert not (tmp_path / "src" / "review.md").exists()
