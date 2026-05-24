@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from hipson import agents as hipson_agents
 from hipson import memory as hipson_memory
 from hipson import project as hipson_project
 from hipson import router as hipson_router
+from hipson import session as hipson_session
 from hipson.assets import packaged_asset, runtime_asset
 from hipson.codex_install import END_MARKER, START_MARKER, detect_codex_home, install_codex, merge_managed_block
 from hipson.home import detect_hipson_home
@@ -1441,6 +1443,102 @@ def test_memory_redacts_metadata_fields(tmp_path: Path):
     assert note.scope != "OPENAI_API_KEY=sk-test-secret1234567890"
 
 
+def test_session_store_creates_schema_idempotently(tmp_path: Path):
+    db = tmp_path / "runtime.sqlite"
+    first = hipson_session.open_session_store(db)
+    first.close()
+
+    second = hipson_session.open_session_store(db)
+    fts_enabled = second.fts_enabled
+    second.close()
+
+    with sqlite3.connect(db) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')")
+        }
+        indexes = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        migrations = [row[0] for row in connection.execute("SELECT version FROM schema_migrations ORDER BY version")]
+
+    assert {
+        "schema_migrations",
+        "sessions",
+        "messages",
+        "tool_calls",
+        "memories",
+        "skill_runs",
+        "jobs",
+    }.issubset(tables)
+    assert {
+        "idx_messages_session_created",
+        "idx_tool_calls_session_started",
+        "idx_memories_repo_scope",
+        "idx_jobs_status_run_after",
+    }.issubset(indexes)
+    assert migrations == [1]
+    if fts_enabled:
+        assert {"messages_fts", "memories_fts"}.issubset(tables)
+
+
+def test_session_store_crud_and_redaction(tmp_path: Path):
+    db = tmp_path / "runtime.sqlite"
+    store = hipson_session.open_session_store(db)
+    try:
+        session_id = store.create_session(cwd=str(tmp_path), repo_root=str(tmp_path / "repo"), title="Runtime")
+        fetched = store.get_session(session_id)
+        sessions = store.list_sessions()
+
+        assert fetched is not None
+        assert fetched["id"] == session_id
+        assert fetched["cwd"] == str(tmp_path)
+        assert sessions and sessions[0]["id"] == session_id
+
+        secret = "sk-test-secret1234567890"
+        message_id = store.add_message(
+            session_id,
+            role="user",
+            content=f"Use OPENROUTER_API_KEY={secret}",
+            metadata={"authorization": f"Bearer {secret}"},
+        )
+        tool_call_id = store.add_tool_call(
+            session_id,
+            message_id=message_id,
+            tool_name="repo.scan",
+            input_data={"path": "."},
+            output_data={"summary": f"password=hunter2 {secret}"},
+            risk_level="read",
+            error=f"provider failed with {secret}",
+        )
+
+        messages = store.list_messages(session_id)
+        tool_calls = store.list_tool_calls(session_id)
+        persisted = json.dumps({"messages": messages, "tool_calls": tool_calls}, ensure_ascii=False)
+
+        assert message_id
+        assert tool_call_id
+        assert messages[0]["content"] == f"Use OPENROUTER_API_KEY={REDACTION}"
+        assert tool_calls[0]["tool_name"] == "repo.scan"
+        assert tool_calls[0]["output"]["summary"] == f"password={REDACTION} {REDACTION}"
+        assert secret not in persisted
+        assert "hunter2" not in persisted
+        assert REDACTION in persisted
+    finally:
+        store.close()
+
+
+def test_session_store_enforces_foreign_keys(tmp_path: Path):
+    store = hipson_session.open_session_store(tmp_path / "runtime.sqlite")
+    try:
+        try:
+            store.add_message("missing-session", role="user", content="hello")
+        except sqlite3.IntegrityError:
+            pass
+        else:
+            raise AssertionError("Expected missing session foreign key to fail")
+    finally:
+        store.close()
+
+
 def test_codex_home_prefers_codex_home(tmp_path: Path):
     codex_home, warnings = detect_codex_home({"CODEX_HOME": str(tmp_path / "codex")})
 
@@ -1856,6 +1954,23 @@ def test_workflow_router_implementation_includes_scan_and_exec_packet():
     assert route["commands"][0] == "hipson scan . --include-diff"
     assert any(command.startswith("hipson packet exec .") for command in route["commands"])
     assert any("--allowed-edit" in command for command in route["commands"])
+
+
+def test_workflow_router_matches_tokens_and_build_intent():
+    build_runtime = hipson_router.route_task("build runtime")
+    build_persistent_runtime = hipson_router.route_task("build persistent agent runtime")
+    run_build = hipson_router.route_task("run build and tests")
+    ui_review = hipson_router.route_task("premium ui review")
+    security_audit = hipson_router.route_task("security auth audit")
+    building_docs = hipson_router.route_task("building docs")
+
+    assert build_runtime["mode"] == "exec"
+    assert build_runtime["risk"] == "normal"
+    assert build_persistent_runtime["mode"] == "exec"
+    assert run_build["mode"] == "verify"
+    assert ui_review["risk"] == "ui"
+    assert security_audit["risk"] == "security"
+    assert building_docs["risk"] == "normal"
 
 
 def test_workflow_router_risk_human_review_rules_are_contractual():

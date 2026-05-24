@@ -23,8 +23,12 @@ from hipson.project import (
     resolve_project_from_registry,
     write_output,
 )
+from hipson.providers import FakeProvider
 from hipson.router import format_text_route, route_task
-from hipson.skills import format_validation_results, validate_skills
+from hipson.runtime import NO_CHAT_PROVIDER_MESSAGE, HipsonRuntime, RuntimeMode, default_session_db
+from hipson.scheduler import Scheduler, parse_json_object
+from hipson.session import open_session_store
+from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
 
 PACKAGE_ROOT = package_root()
 
@@ -147,6 +151,62 @@ def command_skill_validate(args: argparse.Namespace) -> int:
     return 1 if any(not result.ok for result in results) else 0
 
 
+def command_skill_list(args: argparse.Namespace) -> int:
+    root = Path(args.root).expanduser().resolve()
+    skills = list_skill_metadata(root, query=args.query or "")
+    if args.json:
+        print(json.dumps({"skills": skills}, indent=2))
+        return 0
+    if not skills:
+        print("No skills found.")
+        return 0
+    for skill in skills:
+        status = "ok" if skill["ok"] else "failed"
+        print(f"{skill['name']}: {status} - {skill['description']}")
+        print(f"  path: {skill['path']}")
+    return 0
+
+
+def command_skill_view(args: argparse.Namespace) -> int:
+    try:
+        skill = view_skill(
+            Path(args.root).expanduser().resolve(),
+            name=args.name,
+            max_chars=args.max_chars,
+        )
+    except SkillLookupError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(skill, indent=2))
+    else:
+        print(skill["content"])
+    return 0
+
+
+def command_skill_use(args: argparse.Namespace) -> int:
+    try:
+        skill = view_skill(
+            Path(args.root).expanduser().resolve(),
+            name=args.name,
+            max_chars=args.max_chars,
+        )
+    except SkillLookupError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    payload = {
+        "skill_index": [{"name": skill["name"], "description": skill["description"], "path": skill["path"]}],
+        "skill_excerpt": {
+            "name": skill["name"],
+            "content": skill["content"],
+            "truncated": skill["truncated"],
+            "runtime_policy": "reference_data_only",
+        },
+    }
+    print(json.dumps(payload, indent=2) if args.json else skill["content"])
+    return 0
+
+
 def command_install_codex(args: argparse.Namespace) -> int:
     if args.apply == args.dry_run:
         print("Choose exactly one of --dry-run or --apply.", file=sys.stderr)
@@ -162,6 +222,43 @@ def command_route(args: argparse.Namespace) -> int:
         print(json.dumps(route, indent=2))
     else:
         print(format_text_route(route))
+    return 0
+
+
+def command_chat(args: argparse.Namespace) -> int:
+    if args.fake_response and not args.fake:
+        print("--fake-response requires --fake or --offline.", file=sys.stderr)
+        return 2
+    if not args.fake:
+        print(NO_CHAT_PROVIDER_MESSAGE, file=sys.stderr)
+        return 1
+
+    query = args.query
+    if query is None and not sys.stdin.isatty():
+        query = sys.stdin.read().strip()
+    if query is None:
+        query = input("hipson> ").strip()
+    if not query:
+        print("A chat request is required.", file=sys.stderr)
+        return 2
+
+    session_db = Path(args.session_db).expanduser() if args.session_db else default_session_db()
+    store = open_session_store(session_db)
+    try:
+        fake_response = args.fake_response or "Fake provider response"
+        runtime = HipsonRuntime(
+            store=store,
+            provider=FakeProvider.with_text(fake_response),
+            runtime_mode=RuntimeMode.FAKE,
+        )
+        result = runtime.run(query, cwd=Path.cwd(), session_id=args.session_id)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+
+    print(f"Fake/offline mode: {result.answer}")
     return 0
 
 
@@ -208,6 +305,63 @@ def command_memory(args: argparse.Namespace) -> int:
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
 
 
+def command_scheduler_create(args: argparse.Namespace) -> int:
+    try:
+        input_data = parse_json_object(args.input)
+    except (json.JSONDecodeError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    store = open_session_store(Path(args.session_db).expanduser() if args.session_db else default_session_db())
+    try:
+        scheduler = Scheduler.with_defaults(store)
+        job_id = scheduler.create_tool_job(
+            tool_name=args.tool,
+            input_data=input_data,
+            run_after=args.run_after,
+            approved=args.approved,
+        )
+    finally:
+        store.close()
+    print(job_id)
+    return 0
+
+
+def command_scheduler_list(args: argparse.Namespace) -> int:
+    store = open_session_store(Path(args.session_db).expanduser() if args.session_db else default_session_db())
+    try:
+        jobs = store.list_jobs(status=args.status, limit=args.limit)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({"jobs": jobs}, indent=2))
+        return 0
+    if not jobs:
+        print("No scheduler jobs found.")
+        return 0
+    for job in jobs:
+        print(f"{job['id']}: {job['status']} {job['kind']} run_after={job.get('run_after') or 'now'}")
+    return 0
+
+
+def command_scheduler_tick(args: argparse.Namespace) -> int:
+    store = open_session_store(Path(args.session_db).expanduser() if args.session_db else default_session_db())
+    try:
+        scheduler = Scheduler.with_defaults(store)
+        results = scheduler.tick(cwd=Path.cwd(), now=args.now, limit=args.limit)
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({"results": [result.__dict__ for result in results]}, indent=2))
+        return 0
+    if not results:
+        print("No due scheduler jobs.")
+        return 0
+    for result in results:
+        detail = f": {result.error}" if result.error else ""
+        print(f"{result.job_id}: {result.status} - {result.summary}{detail}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hipson", description="Hipson Codex-native local dev workflow tool")
     parser.add_argument("--version", action="version", version=f"hipson {__version__}")
@@ -236,6 +390,20 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
 
+    chat = subparsers.add_parser("chat", help="Run the Hipson runtime chat; provider mode fails closed by default")
+    chat.add_argument("-q", "--query", help="Run one non-interactive request")
+    chat.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
+    chat.add_argument("--session-id", help="Continue an existing runtime session")
+    chat.add_argument(
+        "--fake",
+        "--offline",
+        dest="fake",
+        action="store_true",
+        help="Use explicit fake/offline provider mode for tests and demos",
+    )
+    chat.add_argument("--fake-response", help="Deterministic fake provider response for --fake mode")
+    chat.set_defaults(func=command_chat)
+
     init = subparsers.add_parser("init", help="Create docs/hipson-progress.md in a project")
     init.add_argument("project", help="Project directory")
     init.add_argument("--force", action="store_true", help="Overwrite existing progress file")
@@ -248,6 +416,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     skill = subparsers.add_parser("skill", help="Skill commands")
     skill_sub = skill.add_subparsers(dest="skill_command", required=True)
+    skill_list = skill_sub.add_parser("list", help="List skill metadata")
+    skill_list.add_argument("--root", default=str(PACKAGE_ROOT))
+    skill_list.add_argument("--query", help="Filter skills by name, description, or path")
+    skill_list.add_argument("--json", action="store_true", help="Print machine-readable skill metadata")
+    skill_list.set_defaults(func=command_skill_list)
+    skill_view = skill_sub.add_parser("view", help="View one bounded skill as reference data")
+    skill_view.add_argument("name", help="Skill name")
+    skill_view.add_argument("--root", default=str(PACKAGE_ROOT))
+    skill_view.add_argument("--max-chars", type=int, default=4000)
+    skill_view.add_argument("--json", action="store_true", help="Print machine-readable skill content")
+    skill_view.set_defaults(func=command_skill_view)
+    skill_use = skill_sub.add_parser("use", help="Prepare one bounded skill reference payload")
+    skill_use.add_argument("name", help="Skill name")
+    skill_use.add_argument("--root", default=str(PACKAGE_ROOT))
+    skill_use.add_argument("--max-chars", type=int, default=4000)
+    skill_use.add_argument("--json", action="store_true", help="Print machine-readable runtime reference payload")
+    skill_use.set_defaults(func=command_skill_use)
     validate = skill_sub.add_parser("validate", help="Validate Codex SKILL.md files")
     validate.add_argument("--root", default=str(PACKAGE_ROOT))
     validate.set_defaults(func=command_skill_validate)
@@ -333,6 +518,26 @@ def build_parser() -> argparse.ArgumentParser:
     memory_list.add_argument("--scope")
     memory_list.add_argument("--limit", type=int, default=20)
     memory_list.set_defaults(func=command_memory, memory_func=memory.command_list)
+
+    scheduler_parser = subparsers.add_parser("scheduler", help="Manage opt-in local scheduler jobs")
+    scheduler_parser.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
+    scheduler_sub = scheduler_parser.add_subparsers(dest="scheduler_command", required=True)
+    scheduler_create = scheduler_sub.add_parser("create", help="Create a due tool job")
+    scheduler_create.add_argument("--tool", required=True, help="Registered tool name")
+    scheduler_create.add_argument("--input", required=True, help="Tool input JSON object")
+    scheduler_create.add_argument("--run-after", help="UTC timestamp; defaults to due now")
+    scheduler_create.add_argument("--approved", action="store_true", help="Mark non-read job as explicitly approved")
+    scheduler_create.set_defaults(func=command_scheduler_create)
+    scheduler_list = scheduler_sub.add_parser("list", help="List scheduler jobs")
+    scheduler_list.add_argument("--status", help="Filter by status")
+    scheduler_list.add_argument("--limit", type=int, default=20)
+    scheduler_list.add_argument("--json", action="store_true", help="Print machine-readable jobs")
+    scheduler_list.set_defaults(func=command_scheduler_list)
+    scheduler_tick = scheduler_sub.add_parser("tick", help="Run due scheduler jobs once")
+    scheduler_tick.add_argument("--now", help="Override current UTC timestamp for tests")
+    scheduler_tick.add_argument("--limit", type=int, default=20)
+    scheduler_tick.add_argument("--json", action="store_true", help="Print machine-readable tick results")
+    scheduler_tick.set_defaults(func=command_scheduler_tick)
 
     return parser
 
