@@ -141,6 +141,20 @@ class SessionStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def session_counts(self, session_id: str) -> dict[str, int]:
+        message_count = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM messages WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        tool_call_count = self.connection.execute(
+            "SELECT COUNT(*) AS count FROM tool_calls WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return {
+            "messages": int(message_count["count"]) if message_count else 0,
+            "tool_calls": int(tool_call_count["count"]) if tool_call_count else 0,
+        }
+
     def add_message(
         self,
         session_id: str,
@@ -172,6 +186,31 @@ class SessionStore:
             (session_id, limit),
         ).fetchall()
         return [_message_row(row) for row in rows]
+
+    def search_messages(self, query: str, limit: int = 20) -> list[dict[str, object]]:
+        clean_query = redact_text(query).strip()
+        if not clean_query:
+            return []
+        pattern = _like_pattern(clean_query)
+        rows = self.connection.execute(
+            """
+            SELECT
+              messages.id AS message_id,
+              messages.session_id AS session_id,
+              messages.role AS role,
+              messages.content AS content,
+              messages.created_at AS created_at,
+              sessions.title AS session_title
+            FROM messages
+            JOIN sessions ON sessions.id = messages.session_id
+            WHERE messages.content LIKE ? ESCAPE '\\'
+               OR sessions.title LIKE ? ESCAPE '\\'
+            ORDER BY messages.created_at DESC
+            LIMIT ?
+            """,
+            (pattern, pattern, limit),
+        ).fetchall()
+        return [_search_message_row(row) for row in rows]
 
     def add_tool_call(
         self,
@@ -404,6 +443,11 @@ def _json_loads_object(value: str) -> dict[str, object]:
     return data if isinstance(data, dict) else {}
 
 
+def _like_pattern(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 def _message_row(row: sqlite3.Row) -> dict[str, object]:
     data = dict(row)
     data["metadata"] = _json_loads_object(str(data.pop("metadata_json")))
@@ -415,6 +459,10 @@ def _tool_call_row(row: sqlite3.Row) -> dict[str, object]:
     data["input"] = _json_loads_object(str(data.pop("input_json")))
     data["output"] = _json_loads_object(str(data.pop("output_json")))
     return data
+
+
+def _search_message_row(row: sqlite3.Row) -> dict[str, object]:
+    return dict(row)
 
 
 def _job_row(row: sqlite3.Row) -> dict[str, object]:

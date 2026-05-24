@@ -12,6 +12,10 @@ The provider/sidecar prompt hardening pass addressed the audit findings for remo
 
 The focused fault-injection passes added regression tests for approval fail-closed behavior, path-policy blocking before handler execution, registry primitive/composite type strictness and JSONDecodeError containment, provider URL/redaction helper behavior, runtime provider request/tool descriptor shape, capped rejected-tool summaries, untrusted-data delimiter escaping in prompts and sidecar reports, direct session-store bounding/redaction, scheduler dangerous-job refusal, MCP approval-required read-tool refusal, precise sandbox generated write roots, symlink escape rejection, and absence of `shell.run` in the default runtime registry. `pyproject.toml` now points mutmut at runtime-critical modules. Time-boxed mutmut runs did not complete, and partial results still need survivor triage.
 
+## Status Update — Runtime Observability And Learning MVP
+
+The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, fallback message search, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-provider chat support, `hipson tool run`, FTS population, durable approval records, and scheduler/MCP expansion remain deferred.
+
 ## P0 — Must Fix Before Using Runtime
 
 ### [P0] Make `hipson chat` honest and fail-closed outside explicit fake mode
@@ -116,7 +120,8 @@ The focused fault-injection passes added regression tests for approval fail-clos
 
 ### [P2] Add read-only session and tool CLI commands
 - Severity: P2
-- Evidence: Spec lists `hipson session list` and `hipson tool list` as next commands, but CLI smoke shows both are invalid choices.
+- Status: Fixed by Runtime Observability + Approval-Gated Learning MVP; keep CLI and temp-DB regression tests.
+- Evidence: Prior CLI smoke showed `hipson session list` and `hipson tool list` as invalid choices. Current CLI smoke shows both command groups are available.
 - Affected files: `src/hipson/cli.py`, `src/hipson/session.py`, `src/hipson/tools/registry.py`, tests
 - Why it matters: Auditing runtime state requires first-class read-only inspection commands.
 - Recommended fix: Add `session list/show/search` and `tool list` as read-only commands after persistence and registry contracts are hardened.
@@ -124,6 +129,18 @@ The focused fault-injection passes added regression tests for approval fail-clos
 - Acceptance criteria: Users can inspect sessions/tools without provider credentials or network.
 - Estimated PR size: Medium
 - Dependencies: Session schema and tool contract stability.
+
+### [P2] Add approval-gated learning CLI from runtime sessions
+- Severity: P2
+- Status: Fixed for memory proposals by Runtime Observability + Approval-Gated Learning MVP; skill proposals remain reference-only drafts.
+- Evidence: `src/hipson/learning.py` could propose candidates, but no CLI exposed proposal review or explicit apply workflow.
+- Affected files: `src/hipson/cli.py`, `src/hipson/learning.py`, `src/hipson/memory.py`, `tests/test_learning.py`
+- Why it matters: Hipson could not close the local learning loop from persisted sessions without custom Python.
+- Recommended fix: Add `hipson learn propose` and explicit `hipson learn apply-memory`; never auto-persist model-derived learning.
+- Tests to add: Proposal-only behavior, redaction, deterministic proposal IDs, explicit memory apply with provenance, non-memory proposal refusal.
+- Acceptance criteria: Users can propose and explicitly apply one redacted memory note from a session without provider credentials or network.
+- Estimated PR size: Medium
+- Dependencies: Session store and JSONL memory store.
 
 ### [P2] Treat scheduler and MCP bridge as experimental until foundations are stable
 - Severity: P2

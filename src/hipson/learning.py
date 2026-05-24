@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import uuid
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -53,7 +54,7 @@ def propose_from_session(store: SessionStore, session_id: str, *, max_summary_ch
     memory = _memory_proposal(session, messages, max_summary_chars=max_summary_chars)
     if memory is not None:
         proposals.append(memory)
-    skill = _skill_reference_proposal(messages, tool_calls)
+    skill = _skill_reference_proposal(str(session["id"]), messages, tool_calls)
     if skill is not None:
         proposals.append(skill)
     return proposals
@@ -84,7 +85,7 @@ def _memory_proposal(
         "confidence": 0.6,
     }
     return LearningProposal(
-        id=uuid.uuid4().hex,
+        id=_proposal_id(str(session["id"]), "memory", summary, payload, source_refs),
         kind="memory",
         summary=summary,
         payload=payload,
@@ -94,6 +95,7 @@ def _memory_proposal(
 
 
 def _skill_reference_proposal(
+    session_id: str,
     messages: list[dict[str, object]],
     tool_calls: list[dict[str, object]],
 ) -> LearningProposal | None:
@@ -110,7 +112,7 @@ def _skill_reference_proposal(
         "reason": summary,
     }
     return LearningProposal(
-        id=uuid.uuid4().hex,
+        id=_proposal_id(session_id, "skill_reference", summary, payload, source_refs),
         kind="skill_reference",
         summary=summary,
         payload=payload,
@@ -159,3 +161,24 @@ def _cap(text: str, max_chars: int) -> str:
         return text
     marker = f"\n[truncated to {max_chars} chars]"
     return text[: max(0, max_chars - len(marker))].rstrip() + marker
+
+
+def _proposal_id(
+    session_id: str,
+    kind: ProposalKind,
+    summary: str,
+    payload: dict[str, object],
+    source_refs: list[str],
+) -> str:
+    encoded = json.dumps(
+        {
+            "session_id": session_id,
+            "kind": kind,
+            "summary": summary,
+            "payload": payload,
+            "source_refs": source_refs,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"learn_{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:16]}"

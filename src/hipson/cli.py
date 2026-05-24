@@ -7,8 +7,9 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import cast
 
-from hipson import __version__, agents, memory
+from hipson import __version__, agents, learning, memory
 from hipson import project as project_mod
 from hipson.assets import runtime_asset
 from hipson.codex_install import format_install_plan, install_codex
@@ -24,13 +25,51 @@ from hipson.project import (
     write_output,
 )
 from hipson.providers import FakeProvider
+from hipson.redaction import is_sensitive_path, redact_text
 from hipson.router import format_text_route, route_task
 from hipson.runtime import NO_CHAT_PROVIDER_MESSAGE, HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
-from hipson.session import open_session_store
+from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
+from hipson.tools import ToolRegistryError, ToolSpec, build_default_registry
 
 PACKAGE_ROOT = package_root()
+MAX_CLI_FIELD_CHARS = 220
+MAX_CLI_CONTENT_CHARS = 1200
+MAX_CLI_JSON_CHARS = 4000
+
+
+def _bounded_cli(value: object, *, limit: int = MAX_CLI_FIELD_CHARS) -> str:
+    text = redact_text(str(value))
+    if len(text) <= limit:
+        return text
+    marker = f"... [truncated to {limit} chars]"
+    return text[: max(0, limit - len(marker))].rstrip() + marker
+
+
+def _bounded_json(value: object, *, limit: int = MAX_CLI_JSON_CHARS) -> str:
+    text = redact_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
+    if len(text) <= limit:
+        return text
+    marker = f"\n... [truncated to {limit} chars]"
+    return text[: max(0, limit - len(marker))].rstrip() + marker
+
+
+def _session_db_path(args: argparse.Namespace) -> Path:
+    return Path(args.session_db).expanduser() if getattr(args, "session_db", None) else default_session_db()
+
+
+def _open_existing_session_store(args: argparse.Namespace) -> tuple[Path, SessionStore | None]:
+    db_path = _session_db_path(args)
+    if not db_path.exists():
+        return db_path, None
+    return db_path, open_session_store(db_path)
+
+
+def _positive_limit(value: int, *, default: int = 20, maximum: int = 100) -> int:
+    if value <= 0:
+        return default
+    return min(value, maximum)
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -305,6 +344,312 @@ def command_memory(args: argparse.Namespace) -> int:
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
 
 
+def command_session_list(args: argparse.Namespace) -> int:
+    db_path, store = _open_existing_session_store(args)
+    if store is None:
+        if args.json:
+            print(json.dumps({"session_db": str(db_path), "sessions": []}, indent=2))
+        else:
+            print("No sessions found.")
+        return 0
+    try:
+        sessions = [_session_summary(store, session) for session in store.list_sessions(limit=_positive_limit(args.limit))]
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({"session_db": str(db_path), "sessions": sessions}, indent=2))
+        return 0
+    if not sessions:
+        print("No sessions found.")
+        return 0
+    for session in sessions:
+        print(
+            f"{session['id']} updated={session['updated_at']} "
+            f"messages={session['message_count']} tools={session['tool_call_count']} "
+            f"title={session['title']} cwd={session['cwd']}"
+        )
+    return 0
+
+
+def command_session_show(args: argparse.Namespace) -> int:
+    db_path, store = _open_existing_session_store(args)
+    if store is None:
+        print(f"Session DB does not exist: {db_path}", file=sys.stderr)
+        return 1
+    try:
+        session = store.get_session(args.session_id)
+        if session is None:
+            print(f"Session does not exist: {args.session_id}", file=sys.stderr)
+            return 1
+        messages = store.list_messages(args.session_id, limit=_positive_limit(args.message_limit, maximum=200))
+        tool_calls = store.list_tool_calls(args.session_id)[: _positive_limit(args.tool_limit, maximum=200)]
+        payload = {
+            "session": _session_summary(store, session),
+            "messages": [_message_summary(message) for message in messages],
+            "tool_calls": [_tool_call_summary(tool_call) for tool_call in tool_calls],
+        }
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    session_payload = cast(dict[str, object], payload["session"])
+    print(f"session: {session_payload['id']}")
+    print(f"title: {session_payload['title']}")
+    print(f"cwd: {session_payload['cwd']}")
+    print(f"created_at: {session_payload['created_at']}")
+    print(f"updated_at: {session_payload['updated_at']}")
+    print("messages:")
+    for message in cast(list[dict[str, object]], payload["messages"]):
+        print(f"- {message['role']} {message['id']} {message['created_at']}")
+        print(f"  {_bounded_cli(message['content'], limit=MAX_CLI_CONTENT_CHARS)}")
+    print("tool_calls:")
+    for tool_call in cast(list[dict[str, object]], payload["tool_calls"]):
+        print(
+            f"- {tool_call['status']} {tool_call['tool_name']} "
+            f"risk={tool_call['risk_level']} approval={tool_call['approval_status']}"
+        )
+        if tool_call["error"]:
+            print(f"  error: {_bounded_cli(tool_call['error'], limit=MAX_CLI_CONTENT_CHARS)}")
+        print(f"  output: {_bounded_json(tool_call['output'])}")
+    return 0
+
+
+def command_session_search(args: argparse.Namespace) -> int:
+    db_path, store = _open_existing_session_store(args)
+    if store is None:
+        if args.json:
+            print(json.dumps({"session_db": str(db_path), "results": []}, indent=2))
+        else:
+            print("No session search results.")
+        return 0
+    try:
+        results = [_search_summary(result) for result in store.search_messages(args.query, limit=_positive_limit(args.limit))]
+    finally:
+        store.close()
+    if args.json:
+        print(json.dumps({"session_db": str(db_path), "results": results}, indent=2, ensure_ascii=False))
+        return 0
+    if not results:
+        print("No session search results.")
+        return 0
+    for result in results:
+        print(
+            f"{result['session_id']} message={result['message_id']} "
+            f"role={result['role']} created_at={result['created_at']}"
+        )
+        print(f"  {result['snippet']}")
+    return 0
+
+
+def command_tool_list(args: argparse.Namespace) -> int:
+    registry = build_default_registry()
+    tools = [_tool_spec_payload(spec) for spec in registry.list()]
+    if args.json:
+        print(json.dumps({"tools": tools}, indent=2, ensure_ascii=False))
+        return 0
+    for tool in tools:
+        print(
+            f"{tool['name']} risk={tool['risk_level']} "
+            f"approval_required={tool['approval_required']} - {tool['description']}"
+        )
+    return 0
+
+
+def command_tool_show(args: argparse.Namespace) -> int:
+    registry = build_default_registry()
+    try:
+        spec = registry.get(args.name)
+    except ToolRegistryError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    payload = _tool_spec_payload(spec)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"name: {payload['name']}")
+    print(f"description: {payload['description']}")
+    print(f"risk_level: {payload['risk_level']}")
+    print(f"approval_required: {payload['approval_required']}")
+    print("input_schema:")
+    print(_bounded_json(payload["input_schema"]))
+    print("output_contract:")
+    print(_bounded_json(payload["output_contract"]))
+    print("path_policies:")
+    print(_bounded_json(payload["path_policies"]))
+    return 0
+
+
+def command_learn_propose(args: argparse.Namespace) -> int:
+    db_path, store = _open_existing_session_store(args)
+    if store is None:
+        print(f"Session DB does not exist: {db_path}", file=sys.stderr)
+        return 1
+    try:
+        proposals = learning.propose_from_session(
+            store,
+            args.session_id,
+            max_summary_chars=_positive_limit(args.max_summary_chars, default=500, maximum=2000),
+        )
+    except learning.LearningError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+    records = [proposal.to_dict() for proposal in proposals]
+    if args.json:
+        print(json.dumps({"session_id": args.session_id, "proposals": records}, indent=2, ensure_ascii=False))
+        return 0
+    if not records:
+        print("No learning proposals found.")
+        return 0
+    print(f"Learning proposals for session {args.session_id}:")
+    for proposal in records:
+        print(
+            f"- {proposal['id']} kind={proposal['kind']} "
+            f"approval={proposal['approval_status']} confidence={proposal['confidence']}"
+        )
+        print(f"  {_bounded_cli(proposal['summary'], limit=MAX_CLI_CONTENT_CHARS)}")
+    print("Use `hipson learn apply-memory --session-id ... --proposal-id ... --memory-dir ...` to apply a memory proposal.")
+    return 0
+
+
+def command_learn_apply_memory(args: argparse.Namespace) -> int:
+    db_path, store = _open_existing_session_store(args)
+    if store is None:
+        print(f"Session DB does not exist: {db_path}", file=sys.stderr)
+        return 1
+    try:
+        proposals = learning.propose_from_session(store, args.session_id)
+    except learning.LearningError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+
+    proposal = next((candidate for candidate in proposals if candidate.id == args.proposal_id), None)
+    if proposal is None:
+        print(f"Learning proposal does not exist: {args.proposal_id}", file=sys.stderr)
+        return 1
+    if proposal.kind != "memory":
+        print(f"Proposal {args.proposal_id} is {proposal.kind}; only memory proposals can be applied.", file=sys.stderr)
+        return 1
+
+    memory_root = Path(args.memory_dir).expanduser()
+    if is_sensitive_path(memory_root):
+        print(f"Refusing to write memory under sensitive path: {memory_root}", file=sys.stderr)
+        return 1
+    for source_ref in proposal.source_refs:
+        if is_sensitive_path(source_ref) or source_ref != redact_text(source_ref):
+            print(f"Refusing to store sensitive source reference: {source_ref}", file=sys.stderr)
+            return 1
+
+    payload = proposal.payload
+    raw_tags = payload.get("tags", proposal.tags)
+    tags = [str(tag) for tag in raw_tags] if isinstance(raw_tags, list) else proposal.tags
+    raw_confidence = payload.get("confidence", proposal.confidence)
+    confidence = float(raw_confidence) if isinstance(raw_confidence, (str, int, float)) else proposal.confidence
+    try:
+        note = memory.add_note(
+            root=memory_root,
+            scope=str(payload.get("scope", "session")),
+            repo=str(payload.get("repo", "")),
+            kind=str(payload.get("kind", "handoff")),
+            summary=_bounded_cli(payload.get("summary", proposal.summary), limit=MAX_CLI_CONTENT_CHARS),
+            tags=tags,
+            sources=proposal.source_refs,
+            confidence=confidence,
+        )
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+
+    result = {
+        "status": "applied",
+        "proposal_id": proposal.id,
+        "note_id": note.id,
+        "memory_dir": str(memory_root.resolve()),
+        "source_refs": proposal.source_refs,
+    }
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Applied memory proposal {proposal.id} as note {note.id}")
+        print(f"memory_dir: {result['memory_dir']}")
+        print(f"sources: {', '.join(proposal.source_refs)}")
+    return 0
+
+
+def _session_summary(store: SessionStore, session: dict[str, object]) -> dict[str, object]:
+    counts = store.session_counts(str(session["id"]))
+    return {
+        "id": str(session["id"]),
+        "title": _bounded_cli(session.get("title", "")),
+        "cwd": _bounded_cli(session.get("cwd", "")),
+        "repo_root": _bounded_cli(session.get("repo_root", "")),
+        "status": str(session.get("status", "")),
+        "created_at": str(session.get("created_at", "")),
+        "updated_at": str(session.get("updated_at", "")),
+        "message_count": counts["messages"],
+        "tool_call_count": counts["tool_calls"],
+    }
+
+
+def _message_summary(message: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(message.get("id", "")),
+        "role": str(message.get("role", "")),
+        "content": _bounded_cli(message.get("content", ""), limit=MAX_CLI_CONTENT_CHARS),
+        "metadata": message.get("metadata", {}),
+        "created_at": str(message.get("created_at", "")),
+    }
+
+
+def _tool_call_summary(tool_call: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(tool_call.get("id", "")),
+        "tool_name": _bounded_cli(tool_call.get("tool_name", "")),
+        "input": tool_call.get("input", {}),
+        "output": tool_call.get("output", {}),
+        "risk_level": str(tool_call.get("risk_level", "")),
+        "approval_status": str(tool_call.get("approval_status", "")),
+        "status": str(tool_call.get("status", "")),
+        "error": _bounded_cli(tool_call.get("error", ""), limit=MAX_CLI_CONTENT_CHARS),
+        "started_at": str(tool_call.get("started_at", "")),
+        "completed_at": str(tool_call.get("completed_at", "")),
+    }
+
+
+def _search_summary(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "session_id": str(row.get("session_id", "")),
+        "session_title": _bounded_cli(row.get("session_title", "")),
+        "message_id": str(row.get("message_id", "")),
+        "role": str(row.get("role", "")),
+        "created_at": str(row.get("created_at", "")),
+        "snippet": _bounded_cli(row.get("content", ""), limit=MAX_CLI_CONTENT_CHARS),
+    }
+
+
+def _tool_spec_payload(spec: ToolSpec) -> dict[str, object]:
+    return {
+        "name": spec.name,
+        "description": spec.description,
+        "input_schema": spec.input_schema,
+        "output_contract": spec.output_contract,
+        "risk_level": spec.risk_level,
+        "approval_required": spec.approval_required,
+        "path_policies": [
+            {
+                "field": policy.field,
+                "mode": policy.mode,
+                "base_field": policy.base_field,
+            }
+            for policy in spec.path_policies
+        ],
+    }
+
+
 def command_scheduler_create(args: argparse.Namespace) -> int:
     try:
         input_data = parse_json_object(args.input)
@@ -518,6 +863,75 @@ def build_parser() -> argparse.ArgumentParser:
     memory_list.add_argument("--scope")
     memory_list.add_argument("--limit", type=int, default=20)
     memory_list.set_defaults(func=command_memory, memory_func=memory.command_list)
+
+    session_parser = subparsers.add_parser("session", help="Inspect local runtime sessions")
+    session_parser.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
+    session_sub = session_parser.add_subparsers(dest="session_command", required=True)
+    session_list = session_sub.add_parser("list", help="List local runtime sessions")
+    session_list.add_argument(
+        "--session-db",
+        default=argparse.SUPPRESS,
+        help="SQLite session DB path; defaults to Hipson config runtime.sqlite",
+    )
+    session_list.add_argument("--limit", type=int, default=20)
+    session_list.add_argument("--json", action="store_true", help="Print machine-readable sessions")
+    session_list.set_defaults(func=command_session_list)
+    session_show = session_sub.add_parser("show", help="Show one redacted runtime session")
+    session_show.add_argument("session_id")
+    session_show.add_argument(
+        "--session-db",
+        default=argparse.SUPPRESS,
+        help="SQLite session DB path; defaults to Hipson config runtime.sqlite",
+    )
+    session_show.add_argument("--message-limit", type=int, default=50)
+    session_show.add_argument("--tool-limit", type=int, default=50)
+    session_show.add_argument("--json", action="store_true", help="Print machine-readable session details")
+    session_show.set_defaults(func=command_session_show)
+    session_search = session_sub.add_parser("search", help="Search redacted runtime session messages")
+    session_search.add_argument("query")
+    session_search.add_argument(
+        "--session-db",
+        default=argparse.SUPPRESS,
+        help="SQLite session DB path; defaults to Hipson config runtime.sqlite",
+    )
+    session_search.add_argument("--limit", type=int, default=20)
+    session_search.add_argument("--json", action="store_true", help="Print machine-readable search results")
+    session_search.set_defaults(func=command_session_search)
+
+    tool_parser = subparsers.add_parser("tool", help="Inspect runtime tool registry metadata")
+    tool_sub = tool_parser.add_subparsers(dest="tool_command", required=True)
+    tool_list = tool_sub.add_parser("list", help="List registered runtime tools")
+    tool_list.add_argument("--json", action="store_true", help="Print machine-readable tools")
+    tool_list.set_defaults(func=command_tool_list)
+    tool_show = tool_sub.add_parser("show", help="Show one registered runtime tool")
+    tool_show.add_argument("name")
+    tool_show.add_argument("--json", action="store_true", help="Print machine-readable tool metadata")
+    tool_show.set_defaults(func=command_tool_show)
+
+    learn_parser = subparsers.add_parser("learn", help="Propose and explicitly apply approval-gated runtime learning")
+    learn_parser.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
+    learn_sub = learn_parser.add_subparsers(dest="learn_command", required=True)
+    learn_propose = learn_sub.add_parser("propose", help="Propose memory/skill candidates from a session")
+    learn_propose.add_argument("--session-id", required=True)
+    learn_propose.add_argument(
+        "--session-db",
+        default=argparse.SUPPRESS,
+        help="SQLite session DB path; defaults to Hipson config runtime.sqlite",
+    )
+    learn_propose.add_argument("--max-summary-chars", type=int, default=500)
+    learn_propose.add_argument("--json", action="store_true", help="Print machine-readable proposals")
+    learn_propose.set_defaults(func=command_learn_propose)
+    learn_apply = learn_sub.add_parser("apply-memory", help="Explicitly persist one approved memory proposal")
+    learn_apply.add_argument("--session-id", required=True)
+    learn_apply.add_argument("--proposal-id", required=True)
+    learn_apply.add_argument("--memory-dir", required=True)
+    learn_apply.add_argument(
+        "--session-db",
+        default=argparse.SUPPRESS,
+        help="SQLite session DB path; defaults to Hipson config runtime.sqlite",
+    )
+    learn_apply.add_argument("--json", action="store_true", help="Print machine-readable apply result")
+    learn_apply.set_defaults(func=command_learn_apply_memory)
 
     scheduler_parser = subparsers.add_parser("scheduler", help="Manage opt-in local scheduler jobs")
     scheduler_parser.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
