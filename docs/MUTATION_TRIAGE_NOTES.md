@@ -27,12 +27,19 @@ Latest local provider-free production readiness repair verification:
 - `uv run python scripts/run_tests.py`: 216/216 passed.
 - `uv run ruff check .`, `uv run mypy src/hipson`, configured Bandit, compileall, doctor, and skill validation passed.
 
-Mutmut was not rerun in this 10-minute stabilization pass. Reason: the previous time-boxed focused run already exited 124 after partial progress, and this pass is intended to freeze docs and prepare the next package rather than spend the window generating another partial set.
+Latest Hermes-style real-agent completion verification:
+
+- `uv run pytest -q`: 223 passed.
+- `uv run python scripts/run_tests.py`: 223/223 passed.
+- `uv run ruff check .`, `uv run mypy src/hipson`, configured Bandit, compileall, doctor, and skill validation passed.
+- Real-provider adapter tests use stub transports only; no live provider credentials or network checks were used.
+
+Mutmut reconnaissance was rerun with `timeout 300s uv run mutmut run || true`. It did not complete the configured 2,219-mutant set within the timeout. Last observed progress was 1,965/2,219 mutants with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still reported survivors, timeouts, and not-checked mutants in safety-adjacent modules.
 
 Recommended follow-up command:
 
 ```bash
-timeout 180s uv run mutmut run || true
+timeout 300s uv run mutmut run || true
 uv run mutmut results || true
 ```
 
@@ -54,12 +61,16 @@ Implemented CLI:
 
 Still not claimed:
 
-- Real-provider readiness.
 - Release readiness.
-- FTS-backed search readiness.
 - Write/external/exec/dangerous `hipson tool run`.
-- Durable approval records.
 - Completed mutation survivor triage.
+- Live-provider smoke readiness.
+
+Newly implemented after the original stabilization note:
+
+- Explicit `hipson chat --provider openai-compatible` provider mode.
+- Durable `approval_records` persisted for runtime, scheduler, and manual tool-run decisions.
+- Session search across messages, tool-call summaries, and memory summaries with FTS/fallback behavior.
 
 ## 3. High-Risk Survivor Categories
 
@@ -91,11 +102,12 @@ Still not claimed:
 
 ## 5. Observed Survivors
 
-Known prior signal from `docs/AUDIT_CONTEXT_FOR_HIPSON.md`:
+Current signal from `docs/AUDIT_CONTEXT_FOR_HIPSON.md`:
 
-- A previous configured mutmut run timed out with exit 124.
-- Last observed progress was roughly 1,597/2,219 mutants.
-- Partial results still included survivors or unchecked mutants in approval, sandbox, registry, provider, prompt, and runtime helpers.
+- A configured mutmut run did not complete within `timeout 300s`.
+- Last observed progress was 1,965/2,219 mutants.
+- Partial results included 192 survivors and 130 timeouts.
+- Results still include survivors, timeouts, or not-checked mutants in approval, sandbox, registry, provider/agents, prompt, redaction, router, and runtime helpers.
 
 No new survivor list was generated during this stabilization pass.
 

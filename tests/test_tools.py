@@ -381,6 +381,7 @@ def test_tool_cli_run_can_persist_auditable_session_record(tmp_path: Path):
     try:
         sessions = store.list_sessions()
         tool_calls = store.list_tool_calls(payload["session_id"])
+        approvals = store.list_approval_records(session_id=payload["session_id"])
     finally:
         store.close()
 
@@ -388,6 +389,9 @@ def test_tool_cli_run_can_persist_auditable_session_record(tmp_path: Path):
     assert tool_calls[0]["tool_name"] == "repo.changed_files"
     assert tool_calls[0]["status"] == "completed"
     assert tool_calls[0]["approval_status"] == "approved"
+    assert approvals[0]["source"] == "cli.tool.run"
+    assert approvals[0]["tool_call_id"] == tool_calls[0]["id"]
+    assert approvals[0]["decision"] == "approved"
 
 
 def test_default_tool_registry_exposes_initial_mvp_tools():

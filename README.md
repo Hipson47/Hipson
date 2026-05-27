@@ -14,7 +14,8 @@ the source of truth.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
-- **Runtime session observability** for inspecting SQLite-backed fake/offline chat sessions.
+- **Runtime session observability** for inspecting SQLite-backed chat sessions.
+- **Explicit OpenAI-compatible runtime provider adapter** for configured real-provider chat.
 - **Approval-gated learning proposals** that can be explicitly applied to local memory.
 - **Tool registry observability** for reviewing tool risk levels, contracts, and path policies.
 - **MoE-like sidecar routing** from explicit agent metadata in `config/agents.json`.
@@ -64,8 +65,9 @@ uv run hipson memory add --scope repo --repo Hipson --kind decision --summary "K
 uv run hipson memory search "sidecar routing"
 ```
 
-`.env` is optional and only needed for provider-backed sidecars. Core commands do
-not require API keys or cloud services.
+`.env` is optional and only needed for provider-backed sidecars or explicit
+`hipson chat --provider openai-compatible` usage. Core local commands do not
+require API keys or cloud services.
 
 ## Common Commands
 
@@ -87,6 +89,7 @@ hipson memory list
 hipson chat -q "scan this repo"
 hipson chat --fake -q "offline runtime smoke"
 hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"
+hipson chat --provider openai-compatible --model openai/gpt-4o-mini -q "scan this repo"
 hipson session list
 hipson session show <session-id>
 hipson session search "runtime hardening"
@@ -125,23 +128,32 @@ key.
 ## Runtime Preview
 
 The persistent runtime is local and provider-free by default. `hipson chat`
-fails closed unless a real provider adapter is intentionally added later or the
-explicit fake/offline path is selected with `--fake`:
+fails closed unless an explicit provider is configured or the fake/offline path
+is selected with `--fake`:
 
 ```bash
 hipson chat -q "scan this repo"
 hipson chat --fake -q "offline runtime smoke"
 hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check changed files"
+hipson chat --provider openai-compatible --model openai/gpt-4o-mini -q "scan this repo"
 ```
 
 The fake tool-call form is an explicit offline demo path. It exercises the
 runtime tool-call boundary through the same registry, approval, path-policy,
 output-contract, redaction, and session-persistence checks used by injected
-runtime tests. It is not a real provider-backed agent loop.
+runtime tests.
+
+The OpenAI-compatible provider adapter is explicit and fail-closed. It uses
+`OPENROUTER_API_KEY` and `https://openrouter.ai/api/v1` by default, accepts
+`--api-key-env`, `--provider-url`, `--model`, and `--provider-timeout`, rejects
+remote `http://` provider URLs, and allows local HTTP only with
+`--allow-local-provider-http`. Unit tests use stub transports; live provider
+smoke checks are manual and should not be required for CI.
 
 Runtime sessions are stored in SQLite under Hipson home by default, with
-`--session-db` available for tests and local debugging. Observability commands
-are read-only:
+`--session-db` available for tests and local debugging. Messages, tool calls,
+approval records, and approved memory summaries are redacted and bounded before
+persistence. Observability commands are read-only:
 
 ```bash
 hipson session list --session-db ~/.config/hipson/runtime.sqlite
@@ -154,7 +166,8 @@ hipson tool run repo.changed_files '{"path":"."}' --json
 
 Manual tool execution is intentionally narrow: `tool run` only runs read-risk
 tools that do not require approval. Write, external, exec, and dangerous tools
-fail closed until a durable approval UX exists.
+fail closed outside the runtime approval policy. Runtime, scheduler, and manual
+tool-run decisions are recorded as bounded approval records in the session DB.
 
 Learning is approval-gated. `learn propose` reads a session and prints memory or
 skill-reference candidates without writing durable memory. `learn apply-memory`
