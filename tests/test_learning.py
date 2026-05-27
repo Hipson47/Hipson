@@ -42,6 +42,39 @@ def test_learning_proposes_redacted_memory_candidate_without_persisting(tmp_path
     assert memory_rows == 0
 
 
+def test_learning_memory_candidate_summarizes_session_trajectory_and_tool_calls(tmp_path: Path):
+    secret = "sk-test-secret1234567890"
+    store = open_session_store(tmp_path / "runtime.sqlite")
+    try:
+        session_id = store.create_session(cwd=str(tmp_path), repo_root=str(tmp_path), title="Trajectory")
+        user_message = store.add_message(session_id, "user", f"Scan repo and remember {secret}")
+        assistant_message = store.add_message(session_id, "assistant", "Final answer: changed files are clean.")
+        tool_call = store.add_tool_call(
+            session_id,
+            message_id=assistant_message,
+            tool_name="repo.changed_files",
+            input_data={"path": "."},
+            output_data={"changed_files": [], "untracked_files": [], "secret": secret},
+            risk_level="read",
+            status="completed",
+        )
+
+        memory = next(proposal for proposal in propose_from_session(store, session_id) if proposal.kind == "memory")
+    finally:
+        store.close()
+
+    rendered = str(memory.to_dict())
+    assert "Scan repo" in memory.summary
+    assert "changed files are clean" in memory.summary
+    assert "repo.changed_files completed" in memory.summary
+    assert secret not in rendered
+    assert f"message:{user_message}" in memory.source_refs
+    assert f"message:{assistant_message}" in memory.source_refs
+    assert f"tool_call:{tool_call}" in memory.source_refs
+    assert memory.payload["tool_summary"]
+    assert memory.payload["confidence"] >= 0.7
+
+
 def test_learning_proposes_skill_reference_from_session_messages(tmp_path: Path):
     store = open_session_store(tmp_path / "runtime.sqlite")
     try:
