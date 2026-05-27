@@ -3,7 +3,7 @@ import io
 from pathlib import Path
 
 from hipson import cli
-from hipson.providers import FakeProvider, ProviderResponse, ProviderToolCall
+from hipson.providers import FakeProvider, OpenAICompatibleProvider, ProviderResponse, ProviderToolCall
 from hipson.runtime import HipsonRuntime, RuntimeMode
 from hipson.session import open_session_store
 from hipson.tools import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec, build_default_registry
@@ -43,6 +43,7 @@ def test_runtime_executes_one_read_tool_call_and_persists_result(tmp_path: Path)
     try:
         result = runtime.run("scan changed files", cwd=tmp_path)
         tool_calls = store.list_tool_calls(result.session_id)
+        approvals = store.list_approval_records(session_id=result.session_id)
     finally:
         store.close()
 
@@ -66,6 +67,56 @@ def test_runtime_executes_one_read_tool_call_and_persists_result(tmp_path: Path)
     assert tool_calls[0]["status"] == "completed"
     assert tool_calls[0]["risk_level"] == "read"
     assert tool_calls[0]["output"] == {"changed_files": [], "untracked_files": []}
+    assert approvals[0]["tool_call_id"] == tool_calls[0]["id"]
+    assert approvals[0]["source"] == "runtime"
+    assert approvals[0]["decision"] == "approved"
+
+
+def test_runtime_executes_openai_compatible_provider_tool_call_without_network(tmp_path: Path):
+    responses = [
+        (
+            b'{"choices":[{"message":{"content":"checking","tool_calls":[{"id":"call-1",'
+            b'"function":{"name":"repo.changed_files","arguments":"{\\"path\\":\\".\\"}"}}]},'
+            b'"finish_reason":"tool_calls"}]}'
+        ),
+        b'{"choices":[{"message":{"content":"no changes"},"finish_reason":"stop"}]}',
+    ]
+    captured_bodies: list[str] = []
+
+    def transport(_url: str, _headers: dict[str, str], body: bytes, _timeout: float) -> bytes:
+        captured_bodies.append(body.decode("utf-8"))
+        return responses.pop(0)
+
+    store = open_session_store(tmp_path / "runtime.sqlite")
+    provider = OpenAICompatibleProvider(
+        base_url="https://provider.example/v1",
+        api_key="test-provider-token",
+        transport=transport,
+    )
+    runtime = HipsonRuntime(
+        store=store,
+        provider=provider,
+        registry=build_default_registry(),
+        runtime_mode=RuntimeMode.REAL,
+        model="test-model",
+    )
+
+    try:
+        result = runtime.run("scan changed files", cwd=tmp_path)
+        tool_calls = store.list_tool_calls(result.session_id)
+        approvals = store.list_approval_records(session_id=result.session_id)
+    finally:
+        store.close()
+
+    assert result.answer == "no changes"
+    assert result.tool_iterations == 1
+    assert len(captured_bodies) == 2
+    assert '"model": "test-model"' in captured_bodies[0]
+    assert '"repo.changed_files"' in captured_bodies[0]
+    assert "repo.changed_files: completed" in captured_bodies[1]
+    assert tool_calls[0]["tool_name"] == "repo.changed_files"
+    assert tool_calls[0]["status"] == "completed"
+    assert approvals[0]["decision"] == "approved"
 
 
 def test_runtime_rejects_unknown_tool_and_persists_rejection(tmp_path: Path):
@@ -76,6 +127,7 @@ def test_runtime_rejects_unknown_tool_and_persists_rejection(tmp_path: Path):
     try:
         result = runtime.run("call missing tool", cwd=tmp_path)
         tool_calls = store.list_tool_calls(result.session_id)
+        approvals = store.list_approval_records(session_id=result.session_id)
     finally:
         store.close()
 
@@ -87,6 +139,7 @@ def test_runtime_rejects_unknown_tool_and_persists_rejection(tmp_path: Path):
     assert "Tool call rejection(s)" in result.answer
     assert "missing.tool" in result.answer
     assert "Unknown tool" in result.answer
+    assert approvals[0]["decision"] == "rejected"
 
 
 def test_runtime_rejects_invalid_tool_input_and_persists_rejection(tmp_path: Path):
@@ -479,6 +532,45 @@ def test_chat_cli_query_fails_closed_without_fake_provider(tmp_path: Path):
     assert stdout.getvalue() == ""
     assert "No chat provider is configured" in stderr.getvalue()
     assert not session_db.exists()
+
+
+def test_chat_cli_real_provider_requires_explicit_config_without_network(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "--provider",
+                "openai-compatible",
+                "--api-key-env",
+                "HIPSON_TEST_MISSING_PROVIDER_KEY",
+                "-q",
+                "hello from cli",
+                "--session-db",
+                str(session_db),
+            ]
+        )
+
+    assert exit_code == 1
+    assert stdout.getvalue() == ""
+    assert "Chat provider is not configured" in stderr.getvalue()
+    assert "HIPSON_TEST_MISSING_PROVIDER_KEY" in stderr.getvalue()
+    assert not session_db.exists()
+
+
+def test_chat_cli_fake_and_real_provider_modes_are_mutually_exclusive(tmp_path: Path):
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(["chat", "--fake", "--provider", "openai-compatible", "-q", "hello"])
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert "--fake cannot be combined with --provider" in stderr.getvalue()
 
 
 def test_chat_cli_fake_response_requires_fake_flag(tmp_path: Path):

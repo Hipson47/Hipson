@@ -76,16 +76,52 @@ class Scheduler:
             spec = self.registry.get(tool_name)
             self.registry.validate_input(tool_name, input_data)
         except ToolRegistryError as exc:
+            self._record_approval(
+                job_id,
+                tool_name=str(tool_name or "unknown"),
+                risk_level="dangerous",
+                decision="invalid_input",
+                reason=str(exc),
+            )
             return self._fail(job_id, payload, now, str(exc))
 
         approved = bool(payload.get("approved", False))
         if spec.risk_level in {"external", "exec", "dangerous"}:
+            self._record_approval(
+                job_id,
+                tool_name=spec.name,
+                risk_level=spec.risk_level,
+                decision="blocked",
+                reason=f"Scheduler does not run {spec.risk_level} jobs",
+            )
             return self._fail(job_id, payload, now, f"Scheduler does not run {spec.risk_level} jobs")
         decision = self._decision(spec, input_data, cwd=cwd, approved=approved)
         if not decision.allowed:
+            self._record_approval(
+                job_id,
+                tool_name=spec.name,
+                risk_level=spec.risk_level,
+                decision="blocked" if decision.blocked else "requires_approval",
+                reason=decision.reason,
+            )
             return self._fail(job_id, payload, now, decision.reason)
         if spec.risk_level != "read" and not approved:
+            self._record_approval(
+                job_id,
+                tool_name=spec.name,
+                risk_level=spec.risk_level,
+                decision="requires_approval",
+                reason="Non-read scheduler jobs require explicit approval",
+            )
             return self._fail(job_id, payload, now, "Non-read scheduler jobs require explicit approval")
+        self._record_approval(
+            job_id,
+            tool_name=spec.name,
+            risk_level=spec.risk_level,
+            decision="approved",
+            reason="Policy allowed scheduler tool execution",
+            approved_by="scheduler --approved" if approved else "policy",
+        )
 
         try:
             result = self.registry.run(
@@ -116,6 +152,27 @@ class Scheduler:
             last_run_at=now,
         )
         return SchedulerResult(job_id=job_id, status="failed", summary="Job failed", error=redacted_error)
+
+    def _record_approval(
+        self,
+        job_id: str,
+        *,
+        tool_name: str,
+        risk_level: str,
+        decision: str,
+        reason: str,
+        approved_by: str = "",
+    ) -> None:
+        self.store.add_approval_record(
+            job_id=job_id,
+            source="scheduler",
+            tool_name=tool_name,
+            risk_level=risk_level,
+            decision=decision,
+            reason=reason,
+            approved_by=approved_by,
+            scope="scheduler_job",
+        )
 
 
 def parse_json_object(value: str) -> dict[str, object]:

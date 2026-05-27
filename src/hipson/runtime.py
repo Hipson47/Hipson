@@ -27,7 +27,7 @@ DEFAULT_MODEL = "fake"
 DEFAULT_MAX_TOOL_ITERATIONS = 3
 NO_CHAT_PROVIDER_MESSAGE = (
     "No chat provider is configured. Use --fake for offline test mode, "
-    "or configure a real provider after runtime provider support is implemented."
+    "or use --provider openai-compatible with explicit provider configuration."
 )
 MAX_REJECTION_NOTICES = 3
 MAX_REJECTION_SUMMARY_CHARS = 240
@@ -227,6 +227,7 @@ class HipsonRuntime:
                 risk_level=spec.risk_level,
                 approval_status="blocked" if decision.blocked else "requires_approval",
                 error=decision.reason,
+                approved_by="policy",
             )
 
         try:
@@ -261,7 +262,7 @@ class HipsonRuntime:
         status = "completed" if result.ok else "failed"
         tool_name = _safe_tool_name(tool_call.name)
         summary = redact_text(_tool_result_summary(result))
-        self.store.add_tool_call(
+        tool_call_id = self.store.add_tool_call(
             session_id,
             message_id=assistant_message_id,
             tool_name=tool_name,
@@ -271,6 +272,17 @@ class HipsonRuntime:
             approval_status="approved",
             status=status,
             error=result.error,
+        )
+        self.store.add_approval_record(
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            source="runtime",
+            tool_name=tool_name,
+            risk_level=risk_level,
+            decision="approved",
+            reason="Policy allowed tool execution",
+            approved_by="policy",
+            metadata={"runtime_mode": self.runtime_mode.value, "tool_status": status},
         )
         return RuntimeToolCallRecord(name=tool_name, status=status, summary=summary)
 
@@ -283,10 +295,11 @@ class HipsonRuntime:
         risk_level: str,
         approval_status: str,
         error: str,
+        approved_by: str = "",
     ) -> RuntimeToolCallRecord:
         tool_name = _safe_tool_name(tool_call.name)
         summary = redact_text(error)
-        self.store.add_tool_call(
+        tool_call_id = self.store.add_tool_call(
             session_id,
             message_id=assistant_message_id,
             tool_name=tool_name,
@@ -296,6 +309,17 @@ class HipsonRuntime:
             approval_status=approval_status,
             status="rejected",
             error=summary,
+        )
+        self.store.add_approval_record(
+            session_id=session_id,
+            tool_call_id=tool_call_id,
+            source="runtime",
+            tool_name=tool_name,
+            risk_level=risk_level,
+            decision=approval_status,
+            reason=summary,
+            approved_by=approved_by,
+            metadata={"runtime_mode": self.runtime_mode.value, "tool_status": "rejected"},
         )
         return RuntimeToolCallRecord(name=tool_name, status="rejected", summary=summary)
 

@@ -6,7 +6,7 @@ The runtime tool boundary hardening pass addressed the audit findings for explic
 
 ## Status Update — Provider/Prompt Boundary Hardening
 
-The provider/sidecar prompt hardening pass addressed the audit findings for remote provider URL policy, redacted and bounded provider HTTP/error bodies, advisory sidecar provider output, and role-separated prompt assembly. Real-provider chat runtime support is still intentionally absent.
+The provider/sidecar prompt hardening pass addressed the audit findings for remote provider URL policy, redacted and bounded provider HTTP/error bodies, advisory sidecar provider output, and role-separated prompt assembly. The real-agent completion pass adds an explicit OpenAI-compatible primary runtime provider adapter while preserving provider-free defaults and network-free unit tests.
 
 ## Status Update — Focused Fault-Injection Hardening
 
@@ -14,11 +14,15 @@ The focused fault-injection passes added regression tests for approval fail-clos
 
 ## Status Update — Runtime Observability And Learning MVP
 
-The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, fallback message search, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-provider chat support, FTS population, durable approval records, and scheduler/MCP expansion remain deferred.
+The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-agent completion now adds provider adapter tests, durable approval records, and session search across messages/tool calls/memory summaries.
 
 ## Status Update — Local Provider-Free Production Readiness Repair
 
-The local/provider-free production readiness repair added `hipson tool run` for read-risk tools that do not require approval, an explicit `hipson chat --fake --fake-tool-call ... --fake-tool-input ...` offline demo path, bounded max-tool-iteration visibility, and trajectory-based learning proposals. Tests cover safe read-only tool execution, unsafe/invalid/path-rejected tool runs, optional session persistence, fake chat tool-call execution, unsafe fake tool-call refusal, max-iteration audit visibility, and improved learning provenance. Real-provider chat support, write/external/exec/dangerous tool execution, durable approval records, FTS-backed search, and full mutmut survivor triage remain deferred.
+The local/provider-free production readiness repair added `hipson tool run` for read-risk tools that do not require approval, an explicit `hipson chat --fake --fake-tool-call ... --fake-tool-input ...` offline demo path, bounded max-tool-iteration visibility, and trajectory-based learning proposals. Tests cover safe read-only tool execution, unsafe/invalid/path-rejected tool runs, optional session persistence, fake chat tool-call execution, unsafe fake tool-call refusal, max-iteration audit visibility, and improved learning provenance. Real-agent completion resolves the real-provider adapter and durable approval-record gaps with stubbed tests. Write/external/exec/dangerous manual tool execution and full mutmut survivor triage remain deferred.
+
+## Status Update — Hermes-Style Real Agent Completion
+
+The real-agent completion pass added `src/hipson/providers/openai_compatible.py`, explicit `hipson chat --provider openai-compatible` configuration, redacted/bounded provider transport errors, strict provider tool-call argument parsing, durable `approval_records`, and session search across messages, tool-call summaries, and memory summaries. Unit tests remain network-free and credential-free. Live provider smoke is manual and full mutation survivor triage remains open.
 
 ## P0 — Must Fix Before Using Runtime
 
@@ -111,14 +115,26 @@ The local/provider-free production readiness repair added `hipson tool run` for 
 ### [P1] Triage focused mutation survivors in safety-critical boundaries
 - Severity: P1
 - Status: Partially fixed. New direct helper/fault-injection tests were added, but full survivor triage remains open.
-- Evidence: `timeout 180s uv run mutmut run --max-children 2` used the focused configuration but exited 124 before completion after roughly 1,597/2,219 mutants. Partial `uv run mutmut results` output still listed survivors or unchecked mutants in `hipson.approvals`, `hipson.sandbox`, `hipson.tools.registry`, `hipson.agents`, `hipson.prompt`, and `hipson.runtime`.
+- Evidence: `timeout 300s uv run mutmut run || true` used the focused configuration and did not complete the 2,219-mutant set. Last observed progress was 1,965/2,219 mutants with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still listed survivors, timeouts, or unchecked mutants in `hipson.approvals`, `hipson.sandbox`, `hipson.tools.registry`, `hipson.agents`, `hipson.prompt`, `hipson.redaction`, `hipson.router`, and `hipson.runtime`.
 - Affected files: `src/hipson/approvals.py`, `src/hipson/sandbox.py`, `src/hipson/tools/registry.py`, `src/hipson/agents.py`, `src/hipson/prompt.py`, `src/hipson/runtime.py`, tests
-- Why it matters: Fault-injection tests improved the boundary, but mutation survivors in approval/path/registry/redaction/prompt code can still hide logic inversions before real-provider usage.
+- Why it matters: Fault-injection tests improved the boundary, but mutation survivors in approval/path/registry/redaction/prompt/runtime code can still hide logic inversions before broad release readiness.
 - Recommended fix: Run mutmut in smaller batches by module/function, inspect high-risk survivors first, and add requirement-level tests for real approval, path, output-contract, redaction, and untrusted-delimiter mutants.
 - Tests to add: Targeted tests for specific high-risk survivors discovered in each module batch.
 - Acceptance criteria: No known high-risk survivors remain in approval/path/redaction/registry/prompt/runtime safety logic, or each survivor is documented as equivalent/low-risk.
 - Estimated PR size: Medium
 - Dependencies: Focused mutmut batching or CI support.
+
+### [P1] Complete live-provider manual smoke before external release
+- Severity: P1
+- Status: Open for release readiness; not required for network-free unit verification.
+- Evidence: The OpenAI-compatible provider adapter is covered by stub transport tests, but no live provider smoke was run by design.
+- Affected files: `src/hipson/providers/openai_compatible.py`, `src/hipson/cli.py`, provider setup docs
+- Why it matters: Stub tests prove request/response/error handling but cannot catch provider-specific deployment/configuration issues.
+- Recommended fix: With explicit user permission and a disposable provider key, run one minimal no-tool live smoke and one read-only tool-call smoke if the chosen provider supports tool calls.
+- Tests to add: Do not add network-dependent unit tests; document manual smoke commands and expected redacted output.
+- Acceptance criteria: Manual smoke passes without leaking credentials or bypassing approval/tool boundaries.
+- Estimated PR size: Small
+- Dependencies: User-provided provider credentials and explicit live-network approval.
 
 ## P2 — Hardening Before Release
 

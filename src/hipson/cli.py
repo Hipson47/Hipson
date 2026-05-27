@@ -25,7 +25,19 @@ from hipson.project import (
     resolve_project_from_registry,
     write_output,
 )
-from hipson.providers import FakeProvider, ProviderResponse, ProviderToolCall
+from hipson.providers import (
+    DEFAULT_API_KEY_ENV,
+    DEFAULT_BASE_URL,
+    ChatProvider,
+    FakeProvider,
+    OpenAICompatibleProvider,
+    ProviderError,
+    ProviderResponse,
+    ProviderToolCall,
+)
+from hipson.providers import (
+    DEFAULT_MODEL as DEFAULT_PROVIDER_MODEL,
+)
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.router import format_text_route, route_task
 from hipson.runtime import NO_CHAT_PROVIDER_MESSAGE, HipsonRuntime, RuntimeMode, default_session_db
@@ -266,6 +278,9 @@ def command_route(args: argparse.Namespace) -> int:
 
 
 def command_chat(args: argparse.Namespace) -> int:
+    if args.fake and args.provider:
+        print("--fake cannot be combined with --provider.", file=sys.stderr)
+        return 2
     if args.fake_response and not args.fake:
         print("--fake-response requires --fake or --offline.", file=sys.stderr)
         return 2
@@ -275,7 +290,7 @@ def command_chat(args: argparse.Namespace) -> int:
     if args.fake_tool_input and not args.fake_tool_call:
         print("--fake-tool-input requires --fake-tool-call.", file=sys.stderr)
         return 2
-    if not args.fake:
+    if not args.fake and not args.provider:
         print(NO_CHAT_PROVIDER_MESSAGE, file=sys.stderr)
         return 1
 
@@ -288,34 +303,45 @@ def command_chat(args: argparse.Namespace) -> int:
         print("A chat request is required.", file=sys.stderr)
         return 2
 
-    fake_response = args.fake_response or "Fake provider response"
-    provider = FakeProvider.with_text(fake_response)
-    if args.fake_tool_call:
+    if args.fake:
+        fake_response = args.fake_response or "Fake provider response"
+        provider: ChatProvider = FakeProvider.with_text(fake_response)
+        runtime_mode = RuntimeMode.FAKE
+        model = "fake"
+        if args.fake_tool_call:
+            try:
+                fake_tool_input = parse_json_object(args.fake_tool_input or "{}")
+                _validate_fake_demo_tool(args.fake_tool_call)
+            except json.JSONDecodeError as exc:
+                print(exc, file=sys.stderr)
+                return 2
+            except (ValueError, ToolRegistryError) as exc:
+                print(exc, file=sys.stderr)
+                return 1
+            provider = FakeProvider(
+                responses=[
+                    ProviderResponse(
+                        text="Fake/offline tool call requested",
+                        tool_calls=[
+                            ProviderToolCall(
+                                id="cli-fake-call-1",
+                                name=args.fake_tool_call,
+                                input=fake_tool_input,
+                            )
+                        ],
+                        raw_metadata={"provider": "fake"},
+                    ),
+                    ProviderResponse(text=fake_response, raw_metadata={"provider": "fake"}),
+                ]
+            )
+    else:
         try:
-            fake_tool_input = parse_json_object(args.fake_tool_input or "{}")
-            _validate_fake_demo_tool(args.fake_tool_call)
-        except json.JSONDecodeError as exc:
-            print(exc, file=sys.stderr)
-            return 2
-        except (ValueError, ToolRegistryError) as exc:
-            print(exc, file=sys.stderr)
+            provider = _build_chat_provider(args)
+        except ProviderError as exc:
+            print(f"Chat provider is not configured: {exc}", file=sys.stderr)
             return 1
-        provider = FakeProvider(
-            responses=[
-                ProviderResponse(
-                    text="Fake/offline tool call requested",
-                    tool_calls=[
-                        ProviderToolCall(
-                            id="cli-fake-call-1",
-                            name=args.fake_tool_call,
-                            input=fake_tool_input,
-                        )
-                    ],
-                    raw_metadata={"provider": "fake"},
-                ),
-                ProviderResponse(text=fake_response, raw_metadata={"provider": "fake"}),
-            ]
-        )
+        runtime_mode = RuntimeMode.REAL
+        model = args.model or DEFAULT_PROVIDER_MODEL
 
     session_db = Path(args.session_db).expanduser() if args.session_db else default_session_db()
     store = open_session_store(session_db)
@@ -323,7 +349,8 @@ def command_chat(args: argparse.Namespace) -> int:
         runtime = HipsonRuntime(
             store=store,
             provider=provider,
-            runtime_mode=RuntimeMode.FAKE,
+            runtime_mode=runtime_mode,
+            model=model,
         )
         result = runtime.run(query, cwd=Path.cwd(), session_id=args.session_id)
     except RuntimeError as exc:
@@ -332,12 +359,24 @@ def command_chat(args: argparse.Namespace) -> int:
     finally:
         store.close()
 
-    print(f"Fake/offline mode: {result.answer}")
-    if args.fake_tool_call and result.tool_calls:
+    prefix = "Fake/offline mode" if args.fake else f"Provider mode ({args.provider})"
+    print(f"{prefix}: {result.answer}")
+    if result.tool_calls:
         print("Tool calls:")
         for record in result.tool_calls:
             print(f"- {record.name}: {record.status} - {_bounded_cli(record.summary, limit=MAX_CLI_CONTENT_CHARS)}")
     return 0
+
+
+def _build_chat_provider(args: argparse.Namespace) -> OpenAICompatibleProvider:
+    if args.provider != "openai-compatible":
+        raise ProviderError("Unsupported chat provider", str(args.provider))
+    return OpenAICompatibleProvider.from_env(
+        base_url=args.provider_url or DEFAULT_BASE_URL,
+        api_key_env=args.api_key_env,
+        timeout=float(args.provider_timeout),
+        allow_local_http=bool(args.allow_local_provider_http),
+    )
 
 
 def _validate_fake_demo_tool(tool_name: str) -> ToolSpec:
@@ -430,10 +469,12 @@ def command_session_show(args: argparse.Namespace) -> int:
             return 1
         messages = store.list_messages(args.session_id, limit=_positive_limit(args.message_limit, maximum=200))
         tool_calls = store.list_tool_calls(args.session_id)[: _positive_limit(args.tool_limit, maximum=200)]
+        approvals = store.list_approval_records(session_id=args.session_id)[: _positive_limit(args.tool_limit, maximum=200)]
         payload = {
             "session": _session_summary(store, session),
             "messages": [_message_summary(message) for message in messages],
             "tool_calls": [_tool_call_summary(tool_call) for tool_call in tool_calls],
+            "approval_records": [_approval_summary(approval) for approval in approvals],
         }
     finally:
         store.close()
@@ -459,6 +500,14 @@ def command_session_show(args: argparse.Namespace) -> int:
         if tool_call["error"]:
             print(f"  error: {_bounded_cli(tool_call['error'], limit=MAX_CLI_CONTENT_CHARS)}")
         print(f"  output: {_bounded_json(tool_call['output'])}")
+    print("approval_records:")
+    for approval in cast(list[dict[str, object]], payload["approval_records"]):
+        print(
+            f"- {approval['decision']} {approval['tool_name']} "
+            f"risk={approval['risk_level']} source={approval['source']}"
+        )
+        if approval["reason"]:
+            print(f"  reason: {_bounded_cli(approval['reason'], limit=MAX_CLI_CONTENT_CHARS)}")
     return 0
 
 
@@ -768,12 +817,29 @@ def _tool_call_summary(tool_call: dict[str, object]) -> dict[str, object]:
 
 def _search_summary(row: dict[str, object]) -> dict[str, object]:
     return {
+        "kind": str(row.get("kind", "message")),
+        "record_id": str(row.get("record_id", row.get("message_id", ""))),
         "session_id": str(row.get("session_id", "")),
         "session_title": _bounded_cli(row.get("session_title", "")),
         "message_id": str(row.get("message_id", "")),
         "role": str(row.get("role", "")),
         "created_at": str(row.get("created_at", "")),
         "snippet": _bounded_cli(row.get("content", ""), limit=MAX_CLI_CONTENT_CHARS),
+    }
+
+
+def _approval_summary(approval: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(approval.get("id", "")),
+        "source": _bounded_cli(approval.get("source", "")),
+        "tool_name": _bounded_cli(approval.get("tool_name", "")),
+        "risk_level": str(approval.get("risk_level", "")),
+        "decision": str(approval.get("decision", "")),
+        "reason": _bounded_cli(approval.get("reason", ""), limit=MAX_CLI_CONTENT_CHARS),
+        "approved_by": _bounded_cli(approval.get("approved_by", "")),
+        "scope": str(approval.get("scope", "")),
+        "metadata": approval.get("metadata", {}),
+        "created_at": str(approval.get("created_at", "")),
     }
 
 
@@ -854,7 +920,7 @@ def _persist_cli_tool_run(
 ) -> None:
     if store is None or not session_id:
         return
-    store.add_tool_call(
+    tool_call_id = store.add_tool_call(
         session_id,
         tool_name=tool_name,
         input_data=input_data,
@@ -863,6 +929,17 @@ def _persist_cli_tool_run(
         approval_status=str(payload["approval_status"]),
         status=str(payload["status"]),
         error=str(payload["error"]),
+    )
+    store.add_approval_record(
+        session_id=session_id,
+        tool_call_id=tool_call_id,
+        source="cli.tool.run",
+        tool_name=tool_name,
+        risk_level=str(payload["risk_level"]),
+        decision=str(payload["approval_status"]),
+        reason=str(payload["error"] or payload["summary"]),
+        approved_by="policy" if payload["approval_status"] == "approved" else "",
+        metadata={"tool_status": str(payload["status"])},
     )
 
 
@@ -965,6 +1042,20 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument("--fake-response", help="Deterministic fake provider response for --fake mode")
     chat.add_argument("--fake-tool-call", help="Explicit fake/offline demo tool call to execute through the runtime")
     chat.add_argument("--fake-tool-input", help="JSON object input for --fake-tool-call")
+    chat.add_argument(
+        "--provider",
+        choices=["openai-compatible"],
+        help="Use an explicit real provider adapter; omitted chat remains fail-closed unless --fake is used",
+    )
+    chat.add_argument("--provider-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible provider base URL")
+    chat.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV, help="Environment variable containing the provider API key")
+    chat.add_argument("--model", default=DEFAULT_PROVIDER_MODEL, help="Provider model name")
+    chat.add_argument("--provider-timeout", type=float, default=90.0, help="Provider request timeout in seconds")
+    chat.add_argument(
+        "--allow-local-provider-http",
+        action="store_true",
+        help="Allow http://localhost provider URLs for explicit local test endpoints only",
+    )
     chat.set_defaults(func=command_chat)
 
     init = subparsers.add_parser("init", help="Create docs/hipson-progress.md in a project")

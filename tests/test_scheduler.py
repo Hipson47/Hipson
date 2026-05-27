@@ -36,6 +36,7 @@ def test_scheduler_tick_runs_due_read_tool_and_persists_success(tmp_path: Path):
 
         results = scheduler.tick(cwd=tmp_path, now="2026-01-01T00:00:01Z")
         jobs = store.list_jobs()
+        approvals = store.list_approval_records(job_id=job_id)
     finally:
         store.close()
 
@@ -44,16 +45,20 @@ def test_scheduler_tick_runs_due_read_tool_and_persists_success(tmp_path: Path):
     assert results[0].status == "completed"
     assert jobs[0]["status"] == "completed"
     assert jobs[0]["payload"]["last_result"] == {"changed_files": [], "untracked_files": []}
+    assert approvals[0]["source"] == "scheduler"
+    assert approvals[0]["decision"] == "approved"
+    assert approvals[0]["job_id"] == job_id
 
 
 def test_scheduler_tick_persists_unknown_tool_failure(tmp_path: Path):
     store = open_session_store(tmp_path / "runtime.sqlite")
     try:
         scheduler = Scheduler.with_defaults(store)
-        scheduler.create_tool_job(tool_name="missing.tool", input_data={})
+        job_id = scheduler.create_tool_job(tool_name="missing.tool", input_data={})
 
         results = scheduler.tick(cwd=tmp_path, now="2026-01-01T00:00:01Z")
         jobs = store.list_jobs()
+        approvals = store.list_approval_records(job_id=job_id)
     finally:
         store.close()
 
@@ -61,6 +66,7 @@ def test_scheduler_tick_persists_unknown_tool_failure(tmp_path: Path):
     assert "Unknown tool" in results[0].error
     assert jobs[0]["status"] == "failed"
     assert "Unknown tool" in str(jobs[0]["payload"]["last_error"])
+    assert approvals[0]["decision"] == "invalid_input"
 
 
 def test_scheduler_requires_approval_for_non_read_jobs(tmp_path: Path):

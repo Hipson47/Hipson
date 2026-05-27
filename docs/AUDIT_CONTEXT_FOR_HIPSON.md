@@ -2,16 +2,16 @@
 
 ## 1. Current Verified State
 
-The repository is on branch `main` at `/home/hipson47/code/Hipson`. The Hermes-style repair pass started from a clean git scan and then added runtime observability and approval-gated learning CLI changes.
+The repository is on branch `main` at `/home/hipson47/code/Hipson`. The real-agent completion pass started from a clean git scan after the local/provider-free runtime MVP.
 
 Verified local checks:
 
-- `uv run pytest -q`: 216 tests passed.
+- `uv run pytest -q`: 223 tests passed after the real-agent completion changes.
 - `uv run ruff check .`: passed.
 - `uv run mypy src/hipson`: passed.
 - `uv run bandit -q -r src/hipson -c pyproject.toml`: passed.
 - `python -m compileall src/hipson`: passed.
-- `uv run python scripts/run_tests.py`: 216/216 passed.
+- `uv run python scripts/run_tests.py`: 223/223 tests passed.
 - `uv run hipson doctor`: passed.
 - `uv run hipson skill validate`: passed.
 
@@ -58,12 +58,20 @@ Local provider-free production readiness repair:
 - Runtime max-tool-iteration stops now include bounded attempted-tool context and persist skipped calls as `approval_status=max_tool_iterations`.
 - Learning memory proposals now summarize bounded session trajectory, final outcome, relevant tool-call summaries, and message/tool provenance.
 
+Real-agent completion pass:
+
+- `src/hipson/providers/openai_compatible.py` adds a dependency-free OpenAI-compatible primary runtime provider adapter with explicit config, HTTPS-by-default URL policy, local HTTP opt-in, stub transport support for network-free tests, strict tool-call parsing, and redacted/bounded provider errors.
+- `hipson chat --provider openai-compatible ...` now uses the real provider adapter only when explicitly selected and configured. `hipson chat -q ...` still fails closed by default, and `--fake` remains explicit.
+- `src/hipson/session.py` now persists first-class `approval_records` for runtime, scheduler, and manual tool-run decisions.
+- `hipson session show` displays bounded approval records.
+- `hipson session search` now searches messages, tool-call summaries, and memory summaries, using FTS for messages/memories when SQLite supports it and a safe fallback otherwise.
+
 ## 2. Implemented Runtime Modules
 
 Runtime-related modules observed in the working tree:
 
-- `src/hipson/session.py`: SQLite session store with sessions, messages, tool calls, memories, skill runs, jobs, migrations, redaction, and placeholder FTS setup.
-- `src/hipson/providers/base.py` and `src/hipson/providers/fake.py`: provider protocol dataclasses and deterministic fake provider.
+- `src/hipson/session.py`: SQLite session store with sessions, messages, tool calls, approval records, memories, skill runs, jobs, migrations, redaction, bounded persistence, and FTS-backed/fallback search.
+- `src/hipson/providers/base.py`, `src/hipson/providers/fake.py`, and `src/hipson/providers/openai_compatible.py`: provider protocol dataclasses, deterministic fake provider, and explicit OpenAI-compatible runtime provider adapter.
 - `src/hipson/tools/registry.py`: tool registry with `ToolSpec`, `ToolResult`, `ToolContext`, duplicate rejection, unknown tool rejection, and basic input validation.
 - `src/hipson/tools/repo.py`, `packets.py`, `memory.py`, `skills.py`: wrappers for scan/changed-files, review packet creation, memory search, and skill list/view.
 - `src/hipson/approvals.py` and `src/hipson/sandbox.py`: risk policy and path checks.
@@ -82,7 +90,7 @@ Observed with `uv run hipson --help`:
 
 Observed behavior:
 
-- `uv run hipson chat --help` exists and exposes `--session-db`, `--session-id`, `--fake`, `--fake-response`, `--fake-tool-call`, and `--fake-tool-input`.
+- `uv run hipson chat --help` exists and exposes `--session-db`, `--session-id`, `--fake`, `--fake-response`, `--fake-tool-call`, `--fake-tool-input`, and explicit `--provider openai-compatible` configuration flags.
 - `uv run hipson chat -q "scan this repo and propose the next safe PR"` fails closed when no chat provider is configured.
 - `uv run hipson chat --fake -q "scan this repo and propose the next safe PR"` runs the explicit fake/offline provider path.
 - `uv run hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"` runs a read-only tool call through the fake/offline runtime path and prints a bounded tool-call summary.
@@ -96,6 +104,7 @@ Observed behavior:
 
 - Tests can exercise runtime tool calls by injecting `FakeProvider.with_tool_calls(...)` into `HipsonRuntime`.
 - Runtime creates a session, persists user and assistant messages, validates tool names/inputs through the registry, checks approval before execution, executes allowed tools, persists tool calls/results, and stops after a bounded number of tool iterations.
+- Explicit real-provider mode uses the same runtime loop and tool boundary as fake provider mode; unit tests use stub transports and do not call live providers.
 - Session store redacts message and tool-call fields before persistence.
 - Approval policy blocks dangerous risk, requires approval for exec except allowlisted read-only commands, and blocks common sensitive/path traversal cases.
 - Registered tools now declare path policies for path-bearing inputs, and runtime/scheduler/MCP validate inputs before approval.
@@ -110,36 +119,36 @@ Observed behavior:
 ## 5. Failed or Skipped Checks
 
 - Raw Bandit failed without project config because `src/hipson/project.py` imports and uses `subprocess`; configured Bandit passes.
-- Live provider/network checks were skipped by requirement.
+- Live provider/network checks were skipped by requirement; provider adapter tests use local stub transports only.
 - `uv run mutmut run --paths-to-mutate ...` failed because this mutmut version does not support that CLI flag.
-- `timeout 180s uv run mutmut run --max-children 2` started from the focused project config, generated 2,219 mutants, and exited 124 before completion. Last observed progress was roughly 1,597/2,219 mutants, with roughly 1,381 killed and 216 surviving. Partial `uv run mutmut results` output still listed survivors/not-checked mutants, including safety-adjacent survivors in approvals, sandbox, registry, provider, prompt, and runtime helpers.
+- `timeout 300s uv run mutmut run || true` started from the focused project config, generated 2,219 mutants, and did not complete the set within the timeout. Last observed progress was 1,965/2,219 mutants, with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still listed survivors, timeouts, and not-checked mutants, including safety-adjacent items in approvals, sandbox, registry, provider/agents, prompt, redaction, router, and runtime helpers.
 - Historical pre-observability smoke showed `hipson session list` and `hipson tool list` missing. Post-repair smoke now shows `hipson session list --session-db <temp>/runtime.sqlite` and `hipson tool list` succeeding.
 
 ## 6. Known Bugs / Risks
 
-- Real provider support is still intentionally absent; `hipson chat` remains fake/offline only when explicitly requested with `--fake`.
+- Real provider adapter support exists for explicit OpenAI-compatible chat configuration, but live provider smoke remains manual and was not run in this pass.
 - Manual `hipson tool run` is intentionally limited to read-risk tools that do not require approval.
 - Future tools must declare path policy metadata before registration.
 - Session history retention remains minimal.
-- Session search uses a safe SQLite `LIKE` fallback; FTS tables are still schema placeholders until population/search is implemented.
+- Session search uses FTS for messages/memories when available and a safe fallback; tool-call search uses bounded SQLite fallback.
 
 ## 7. Test Gaps
 
-- CLI fake/offline `chat` tool-call execution is covered; real-provider chat remains intentionally unimplemented and untested.
-- No FTS population test; fallback message search is covered by `tests/test_session.py`.
+- CLI fake/offline `chat` tool-call execution is covered; real-provider adapter success/failure/tool-call parsing is covered with stub transports, while live provider smoke is manual.
+- FTS/fallback session search is covered for messages, tool-call summaries, and memory summaries by `tests/test_session.py`.
 - Focused fault-injection tests exist for runtime-critical modules, including direct provider helper, runtime tool-descriptor/rejection, registry composite-contract, bounded-output, and sandbox symlink/sensitive-path cases. Full mutation survivor triage is still incomplete.
 - No live provider/network test by design; sidecar provider hardening is covered with local fakes only.
 
 ## 8. Security Gaps
 
 - Approval enforcement is caller-dependent; direct registry callers can bypass approvals unless they explicitly use `ApprovalPolicy`.
-- Scheduler `--approved` is a boolean flag, not a durable approval record.
-- Partial mutmut results show remaining approval/path/registry/provider/prompt/runtime survivors that must be triaged before real-provider work.
-- Real-provider prompt/tool exposure remains intentionally unimplemented and must not be added until provider, prompt, runtime, and tool-boundary mutmut survivors are triaged.
+- Scheduler approval decisions are now persisted as bounded approval records, but `--approved` remains a coarse boolean UX rather than an interactive human approval flow.
+- Partial mutmut results show remaining approval/path/registry/provider/prompt/runtime survivors that must be triaged before claiming broad release readiness.
+- Full mutmut survivor triage remains incomplete and should be completed in smaller module/function batches.
 
 ## 9. Documentation Drift
 
-- `README.md` now documents fake-only chat behavior, runtime DB observability, tool inspection, and approval-gated learning. Scheduler docs remain minimal.
+- `README.md` now documents provider-free defaults, explicit OpenAI-compatible chat configuration, runtime DB observability, tool inspection, durable approval records, and approval-gated learning. Scheduler docs remain minimal.
 - `docs/PERSISTENT_AGENT_RUNTIME_SPEC.md` now lists read-only/no-approval `hipson tool run` as an MVP command; some later modules are still described as proposed/future even though implementation files exist in the working tree.
 - `docs/PROJECT_DEVELOPMENT_PLAN.md` frames scheduler/MCP as future/optional, but implementation files already exist.
 - The spec now lists `hipson session list/show/search`, `hipson tool list/show/run`, and `hipson learn propose/apply-memory` as MVP commands, with `tool run` constrained to read-risk/no-approval tools.
@@ -153,19 +162,17 @@ Scope:
 - Run mutmut in smaller module/function batches for `agents.py`, `prompt.py`, `runtime.py`, `approvals.py`, `sandbox.py`, and `tools/registry.py`.
 - Add requirement-level tests for remaining high-risk survivors; document only equivalent/low-risk survivors.
 - Keep tests credential-free and network-free.
-- Preserve provider-free defaults and do not add a real chat provider adapter.
-
-Do not add a real primary runtime provider adapter in this PR.
+- Preserve provider-free defaults and keep live provider tests manual/stubbed.
 
 ## 11. Open Product Decisions
 
-- Should `hipson chat` default to fake mode, or should fake mode require `--fake`?
+- `hipson chat` now fails closed by default; fake mode requires explicit `--fake`.
 - Where should runtime sessions be stored by default, and what retention policy should apply?
 - Should model-initiated writes under `runs/`, `scans/`, and `docs/` be auto-approved?
-- What exact user approval UX should be used for write/external/exec tools?
+- What exact interactive user approval UX should be used for write/external/exec tools?
 - Should MCP remain an internal adapter until core runtime safety is stable?
 - Should scheduler remain in the merge or be deferred until approval metadata is stronger?
 
 ## 12. Handoff Summary
 
-The runtime implementation has a more defensible dependency-light tool boundary: registered tools declare path policies, inputs are validated before approval, handler/output failures are contained, persisted/provider-visible tool outputs are bounded and redacted, remote sidecar provider URLs are HTTPS-only by default, provider error bodies are redacted/bounded, prompt assembly separates stable policy from untrusted dynamic data, focused fault-injection tests cover several safety inversions, and Hipson can now inspect runtime sessions/tools plus explicitly apply approved memory proposals. It is still not ready for real provider usage. The next session should triage focused mutmut survivors before any real primary runtime provider adapter or expanded external tool surface.
+The runtime implementation has a more defensible dependency-light real-agent path: registered tools declare path policies, inputs are validated before approval, handler/output failures are contained, persisted/provider-visible tool outputs are bounded and redacted, provider URLs are HTTPS-only by default, provider error bodies are redacted/bounded, prompt assembly separates stable policy from untrusted dynamic data, Hipson can inspect runtime sessions/tools, explicit learning apply is approval-gated, and an OpenAI-compatible provider adapter now exists for explicit runtime chat configuration. Live provider smoke and full mutation survivor triage remain open before claiming unrestricted release readiness.

@@ -41,14 +41,24 @@ def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Pa
             },
             error=f"provider failed with password=hunter2 {secret}",
         )
+        approval_id = store.add_approval_record(
+            session_id=session_id,
+            source="test",
+            tool_name="demo.large",
+            risk_level="read",
+            decision="approved",
+            reason=f"allowed with token={secret}",
+            approved_by="policy",
+        )
 
         sessions = store.list_sessions()
         messages = store.list_messages(session_id)
         tool_calls = store.list_tool_calls(session_id)
+        approvals = store.list_approval_records(session_id=session_id)
     finally:
         store.close()
 
-    rendered = f"{sessions} {messages} {tool_calls}"
+    rendered = f"{sessions} {messages} {tool_calls} {approvals}"
     assert secret not in rendered
     assert "abc123secret4567890" not in rendered
     assert "hunter2" not in rendered
@@ -57,6 +67,9 @@ def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Pa
     assert "truncated" in str(tool_calls[0]["output"])
     assert len(str(tool_calls[0]["input"])) < 1_500
     assert len(str(tool_calls[0]["output"])) < 2_500
+    assert approvals[0]["id"] == approval_id
+    assert approvals[0]["decision"] == "approved"
+    assert approvals[0]["reason"] == "allowed with token=[REDACTED]"
 
 
 def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
@@ -76,6 +89,22 @@ def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
             risk_level="read",
             status="completed",
         )
+        store.add_approval_record(
+            session_id=session_id,
+            source="runtime",
+            tool_name="repo.scan",
+            risk_level="read",
+            decision="approved",
+            reason="Policy allowed tool execution",
+        )
+        store.add_memory(
+            session_id=session_id,
+            scope="repo",
+            repo="Hipson",
+            kind="decision",
+            summary=f"Remember searchable tool trajectory {secret}",
+            source_refs=[f"session:{session_id}"],
+        )
     finally:
         store.close()
 
@@ -90,6 +119,7 @@ def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
     assert rc == 0
     assert stderr == ""
     assert "repo.scan" in stdout
+    assert "approval_records:" in stdout
     assert "Searchable packet-first note" in stdout
     assert secret not in stdout
     assert REDACTION in stdout
@@ -100,6 +130,19 @@ def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
     payload = json.loads(stdout)
     assert payload["results"][0]["session_id"] == session_id
     assert "packet-first" in payload["results"][0]["snippet"]
+    assert secret not in stdout
+
+    rc, stdout, stderr = run_cli("session", "search", "repo.scan", "--session-db", str(db_path), "--json")
+    assert rc == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert any(result["kind"] == "tool_call" for result in payload["results"])
+
+    rc, stdout, stderr = run_cli("session", "search", "trajectory", "--session-db", str(db_path), "--json")
+    assert rc == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert any(result["kind"] == "memory" for result in payload["results"])
     assert secret not in stdout
 
 

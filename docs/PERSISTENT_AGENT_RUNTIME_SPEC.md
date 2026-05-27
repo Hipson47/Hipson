@@ -21,14 +21,13 @@ Current state, based on inspected files:
 - Repo scan module: `src/hipson/project.py` contains `build_scan`, `build_scan_record`, `changed_files`, `untracked_files`, `discover_commands`, and scan/packet CLI command handlers.
 - Packet generation: `src/hipson/packets.py` defines `PacketSpec`, `compile_review_packet`, and `compile_executor_packet`; `src/hipson/project.py` wires those compilers to `hipson packet review` and `hipson packet exec`.
 - JSONL memory: `src/hipson/memory.py` stores notes in `notes.jsonl` and sources in `sources.jsonl`, with `add_note`, `search_notes`, `load_notes`, and CLI handlers.
-- Sidecar routing/provider code: `src/hipson/agents.py` contains deterministic sidecar routing, optional LLM routing, OpenRouter chat completion calls, packet reading, dry-run behavior, and sidecar report writing. `README.md` documents that provider-backed sidecars are optional and that `.env` is only needed for those paths.
+- Sidecar routing/provider code: `src/hipson/agents.py` contains deterministic sidecar routing, optional LLM routing, OpenRouter chat completion calls, packet reading, dry-run behavior, and sidecar report writing. `README.md` documents that provider-backed sidecars and explicit runtime provider chat are optional.
 - Skills validation: `src/hipson/skills.py` finds `SKILL.md` files, parses frontmatter, validates required metadata, and ignores generated/cache-like trees such as `mutants`.
-- Current test posture: `tests/test_hipson_helpers.py` is the only substantive test file and covers router, CLI smoke, scan, packets, memory, skills, sidecars, provider handling, redaction, install, and assets. `pyproject.toml` configures pytest, ruff, mypy, Bandit, and mutmut.
+- Current test posture: runtime coverage is split across focused test files for router, session, providers, tools, approvals, prompt, runtime, skills, learning, scheduler, gateway/MCP-style adapters, and CLI behavior. `pyproject.toml` configures pytest, ruff, mypy, Bandit, and mutmut.
 - Current hardening risks:
-  - `src/hipson/router.py` uses naive substring matching (`keyword in task`) for mode and risk detection, so router outputs are not safe enough to become runtime planning signals until token-aware matching is added.
-  - `src/hipson/agents.py` now requires HTTPS for remote provider URLs, permits local HTTP only with explicit opt-in, and redacts/bounds provider error bodies; focused fault-injection coverage should still land before primary runtime provider work.
-  - `tests/test_hipson_helpers.py` is broad and monolithic, making future runtime coverage harder to maintain.
-  - `hipson chat`, SQLite sessions, tool registry, prompt assembler, approvals, sandbox, learning loop, scheduler, gateway adapters, and MCP bridge are proposed future modules, not current behavior.
+  - focused mutation survivor triage remains incomplete for runtime-critical modules;
+  - live provider smoke is manual and intentionally excluded from unit tests;
+  - write/external/exec/dangerous manual tool execution remains fail-closed until a richer approval UX exists.
 
 ## 3. Target Architecture
 
@@ -44,7 +43,7 @@ hipson chat
 Runtime loop (`src/hipson/runtime.py`)
   |
   +-- Prompt assembler (`src/hipson/prompt.py`)
-  +-- Provider abstraction (`src/hipson/providers/`)
+  +-- Provider abstraction (`src/hipson/providers/`, fake + explicit OpenAI-compatible adapter)
   +-- Tool registry (`src/hipson/tools/registry.py`)
   |     +-- tools wrapping `src/hipson/project.py`
   |     +-- tools wrapping `src/hipson/packets.py`
@@ -54,16 +53,16 @@ Runtime loop (`src/hipson/runtime.py`)
   +-- Session store (`src/hipson/session.py`, SQLite)
   +-- Approval/sandbox layer (`src/hipson/approvals.py`, `src/hipson/sandbox.py`)
   |
-  +-- Future: scheduler (`src/hipson/scheduler.py`)
-  +-- Future: gateway adapters (`src/hipson/gateway/`)
-  +-- Future: MCP bridge
-  +-- Future: learning loop (`src/hipson/learning.py`)
+  +-- Optional tick scheduler (`src/hipson/scheduler.py`)
+  +-- Optional gateway adapters (`src/hipson/gateway/`)
+  +-- Optional internal MCP-style bridge
+  +-- Approval-gated learning loop (`src/hipson/learning.py`)
 ```
 
 MVP target:
 
 - `hipson chat` runs over a persistent local session.
-- The runtime loop uses a fakeable provider abstraction.
+- The runtime loop uses a fakeable provider abstraction and an explicit OpenAI-compatible provider adapter.
 - The runtime exposes selected internal tools through a stable registry.
 - Tool calls are validated against registry contracts and approval policy before execution.
 - Messages, tool calls, redacted errors, and approval decisions are persisted in SQLite.
@@ -250,13 +249,13 @@ Persistence rules:
 - Do not store full repo dumps in SQLite.
 - Store paths, summaries, bounded snippets, artifact paths, and JSON metadata only.
 - Provider errors and tool outputs must be redacted before display and before insertion.
-- Approval decisions must be persisted as tool metadata.
+- Approval decisions must be persisted as tool metadata and first-class approval records.
 
 ## 7. Provider Protocol
 
-The primary chat runtime needs a narrow provider abstraction separate from sidecar/OpenRouter code in `src/hipson/agents.py`.
+The primary chat runtime uses a narrow provider abstraction separate from sidecar/OpenRouter code in `src/hipson/agents.py`.
 
-Proposed stdlib dataclasses:
+Current stdlib dataclasses:
 
 ```python
 @dataclass(frozen=True)
@@ -292,6 +291,7 @@ Provider rules:
 - Provider errors must be redacted before persistence/display.
 - Unit tests must not require network access or provider credentials.
 - The fake provider must support deterministic text, deterministic tool call emission, and deterministic failure.
+- The OpenAI-compatible provider adapter must be explicit, dependency-free, HTTPS-by-default for remote URLs, local-HTTP opt-in only, and covered by stub transport tests.
 - The primary chat provider path is separate from sidecar/OpenRouter code. An adapter may reuse safe patterns from `src/hipson/agents.py`, but `hipson chat` must not depend directly on sidecar packet-run behavior.
 
 ## 8. Tool Registry Contract
@@ -447,10 +447,10 @@ Runtime constraints:
 | `hipson chat -q "..."` | MVP | Non-interactive single request, useful for tests and scripts; same provider/fake constraint. |
 | `hipson session list` | MVP | List local sessions from SQLite with redacted bounded summaries. |
 | `hipson session show <id>` | MVP | Show redacted session transcript and tool call summaries. |
-| `hipson session search "..."` | MVP | Search redacted session messages through safe fallback search; FTS population remains future work. |
+| `hipson session search "..."` | MVP | Search redacted session messages, tool-call summaries, and memory summaries; uses FTS for messages/memories when available and safe fallback otherwise. |
 | `hipson tool list` | MVP | List registry tools, risk levels, approval requirements, contracts, and path policies. |
 | `hipson tool show <name>` | MVP | Show one registered tool's schemas, output contract, risk, approval, and path policy metadata. |
-| `hipson tool run <name> <json>` | MVP | Manual execution for read-risk tools that do not require approval; must use registry validation, path policy, approval checks, output contracts, bounded/redacted output, and optional session persistence. Write/external/exec/dangerous tools remain future work until durable approval UX exists. |
+| `hipson tool run <name> <json>` | MVP | Manual execution for read-risk tools that do not require approval; must use registry validation, path policy, approval checks, output contracts, bounded/redacted output, approval records, and optional session persistence. Write/external/exec/dangerous tools remain future work until a richer approval UX exists. |
 | `hipson skill list` | Next | Expose skill metadata, likely via existing `skill` command group. |
 | `hipson skill view <name>` | Next | View bounded skill reference text. |
 | `hipson learn propose --session-id <id>` | MVP | Print approval-gated memory/skill-reference proposals without durable writes. |
