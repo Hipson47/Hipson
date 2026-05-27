@@ -10,13 +10,15 @@ Recommended 4-5h repair scope: add read-only session/tool CLI observability plus
 
 Repair status: this document was created before implementation as the planning artifact. The selected repair package was then implemented as the runtime observability and approval-gated learning MVP.
 
+Later update: the local runtime-router pass superseded the earlier fail-closed default for supported provider-free engineering tasks. `hipson chat -q "scan this repo and propose the next safe PR"` now executes `repo.scan` locally through the runtime safety boundary; unsupported requests still fail truthfully.
+
 ## 2. Current Verified Runtime State
 
 - `uv run hipson doctor` passed and reported Hipson `1.1.0`, Python `3.12.3`, WSL repo cwd `/home/hipson47/code/Hipson`, configured Hipson home `/home/hipson47/.config/hipson`, and 50 valid skills.
 - `uv run hipson skill validate` passed for all observed project and packaged skills.
 - `uv run hipson scan . --include-diff` succeeded and reported a clean git status.
 - `uv run hipson route --task "audit Hipson Hermes-style runtime gaps, observability, memory, and learning loop" --json` classified the task as `memory` and recommended memory commands, which is advisory but not sufficient for this implementation task.
-- `uv run hipson chat -q "scan this repo and propose the next safe PR"` failed closed with the no-provider message.
+- Original pre-router smoke: `uv run hipson chat -q "scan this repo and propose the next safe PR"` failed closed with the no-provider message. Later local-router smoke now executes `repo.scan` for this supported request.
 - `HIPSON_HOME=<temp> uv run hipson chat --fake -q "offline runtime smoke"` succeeded with explicit fake/offline output.
 - Pre-repair audit: `uv run hipson session list` and `uv run hipson tool list` failed because those top-level commands were not implemented.
 - Post-repair smoke: `uv run hipson session list --session-db <temp>/runtime.sqlite`, `uv run hipson tool list`, and `uv run hipson learn --help` succeeded.

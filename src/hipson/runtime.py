@@ -8,6 +8,7 @@ from pathlib import Path
 
 from hipson.approvals import ApprovalPolicy
 from hipson.home import detect_hipson_home
+from hipson.local_router import render_local_route_answer, route_local_request, unsupported_local_route_answer
 from hipson.project import git_root
 from hipson.prompt import PromptContext, assemble_prompt_messages
 from hipson.providers import ChatProvider, FakeProvider, ProviderError, ProviderRequest, ProviderToolCall
@@ -35,6 +36,7 @@ MAX_REJECTION_SUMMARY_CHARS = 240
 
 class RuntimeMode(StrEnum):
     NO_PROVIDER = "no_provider"
+    LOCAL = "local_router"
     FAKE = "fake"
     REAL = "real"
 
@@ -52,6 +54,7 @@ class RuntimeResult:
     session_id: str
     tool_iterations: int
     tool_calls: list[RuntimeToolCallRecord] = field(default_factory=list)
+    status: str = "completed"
 
 
 @dataclass
@@ -155,6 +158,135 @@ class HipsonRuntime:
             session_id=active_session_id,
             tool_iterations=len(tool_records),
             tool_calls=tool_records,
+        )
+
+    def run_local(self, request: str, *, cwd: Path | None = None, session_id: str | None = None) -> RuntimeResult:
+        runtime_cwd = (cwd or Path.cwd()).resolve()
+        active_session_id = self._session_id(session_id, runtime_cwd)
+        self.store.add_message(active_session_id, "user", request, {"mode": RuntimeMode.LOCAL.value})
+
+        route = route_local_request(request)
+        if route is None:
+            answer = unsupported_local_route_answer(request)
+            self.store.add_message(
+                active_session_id,
+                "assistant",
+                answer,
+                {"mode": RuntimeMode.LOCAL.value, "status": "unsupported"},
+            )
+            return RuntimeResult(answer=answer, session_id=active_session_id, tool_iterations=0, status="unsupported")
+
+        if route.tool_name is None:
+            answer = render_local_route_answer(route, None)
+            self.store.add_message(
+                active_session_id,
+                "assistant",
+                answer,
+                {"mode": RuntimeMode.LOCAL.value, "intent": route.intent, "status": "needs_input"},
+            )
+            return RuntimeResult(answer=answer, session_id=active_session_id, tool_iterations=0, status="needs_input")
+
+        assistant_message_id = self.store.add_message(
+            active_session_id,
+            "assistant",
+            f"Local router selected `{route.tool_name}`: {route.explanation}",
+            {
+                "mode": RuntimeMode.LOCAL.value,
+                "intent": route.intent,
+                "tool_name": route.tool_name,
+                "status": "tool_selected",
+            },
+        )
+
+        before_ids = {str(tool_call["id"]) for tool_call in self.store.list_tool_calls(active_session_id)}
+        try:
+            spec = self.registry.validate_input(route.tool_name, route.input_data)
+        except ToolRegistryError as exc:
+            record = self._persist_rejected_tool_call(
+                active_session_id,
+                ProviderToolCall(id="local-router-call-1", name=route.tool_name, input=route.input_data),
+                assistant_message_id=assistant_message_id,
+                risk_level="dangerous",
+                approval_status="invalid_input",
+                error=str(exc),
+            )
+            answer = _answer_with_tool_rejections(render_local_route_answer(route, None), [record])
+            self.store.add_message(
+                active_session_id,
+                "assistant",
+                answer,
+                {"mode": RuntimeMode.LOCAL.value, "intent": route.intent, "status": "rejected"},
+            )
+            return RuntimeResult(
+                answer=answer,
+                session_id=active_session_id,
+                tool_iterations=1,
+                tool_calls=[record],
+                status="rejected",
+            )
+
+        if spec.risk_level != "read" or spec.approval_required:
+            record = self._persist_rejected_tool_call(
+                active_session_id,
+                ProviderToolCall(id="local-router-call-1", name=route.tool_name, input=route.input_data),
+                assistant_message_id=assistant_message_id,
+                risk_level=spec.risk_level,
+                approval_status="requires_approval" if spec.approval_required else "blocked",
+                error="Local router only executes read-risk tools that do not require approval.",
+                approved_by="policy",
+            )
+            answer = _answer_with_tool_rejections(render_local_route_answer(route, None), [record])
+            self.store.add_message(
+                active_session_id,
+                "assistant",
+                answer,
+                {"mode": RuntimeMode.LOCAL.value, "intent": route.intent, "status": "rejected"},
+            )
+            return RuntimeResult(
+                answer=answer,
+                session_id=active_session_id,
+                tool_iterations=1,
+                tool_calls=[record],
+                status="rejected",
+            )
+
+        previous_mode = self.runtime_mode
+        self.runtime_mode = RuntimeMode.LOCAL
+        try:
+            record = self._handle_tool_call(
+                ProviderToolCall(id="local-router-call-1", name=route.tool_name, input=route.input_data),
+                active_session_id,
+                assistant_message_id=assistant_message_id,
+                cwd=runtime_cwd,
+            )
+        finally:
+            self.runtime_mode = previous_mode
+
+        new_tool_calls = [
+            tool_call for tool_call in self.store.list_tool_calls(active_session_id) if str(tool_call["id"]) not in before_ids
+        ]
+        persisted_tool_call = new_tool_calls[-1] if new_tool_calls else None
+        result = _tool_result_from_persisted(record, persisted_tool_call)
+        answer = render_local_route_answer(route, result, persisted_tool_call)
+        if record.status in {"rejected", "failed"}:
+            answer = _answer_with_tool_rejections(answer, [record])
+        self.store.add_message(
+            active_session_id,
+            "assistant",
+            answer,
+            {
+                "mode": RuntimeMode.LOCAL.value,
+                "intent": route.intent,
+                "tool_name": route.tool_name,
+                "tool_status": record.status,
+            },
+        )
+        return RuntimeResult(
+            answer=answer,
+            session_id=active_session_id,
+            tool_iterations=1,
+            tool_calls=[record],
+            status="completed" if record.status == "completed" else record.status,
         )
 
     def _provider_or_raise(self) -> ChatProvider:
@@ -358,7 +490,7 @@ def run_chat_once(
     provider: ChatProvider | None = None,
     runtime_mode: RuntimeMode = RuntimeMode.REAL,
 ) -> RuntimeResult:
-    if provider is None and runtime_mode != RuntimeMode.FAKE:
+    if provider is None and runtime_mode not in {RuntimeMode.FAKE, RuntimeMode.LOCAL}:
         raise RuntimeError(NO_CHAT_PROVIDER_MESSAGE)
     store = open_session_store(session_db or default_session_db())
     try:
@@ -366,6 +498,8 @@ def run_chat_once(
         if runtime_provider is None and runtime_mode == RuntimeMode.FAKE:
             runtime_provider = FakeProvider()
         runtime = HipsonRuntime(store=store, provider=runtime_provider, runtime_mode=runtime_mode)
+        if runtime_mode == RuntimeMode.LOCAL:
+            return runtime.run_local(request, cwd=cwd, session_id=session_id)
         return runtime.run(request, cwd=cwd, session_id=session_id)
     finally:
         store.close()
@@ -420,6 +554,23 @@ def _tool_result_summary(result: ToolResult) -> str:
     if result.error and result.summary:
         return f"{result.summary}: {result.error}"
     return result.error or result.summary
+
+
+def _tool_result_from_persisted(
+    record: RuntimeToolCallRecord,
+    persisted_tool_call: dict[str, object] | None,
+) -> ToolResult | None:
+    if persisted_tool_call is None:
+        return None
+    output = persisted_tool_call.get("output", {})
+    if not isinstance(output, dict):
+        output = {}
+    return ToolResult(
+        ok=record.status == "completed",
+        output=output,
+        summary=record.summary,
+        error=str(persisted_tool_call.get("error", "")),
+    )
 
 
 def _bounded(value: str, limit: int) -> str:

@@ -109,11 +109,20 @@ Current signal from `docs/AUDIT_CONTEXT_FOR_HIPSON.md`:
 - Partial results included 192 survivors and 130 timeouts.
 - Results still include survivors, timeouts, or not-checked mutants in approval, sandbox, registry, provider/agents, prompt, redaction, router, and runtime helpers.
 
+Autonomous loop iteration 1 selected-mutant follow-up:
+
+- Killed `hipson.approvals.x__check_input_paths__mutmut_3` with a legacy approval path-key test covering `path`, `project`, `packet`, and `source`.
+- Killed `hipson.sandbox.x_check_skill_root_path__mutmut_3` with a relative workspace skill-root and packaged-asset skill-root test.
+- Killed `hipson.tools.registry.x__handler_failure__mutmut_1` with a handler-failure diagnostic detail test.
+- Killed `hipson.runtime.x__rejection_summary__mutmut_11` with a direct rejection-summary header/count/bounds contract test.
+- `hipson.redaction.x_sanitize_path__mutmut_1` remained a survivor and is classified as equivalent/low-risk for now because `summarize_sensitive_path(...)` intentionally ignores its argument and returns the same constant skipped marker.
+
 No new survivor list was generated during this stabilization pass.
 
 ## 6. Low-Risk / Equivalent Survivors
 
-Unknown. The next package should classify survivors only after reading `uv run mutmut results` and mapping each survivor to an observable safety property.
+- `hipson.redaction.x_sanitize_path__mutmut_1`: equivalent/low-risk under current behavior because sensitive path summarization is intentionally constant.
+- Other low-risk/equivalent survivors remain unknown until smaller module batches are inspected.
 
 ## 7. Tests To Add Next
 
@@ -127,6 +136,14 @@ Add tests only for mutants that weaken observable safety behavior. Prioritize:
 - runtime rejection visibility;
 - session persistence redaction/bounding;
 - explicit-only learning apply behavior.
+
+Next concrete batches:
+
+- `agents.py`: URL validation, provider error bounding, and advisory report output survivors.
+- `prompt.py`: untrusted block delimiter, role separation, and cap/budget survivors.
+- `approvals.py`: remaining path policy and write/exec decision survivors.
+- `tools/registry.py`: input/output contract and bounded output survivors.
+- `sandbox.py`: broad home and path traversal timeout/survivor cases.
 
 Avoid tests that merely mirror implementation internals or assert low-value formatting details.
 

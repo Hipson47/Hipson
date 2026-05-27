@@ -24,15 +24,19 @@ The local/provider-free production readiness repair added `hipson tool run` for 
 
 The real-agent completion pass added `src/hipson/providers/openai_compatible.py`, explicit `hipson chat --provider openai-compatible` configuration, redacted/bounded provider transport errors, strict provider tool-call argument parsing, durable `approval_records`, and session search across messages, tool-call summaries, and memory summaries. Unit tests remain network-free and credential-free. Live provider smoke is manual and full mutation survivor triage remains open.
 
+## Status Update — Local Runtime Router
+
+The local runtime-router pass added `src/hipson/local_router.py` and changed default `hipson chat` behavior for supported safe provider-free workflows. `hipson chat -q "scan this repo and propose the next safe PR"` now executes `repo.scan` locally through the existing runtime registry, approval, path-policy, output-contract, redaction, bounded-persistence, and session-store boundary. `hipson chat -q "show changed files"` executes `repo.changed_files`. Unsupported requests fail truthfully with supported local-router intents. Real-provider support was not expanded by this pass.
+
 ## P0 — Must Fix Before Using Runtime
 
 ### [P0] Make `hipson chat` honest and fail-closed outside explicit fake mode
 - Severity: P0
-- Status: Fixed by `fix(runtime): make chat mode and approvals fail closed`; keep regression tests.
+- Status: Fixed by `fix(runtime): make chat mode and approvals fail closed`; superseded for supported provider-free engineering workflows by the local runtime router. Keep regression tests for explicit fake mode, unsupported local requests, and provider-specific fail-closed behavior.
 - Evidence: CLI smoke `HIPSON_HOME=<temp> uv run hipson chat -q "scan this repo and propose the next safe PR"` printed `Fake provider response`. `src/hipson/cli.py` constructs `FakeProvider.with_text(args.fake_response)` for `chat`; no CLI path exercises provider tool calls.
 - Affected files: `src/hipson/cli.py`, `src/hipson/runtime.py`, `tests/test_runtime.py`
 - Why it matters: The public command looks like a runtime MVP, but it cannot perform the requested scan/planning workflow. Users may trust a facade as if it were an agent loop.
-- Recommended fix: Require an explicit fake/offline mode or clearly label current behavior as fake-only. Add a fail-closed no-provider message until a safe provider adapter exists.
+- Recommended fix: Completed in two stages: explicit fake/offline mode and provider fail-closed behavior first, then a deterministic local-router mode for supported safe workflows.
 - Tests to add: CLI smoke proving fake mode is explicit; no-provider runtime fails closed; CLI does not claim scan/tool execution unless a fake tool-call provider is injected through a test path.
 - Acceptance criteria: `hipson chat -q ...` has truthful output and cannot be mistaken for a real provider/tool runtime. Fake tests remain network-free.
 - Estimated PR size: Small
@@ -116,6 +120,7 @@ The real-agent completion pass added `src/hipson/providers/openai_compatible.py`
 - Severity: P1
 - Status: Partially fixed. New direct helper/fault-injection tests were added, but full survivor triage remains open.
 - Evidence: `timeout 300s uv run mutmut run || true` used the focused configuration and did not complete the 2,219-mutant set. Last observed progress was 1,965/2,219 mutants with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still listed survivors, timeouts, or unchecked mutants in `hipson.approvals`, `hipson.sandbox`, `hipson.tools.registry`, `hipson.agents`, `hipson.prompt`, `hipson.redaction`, `hipson.router`, and `hipson.runtime`.
+- Autonomous loop update: selected follow-up checks killed `hipson.approvals.x__check_input_paths__mutmut_3`, `hipson.sandbox.x_check_skill_root_path__mutmut_3`, `hipson.tools.registry.x__handler_failure__mutmut_1`, and `hipson.runtime.x__rejection_summary__mutmut_11`. `hipson.redaction.x_sanitize_path__mutmut_1` remains classified as equivalent/low-risk under the current constant skipped-marker behavior.
 - Affected files: `src/hipson/approvals.py`, `src/hipson/sandbox.py`, `src/hipson/tools/registry.py`, `src/hipson/agents.py`, `src/hipson/prompt.py`, `src/hipson/runtime.py`, tests
 - Why it matters: Fault-injection tests improved the boundary, but mutation survivors in approval/path/registry/redaction/prompt/runtime code can still hide logic inversions before broad release readiness.
 - Recommended fix: Run mutmut in smaller batches by module/function, inspect high-risk survivors first, and add requirement-level tests for real approval, path, output-contract, redaction, and untrusted-delimiter mutants.

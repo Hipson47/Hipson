@@ -131,11 +131,23 @@ def test_tool_registry_enforces_output_contracts_and_handler_boundaries(tmp_path
             handler=lambda _input_data, _context: (_ for _ in ()).throw(OSError("OPENROUTER_API_KEY=sk-test-secret1234567890")),
         )
     )
+    registry.register(
+        ToolSpec(
+            name="demo.raises_detail",
+            description="Handler raises with non-secret diagnostic detail.",
+            input_schema={"required": {}, "optional": {}},
+            output_contract={"value": "str"},
+            risk_level="read",
+            approval_required=False,
+            handler=lambda _input_data, _context: (_ for _ in ()).throw(ValueError("diagnostic detail")),
+        )
+    )
 
     assert registry.run("demo.valid", {}, context).ok is True
     missing = registry.run("demo.missing", {}, context)
     wrong = registry.run("demo.wrong", {}, context)
     raised = registry.run("demo.raises", {}, context)
+    raised_detail = registry.run("demo.raises_detail", {}, context)
 
     assert missing.ok is False
     assert "missing required key" in missing.error
@@ -144,6 +156,9 @@ def test_tool_registry_enforces_output_contracts_and_handler_boundaries(tmp_path
     assert raised.ok is False
     assert "OSError" in raised.error
     assert "sk-test-secret1234567890" not in raised.error
+    assert raised_detail.ok is False
+    assert "ValueError: diagnostic detail" in raised_detail.error
+    assert raised_detail.summary == "demo.raises_detail handler failed"
 
 
 def test_tool_registry_fault_injection_rejects_bool_as_int_and_json_decode_errors(tmp_path: Path):

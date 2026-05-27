@@ -41,6 +41,13 @@ Self-audit repair pass added after the first fault-injection hardening:
 - Registry tests now cover composite type contracts, unsupported output types, and bounded/redacted nested output summaries.
 - Sandbox tests now cover symlink escape, sensitive path names/suffixes, and precise generated write roots.
 
+Autonomous loop mutation triage iteration 1:
+
+- Added requirement-level tests for legacy approval path keys, relative workspace skill-root checks, registry handler failure diagnostic details, runtime rejection-summary header/count/bounds, and sensitive path sanitization.
+- `uv run pytest tests/test_approvals.py tests/test_tools.py tests/test_runtime.py tests/test_hipson_helpers.py -q`: 174 passed.
+- Selected mutmut checks killed `hipson.approvals.x__check_input_paths__mutmut_3`, `hipson.sandbox.x_check_skill_root_path__mutmut_3`, `hipson.tools.registry.x__handler_failure__mutmut_1`, and `hipson.runtime.x__rejection_summary__mutmut_11`.
+- `hipson.redaction.x_sanitize_path__mutmut_1` is currently classified as equivalent/low-risk because sensitive path summarization intentionally returns a constant skipped marker.
+
 Hermes-style runtime observability and learning repair pass:
 
 - `src/hipson/cli.py` now exposes `session`, `tool`, and `learn` command groups.
@@ -61,10 +68,18 @@ Local provider-free production readiness repair:
 Real-agent completion pass:
 
 - `src/hipson/providers/openai_compatible.py` adds a dependency-free OpenAI-compatible primary runtime provider adapter with explicit config, HTTPS-by-default URL policy, local HTTP opt-in, stub transport support for network-free tests, strict tool-call parsing, and redacted/bounded provider errors.
-- `hipson chat --provider openai-compatible ...` now uses the real provider adapter only when explicitly selected and configured. `hipson chat -q ...` still fails closed by default, and `--fake` remains explicit.
+- `hipson chat --provider openai-compatible ...` uses the real provider adapter only when explicitly selected and configured. `--fake` remains explicit.
 - `src/hipson/session.py` now persists first-class `approval_records` for runtime, scheduler, and manual tool-run decisions.
 - `hipson session show` displays bounded approval records.
 - `hipson session search` now searches messages, tool-call summaries, and memory summaries, using FTS for messages/memories when SQLite supports it and a safe fallback otherwise.
+
+Local deterministic runtime-router pass:
+
+- `src/hipson/local_router.py` maps supported provider-free chat requests to safe read-only tools: `repo.scan`, `repo.changed_files`, `memory.search`, and `skill.list`.
+- Default `hipson chat -q "scan this repo and propose the next safe PR"` now runs in local/router mode and executes `repo.scan` through the runtime registry, approval, path-policy, output-contract, redaction, bounded-persistence, and session-store boundary.
+- Default `hipson chat -q "show changed files"` executes `repo.changed_files` locally.
+- Unsupported default chat requests fail truthfully with a bounded list of supported local-router intents.
+- Real-provider mode remains explicit and was not expanded by this pass.
 
 ## 2. Implemented Runtime Modules
 
@@ -91,7 +106,8 @@ Observed with `uv run hipson --help`:
 Observed behavior:
 
 - `uv run hipson chat --help` exists and exposes `--session-db`, `--session-id`, `--fake`, `--fake-response`, `--fake-tool-call`, `--fake-tool-input`, and explicit `--provider openai-compatible` configuration flags.
-- `uv run hipson chat -q "scan this repo and propose the next safe PR"` fails closed when no chat provider is configured.
+- `uv run hipson chat -q "scan this repo and propose the next safe PR"` runs the provider-free local router and executes `repo.scan` through the runtime safety boundary.
+- `uv run hipson chat -q "show changed files"` runs the provider-free local router and executes `repo.changed_files`.
 - `uv run hipson chat --fake -q "scan this repo and propose the next safe PR"` runs the explicit fake/offline provider path.
 - `uv run hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"` runs a read-only tool call through the fake/offline runtime path and prints a bounded tool-call summary.
 - `uv run hipson skill list` succeeds.
@@ -104,6 +120,7 @@ Observed behavior:
 
 - Tests can exercise runtime tool calls by injecting `FakeProvider.with_tool_calls(...)` into `HipsonRuntime`.
 - Runtime creates a session, persists user and assistant messages, validates tool names/inputs through the registry, checks approval before execution, executes allowed tools, persists tool calls/results, and stops after a bounded number of tool iterations.
+- Local-router chat creates a session, persists the user request, records the selected local route as assistant metadata, executes the selected read-only tool through the runtime boundary, persists the tool call, and writes a final bounded assistant answer derived from the tool result.
 - Explicit real-provider mode uses the same runtime loop and tool boundary as fake provider mode; unit tests use stub transports and do not call live providers.
 - Session store redacts message and tool-call fields before persistence.
 - Approval policy blocks dangerous risk, requires approval for exec except allowlisted read-only commands, and blocks common sensitive/path traversal cases.

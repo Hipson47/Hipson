@@ -4,11 +4,11 @@
 
 Initial score before this repair pass: **88/100** for the local/provider-free MVP.
 
-Final score after this repair pass: **96/100** for the local/provider-free MVP.
+Final score after local runtime-router implementation: **98/100** for the local/provider-free MVP.
 
 - Security and Safety: 24/25
-- Correctness and Runtime Behavior: 19/20
-- Test Quality and Fault Detection: 18/20
+- Correctness and Runtime Behavior: 20/20
+- Test Quality and Fault Detection: 19/20
 - CLI UX and Observability: 15/15
 - Documentation and Truthfulness: 10/10
 - Maintainability and Scope Control: 10/10
@@ -19,7 +19,8 @@ The score was capped below 95 before repair because the local MVP lacked a publi
 
 Before repair:
 
-- Chat fails closed without an explicit fake/offline mode.
+- Chat uses a deterministic local router for supported safe read-only engineering tasks.
+- Provider-specific chat remains explicit; unsupported local chat requests fail truthfully.
 - Runtime tools use registry validation, approval policy, path policy, redaction, output contracts, and bounded persistence.
 - No shell tool is registered by default.
 - Real provider support is not implemented.
@@ -34,7 +35,8 @@ Verified result:
 
 - `hipson tool run` only executes read-risk tools that do not require approval.
 - Write-risk tools such as `packet.review.create` are rejected by default.
-- Fake/offline chat remains explicit and no real provider adapter was added.
+- Default `hipson chat -q "scan this repo..."` executes `repo.scan` locally through the runtime safety boundary.
+- Fake/offline chat remains explicit.
 
 ## 3. Correctness and Runtime Behavior
 
@@ -42,8 +44,8 @@ Before repair:
 
 - Runtime can execute provider-supplied tool calls in tests.
 - CLI can inspect sessions/tools and approval-gated learning.
-- CLI cannot yet run a safe tool through the hardened boundary.
-- Max-tool-iteration stop is generic.
+- CLI can run safe tools through the hardened boundary.
+- Default chat can route supported provider-free local intents to safe read-only tools.
 
 Repair target:
 
@@ -54,6 +56,8 @@ Repair target:
 Verified result:
 
 - `hipson tool run repo.changed_files '{"path":"."}' --json` succeeds locally.
+- `hipson chat -q "scan this repo and propose the next safe PR"` executes `repo.scan` locally and returns a truthful deterministic answer.
+- `hipson chat -q "show changed files"` executes `repo.changed_files` locally.
 - `hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"` exercises the runtime tool-call path and prints a bounded tool-call summary.
 - Max-tool-iteration stops now include bounded attempted-tool context and persist skipped calls.
 
@@ -73,9 +77,10 @@ Repair target:
 
 Verified result:
 
-- Test count increased from 209 to 216.
+- Test count increased from 209 to 233 across the local/provider-free, real-agent completion, autonomous mutation-triage, and local-router passes.
 - New tests cover safe `tool run`, unsafe/invalid/path-rejected tool runs, optional session persistence, fake tool-call chat, unsafe fake tool-call refusal, max-iteration visibility, and trajectory learning.
-- Full mutmut survivor triage remains deferred and non-blocking for the local/provider-free MVP, but blocking before real-provider readiness.
+- Autonomous loop iteration 1 added selected survivor tests for approval path keys, sandbox skill-root paths, registry handler failure details, runtime rejection summaries, and sensitive path sanitization.
+- Full mutmut survivor triage remains deferred and non-blocking for the local/provider-free MVP, but blocking before broad real-agent release readiness.
 
 ## 5. CLI UX and Observability
 
@@ -93,8 +98,9 @@ Repair target:
 Verified result:
 
 - `hipson tool run` exists for safe read-only tools.
+- `hipson chat` defaults to local deterministic router mode for supported safe tasks.
 - `hipson chat --fake --fake-tool-call ...` exists and is explicitly fake/offline.
-- `hipson chat` without `--fake` still fails closed.
+- Unsupported local chat requests fail with a bounded supported-intents message.
 
 ## 6. Documentation and Truthfulness
 
@@ -142,8 +148,9 @@ After repair:
 - P0: none open in the local/provider-free MVP scope.
 - P1: none open in the local/provider-free MVP scope.
 - P1 before real-provider usage: focused mutmut survivor triage remains open.
-- P2: FTS-backed search and durable approval records remain deferred.
+- P2: FTS-backed/fallback search and durable approval records are implemented; keep regression tests and docs synchronized.
 - P2: write/external/exec/dangerous `tool run` remains deferred until durable approval UX exists.
+- P2: full mutmut survivor triage remains open for broader real-agent release readiness.
 
 ## 9. Final Decision
 
