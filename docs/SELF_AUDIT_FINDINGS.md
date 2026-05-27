@@ -2,7 +2,7 @@
 
 ## 1. Executive Summary
 
-Hipson's current working tree contains a broad persistent-runtime hardening diff: explicit fake chat mode, SQLite sessions, provider/fake abstractions, tool registry contracts, path-aware approvals, prompt separation, scheduler, and an optional MCP-style adapter. Local Hipson commands show the core CLI is usable, and `hipson chat` now fails closed unless `--fake` is explicit.
+Hipson's current working tree contains a broad persistent-runtime hardening diff: explicit fake chat mode, SQLite sessions, provider/fake abstractions, tool registry contracts, path-aware approvals, prompt separation, scheduler, and an optional MCP-style adapter. Local Hipson commands show the core CLI is usable. Later local-router work superseded the original fake/fail-closed default for supported provider-free engineering tasks.
 
 The highest-value remaining repair package is focused mutation/fault-injection survivor triage for runtime-critical safety boundaries. The current tests cover many negative paths, but `docs/AUDIT_CONTEXT_FOR_HIPSON.md` records a time-boxed mutmut run that timed out with partial survivors in approvals, sandbox, registry, provider, prompt, and runtime helpers. Before real-provider work, those helpers need more requirement-level tests that catch small logic inversions.
 
@@ -12,7 +12,7 @@ The highest-value remaining repair package is focused mutation/fault-injection s
 - Working tree: existing unstaged runtime/provider/tool/scheduler/test/docs changes plus untracked `tests/test_session.py`; this self-audit preserves those changes as the current baseline.
 - `uv run hipson doctor`: passed; reported Python 3.12.3, Hipson 1.1.0, git ok, Codex home `/home/hipson47/.codex-app`, Hipson home `/home/hipson47/.config/hipson`, optional sidecar env found, assets ok, 50 skills checked and 0 failed.
 - `uv run hipson skill validate`: passed; 50 `SKILL.md` files checked, 0 failed.
-- `uv run hipson chat -q "scan this repo"`: failed closed with `No chat provider is configured...`, which matches provider-free-by-default policy.
+- Original pre-router smoke: `uv run hipson chat -q "scan this repo"` failed closed with `No chat provider is configured...`. Later local-router smoke now executes supported safe repo-scan requests locally.
 - `HIPSON_HOME=<temp> uv run hipson chat --fake -q "offline runtime smoke"`: succeeded with `Fake/offline mode: Fake provider response`.
 - `uv run hipson scheduler --help`: shows opt-in `create`, `list`, and `tick` commands, not a daemon.
 - `uv run pytest -q`: passed, 201 tests.

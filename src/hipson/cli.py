@@ -40,7 +40,7 @@ from hipson.providers import (
 )
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.router import format_text_route, route_task
-from hipson.runtime import NO_CHAT_PROVIDER_MESSAGE, HipsonRuntime, RuntimeMode, default_session_db
+from hipson.runtime import HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
 from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
@@ -290,10 +290,6 @@ def command_chat(args: argparse.Namespace) -> int:
     if args.fake_tool_input and not args.fake_tool_call:
         print("--fake-tool-input requires --fake-tool-call.", file=sys.stderr)
         return 2
-    if not args.fake and not args.provider:
-        print(NO_CHAT_PROVIDER_MESSAGE, file=sys.stderr)
-        return 1
-
     query = args.query
     if query is None and not sys.stdin.isatty():
         query = sys.stdin.read().strip()
@@ -303,9 +299,10 @@ def command_chat(args: argparse.Namespace) -> int:
         print("A chat request is required.", file=sys.stderr)
         return 2
 
+    provider: ChatProvider | None
     if args.fake:
         fake_response = args.fake_response or "Fake provider response"
-        provider: ChatProvider = FakeProvider.with_text(fake_response)
+        provider = FakeProvider.with_text(fake_response)
         runtime_mode = RuntimeMode.FAKE
         model = "fake"
         if args.fake_tool_call:
@@ -334,7 +331,7 @@ def command_chat(args: argparse.Namespace) -> int:
                     ProviderResponse(text=fake_response, raw_metadata={"provider": "fake"}),
                 ]
             )
-    else:
+    elif args.provider:
         try:
             provider = _build_chat_provider(args)
         except ProviderError as exc:
@@ -342,6 +339,10 @@ def command_chat(args: argparse.Namespace) -> int:
             return 1
         runtime_mode = RuntimeMode.REAL
         model = args.model or DEFAULT_PROVIDER_MODEL
+    else:
+        provider = None
+        runtime_mode = RuntimeMode.LOCAL
+        model = "local-router"
 
     session_db = Path(args.session_db).expanduser() if args.session_db else default_session_db()
     store = open_session_store(session_db)
@@ -352,20 +353,28 @@ def command_chat(args: argparse.Namespace) -> int:
             runtime_mode=runtime_mode,
             model=model,
         )
-        result = runtime.run(query, cwd=Path.cwd(), session_id=args.session_id)
+        if runtime_mode == RuntimeMode.LOCAL:
+            result = runtime.run_local(query, cwd=Path.cwd(), session_id=args.session_id)
+        else:
+            result = runtime.run(query, cwd=Path.cwd(), session_id=args.session_id)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 1
     finally:
         store.close()
 
-    prefix = "Fake/offline mode" if args.fake else f"Provider mode ({args.provider})"
+    if runtime_mode == RuntimeMode.LOCAL:
+        prefix = "Local/router mode"
+    elif args.fake:
+        prefix = "Fake/offline mode"
+    else:
+        prefix = f"Provider mode ({args.provider})"
     print(f"{prefix}: {result.answer}")
     if result.tool_calls:
         print("Tool calls:")
         for record in result.tool_calls:
             print(f"- {record.name}: {record.status} - {_bounded_cli(record.summary, limit=MAX_CLI_CONTENT_CHARS)}")
-    return 0
+    return 0 if result.status == "completed" else 1
 
 
 def _build_chat_provider(args: argparse.Namespace) -> OpenAICompatibleProvider:
@@ -1028,7 +1037,10 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
 
-    chat = subparsers.add_parser("chat", help="Run the Hipson runtime chat; provider mode fails closed by default")
+    chat = subparsers.add_parser(
+        "chat",
+        help="Run local deterministic chat workflows; provider mode remains explicit",
+    )
     chat.add_argument("-q", "--query", help="Run one non-interactive request")
     chat.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")
     chat.add_argument("--session-id", help="Continue an existing runtime session")
@@ -1045,7 +1057,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.add_argument(
         "--provider",
         choices=["openai-compatible"],
-        help="Use an explicit real provider adapter; omitted chat remains fail-closed unless --fake is used",
+        help="Use an explicit real provider adapter; omitted chat uses local deterministic router mode",
     )
     chat.add_argument("--provider-url", default=DEFAULT_BASE_URL, help="OpenAI-compatible provider base URL")
     chat.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV, help="Environment variable containing the provider API key")

@@ -2,9 +2,9 @@
 
 ## 1. Score Summary
 
-Current score after the Hermes-style real-agent completion pass: 93/100.
+Current score after local runtime-router implementation: 94/100.
 
-Hipson now has an explicit OpenAI-compatible primary runtime provider adapter, safe read-only public tool execution, durable approval records, searchable redacted session history, approval-gated learning, and credential-free tests for provider success/failure/tool-call paths. It is not 100/100 because live provider smoke was intentionally skipped and the configured mutmut run still has untriaged safety-adjacent survivors/timeouts.
+Hipson now has an explicit OpenAI-compatible primary runtime provider adapter, safe read-only public tool execution, durable approval records, searchable redacted session history, approval-gated learning, and credential-free tests for provider success/failure/tool-call paths. Autonomous loop iteration 1 killed selected high-risk mutation survivors in approval path checks, sandbox skill-root checks, registry handler failures, and runtime rejection summaries. It is not 100/100 because live provider smoke was intentionally skipped and broad mutmut survivor triage still has untriaged safety-adjacent survivors/timeouts.
 
 Final decision: not 100/100 yet. Do not claim unrestricted release readiness until the open P1 findings in section 10 are closed.
 
@@ -12,7 +12,8 @@ Final decision: not 100/100 yet. Do not claim unrestricted release readiness unt
 
 Score: 14/15.
 
-- Pass: `hipson chat -q ...` fails closed when no provider is configured.
+- Pass: provider-specific chat fails closed when explicit provider configuration is missing.
+- Pass: provider-free `hipson chat -q "scan this repo..."` now uses deterministic local-router mode for supported safe tool workflows.
 - Pass: explicit fake/offline mode remains available through `--fake`.
 - Pass: `hipson chat --provider openai-compatible ...` is explicit and uses provider-free defaults otherwise.
 - Pass: the provider adapter has HTTPS-by-default URL policy, explicit local HTTP opt-in, redacted/bounded transport errors, and strict tool-call argument parsing.
@@ -67,11 +68,12 @@ Score: 10/10.
 
 ## 8. Test Quality and Mutation
 
-Score: 9/13.
+Score: 10/13.
 
 - Pass: full pytest, ruff, mypy, configured Bandit, compileall, custom runner, doctor, and skill validation passed after the implementation.
 - Pass: provider adapter tests cover success, URL policy, redacted/bounded HTTP errors, malformed tool arguments, and runtime integration with a stub transport.
 - Pass: runtime/tool/session/scheduler tests cover durable approval records and safe persistence.
+- Pass: autonomous loop iteration 1 killed selected high-risk mutants in approvals, sandbox, registry handler failure, and runtime rejection-summary behavior.
 - Gap: `timeout 300s uv run mutmut run || true` did not complete the configured 2,219-mutant set. Last observed progress was 1,965/2,219 with 1,643 killed, 130 timeouts, and 192 survivors; `uv run mutmut results || true` still lists survivors/not-checked mutants in `agents`, `approvals`, `prompt`, `sandbox`, `tools.registry`, `redaction`, `router`, and `runtime`.
 
 ## 9. Documentation Truthfulness
@@ -83,7 +85,7 @@ Score: 10/10.
 
 ## 10. Open Findings
 
-- P1: complete focused mutmut survivor triage in smaller batches for approval/path/redaction/registry/prompt/runtime safety logic.
+- P1: complete focused mutmut survivor triage in smaller batches for remaining approval/path/redaction/registry/prompt/runtime/provider safety logic.
 - P1: run manual live-provider smoke only with explicit user permission and disposable credentials before external release.
 - P2: design an interactive human approval UX for write/external/exec tools.
 - P2: improve learning with duplicate suppression and richer skill draft/apply workflows while keeping explicit approval gates.
@@ -92,4 +94,4 @@ Score: 10/10.
 
 Not 100/100 yet.
 
-Hipson is substantially closer to a Hermes-style real AI engineering agent runtime: it now has an explicit real-provider adapter and an end-to-end, auditable tool-calling path tested without network or credentials. It should be treated as a strong local-first real-agent candidate, not as final release-ready 100/100 software, until the P1 mutation triage and manual live-provider smoke are closed.
+Hipson is substantially closer to a Hermes-style real AI engineering agent runtime: it now has an explicit real-provider adapter and an end-to-end, auditable tool-calling path tested without network or credentials. It should be treated as a strong local-first real-agent candidate, not as final release-ready 100/100 software, until the remaining P1 mutation triage and manual live-provider smoke are closed.

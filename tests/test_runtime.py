@@ -3,8 +3,10 @@ import io
 from pathlib import Path
 
 from hipson import cli
+from hipson import memory as hipson_memory
+from hipson.local_router import route_local_request
 from hipson.providers import FakeProvider, OpenAICompatibleProvider, ProviderResponse, ProviderToolCall
-from hipson.runtime import HipsonRuntime, RuntimeMode
+from hipson.runtime import HipsonRuntime, RuntimeMode, RuntimeToolCallRecord, _rejection_summary
 from hipson.session import open_session_store
 from hipson.tools import PathPolicy, ToolContext, ToolRegistry, ToolResult, ToolSpec, build_default_registry
 
@@ -208,6 +210,7 @@ def test_runtime_rejection_summary_caps_multiple_rejected_calls_and_redacts(tmp_
     assert result.tool_iterations == 5
     assert len(tool_calls) == 5
     assert "Tool call rejection(s)" in result.answer
+    assert result.answer.count("Tool call rejection(s):") == 1
     assert "missing.0" in result.answer
     assert "missing.1" in result.answer
     assert "missing.2" in result.answer
@@ -215,6 +218,22 @@ def test_runtime_rejection_summary_caps_multiple_rejected_calls_and_redacts(tmp_
     assert "... 2 more rejected tool call(s)" in result.answer
     assert secret not in result.answer
     assert "[REDACTED]" in result.answer
+
+
+def test_runtime_rejection_summary_helper_has_stable_header_count_and_bounds():
+    records = [
+        RuntimeToolCallRecord(name=f"missing.{index}", status="rejected", summary="bad input")
+        for index in range(4)
+    ]
+
+    summary = _rejection_summary(records)
+
+    assert summary.splitlines()[0] == "Tool call rejection(s):"
+    assert summary.count("Tool call rejection(s):") == 1
+    assert "missing.0" in summary
+    assert "missing.2" in summary
+    assert "missing.3" not in summary
+    assert "... 1 more rejected tool call(s)" in summary
 
 
 def test_runtime_non_fake_mode_blocks_external_risk_tool(tmp_path: Path):
@@ -512,7 +531,37 @@ def test_runtime_stops_after_max_tool_iterations(tmp_path: Path):
     assert len(provider.calls) == 4
 
 
-def test_chat_cli_query_fails_closed_without_fake_provider(tmp_path: Path):
+def test_local_router_maps_supported_intents_to_safe_read_tools():
+    registry = build_default_registry()
+    examples = {
+        "scan this repo": ("repo_scan", "repo.scan", {"path": ".", "include_diff": False, "diff_lines": 3}),
+        "show changed files": ("changed_files", "repo.changed_files", {"path": "."}),
+        "search memory for provider": ("memory_search", "memory.search", {"query": "provider", "limit": 5}),
+        "list skills": ("skill_list", "skill.list", {}),
+    }
+
+    for request, expected in examples.items():
+        route = route_local_request(request)
+        assert route is not None
+        assert (route.intent, route.tool_name, route.input_data) == expected
+        assert route.tool_name is not None
+        spec = registry.get(route.tool_name)
+        assert spec.risk_level == "read"
+        assert spec.approval_required is False
+
+    assert route_local_request("please create a review packet") is None
+
+
+def test_local_router_memory_search_without_query_needs_input():
+    route = route_local_request("search memory")
+
+    assert route is not None
+    assert route.intent == "memory_search"
+    assert route.tool_name is None
+    assert route.missing_input == "memory query"
+
+
+def test_chat_cli_default_uses_local_router_for_repo_scan(tmp_path: Path):
     session_db = tmp_path / "runtime.sqlite"
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -522,16 +571,172 @@ def test_chat_cli_query_fails_closed_without_fake_provider(tmp_path: Path):
             [
                 "chat",
                 "-q",
-                "hello from cli",
+                "scan this repo and propose the next safe PR",
                 "--session-db",
                 str(session_db),
             ]
         )
 
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        messages = store.list_messages(str(sessions[0]["id"]))
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert output.startswith("Local/router mode: Local/router mode executed `repo.scan`")
+    assert "Fake provider response" not in output
+    assert "No chat provider is configured" not in output
+    assert "Next safe PR:" in output
+    assert "Tool calls:" in output
+    assert "repo.scan: completed" in output
+    assert [message["role"] for message in messages] == ["user", "assistant", "assistant"]
+    assert messages[0]["metadata"]["mode"] == "local_router"
+    assert tool_calls[0]["tool_name"] == "repo.scan"
+    assert tool_calls[0]["status"] == "completed"
+    assert tool_calls[0]["approval_status"] == "approved"
+
+
+def test_chat_cli_default_uses_local_router_for_changed_files(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "-q",
+                "show changed files",
+                "--session-db",
+                str(session_db),
+            ]
+        )
+
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert output.startswith("Local/router mode: Local/router mode executed `repo.changed_files`")
+    assert "No changed or untracked files were found." in output
+    assert tool_calls[0]["tool_name"] == "repo.changed_files"
+    assert tool_calls[0]["status"] == "completed"
+
+
+def test_chat_cli_default_uses_local_router_for_memory_search(tmp_path: Path):
+    hipson_memory.add_note(
+        root=tmp_path / "memory",
+        scope="repo",
+        repo="Hipson",
+        kind="decision",
+        summary="Provider mode stays explicit while local router handles safe requests.",
+        tags=["provider", "runtime"],
+    )
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "-q",
+                "search memory for provider",
+                "--session-db",
+                str(session_db),
+            ]
+        )
+
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert "Local/router mode executed `memory.search`" in output
+    assert "Provider mode stays explicit" in output
+    assert tool_calls[0]["tool_name"] == "memory.search"
+    assert tool_calls[0]["status"] == "completed"
+
+
+def test_chat_cli_default_uses_local_router_for_skill_list(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "-q",
+                "list skills",
+                "--session-db",
+                str(session_db),
+            ]
+        )
+
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    output = stdout.getvalue()
+    assert exit_code == 0
+    assert stderr.getvalue() == ""
+    assert "Local/router mode executed `skill.list`" in output
+    assert tool_calls[0]["tool_name"] == "skill.list"
+    assert tool_calls[0]["status"] == "completed"
+
+
+def test_chat_cli_default_rejects_unsupported_local_request_truthfully(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "-q",
+                "write a poem about the runtime",
+                "--session-db",
+                str(session_db),
+            ]
+        )
+
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        messages = store.list_messages(str(sessions[0]["id"]))
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    output = stdout.getvalue()
     assert exit_code == 1
-    assert stdout.getvalue() == ""
-    assert "No chat provider is configured" in stderr.getvalue()
-    assert not session_db.exists()
+    assert stderr.getvalue() == ""
+    assert output.startswith("Local/router mode: Local/router mode could not map this request")
+    assert "Supported local-router intents:" in output
+    assert "Fake provider response" not in output
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[-1]["metadata"]["status"] == "unsupported"
+    assert tool_calls == []
 
 
 def test_chat_cli_real_provider_requires_explicit_config_without_network(tmp_path: Path):

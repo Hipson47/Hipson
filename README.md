@@ -128,27 +128,31 @@ key.
 ## Runtime Preview
 
 The persistent runtime is local and provider-free by default. `hipson chat`
-fails closed unless an explicit provider is configured or the fake/offline path
-is selected with `--fake`:
+uses a deterministic local router for supported safe engineering tasks such as
+repo scans, changed-file summaries, memory search, and skill listing. It runs
+read-only tools through the same registry, approval, path-policy,
+output-contract, redaction, and session-persistence checks used by the runtime:
 
 ```bash
 hipson chat -q "scan this repo"
+hipson chat -q "show changed files"
+hipson chat -q "search memory for runtime approvals"
 hipson chat --fake -q "offline runtime smoke"
 hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check changed files"
 hipson chat --provider openai-compatible --model openai/gpt-4o-mini -q "scan this repo"
 ```
 
-The fake tool-call form is an explicit offline demo path. It exercises the
-runtime tool-call boundary through the same registry, approval, path-policy,
-output-contract, redaction, and session-persistence checks used by injected
-runtime tests.
+Unsupported default chat requests fail truthfully with the supported local
+intents instead of pretending to be a general chatbot. The fake tool-call form
+is an explicit offline demo path. It exercises the runtime tool-call boundary
+without claiming real provider behavior.
 
-The OpenAI-compatible provider adapter is explicit and fail-closed. It uses
-`OPENROUTER_API_KEY` and `https://openrouter.ai/api/v1` by default, accepts
-`--api-key-env`, `--provider-url`, `--model`, and `--provider-timeout`, rejects
-remote `http://` provider URLs, and allows local HTTP only with
-`--allow-local-provider-http`. Unit tests use stub transports; live provider
-smoke checks are manual and should not be required for CI.
+The OpenAI-compatible provider adapter is explicit. It uses `OPENROUTER_API_KEY`
+and `https://openrouter.ai/api/v1` by default, accepts `--api-key-env`,
+`--provider-url`, `--model`, and `--provider-timeout`, rejects remote `http://`
+provider URLs, and allows local HTTP only with `--allow-local-provider-http`.
+Unit tests use stub transports; live provider smoke checks are manual and
+should not be required for CI.
 
 Runtime sessions are stored in SQLite under Hipson home by default, with
 `--session-db` available for tests and local debugging. Messages, tool calls,

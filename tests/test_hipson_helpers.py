@@ -24,7 +24,7 @@ from hipson.packets import (
     prose_list,
 )
 from hipson.paths import package_root
-from hipson.redaction import REDACTION, is_sensitive_path, redact_sensitive_paths, redact_text
+from hipson.redaction import REDACTION, SKIPPED, is_sensitive_path, redact_sensitive_paths, redact_text, sanitize_path
 from hipson.skills import find_skill_files, parse_frontmatter, validate_skill_file, validate_skills
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -217,6 +217,13 @@ def test_sensitive_path_contract_covers_suffixes_parts_and_safe_names():
         assert is_sensitive_path(path) is True
     for path in safe:
         assert is_sensitive_path(path) is False
+
+
+def test_sanitize_path_preserves_safe_paths_and_summarizes_sensitive_paths():
+    assert sanitize_path("src/app.py") == "src/app.py"
+    assert sanitize_path("docs/key-concepts.md") == "docs/key-concepts.md"
+    assert sanitize_path(".env") == SKIPPED
+    assert sanitize_path("state/runtime.sqlite") == SKIPPED
 
 
 def test_redact_sensitive_paths_handles_quoted_and_punctuated_paths():

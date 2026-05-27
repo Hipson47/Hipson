@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from hipson.approvals import ApprovalPolicy
-from hipson.sandbox import check_read_path, check_write_path, is_allowlisted_read_only_command
+from hipson.sandbox import check_read_path, check_skill_root_path, check_write_path, is_allowlisted_read_only_command
 from hipson.tools import PathPolicy, ToolContext, ToolResult, ToolSpec, build_default_registry
 
 
@@ -144,6 +144,33 @@ def test_approval_policy_checks_declared_path_fields(tmp_path: Path):
     assert "Write path must be under runs/" in packet_outside.reason
     assert skill_home.blocked is True
     assert "Broad home/profile paths" in skill_home.reason
+
+
+def test_approval_policy_legacy_path_keys_all_get_sandbox_checks(tmp_path: Path):
+    policy = ApprovalPolicy()
+    context = ToolContext(cwd=tmp_path, repo_root=None, session_id="test")
+
+    for key in ("path", "project", "packet", "source"):
+        decision = policy.evaluate("read", {key: "../outside"}, context)
+
+        assert decision.blocked is True, key
+        assert decision.allowed is False, key
+        assert "Path traversal is not allowed" in decision.reason
+
+
+def test_sandbox_skill_root_allows_relative_workspace_and_packaged_assets(tmp_path: Path):
+    workspace_skill_root = tmp_path / "skills"
+    workspace_skill_root.mkdir()
+
+    relative = check_skill_root_path("skills", tmp_path)
+    packaged = check_skill_root_path(Path(__file__).resolve().parents[1] / "skills", tmp_path)
+    outside = check_skill_root_path(tmp_path.parent, tmp_path)
+
+    assert relative.allowed is True
+    assert relative.path == workspace_skill_root.resolve()
+    assert packaged.allowed is True
+    assert outside.allowed is False
+    assert "active workspace or packaged Hipson assets" in outside.reason
 
 
 def test_exec_allowlist_is_read_only_and_narrow():
