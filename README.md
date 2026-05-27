@@ -86,11 +86,13 @@ hipson memory list
 
 hipson chat -q "scan this repo"
 hipson chat --fake -q "offline runtime smoke"
+hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"
 hipson session list
 hipson session show <session-id>
 hipson session search "runtime hardening"
 hipson tool list
 hipson tool show repo.scan
+hipson tool run repo.changed_files '{"path":"."}' --json
 hipson learn propose --session-id <session-id>
 hipson learn apply-memory --session-id <session-id> --proposal-id <proposal-id> --memory-dir memory
 
@@ -129,7 +131,13 @@ explicit fake/offline path is selected with `--fake`:
 ```bash
 hipson chat -q "scan this repo"
 hipson chat --fake -q "offline runtime smoke"
+hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check changed files"
 ```
+
+The fake tool-call form is an explicit offline demo path. It exercises the
+runtime tool-call boundary through the same registry, approval, path-policy,
+output-contract, redaction, and session-persistence checks used by injected
+runtime tests. It is not a real provider-backed agent loop.
 
 Runtime sessions are stored in SQLite under Hipson home by default, with
 `--session-db` available for tests and local debugging. Observability commands
@@ -141,7 +149,12 @@ hipson session show <session-id> --session-db ~/.config/hipson/runtime.sqlite
 hipson session search "approval" --session-db ~/.config/hipson/runtime.sqlite
 hipson tool list
 hipson tool show memory.search
+hipson tool run repo.changed_files '{"path":"."}' --json
 ```
+
+Manual tool execution is intentionally narrow: `tool run` only runs read-risk
+tools that do not require approval. Write, external, exec, and dangerous tools
+fail closed until a durable approval UX exists.
 
 Learning is approval-gated. `learn propose` reads a session and prints memory or
 skill-reference candidates without writing durable memory. `learn apply-memory`

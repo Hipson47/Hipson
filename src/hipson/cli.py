@@ -11,6 +11,7 @@ from typing import cast
 
 from hipson import __version__, agents, learning, memory
 from hipson import project as project_mod
+from hipson.approvals import ApprovalPolicy
 from hipson.assets import runtime_asset
 from hipson.codex_install import format_install_plan, install_codex
 from hipson.home import detect_codex_home, detect_hipson_home
@@ -24,14 +25,14 @@ from hipson.project import (
     resolve_project_from_registry,
     write_output,
 )
-from hipson.providers import FakeProvider
+from hipson.providers import FakeProvider, ProviderResponse, ProviderToolCall
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.router import format_text_route, route_task
 from hipson.runtime import NO_CHAT_PROVIDER_MESSAGE, HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
 from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
-from hipson.tools import ToolRegistryError, ToolSpec, build_default_registry
+from hipson.tools import ToolContext, ToolRegistryError, ToolSpec, bounded_tool_output, build_default_registry
 
 PACKAGE_ROOT = package_root()
 MAX_CLI_FIELD_CHARS = 220
@@ -268,6 +269,12 @@ def command_chat(args: argparse.Namespace) -> int:
     if args.fake_response and not args.fake:
         print("--fake-response requires --fake or --offline.", file=sys.stderr)
         return 2
+    if args.fake_tool_call and not args.fake:
+        print("--fake-tool-call requires --fake or --offline.", file=sys.stderr)
+        return 2
+    if args.fake_tool_input and not args.fake_tool_call:
+        print("--fake-tool-input requires --fake-tool-call.", file=sys.stderr)
+        return 2
     if not args.fake:
         print(NO_CHAT_PROVIDER_MESSAGE, file=sys.stderr)
         return 1
@@ -281,13 +288,41 @@ def command_chat(args: argparse.Namespace) -> int:
         print("A chat request is required.", file=sys.stderr)
         return 2
 
+    fake_response = args.fake_response or "Fake provider response"
+    provider = FakeProvider.with_text(fake_response)
+    if args.fake_tool_call:
+        try:
+            fake_tool_input = parse_json_object(args.fake_tool_input or "{}")
+            _validate_fake_demo_tool(args.fake_tool_call)
+        except json.JSONDecodeError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        except (ValueError, ToolRegistryError) as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        provider = FakeProvider(
+            responses=[
+                ProviderResponse(
+                    text="Fake/offline tool call requested",
+                    tool_calls=[
+                        ProviderToolCall(
+                            id="cli-fake-call-1",
+                            name=args.fake_tool_call,
+                            input=fake_tool_input,
+                        )
+                    ],
+                    raw_metadata={"provider": "fake"},
+                ),
+                ProviderResponse(text=fake_response, raw_metadata={"provider": "fake"}),
+            ]
+        )
+
     session_db = Path(args.session_db).expanduser() if args.session_db else default_session_db()
     store = open_session_store(session_db)
     try:
-        fake_response = args.fake_response or "Fake provider response"
         runtime = HipsonRuntime(
             store=store,
-            provider=FakeProvider.with_text(fake_response),
+            provider=provider,
             runtime_mode=RuntimeMode.FAKE,
         )
         result = runtime.run(query, cwd=Path.cwd(), session_id=args.session_id)
@@ -298,7 +333,19 @@ def command_chat(args: argparse.Namespace) -> int:
         store.close()
 
     print(f"Fake/offline mode: {result.answer}")
+    if args.fake_tool_call and result.tool_calls:
+        print("Tool calls:")
+        for record in result.tool_calls:
+            print(f"- {record.name}: {record.status} - {_bounded_cli(record.summary, limit=MAX_CLI_CONTENT_CHARS)}")
     return 0
+
+
+def _validate_fake_demo_tool(tool_name: str) -> ToolSpec:
+    registry = build_default_registry()
+    spec = registry.get(tool_name)
+    if spec.risk_level != "read" or spec.approval_required:
+        raise ToolRegistryError("Fake tool-call demo is limited to read-risk tools that do not require approval")
+    return spec
 
 
 def command_packet_review(args: argparse.Namespace) -> int:
@@ -480,6 +527,105 @@ def command_tool_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_tool_run(args: argparse.Namespace) -> int:
+    registry = build_default_registry()
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd().resolve()
+    session_id = ""
+    store: SessionStore | None = None
+    try:
+        try:
+            input_data = parse_json_object(args.input)
+        except (json.JSONDecodeError, ValueError) as exc:
+            payload = _tool_run_payload(
+                args.name,
+                status="rejected",
+                risk_level="dangerous",
+                approval_status="invalid_input",
+                summary="Tool input was rejected",
+                error=str(exc),
+            )
+            _print_tool_run_payload(payload, json_output=args.json)
+            return 2
+
+        try:
+            spec = registry.validate_input(args.name, input_data)
+        except ToolRegistryError as exc:
+            payload = _tool_run_payload(
+                args.name,
+                status="rejected",
+                risk_level="dangerous",
+                approval_status="invalid_input",
+                summary="Tool input was rejected",
+                error=str(exc),
+            )
+            _print_tool_run_payload(payload, json_output=args.json)
+            return 1
+
+        if spec.risk_level != "read" or spec.approval_required:
+            payload = _tool_run_payload(
+                spec.name,
+                status="rejected",
+                risk_level=spec.risk_level,
+                approval_status="requires_approval" if spec.approval_required else "blocked",
+                summary="Tool run rejected",
+                error="Manual tool run is limited to read-risk tools that do not require approval",
+            )
+            _print_tool_run_payload(payload, json_output=args.json)
+            return 1
+
+        if args.session_db or args.session_id:
+            store = open_session_store(_session_db_path(args))
+            try:
+                session_id = _tool_run_session_id(store, args.session_id, cwd)
+            except ToolRegistryError as exc:
+                payload = _tool_run_payload(
+                    spec.name,
+                    status="rejected",
+                    risk_level=spec.risk_level,
+                    approval_status="invalid_session",
+                    summary="Tool run rejected",
+                    error=str(exc),
+                )
+                _print_tool_run_payload(payload, json_output=args.json)
+                return 1
+
+        context = ToolContext(cwd=cwd, repo_root=project_mod.git_root(cwd), session_id=session_id or "cli-tool-run")
+        decision = ApprovalPolicy().evaluate_tool(spec, input_data, context)
+        if not decision.allowed:
+            payload = _tool_run_payload(
+                spec.name,
+                status="rejected",
+                risk_level=spec.risk_level,
+                approval_status="blocked" if decision.blocked else "requires_approval",
+                summary="Tool run rejected",
+                error=decision.reason,
+                session_id=session_id,
+            )
+            _persist_cli_tool_run(store, session_id, spec.name, input_data, payload)
+            _print_tool_run_payload(payload, json_output=args.json)
+            return 1
+
+        result = registry.run(spec.name, input_data, context)
+        status = "completed" if result.ok else "failed"
+        payload = _tool_run_payload(
+            spec.name,
+            status=status,
+            risk_level=spec.risk_level,
+            approval_status="approved",
+            summary=result.summary,
+            output=bounded_tool_output(result),
+            error=result.error,
+            artifacts=list(result.artifacts),
+            session_id=session_id,
+        )
+        _persist_cli_tool_run(store, session_id, spec.name, input_data, payload)
+        _print_tool_run_payload(payload, json_output=args.json)
+        return 0 if result.ok else 1
+    finally:
+        if store is not None:
+            store.close()
+
+
 def command_learn_propose(args: argparse.Namespace) -> int:
     db_path, store = _open_existing_session_store(args)
     if store is None:
@@ -650,6 +796,76 @@ def _tool_spec_payload(spec: ToolSpec) -> dict[str, object]:
     }
 
 
+def _tool_run_payload(
+    tool_name: str,
+    *,
+    status: str,
+    risk_level: str,
+    approval_status: str,
+    summary: str,
+    output: dict[str, object] | None = None,
+    error: str = "",
+    artifacts: list[str] | None = None,
+    session_id: str = "",
+) -> dict[str, object]:
+    return {
+        "tool_name": _bounded_cli(tool_name),
+        "status": status,
+        "risk_level": risk_level,
+        "approval_status": approval_status,
+        "summary": _bounded_cli(summary, limit=MAX_CLI_CONTENT_CHARS),
+        "output": output or {},
+        "error": _bounded_cli(error, limit=MAX_CLI_CONTENT_CHARS),
+        "artifacts": artifacts or [],
+        "session_id": session_id,
+    }
+
+
+def _print_tool_run_payload(payload: dict[str, object], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
+    print(
+        f"{payload['tool_name']}: {payload['status']} "
+        f"risk={payload['risk_level']} approval={payload['approval_status']}"
+    )
+    if payload["summary"]:
+        print(f"summary: {payload['summary']}")
+    if payload["error"]:
+        print(f"error: {payload['error']}")
+    print("output:")
+    print(_bounded_json(payload["output"]))
+
+
+def _tool_run_session_id(store: SessionStore, session_id: str | None, cwd: Path) -> str:
+    if session_id:
+        if store.get_session(session_id) is None:
+            raise ToolRegistryError(f"Session does not exist: {session_id}")
+        return session_id
+    return store.create_session(cwd=str(cwd), repo_root=str(project_mod.git_root(cwd) or ""), title="Hipson tool run")
+
+
+def _persist_cli_tool_run(
+    store: SessionStore | None,
+    session_id: str,
+    tool_name: str,
+    input_data: dict[str, object],
+    payload: dict[str, object],
+) -> None:
+    if store is None or not session_id:
+        return
+    store.add_tool_call(
+        session_id,
+        tool_name=tool_name,
+        input_data=input_data,
+        output_data=cast(dict[str, object], payload.get("output", {})),
+        risk_level=str(payload["risk_level"]),
+        approval_status=str(payload["approval_status"]),
+        status=str(payload["status"]),
+        error=str(payload["error"]),
+    )
+
+
 def command_scheduler_create(args: argparse.Namespace) -> int:
     try:
         input_data = parse_json_object(args.input)
@@ -747,6 +963,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use explicit fake/offline provider mode for tests and demos",
     )
     chat.add_argument("--fake-response", help="Deterministic fake provider response for --fake mode")
+    chat.add_argument("--fake-tool-call", help="Explicit fake/offline demo tool call to execute through the runtime")
+    chat.add_argument("--fake-tool-input", help="JSON object input for --fake-tool-call")
     chat.set_defaults(func=command_chat)
 
     init = subparsers.add_parser("init", help="Create docs/hipson-progress.md in a project")
@@ -907,6 +1125,14 @@ def build_parser() -> argparse.ArgumentParser:
     tool_show.add_argument("name")
     tool_show.add_argument("--json", action="store_true", help="Print machine-readable tool metadata")
     tool_show.set_defaults(func=command_tool_show)
+    tool_run = tool_sub.add_parser("run", help="Run one safe read-only runtime tool through policy checks")
+    tool_run.add_argument("name")
+    tool_run.add_argument("input", help="Tool input JSON object")
+    tool_run.add_argument("--cwd", help="Workspace for path policy checks; defaults to current directory")
+    tool_run.add_argument("--session-db", help="Persist an auditable tool call in this SQLite session DB")
+    tool_run.add_argument("--session-id", help="Persist into an existing session; defaults to a new session when --session-db is used")
+    tool_run.add_argument("--json", action="store_true", help="Print machine-readable tool result")
+    tool_run.set_defaults(func=command_tool_run)
 
     learn_parser = subparsers.add_parser("learn", help="Propose and explicitly apply approval-gated runtime learning")
     learn_parser.add_argument("--session-db", help="SQLite session DB path; defaults to Hipson config runtime.sqlite")

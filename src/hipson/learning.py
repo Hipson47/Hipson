@@ -43,6 +43,16 @@ class LearningProposal:
         }
 
 
+@dataclass(frozen=True)
+class _Trajectory:
+    summary: str
+    request: str
+    outcome: str
+    tool_summary: str
+    source_refs: list[str]
+    confidence: float
+
+
 def propose_from_session(store: SessionStore, session_id: str, *, max_summary_chars: int = 500) -> list[LearningProposal]:
     session = store.get_session(session_id)
     if session is None:
@@ -51,7 +61,7 @@ def propose_from_session(store: SessionStore, session_id: str, *, max_summary_ch
     messages = store.list_messages(session_id, limit=50)
     tool_calls = store.list_tool_calls(session_id)
     proposals: list[LearningProposal] = []
-    memory = _memory_proposal(session, messages, max_summary_chars=max_summary_chars)
+    memory = _memory_proposal(session, messages, tool_calls, max_summary_chars=max_summary_chars)
     if memory is not None:
         proposals.append(memory)
     skill = _skill_reference_proposal(str(session["id"]), messages, tool_calls)
@@ -63,26 +73,29 @@ def propose_from_session(store: SessionStore, session_id: str, *, max_summary_ch
 def _memory_proposal(
     session: dict[str, object],
     messages: list[dict[str, object]],
+    tool_calls: list[dict[str, object]],
     *,
     max_summary_chars: int,
 ) -> LearningProposal | None:
     if not messages:
         return None
-    source = _last_non_empty_message(messages)
-    if source is None:
+    trajectory = _session_trajectory(messages, tool_calls, max_summary_chars=max_summary_chars)
+    if trajectory is None:
         return None
-    content = _cap(redact_text(str(source["content"])), max_summary_chars)
-    summary = redact_text(f"Session outcome candidate: {content}")
-    source_refs = [f"session:{session['id']}", f"message:{source['id']}"]
+    summary = redact_text(f"Session trajectory candidate: {trajectory.summary}")
+    source_refs = [f"session:{session['id']}", *trajectory.source_refs]
     repo = str(session.get("repo_root") or session.get("cwd") or "")
     payload: dict[str, object] = {
         "scope": "repo" if session.get("repo_root") else "session",
         "repo": redact_metadata(repo),
         "kind": "handoff",
         "summary": summary,
+        "request": trajectory.request,
+        "outcome": trajectory.outcome,
+        "tool_summary": trajectory.tool_summary,
         "tags": ["runtime", "session"],
         "sources": source_refs,
-        "confidence": 0.6,
+        "confidence": trajectory.confidence,
     }
     return LearningProposal(
         id=_proposal_id(str(session["id"]), "memory", summary, payload, source_refs),
@@ -90,6 +103,7 @@ def _memory_proposal(
         summary=summary,
         payload=payload,
         source_refs=source_refs,
+        confidence=trajectory.confidence,
         tags=["runtime", "session"],
     )
 
@@ -127,6 +141,72 @@ def _last_non_empty_message(messages: list[dict[str, object]]) -> dict[str, obje
         if str(message.get("content", "")).strip():
             return message
     return None
+
+
+def _session_trajectory(
+    messages: list[dict[str, object]],
+    tool_calls: list[dict[str, object]],
+    *,
+    max_summary_chars: int,
+) -> _Trajectory | None:
+    request_message = _first_non_empty_role(messages, "user")
+    outcome_message = _last_non_empty_role(messages, "assistant") or _last_non_empty_message(messages)
+    if request_message is None and outcome_message is None and not tool_calls:
+        return None
+
+    request = _message_excerpt(request_message, max_summary_chars=max_summary_chars // 3) if request_message else ""
+    outcome = _message_excerpt(outcome_message, max_summary_chars=max_summary_chars // 3) if outcome_message else ""
+    tool_summary = _cap("; ".join(_tool_call_excerpt(call) for call in tool_calls[-5:]), max_summary_chars // 3)
+    parts = []
+    if request:
+        parts.append(f"request: {request}")
+    if outcome:
+        parts.append(f"outcome: {outcome}")
+    if tool_summary:
+        parts.append(f"tools: {tool_summary}")
+    summary = _cap(" | ".join(parts), max_summary_chars)
+    source_refs: list[str] = []
+    for message in (request_message, outcome_message):
+        if message is not None:
+            ref = f"message:{message['id']}"
+            if ref not in source_refs:
+                source_refs.append(ref)
+    for call in tool_calls[-5:]:
+        source_refs.append(f"tool_call:{call['id']}")
+    confidence = 0.75 if tool_calls else 0.65
+    return _Trajectory(
+        summary=summary,
+        request=request,
+        outcome=outcome,
+        tool_summary=tool_summary,
+        source_refs=source_refs,
+        confidence=confidence,
+    )
+
+
+def _first_non_empty_role(messages: list[dict[str, object]], role: str) -> dict[str, object] | None:
+    for message in messages:
+        if str(message.get("role")) == role and str(message.get("content", "")).strip():
+            return message
+    return None
+
+
+def _last_non_empty_role(messages: list[dict[str, object]], role: str) -> dict[str, object] | None:
+    for message in reversed(messages):
+        if str(message.get("role")) == role and str(message.get("content", "")).strip():
+            return message
+    return None
+
+
+def _message_excerpt(message: dict[str, object], *, max_summary_chars: int) -> str:
+    return _cap(redact_text(str(message.get("content", ""))), max(80, max_summary_chars))
+
+
+def _tool_call_excerpt(tool_call: dict[str, object]) -> str:
+    name = redact_text(str(tool_call.get("tool_name", "")))
+    status = redact_text(str(tool_call.get("status", "")))
+    error = redact_text(str(tool_call.get("error", ""))).strip()
+    return _cap(f"{name} {status}{': ' + error if error else ''}", 180)
 
 
 def _skill_name_from_tool_calls(tool_calls: list[dict[str, object]]) -> str | None:

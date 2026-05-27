@@ -300,6 +300,96 @@ def test_tool_cli_unknown_tool_fails_cleanly():
     assert "Unknown tool: missing.tool" in stderr
 
 
+def test_tool_cli_run_executes_read_tool_through_safe_boundary(tmp_path: Path):
+    rc, stdout, stderr = run_cli(
+        "tool",
+        "run",
+        "repo.changed_files",
+        '{"path":"."}',
+        "--cwd",
+        str(tmp_path),
+        "--json",
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["tool_name"] == "repo.changed_files"
+    assert payload["status"] == "completed"
+    assert payload["risk_level"] == "read"
+    assert payload["approval_status"] == "approved"
+    assert payload["output"] == {"changed_files": [], "untracked_files": []}
+
+
+def test_tool_cli_run_rejects_unsafe_or_invalid_tools(tmp_path: Path):
+    for args, expected in [
+        (
+            (
+                "tool",
+                "run",
+                "packet.review.create",
+                '{"project":".","title":"unsafe"}',
+                "--cwd",
+                str(tmp_path),
+                "--json",
+            ),
+            "Manual tool run is limited to read-risk",
+        ),
+        (
+            ("tool", "run", "missing.tool", "{}", "--cwd", str(tmp_path), "--json"),
+            "Unknown tool",
+        ),
+        (
+            ("tool", "run", "repo.changed_files", "{}", "--cwd", str(tmp_path), "--json"),
+            "missing required input",
+        ),
+        (
+            ("tool", "run", "repo.changed_files", '{"path":"../escape"}', "--cwd", str(tmp_path), "--json"),
+            "Path traversal is not allowed",
+        ),
+    ]:
+        rc, stdout, stderr = run_cli(*args)
+        assert rc == 1
+        assert stderr == ""
+        payload = json.loads(stdout)
+        assert payload["status"] == "rejected"
+        assert expected in payload["error"]
+
+
+def test_tool_cli_run_can_persist_auditable_session_record(tmp_path: Path):
+    db_path = tmp_path / "runtime.sqlite"
+    rc, stdout, stderr = run_cli(
+        "tool",
+        "run",
+        "repo.changed_files",
+        '{"path":"."}',
+        "--cwd",
+        str(tmp_path),
+        "--session-db",
+        str(db_path),
+        "--json",
+    )
+
+    assert rc == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["session_id"]
+
+    from hipson.session import open_session_store
+
+    store = open_session_store(db_path)
+    try:
+        sessions = store.list_sessions()
+        tool_calls = store.list_tool_calls(payload["session_id"])
+    finally:
+        store.close()
+
+    assert len(sessions) == 1
+    assert tool_calls[0]["tool_name"] == "repo.changed_files"
+    assert tool_calls[0]["status"] == "completed"
+    assert tool_calls[0]["approval_status"] == "approved"
+
+
 def test_default_tool_registry_exposes_initial_mvp_tools():
     registry = build_default_registry()
     specs = {spec.name: spec for spec in registry.list()}

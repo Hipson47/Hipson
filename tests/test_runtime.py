@@ -448,9 +448,14 @@ def test_runtime_stops_after_max_tool_iterations(tmp_path: Path):
     finally:
         store.close()
 
-    assert result.answer == "Stopped after 3 tool iteration(s)."
+    assert "Stopped after 3 tool iteration(s)." in result.answer
+    assert "Tool call rejection(s)" in result.answer
+    assert "repo.changed_files" in result.answer
+    assert "max tool iterations" in result.answer
     assert result.tool_iterations == 3
-    assert len(tool_calls) == 3
+    assert len(tool_calls) == 4
+    assert tool_calls[-1]["status"] == "rejected"
+    assert tool_calls[-1]["approval_status"] == "max_tool_iterations"
     assert len(provider.calls) == 4
 
 
@@ -529,6 +534,94 @@ def test_chat_cli_query_uses_explicit_fake_provider_and_temp_db(tmp_path: Path):
     assert stdout.getvalue().strip() == "Fake/offline mode: cli ok"
     assert len(sessions) == 1
     assert [message["role"] for message in messages] == ["user", "assistant"]
+
+
+def test_chat_cli_explicit_fake_tool_call_uses_runtime_pipeline(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout):
+        exit_code = cli.main(
+            [
+                "chat",
+                "--fake",
+                "-q",
+                "check changed files",
+                "--session-db",
+                str(session_db),
+                "--fake-tool-call",
+                "repo.changed_files",
+                "--fake-tool-input",
+                '{"path":"."}',
+            ]
+        )
+
+    store = open_session_store(session_db)
+    try:
+        sessions = store.list_sessions()
+        tool_calls = store.list_tool_calls(str(sessions[0]["id"]))
+    finally:
+        store.close()
+
+    assert exit_code == 0
+    assert stdout.getvalue().startswith("Fake/offline mode: Fake provider response")
+    assert "Tool calls:" in stdout.getvalue()
+    assert "repo.changed_files: completed" in stdout.getvalue()
+    assert len(tool_calls) == 1
+    assert tool_calls[0]["tool_name"] == "repo.changed_files"
+    assert tool_calls[0]["status"] == "completed"
+
+
+def test_chat_cli_fake_tool_call_rejects_unsafe_tool_before_runtime(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "--fake",
+                "-q",
+                "write packet",
+                "--session-db",
+                str(session_db),
+                "--fake-tool-call",
+                "packet.review.create",
+                "--fake-tool-input",
+                '{"project":".","title":"x"}',
+            ]
+        )
+
+    assert exit_code == 1
+    assert stdout.getvalue() == ""
+    assert "Fake tool-call demo is limited to read-risk" in stderr.getvalue()
+    assert not session_db.exists()
+
+
+def test_chat_cli_fake_tool_input_requires_fake_tool_call(tmp_path: Path):
+    session_db = tmp_path / "runtime.sqlite"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with contextlib.chdir(tmp_path), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code = cli.main(
+            [
+                "chat",
+                "--fake",
+                "-q",
+                "bad demo",
+                "--session-db",
+                str(session_db),
+                "--fake-tool-input",
+                '{"path":"."}',
+            ]
+        )
+
+    assert exit_code == 2
+    assert stdout.getvalue() == ""
+    assert "--fake-tool-input requires --fake-tool-call" in stderr.getvalue()
+    assert not session_db.exists()
 
 
 def test_runtime_default_registry_has_no_shell_auto_execution_tool():

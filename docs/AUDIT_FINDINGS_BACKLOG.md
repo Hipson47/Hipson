@@ -14,7 +14,11 @@ The focused fault-injection passes added regression tests for approval fail-clos
 
 ## Status Update — Runtime Observability And Learning MVP
 
-The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, fallback message search, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-provider chat support, `hipson tool run`, FTS population, durable approval records, and scheduler/MCP expansion remain deferred.
+The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, fallback message search, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-provider chat support, FTS population, durable approval records, and scheduler/MCP expansion remain deferred.
+
+## Status Update — Local Provider-Free Production Readiness Repair
+
+The local/provider-free production readiness repair added `hipson tool run` for read-risk tools that do not require approval, an explicit `hipson chat --fake --fake-tool-call ... --fake-tool-input ...` offline demo path, bounded max-tool-iteration visibility, and trajectory-based learning proposals. Tests cover safe read-only tool execution, unsafe/invalid/path-rejected tool runs, optional session persistence, fake chat tool-call execution, unsafe fake tool-call refusal, max-iteration audit visibility, and improved learning provenance. Real-provider chat support, write/external/exec/dangerous tool execution, durable approval records, FTS-backed search, and full mutmut survivor triage remain deferred.
 
 ## P0 — Must Fix Before Using Runtime
 
@@ -94,7 +98,7 @@ The Hermes-style repair pass added read-only `hipson session list/show/search`, 
 
 ### [P1] Surface rejected tool calls in runtime answers
 - Severity: P1
-- Status: Fixed for rejected and failed runtime tool calls; keep CLI/runtime regression tests.
+- Status: Fixed for rejected, failed, and max-tool-iteration runtime tool calls; keep CLI/runtime regression tests.
 - Evidence: Runtime persists rejected tool calls, but tests such as the gateway path still return `Fake provider response`; user-facing answers may hide rejected/blocked tool calls.
 - Affected files: `src/hipson/runtime.py`, `src/hipson/gateway/cli.py`, `tests/test_runtime.py`, `tests/test_gateway.py`
 - Why it matters: Silent rejection makes the runtime misleading and weakens auditability for users.
@@ -120,25 +124,25 @@ The Hermes-style repair pass added read-only `hipson session list/show/search`, 
 
 ### [P2] Add read-only session and tool CLI commands
 - Severity: P2
-- Status: Fixed by Runtime Observability + Approval-Gated Learning MVP; keep CLI and temp-DB regression tests.
+- Status: Fixed by Runtime Observability + Approval-Gated Learning MVP and local production-readiness repair; keep CLI and temp-DB regression tests.
 - Evidence: Prior CLI smoke showed `hipson session list` and `hipson tool list` as invalid choices. Current CLI smoke shows both command groups are available.
 - Affected files: `src/hipson/cli.py`, `src/hipson/session.py`, `src/hipson/tools/registry.py`, tests
 - Why it matters: Auditing runtime state requires first-class read-only inspection commands.
-- Recommended fix: Add `session list/show/search` and `tool list` as read-only commands after persistence and registry contracts are hardened.
-- Tests to add: CLI list/show/search use temp DB and do not touch user home unless explicitly configured.
-- Acceptance criteria: Users can inspect sessions/tools without provider credentials or network.
+- Recommended fix: Complete for inspection and read-only safe execution. Keep `tool run` limited to read-risk tools that do not require approval until durable approval UX exists.
+- Tests to add: Future regressions should keep CLI list/show/search on temp DBs and avoid touching user home unless explicitly configured.
+- Acceptance criteria: Met for session/tool observability; users can inspect sessions/tools without provider credentials or network.
 - Estimated PR size: Medium
 - Dependencies: Session schema and tool contract stability.
 
 ### [P2] Add approval-gated learning CLI from runtime sessions
 - Severity: P2
 - Status: Fixed for memory proposals by Runtime Observability + Approval-Gated Learning MVP; skill proposals remain reference-only drafts.
-- Evidence: `src/hipson/learning.py` could propose candidates, but no CLI exposed proposal review or explicit apply workflow.
+- Evidence: Prior state had `src/hipson/learning.py` proposal helpers but no CLI review/apply workflow. Current CLI exposes `hipson learn propose` and explicit `hipson learn apply-memory`.
 - Affected files: `src/hipson/cli.py`, `src/hipson/learning.py`, `src/hipson/memory.py`, `tests/test_learning.py`
 - Why it matters: Hipson could not close the local learning loop from persisted sessions without custom Python.
-- Recommended fix: Add `hipson learn propose` and explicit `hipson learn apply-memory`; never auto-persist model-derived learning.
-- Tests to add: Proposal-only behavior, redaction, deterministic proposal IDs, explicit memory apply with provenance, non-memory proposal refusal.
-- Acceptance criteria: Users can propose and explicitly apply one redacted memory note from a session without provider credentials or network.
+- Recommended fix: Complete for memory proposals; never auto-persist model-derived learning.
+- Tests to add: Future regressions should preserve proposal-only behavior, redaction, deterministic proposal IDs, explicit memory apply with provenance, and non-memory proposal refusal.
+- Acceptance criteria: Met for memory proposals; users can propose and explicitly apply one redacted memory note from a session without provider credentials or network.
 - Estimated PR size: Medium
 - Dependencies: Session store and JSONL memory store.
 

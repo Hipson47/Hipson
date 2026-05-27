@@ -111,12 +111,32 @@ class HipsonRuntime:
 
             if iteration >= self.max_tool_iterations:
                 answer = f"Stopped after {self.max_tool_iterations} tool iteration(s)."
-                self.store.add_message(active_session_id, "assistant", answer, {"status": "max_tool_iterations"})
+                skipped_records = [
+                    self._persist_max_iteration_tool_call(
+                        active_session_id,
+                        tool_call,
+                        assistant_message_id=assistant_message_id,
+                    )
+                    for tool_call in response.tool_calls
+                ]
+                visible_records = tool_records + skipped_records
+                self.store.add_message(
+                    active_session_id,
+                    "assistant",
+                    _answer_with_tool_rejections(answer, visible_records),
+                    {
+                        "status": "max_tool_iterations",
+                        "attempted_tool_calls": [
+                            {"name": record.name, "status": record.status, "summary": record.summary}
+                            for record in skipped_records
+                        ],
+                    },
+                )
                 return RuntimeResult(
-                    answer=answer,
+                    answer=_answer_with_tool_rejections(answer, visible_records),
                     session_id=active_session_id,
                     tool_iterations=len(tool_records),
-                    tool_calls=tool_records,
+                    tool_calls=visible_records,
                 )
 
             for tool_call in response.tool_calls:
@@ -278,6 +298,26 @@ class HipsonRuntime:
             error=summary,
         )
         return RuntimeToolCallRecord(name=tool_name, status="rejected", summary=summary)
+
+    def _persist_max_iteration_tool_call(
+        self,
+        session_id: str,
+        tool_call: ProviderToolCall,
+        *,
+        assistant_message_id: str,
+    ) -> RuntimeToolCallRecord:
+        try:
+            risk_level = self.registry.get(tool_call.name).risk_level
+        except ToolRegistryError:
+            risk_level = "dangerous"
+        return self._persist_rejected_tool_call(
+            session_id,
+            tool_call,
+            assistant_message_id=assistant_message_id,
+            risk_level=risk_level,
+            approval_status="max_tool_iterations",
+            error=f"Tool call skipped because max tool iterations ({self.max_tool_iterations}) was reached.",
+        )
 
 
 def default_session_db() -> Path:

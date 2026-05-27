@@ -450,7 +450,7 @@ Runtime constraints:
 | `hipson session search "..."` | MVP | Search redacted session messages through safe fallback search; FTS population remains future work. |
 | `hipson tool list` | MVP | List registry tools, risk levels, approval requirements, contracts, and path policies. |
 | `hipson tool show <name>` | MVP | Show one registered tool's schemas, output contract, risk, approval, and path policy metadata. |
-| `hipson tool run <name> <json>` | Future | Manual tool execution for debugging; must respect approvals. |
+| `hipson tool run <name> <json>` | MVP | Manual execution for read-risk tools that do not require approval; must use registry validation, path policy, approval checks, output contracts, bounded/redacted output, and optional session persistence. Write/external/exec/dangerous tools remain future work until durable approval UX exists. |
 | `hipson skill list` | Next | Expose skill metadata, likely via existing `skill` command group. |
 | `hipson skill view <name>` | Next | View bounded skill reference text. |
 | `hipson learn propose --session-id <id>` | MVP | Print approval-gated memory/skill-reference proposals without durable writes. |
