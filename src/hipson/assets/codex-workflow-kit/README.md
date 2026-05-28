@@ -8,6 +8,7 @@ project-level `AGENTS.md` template.
 - `~/.codex/AGENTS.md` - global Codex behavior.
 - `~/.codex/skills/hipson-workflow/SKILL.md` - the main AI-assisted workflow skill.
 - `~/.codex/skills/hipson-workflow/references/` - compact workflow references.
+- `~/.codex/skills/hipson-subagent-orchestration/SKILL.md` - bounded subagent delegation workflow.
 - `templates/repo-AGENTS.md` - project-level rules template.
 
 ## Installation

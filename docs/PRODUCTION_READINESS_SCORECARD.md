@@ -13,7 +13,7 @@ Final score after local runtime-router implementation: **98/100** for the local/
 - Documentation and Truthfulness: 10/10
 - Maintainability and Scope Control: 10/10
 
-The score was capped below 95 before repair because the local MVP lacked a public safe end-to-end read-only tool execution path and max-tool-iteration visibility was incomplete. Those local/provider-free blockers are now fixed and verified. Real-provider readiness remains out of scope and is not claimed.
+The score was capped below 95 before repair because the local MVP lacked a public safe end-to-end read-only tool execution path and max-tool-iteration visibility was incomplete. Those local/provider-free blockers are now fixed and verified. Real-provider release readiness is tracked separately in `docs/REAL_AGENT_READINESS_SCORECARD.md`.
 
 ## 2. Security and Safety
 
@@ -23,7 +23,7 @@ Before repair:
 - Provider-specific chat remains explicit; unsupported local chat requests fail truthfully.
 - Runtime tools use registry validation, approval policy, path policy, redaction, output contracts, and bounded persistence.
 - No shell tool is registered by default.
-- Real provider support is not implemented.
+- Real provider support is explicit, not default, and outside the local/provider-free MVP score.
 
 Repair target:
 
@@ -112,12 +112,12 @@ Before repair:
 Repair target:
 
 - Update docs to mark local safe read-only `tool run` and fake tool-call demo as implemented if verified.
-- Continue to state real-provider readiness is absent.
+- Continue to state live-provider/release readiness is not claimed unless separately verified.
 
 Verified result:
 
 - README, audit context, backlog, persistent runtime spec, repair plan, and this scorecard now describe the local/provider-free status.
-- Real-provider readiness and release readiness beyond local/provider-free MVP are not claimed.
+- Live-provider smoke/release readiness beyond local/provider-free MVP is not claimed.
 
 ## 7. Maintainability and Scope Control
 
@@ -147,7 +147,7 @@ After repair:
 
 - P0: none open in the local/provider-free MVP scope.
 - P1: none open in the local/provider-free MVP scope.
-- P1 before real-provider usage: focused mutmut survivor triage remains open.
+- P1 before broad real-agent release: focused mutmut survivor triage remains open.
 - P2: FTS-backed/fallback search and durable approval records are implemented; keep regression tests and docs synchronized.
 - P2: write/external/exec/dangerous `tool run` remains deferred until durable approval UX exists.
 - P2: full mutmut survivor triage remains open for broader real-agent release readiness.
@@ -156,4 +156,4 @@ After repair:
 
 Status after implementation and verification: **production-ready local/provider-free MVP**.
 
-This decision is scoped to the local/provider-free MVP only. Hipson is **not real-provider-ready** and should not be marketed as a real-provider Hermes competitor until provider adapter, durable approvals, prompt/tool-call hardening under real model outputs, and focused mutmut survivor triage are complete.
+This decision is scoped to the local/provider-free MVP only. Hipson has an explicit OpenAI-compatible provider adapter and stubbed provider tool-call tests, but it should not be marketed as a live-provider/release-ready Hermes competitor until manual live-provider smoke and focused mutmut survivor triage are complete.

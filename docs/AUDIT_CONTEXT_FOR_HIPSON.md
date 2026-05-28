@@ -6,12 +6,12 @@ The repository is on branch `main` at `/home/hipson47/code/Hipson`. The real-age
 
 Verified local checks:
 
-- `uv run pytest -q`: 223 tests passed after the real-agent completion changes.
+- `uv run pytest -q`: 234 tests passed after the provider/tool-loop approval/search/learning completion changes.
 - `uv run ruff check .`: passed.
 - `uv run mypy src/hipson`: passed.
 - `uv run bandit -q -r src/hipson -c pyproject.toml`: passed.
 - `python -m compileall src/hipson`: passed.
-- `uv run python scripts/run_tests.py`: 223/223 tests passed.
+- `uv run python scripts/run_tests.py`: 234/234 tests passed.
 - `uv run hipson doctor`: passed.
 - `uv run hipson skill validate`: passed.
 
@@ -55,7 +55,7 @@ Hermes-style runtime observability and learning repair pass:
 - `src/hipson/learning.py` now emits deterministic proposal IDs so proposals can be reviewed and explicitly applied.
 - `hipson session list/show/search` read SQLite runtime sessions without requiring provider credentials or network access.
 - `hipson tool list/show` inspect registered tools, risk levels, approval requirements, schemas, output contracts, and path policies.
-- `hipson learn propose` prints approval-gated memory/skill-reference proposals without durable writes.
+- `hipson learn propose` prints approval-gated memory and draft/reference-only skill proposals without durable writes.
 - `hipson learn apply-memory` explicitly persists one selected memory proposal into JSONL memory with redacted summary and session/message provenance.
 
 Local provider-free production readiness repair:
@@ -72,6 +72,14 @@ Real-agent completion pass:
 - `src/hipson/session.py` now persists first-class `approval_records` for runtime, scheduler, and manual tool-run decisions.
 - `hipson session show` displays bounded approval records.
 - `hipson session search` now searches messages, tool-call summaries, and memory summaries, using FTS for messages/memories when SQLite supports it and a safe fallback otherwise.
+
+Provider/tool-loop approval/search/learning completion pass:
+
+- Approval records now include optional `expires_at` metadata and idempotent migration support for existing SQLite stores.
+- `hipson session search --json` reports `search_backend` as `fts+fallback` or `fallback` so the search contract is visible instead of implied.
+- Learning memory proposals now include approval-record summaries, `approval_record:<id>` provenance, rationale, and confidence.
+- Skill proposals remain draft/reference-only with `activation_status=not_applied` and are never auto-applied.
+- `timeout 300s uv run mutmut run || true` still timed out before the configured set completed; last observed progress was 2,005/2,291 mutants with 1,673 killed, 148 timeouts, and 184 survivors.
 
 Local deterministic runtime-router pass:
 
@@ -147,7 +155,7 @@ Observed behavior:
 - Manual `hipson tool run` is intentionally limited to read-risk tools that do not require approval.
 - Future tools must declare path policy metadata before registration.
 - Session history retention remains minimal.
-- Session search uses FTS for messages/memories when available and a safe fallback; tool-call search uses bounded SQLite fallback.
+- Session search reports whether it is using `fts+fallback` or `fallback`; tool-call search uses bounded SQLite fallback.
 
 ## 7. Test Gaps
 

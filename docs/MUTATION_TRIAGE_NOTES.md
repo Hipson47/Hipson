@@ -36,6 +36,8 @@ Latest Hermes-style real-agent completion verification:
 
 Mutmut reconnaissance was rerun with `timeout 300s uv run mutmut run || true`. It did not complete the configured 2,219-mutant set within the timeout. Last observed progress was 1,965/2,219 mutants with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still reported survivors, timeouts, and not-checked mutants in safety-adjacent modules.
 
+Latest provider/tool-loop approval/search/learning completion pass reran `timeout 300s uv run mutmut run || true`. It generated 2,291 mutants and again did not complete within the timeout. Last observed progress was 2,005/2,291 mutants with 1,673 killed, 148 timeouts, and 184 survivors. `uv run mutmut results || true` still reports survivors/timeouts/not-checked mutants in `agents`, `approvals`, `prompt`, `sandbox`, `redaction`, `router`, `runtime`, and `tools.registry`.
+
 Recommended follow-up command:
 
 ```bash
@@ -71,6 +73,8 @@ Newly implemented after the original stabilization note:
 - Explicit `hipson chat --provider openai-compatible` provider mode.
 - Durable `approval_records` persisted for runtime, scheduler, and manual tool-run decisions.
 - Session search across messages, tool-call summaries, and memory summaries with FTS/fallback behavior.
+- Optional approval expiry metadata is now included in approval records.
+- Learning proposals now include approval-record provenance and draft/reference-only skill metadata.
 
 ## 3. High-Risk Survivor Categories
 
@@ -102,11 +106,11 @@ Newly implemented after the original stabilization note:
 
 ## 5. Observed Survivors
 
-Current signal from `docs/AUDIT_CONTEXT_FOR_HIPSON.md`:
+Current signal from the latest `timeout 300s uv run mutmut run || true`:
 
-- A configured mutmut run did not complete within `timeout 300s`.
-- Last observed progress was 1,965/2,219 mutants.
-- Partial results included 192 survivors and 130 timeouts.
+- The run did not complete within `timeout 300s`.
+- Last observed progress was 2,005/2,291 mutants.
+- Partial results included 184 survivors and 148 timeouts.
 - Results still include survivors, timeouts, or not-checked mutants in approval, sandbox, registry, provider/agents, prompt, redaction, router, and runtime helpers.
 
 Autonomous loop iteration 1 selected-mutant follow-up:

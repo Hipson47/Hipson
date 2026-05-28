@@ -436,15 +436,15 @@ Runtime constraints:
 - Invalid tool name: persist rejected tool call and return an explanation to the provider/runtime answer path.
 - Invalid input: persist validation error and do not call handler.
 - Provider failure: persist redacted error and return a clear no-provider/no-response message.
-- Graceful no-provider behavior: `hipson chat` should support fake provider mode and should fail clearly when a real provider is configured but unavailable.
+- Graceful provider behavior: default `hipson chat` uses deterministic local-router mode for supported safe local intents; explicit provider mode fails clearly when configured but unavailable, and `--fake` remains the offline test/demo path.
 - Fake-provider test path: all runtime loop tests use `src/hipson/providers/fake.py` or an injected provider object.
 
 ## 12. CLI Contract
 
 | Command | Status | Notes |
 |---|---|---|
-| `hipson chat` | MVP | Fails closed without a configured provider; explicit `--fake` remains the offline test/demo path. |
-| `hipson chat -q "..."` | MVP | Non-interactive single request, useful for tests and scripts; same provider/fake constraint. |
+| `hipson chat` | MVP | Uses local deterministic router mode for supported safe provider-free tasks; explicit `--provider openai-compatible` selects the real provider adapter and `--fake` remains the offline test/demo path. |
+| `hipson chat -q "..."` | MVP | Non-interactive single request, useful for tests and scripts; supports local-router, explicit provider, and explicit fake/offline modes. |
 | `hipson session list` | MVP | List local sessions from SQLite with redacted bounded summaries. |
 | `hipson session show <id>` | MVP | Show redacted session transcript and tool call summaries. |
 | `hipson session search "..."` | MVP | Search redacted session messages, tool-call summaries, and memory summaries; uses FTS for messages/memories when available and safe fallback otherwise. |
@@ -453,7 +453,7 @@ Runtime constraints:
 | `hipson tool run <name> <json>` | MVP | Manual execution for read-risk tools that do not require approval; must use registry validation, path policy, approval checks, output contracts, bounded/redacted output, approval records, and optional session persistence. Write/external/exec/dangerous tools remain future work until a richer approval UX exists. |
 | `hipson skill list` | Next | Expose skill metadata, likely via existing `skill` command group. |
 | `hipson skill view <name>` | Next | View bounded skill reference text. |
-| `hipson learn propose --session-id <id>` | MVP | Print approval-gated memory/skill-reference proposals without durable writes. |
+| `hipson learn propose --session-id <id>` | MVP | Print approval-gated trajectory memory and draft/reference-only skill proposals without durable writes. |
 | `hipson learn apply-memory --session-id <id> --proposal-id <id> --memory-dir <path>` | MVP | Explicitly persist one selected memory proposal with redacted summary and provenance. |
 
 ## 13. Implementation Sequence
@@ -573,12 +573,12 @@ Tests must be written from acceptance criteria, not copied from implementation.
 | Category | Required coverage |
 |---|---|
 | Router tests | token-aware rules, phrase matching, build/runtime/verify cases, UI/security risk fixtures, existing behavior stability. |
-| Session tests | temp DB open, migrations, sessions/messages/tool calls CRUD, redaction-before-persistence, FTS fallback. |
+| Session tests | temp DB open, migrations, sessions/messages/tool calls/approval records CRUD, redaction-before-persistence, FTS-backed/fallback search contract. |
 | Provider fake tests | deterministic text, one valid tool call, provider failure, error redaction, no network required. |
 | Tool registry tests | register/list/dispatch, duplicate rejection, input validation, output contract, unknown tool rejection. |
 | Approval policy tests | read auto, generated write auto, external approval, exec approval, dangerous blocked, persisted approval metadata. |
 | Prompt assembly snapshot tests | stable output, bounded memory, selected skills, tool specs, untrusted content delimiters, no raw secrets. |
-| Runtime loop tests with fake provider | no-tool answer, one read-only tool call, invalid tool, max iteration stop, persisted transcript. |
+| Runtime loop tests with fake/stub providers | no-tool answer, one read-only tool call, invalid tool, provider-style tool calls, max iteration stop, persisted transcript and approval records. |
 | CLI smoke tests | `hipson chat -q`, future session/tool/skill commands, existing CLI smoke stays green. |
 | Redaction/security tests | provider errors, tool outputs, packet snippets, memory proposals, sensitive paths. |
 | No-network unit test guarantee | runtime/provider tests must not need live credentials or network access. |

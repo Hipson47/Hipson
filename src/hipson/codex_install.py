@@ -58,11 +58,12 @@ def build_install_plan(codex_home: Path | None = None) -> InstallPlan:
         codex_home, warnings = detect_codex_home()
     agents_path = codex_home / "AGENTS.md"
     skill_target = codex_home / "skills" / "hipson-workflow"
+    skill_sources = _packaged_codex_skills()
     actions = [
         f"ensure directory {codex_home}",
         f"merge Hipson marker block into {agents_path}",
-        f"replace skill directory {skill_target}",
     ]
+    actions.extend(f"replace skill directory {codex_home / 'skills' / source.name}" for source in skill_sources)
     return InstallPlan(codex_home, agents_path, skill_target, actions, warnings)
 
 
@@ -83,12 +84,13 @@ def install_codex(dry_run: bool = True, codex_home: Path | None = None) -> Insta
             plan.actions.append(f"backed up {plan.agents_path} to {backup}")
         plan.agents_path.write_text(merged, encoding="utf-8")
 
-    source_skill = runtime_asset("codex-workflow-kit/skills/hipson-workflow")
-    if plan.skill_target.exists():
-        backup = plan.skill_target.with_name(f"{plan.skill_target.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
-        shutil.move(str(plan.skill_target), str(backup))
-        plan.actions.append(f"backed up {plan.skill_target} to {backup}")
-    shutil.copytree(source_skill, plan.skill_target)
+    for source_skill in _packaged_codex_skills():
+        skill_target = plan.codex_home / "skills" / source_skill.name
+        if skill_target.exists():
+            backup = skill_target.with_name(f"{skill_target.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
+            shutil.move(str(skill_target), str(backup))
+            plan.actions.append(f"backed up {skill_target} to {backup}")
+        shutil.copytree(source_skill, skill_target)
     return plan
 
 
@@ -100,3 +102,8 @@ def format_install_plan(plan: InstallPlan, dry_run: bool) -> str:
     lines.append("Actions:")
     lines.extend(f"- {action}" for action in plan.actions)
     return "\n".join(lines)
+
+
+def _packaged_codex_skills() -> list[Path]:
+    skills_dir = runtime_asset("codex-workflow-kit/skills")
+    return sorted(path for path in skills_dir.iterdir() if (path / "SKILL.md").exists())

@@ -1,9 +1,11 @@
 import contextlib
 import io
 import json
+import sqlite3
 from pathlib import Path
 
 from hipson import cli
+from hipson import session as hipson_session
 from hipson.redaction import REDACTION
 from hipson.session import open_session_store
 
@@ -49,6 +51,7 @@ def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Pa
             decision="approved",
             reason=f"allowed with token={secret}",
             approved_by="policy",
+            expires_at="2026-05-27T23:59:59Z",
         )
 
         sessions = store.list_sessions()
@@ -70,6 +73,64 @@ def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Pa
     assert approvals[0]["id"] == approval_id
     assert approvals[0]["decision"] == "approved"
     assert approvals[0]["reason"] == "allowed with token=[REDACTED]"
+    assert approvals[0]["expires_at"] == "2026-05-27T23:59:59Z"
+
+
+def test_approval_record_migration_adds_expires_at_to_existing_db(tmp_path: Path):
+    db_path = tmp_path / "runtime.sqlite"
+    with sqlite3.connect(db_path) as connection:
+        connection.executescript(hipson_session.INITIAL_SCHEMA)
+        connection.execute(
+            """
+            CREATE TABLE schema_migrations (
+              version INTEGER PRIMARY KEY,
+              applied_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+            (hipson_session.SCHEMA_VERSION, hipson_session.timestamp()),
+        )
+        connection.execute(
+            """
+            CREATE TABLE approval_records (
+              id TEXT PRIMARY KEY,
+              session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+              tool_call_id TEXT REFERENCES tool_calls(id) ON DELETE SET NULL,
+              job_id TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+              source TEXT NOT NULL,
+              tool_name TEXT NOT NULL,
+              risk_level TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              reason TEXT NOT NULL DEFAULT '',
+              approved_by TEXT NOT NULL DEFAULT '',
+              scope TEXT NOT NULL DEFAULT 'tool_call',
+              metadata_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL
+            )
+            """
+        )
+
+    store = open_session_store(db_path)
+    try:
+        columns = {row[1] for row in store.connection.execute("PRAGMA table_info(approval_records)")}
+        session_id = store.create_session(cwd=str(tmp_path), title="Approval migration")
+        store.add_approval_record(
+            session_id=session_id,
+            source="runtime",
+            tool_name="repo.scan",
+            risk_level="read",
+            decision="approved",
+            reason="migration check",
+            expires_at="2026-05-27T23:59:59Z",
+        )
+        approvals = store.list_approval_records(session_id=session_id)
+    finally:
+        store.close()
+
+    assert "expires_at" in columns
+    assert approvals[0]["expires_at"] == "2026-05-27T23:59:59Z"
 
 
 def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
@@ -128,6 +189,7 @@ def test_session_cli_list_show_and_search_redact_temp_db(tmp_path: Path):
     assert rc == 0
     assert stderr == ""
     payload = json.loads(stdout)
+    assert payload["search_backend"] in {"fts+fallback", "fallback"}
     assert payload["results"][0]["session_id"] == session_id
     assert "packet-first" in payload["results"][0]["snippet"]
     assert secret not in stdout

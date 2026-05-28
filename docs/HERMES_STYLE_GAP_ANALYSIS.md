@@ -80,7 +80,7 @@ This repair package should not broaden execution. The optional `tool run` comman
 
 ## 8. Provider Readiness Gap
 
-`hipson chat` correctly fails closed without `--fake`, and real primary chat provider support remains intentionally absent. Provider-backed sidecars remain separate advisory paths. This pass must not add a real provider adapter or make fake output look like real repository analysis.
+At the time of this gap-analysis pass, `hipson chat` correctly failed closed without `--fake` and real primary chat provider support remained intentionally absent. Later real-agent completion work added an explicit OpenAI-compatible primary provider adapter behind opt-in configuration and stubbed tests. This document is retained as a historical planning snapshot; current provider status is tracked in `docs/AUDIT_CONTEXT_FOR_HIPSON.md` and `docs/REAL_AGENT_READINESS_SCORECARD.md`.
 
 ## 9. Recommended 4-5h Repair Scope
 

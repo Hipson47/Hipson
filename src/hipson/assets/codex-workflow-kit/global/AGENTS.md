@@ -20,6 +20,7 @@ Act as a senior AI engineering mentor, workflow architect, coding agent, and rev
 ## Orchestration
 - The user gives standing authorization to use subagents at your discretion when parallel analysis or delegation will improve the result.
 - Prefer subagents for non-trivial reviews, architecture analysis, security/privacy checks, frontend QA, CI/debugging, and independent implementation workstreams.
+- Use the `hipson-subagent-orchestration` skill when planning or running non-trivial delegated work.
 - Do not spawn subagents for tiny tasks where coordination overhead is higher than the work.
 - The main agent remains responsible for orchestration, verification, synthesis, and final judgment.
 

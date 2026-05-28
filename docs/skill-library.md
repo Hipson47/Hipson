@@ -14,6 +14,9 @@ Hipson also includes local wrapper skills for Hipson-specific workflows:
   motion interaction design, Codex implementation briefs, and visual QA.
 - `skills/hipson-hyperframes-video/`: optional HyperFrames website/document to
   video brief and timeline QA workflow.
+- `src/hipson/assets/codex-workflow-kit/skills/hipson-subagent-orchestration/`:
+  installable Codex skill for bounded explorer, worker, reviewer, QA, security,
+  and automation subagent workflows.
 
 ## Installed Sources
 
