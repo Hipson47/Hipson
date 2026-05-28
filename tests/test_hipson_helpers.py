@@ -1476,6 +1476,7 @@ def test_session_store_creates_schema_idempotently(tmp_path: Path):
         "memories",
         "skill_runs",
         "jobs",
+        "approval_records",
     }.issubset(tables)
     assert {
         "idx_messages_session_created",
@@ -1486,6 +1487,9 @@ def test_session_store_creates_schema_idempotently(tmp_path: Path):
     assert migrations == [1]
     if fts_enabled:
         assert {"messages_fts", "memories_fts"}.issubset(tables)
+    with sqlite3.connect(db) as connection:
+        approval_columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_records)")}
+    assert "expires_at" in approval_columns
 
 
 def test_session_store_crud_and_redaction(tmp_path: Path):
@@ -1629,6 +1633,14 @@ def test_install_codex_apply_preserves_existing_agents_content(tmp_path: Path):
     assert END_MARKER in text
     assert (codex_home / "skills" / "hipson-workflow" / "SKILL.md").exists()
     assert (codex_home / "skills" / "hipson-workflow" / "references" / "hipson-agent-skills.md").exists()
+    assert (codex_home / "skills" / "hipson-subagent-orchestration" / "SKILL.md").exists()
+    assert (
+        codex_home
+        / "skills"
+        / "hipson-subagent-orchestration"
+        / "references"
+        / "subagent-orchestration.md"
+    ).exists()
     assert list(codex_home.glob("AGENTS.md.backup-*"))
 
 
@@ -1930,6 +1942,7 @@ def test_root_toolkit_mirror_is_absent():
     assert not Path("codex-workflow-kit").exists()
     assert Path("src/hipson/assets/codex-workflow-kit/global/AGENTS.md").exists()
     assert Path("src/hipson/assets/codex-workflow-kit/skills/hipson-workflow/SKILL.md").exists()
+    assert Path("src/hipson/assets/codex-workflow-kit/skills/hipson-subagent-orchestration/SKILL.md").exists()
 
 
 def test_codex_assets_reference_agent_playbook_and_router():

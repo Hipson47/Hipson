@@ -93,6 +93,7 @@ hipson chat --provider openai-compatible --model openai/gpt-4o-mini -q "scan thi
 hipson session list
 hipson session show <session-id>
 hipson session search "runtime hardening"
+hipson session search "runtime hardening" --json
 hipson tool list
 hipson tool show repo.scan
 hipson tool run repo.changed_files '{"path":"."}' --json
@@ -157,7 +158,9 @@ should not be required for CI.
 Runtime sessions are stored in SQLite under Hipson home by default, with
 `--session-db` available for tests and local debugging. Messages, tool calls,
 approval records, and approved memory summaries are redacted and bounded before
-persistence. Observability commands are read-only:
+persistence. JSON search output includes `search_backend` so callers can see
+whether SQLite FTS is active with fallback, or fallback-only. Observability
+commands are read-only:
 
 ```bash
 hipson session list --session-db ~/.config/hipson/runtime.sqlite
@@ -172,10 +175,13 @@ Manual tool execution is intentionally narrow: `tool run` only runs read-risk
 tools that do not require approval. Write, external, exec, and dangerous tools
 fail closed outside the runtime approval policy. Runtime, scheduler, and manual
 tool-run decisions are recorded as bounded approval records in the session DB.
+Approval records can include optional expiry metadata for future approval UX.
 
-Learning is approval-gated. `learn propose` reads a session and prints memory or
-skill-reference candidates without writing durable memory. `learn apply-memory`
-writes one selected memory proposal only when invoked explicitly:
+Learning is approval-gated. `learn propose` reads a session trajectory and
+prints memory plus draft/reference-only skill candidates without writing durable
+memory. Memory proposals include message, tool-call, and approval provenance.
+`learn apply-memory` writes one selected memory proposal only when invoked
+explicitly:
 
 ```bash
 hipson learn propose --session-id <session-id>

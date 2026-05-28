@@ -48,6 +48,7 @@
 
 ## Agent Workflow
 Use the global `hipson-workflow` skill.
+Use `hipson-subagent-orchestration` when delegating non-trivial work to Codex subagents.
 
 Recommended modes:
 - Architect: plan, split work, create Executor prompts, review diffs.

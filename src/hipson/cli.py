@@ -517,6 +517,8 @@ def command_session_show(args: argparse.Namespace) -> int:
         )
         if approval["reason"]:
             print(f"  reason: {_bounded_cli(approval['reason'], limit=MAX_CLI_CONTENT_CHARS)}")
+        if approval["expires_at"]:
+            print(f"  expires_at: {approval['expires_at']}")
     return 0
 
 
@@ -529,11 +531,18 @@ def command_session_search(args: argparse.Namespace) -> int:
             print("No session search results.")
         return 0
     try:
+        search_backend = store.search_backend()
         results = [_search_summary(result) for result in store.search_messages(args.query, limit=_positive_limit(args.limit))]
     finally:
         store.close()
     if args.json:
-        print(json.dumps({"session_db": str(db_path), "results": results}, indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"session_db": str(db_path), "search_backend": search_backend, "results": results},
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
         return 0
     if not results:
         print("No session search results.")
@@ -849,6 +858,7 @@ def _approval_summary(approval: dict[str, object]) -> dict[str, object]:
         "scope": str(approval.get("scope", "")),
         "metadata": approval.get("metadata", {}),
         "created_at": str(approval.get("created_at", "")),
+        "expires_at": str(approval.get("expires_at", "") or ""),
     }
 
 

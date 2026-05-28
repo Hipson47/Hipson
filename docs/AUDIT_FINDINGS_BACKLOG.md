@@ -14,7 +14,7 @@ The focused fault-injection passes added regression tests for approval fail-clos
 
 ## Status Update — Runtime Observability And Learning MVP
 
-The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-agent completion now adds provider adapter tests, durable approval records, and session search across messages/tool calls/memory summaries.
+The Hermes-style repair pass added read-only `hipson session list/show/search`, read-only `hipson tool list/show`, deterministic learning proposal IDs, `hipson learn propose`, and explicit `hipson learn apply-memory`. Tests cover temp SQLite DB usage, redacted/bounded session output, tool metadata display, proposal-only behavior, explicit memory apply, provenance, and non-memory proposal refusal. Real-agent completion now adds provider adapter tests, durable approval records, and session search across messages/tool calls/memory summaries. The latest completion pass adds optional approval expiry metadata, explicit session-search backend reporting, approval-record learning provenance, and draft/reference-only skill proposal metadata.
 
 ## Status Update — Local Provider-Free Production Readiness Repair
 
@@ -22,7 +22,7 @@ The local/provider-free production readiness repair added `hipson tool run` for 
 
 ## Status Update — Hermes-Style Real Agent Completion
 
-The real-agent completion pass added `src/hipson/providers/openai_compatible.py`, explicit `hipson chat --provider openai-compatible` configuration, redacted/bounded provider transport errors, strict provider tool-call argument parsing, durable `approval_records`, and session search across messages, tool-call summaries, and memory summaries. Unit tests remain network-free and credential-free. Live provider smoke is manual and full mutation survivor triage remains open.
+The real-agent completion pass added `src/hipson/providers/openai_compatible.py`, explicit `hipson chat --provider openai-compatible` configuration, redacted/bounded provider transport errors, strict provider tool-call argument parsing, durable `approval_records`, and session search across messages, tool-call summaries, and memory summaries. Unit tests remain network-free and credential-free. Approval records now include optional expiry metadata and learning proposals include approval provenance. Live provider smoke is manual and full mutation survivor triage remains open; the latest 300s mutmut run reached 2,005/2,291 mutants with 184 survivors and 148 timeouts before stopping.
 
 ## Status Update — Local Runtime Router
 

@@ -58,6 +58,16 @@ def test_learning_memory_candidate_summarizes_session_trajectory_and_tool_calls(
             risk_level="read",
             status="completed",
         )
+        approval = store.add_approval_record(
+            session_id=session_id,
+            tool_call_id=tool_call,
+            source="runtime",
+            tool_name="repo.changed_files",
+            risk_level="read",
+            decision="approved",
+            reason=f"policy allowed token={secret}",
+            approved_by="policy",
+        )
 
         memory = next(proposal for proposal in propose_from_session(store, session_id) if proposal.kind == "memory")
     finally:
@@ -71,8 +81,11 @@ def test_learning_memory_candidate_summarizes_session_trajectory_and_tool_calls(
     assert f"message:{user_message}" in memory.source_refs
     assert f"message:{assistant_message}" in memory.source_refs
     assert f"tool_call:{tool_call}" in memory.source_refs
+    assert f"approval_record:{approval}" in memory.source_refs
     assert memory.payload["tool_summary"]
-    assert memory.payload["confidence"] >= 0.7
+    assert memory.payload["approval_summary"]
+    assert memory.payload["rationale"]
+    assert memory.payload["confidence"] >= 0.8
 
 
 def test_learning_proposes_skill_reference_from_session_messages(tmp_path: Path):
@@ -88,6 +101,9 @@ def test_learning_proposes_skill_reference_from_session_messages(tmp_path: Path)
     skill = next(proposal for proposal in proposals if proposal.kind == "skill_reference")
     assert skill.payload["skill"] == "hipson-workflow"
     assert skill.payload["usage"] == "reference_data_only"
+    assert skill.payload["draft_status"] == "reference_only"
+    assert skill.payload["activation_status"] == "not_applied"
+    assert skill.payload["auto_apply"] is False
     assert skill.approval_required is True
     assert skill.source_refs and str(skill.source_refs[0]).startswith("message:")
 

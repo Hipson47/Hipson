@@ -71,26 +71,41 @@ Local runtime-router implementation:
 - `uv run hipson skill validate`: passed
 - CLI smoke after local-router implementation: local repo scan, local changed files, explicit fake chat, safe `tool run` for `repo.changed_files` and `repo.scan`, rejected write-risk `packet.review.create`, `session list`, `learn --help`, and `chat --help` all behaved as expected
 
+Provider/tool-loop approval/search/learning completion pass:
+
+- `uv run pytest tests/test_session.py tests/test_learning.py tests/test_runtime.py tests/test_hipson_helpers.py -q`: 170 passed
+- `uv run pytest -q -k "provider or runtime or tool or approval or session or learn or learning or redaction or prompt"`: 119 passed, 114 deselected
+- `uv run ruff check .`: passed
+- `uv run mypy src/hipson`: passed
+- `uv run pytest -q`: 234 passed
+- `uv run bandit -q -r src/hipson -c pyproject.toml`: passed with existing configured-comment warnings only
+- `python -m compileall src/hipson`: passed
+- `uv run python scripts/run_tests.py`: 234/234 passed
+- `uv run hipson doctor`: passed
+- `uv run hipson skill validate`: passed
+- `timeout 300s uv run mutmut run || true`: timed out/terminated before completion; last observed progress 2,005/2,291, 1,673 killed, 148 timeouts, 184 survivors
+- `uv run mutmut results || true`: still reports survivors/timeouts/not-checked mutants in agents, approvals, prompt, sandbox, redaction, router, runtime, and tools.registry
+
 ## Current Scores
 
 - Local/provider-free MVP: 98/100 in `docs/PRODUCTION_READINESS_SCORECARD.md`
-- Hermes-style real-agent readiness: 94/100 in `docs/REAL_AGENT_READINESS_SCORECARD.md`
+- Hermes-style real-agent readiness: 95/100 in `docs/REAL_AGENT_READINESS_SCORECARD.md`
 
 ## Open P0/P1/P2 Findings
 
 - P0: none observed in the current inspected state.
 - P1: focused mutation survivor triage remains incomplete for safety-critical modules, but this iteration killed selected high-risk survivors in approvals, sandbox, registry handler failures, and runtime rejection summaries.
 - P1: live-provider smoke remains manual and requires explicit user approval and disposable credentials.
-- P1: broad focused mutmut survivor triage remains incomplete for real-agent release confidence.
+- P1: broad focused mutmut survivor triage remains incomplete for real-agent release confidence; latest 300s run reached 2,005/2,291 mutants with 184 survivors and 148 timeouts.
 - P2: interactive human approval UX for write/external/exec tools remains future work.
-- P2: richer learning duplicate suppression and skill apply workflow remain future work.
+- P2: richer learning now includes approval provenance and draft/reference-only skill metadata; duplicate suppression and explicit skill apply workflow remain future work.
 - P2 docs drift: reduced in this iteration by updating scorecards and mutation notes; older historical audit docs still contain pre-repair findings as chronology.
 
 ## Current Package
 
-`feat(runtime): add provider-free local deterministic chat router`
+`feat(runtime): complete provider/tool-loop approval/search/learning hardening`
 
-This iteration changes production runtime behavior so default `hipson chat` can execute supported safe local workflows without a provider.
+This iteration tightens the existing real-provider adapter/tool-loop surface with optional approval expiry metadata, explicit session-search backend reporting, and richer trajectory learning that includes approval provenance plus draft/reference-only skill metadata.
 
 ## Assumptions
 
@@ -107,4 +122,4 @@ This iteration changes production runtime behavior so default `hipson chat` can 
 
 ## Next Package Recommendation
 
-Continue with smaller mutmut batches for `agents.py`, `prompt.py`, `approvals.py`, `sandbox.py`, `tools/registry.py`, `redaction.py`, `router.py`, and the new `local_router.py`, then decide whether surviving mutants are high-risk, equivalent, or low-value formatting survivors.
+Continue with smaller mutmut batches for `agents.py`, `prompt.py`, `approvals.py`, `sandbox.py`, `tools/registry.py`, `redaction.py`, `router.py`, `runtime.py`, and `providers/openai_compatible.py`, then decide whether surviving mutants are high-risk, equivalent, or low-value formatting survivors.

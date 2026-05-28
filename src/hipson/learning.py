@@ -49,6 +49,7 @@ class _Trajectory:
     request: str
     outcome: str
     tool_summary: str
+    approval_summary: str
     source_refs: list[str]
     confidence: float
 
@@ -60,8 +61,9 @@ def propose_from_session(store: SessionStore, session_id: str, *, max_summary_ch
 
     messages = store.list_messages(session_id, limit=50)
     tool_calls = store.list_tool_calls(session_id)
+    approval_records = store.list_approval_records(session_id=session_id)
     proposals: list[LearningProposal] = []
-    memory = _memory_proposal(session, messages, tool_calls, max_summary_chars=max_summary_chars)
+    memory = _memory_proposal(session, messages, tool_calls, approval_records, max_summary_chars=max_summary_chars)
     if memory is not None:
         proposals.append(memory)
     skill = _skill_reference_proposal(str(session["id"]), messages, tool_calls)
@@ -74,12 +76,13 @@ def _memory_proposal(
     session: dict[str, object],
     messages: list[dict[str, object]],
     tool_calls: list[dict[str, object]],
+    approval_records: list[dict[str, object]],
     *,
     max_summary_chars: int,
 ) -> LearningProposal | None:
     if not messages:
         return None
-    trajectory = _session_trajectory(messages, tool_calls, max_summary_chars=max_summary_chars)
+    trajectory = _session_trajectory(messages, tool_calls, approval_records, max_summary_chars=max_summary_chars)
     if trajectory is None:
         return None
     summary = redact_text(f"Session trajectory candidate: {trajectory.summary}")
@@ -93,6 +96,8 @@ def _memory_proposal(
         "request": trajectory.request,
         "outcome": trajectory.outcome,
         "tool_summary": trajectory.tool_summary,
+        "approval_summary": trajectory.approval_summary,
+        "rationale": "Captured from a completed redacted runtime trajectory; review before applying.",
         "tags": ["runtime", "session"],
         "sources": source_refs,
         "confidence": trajectory.confidence,
@@ -119,11 +124,14 @@ def _skill_reference_proposal(
     source_refs = [f"message:{message['id']}" for message in messages if _mentions_skill(str(message.get("content", "")))]
     if not source_refs:
         source_refs = [f"tool_call:{call['id']}" for call in tool_calls if str(call.get("tool_name")) == "skill.view"]
-    summary = redact_text(f"Consider using skill reference `{name}` for similar future sessions.")
+    summary = redact_text(f"Draft skill reference candidate `{name}` for similar future sessions.")
     payload: dict[str, object] = {
         "skill": redact_metadata(name),
         "usage": "reference_data_only",
         "reason": summary,
+        "draft_status": "reference_only",
+        "activation_status": "not_applied",
+        "auto_apply": False,
     }
     return LearningProposal(
         id=_proposal_id(session_id, "skill_reference", summary, payload, source_refs),
@@ -146,6 +154,7 @@ def _last_non_empty_message(messages: list[dict[str, object]]) -> dict[str, obje
 def _session_trajectory(
     messages: list[dict[str, object]],
     tool_calls: list[dict[str, object]],
+    approval_records: list[dict[str, object]],
     *,
     max_summary_chars: int,
 ) -> _Trajectory | None:
@@ -156,7 +165,12 @@ def _session_trajectory(
 
     request = _message_excerpt(request_message, max_summary_chars=max_summary_chars // 3) if request_message else ""
     outcome = _message_excerpt(outcome_message, max_summary_chars=max_summary_chars // 3) if outcome_message else ""
-    tool_summary = _cap("; ".join(_tool_call_excerpt(call) for call in tool_calls[-5:]), max_summary_chars // 3)
+    segment_limit = max(80, max_summary_chars // 4)
+    tool_summary = _cap("; ".join(_tool_call_excerpt(call) for call in tool_calls[-5:]), segment_limit)
+    approval_summary = _cap(
+        "; ".join(_approval_excerpt(approval) for approval in approval_records[-5:]),
+        segment_limit,
+    )
     parts = []
     if request:
         parts.append(f"request: {request}")
@@ -164,6 +178,8 @@ def _session_trajectory(
         parts.append(f"outcome: {outcome}")
     if tool_summary:
         parts.append(f"tools: {tool_summary}")
+    if approval_summary:
+        parts.append(f"approvals: {approval_summary}")
     summary = _cap(" | ".join(parts), max_summary_chars)
     source_refs: list[str] = []
     for message in (request_message, outcome_message):
@@ -173,12 +189,15 @@ def _session_trajectory(
                 source_refs.append(ref)
     for call in tool_calls[-5:]:
         source_refs.append(f"tool_call:{call['id']}")
-    confidence = 0.75 if tool_calls else 0.65
+    for approval in approval_records[-5:]:
+        source_refs.append(f"approval_record:{approval['id']}")
+    confidence = 0.8 if tool_calls and approval_records else 0.75 if tool_calls else 0.65
     return _Trajectory(
         summary=summary,
         request=request,
         outcome=outcome,
         tool_summary=tool_summary,
+        approval_summary=approval_summary,
         source_refs=source_refs,
         confidence=confidence,
     )
@@ -207,6 +226,17 @@ def _tool_call_excerpt(tool_call: dict[str, object]) -> str:
     status = redact_text(str(tool_call.get("status", "")))
     error = redact_text(str(tool_call.get("error", ""))).strip()
     return _cap(f"{name} {status}{': ' + error if error else ''}", 180)
+
+
+def _approval_excerpt(approval: dict[str, object]) -> str:
+    tool_name = redact_text(str(approval.get("tool_name", "")))
+    decision = redact_text(str(approval.get("decision", "")))
+    source = redact_text(str(approval.get("source", "")))
+    reason = redact_text(str(approval.get("reason", ""))).strip()
+    detail = f"{tool_name} {decision} via {source}".strip()
+    if reason:
+        detail = f"{detail}: {reason}"
+    return _cap(detail, 180)
 
 
 def _skill_name_from_tool_calls(tool_calls: list[dict[str, object]]) -> str | None:

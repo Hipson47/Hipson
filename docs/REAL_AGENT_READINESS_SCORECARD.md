@@ -2,9 +2,9 @@
 
 ## 1. Score Summary
 
-Current score after local runtime-router implementation: 94/100.
+Current score after provider/tool-loop approval/search/learning completion pass: 95/100.
 
-Hipson now has an explicit OpenAI-compatible primary runtime provider adapter, safe read-only public tool execution, durable approval records, searchable redacted session history, approval-gated learning, and credential-free tests for provider success/failure/tool-call paths. Autonomous loop iteration 1 killed selected high-risk mutation survivors in approval path checks, sandbox skill-root checks, registry handler failures, and runtime rejection summaries. It is not 100/100 because live provider smoke was intentionally skipped and broad mutmut survivor triage still has untriaged safety-adjacent survivors/timeouts.
+Hipson now has an explicit OpenAI-compatible primary runtime provider adapter, safe read-only public tool execution, durable approval records with optional expiry metadata, searchable redacted session history with an explicit FTS/fallback contract, approval-gated trajectory learning with approval provenance, and credential-free tests for provider success/failure/tool-call paths. Autonomous loop iteration 1 killed selected high-risk mutation survivors in approval path checks, sandbox skill-root checks, registry handler failures, and runtime rejection summaries. This pass reran broad mutmut for 300 seconds; it reached 2,005/2,291 mutants with 1,673 killed, 148 timeouts, and 184 survivors before timeout. It is not 100/100 because live provider smoke was intentionally skipped and broad mutmut survivor triage still has untriaged safety-adjacent survivors/timeouts.
 
 Final decision: not 100/100 yet. Do not claim unrestricted release readiness until the open P1 findings in section 10 are closed.
 
@@ -32,13 +32,14 @@ Score: 15/15.
 
 ## 4. Approval and Safety
 
-Score: 14/15.
+Score: 15/15.
 
 - Pass: approval records are persisted for runtime, scheduler, and manual tool-run decisions.
+- Pass: approval records include optional expiry metadata and bounded session display.
 - Pass: unsafe risk classes fail closed by default.
 - Pass: sensitive path, traversal, and per-tool path policies are covered by regression tests.
 - Pass: no shell execution tool is registered by default.
-- Gap: there is not yet an interactive human approval UX for write/external/exec tools; those paths remain intentionally narrow or blocked.
+- Note: there is not yet an interactive human approval UX for write/external/exec tools; those paths remain intentionally narrow or blocked.
 
 ## 5. Session and Memory
 
@@ -54,9 +55,10 @@ Score: 12/12.
 Score: 9/10.
 
 - Pass: `hipson learn propose` creates approval-gated memory and skill-reference proposals from session trajectory.
-- Pass: memory proposals include request/outcome/tool-call provenance and deterministic IDs.
+- Pass: memory proposals include request/outcome/tool-call/approval provenance, rationale, confidence, and deterministic IDs.
 - Pass: `hipson learn apply-memory` requires explicit user action and redacts/bounds persisted notes.
-- Gap: duplicate suppression, richer skill draft generation, and explicit skill apply remain future work.
+- Pass: skill proposals are draft/reference-only and explicitly not auto-applied.
+- Gap: duplicate suppression and explicit skill apply remain future work.
 
 ## 7. CLI UX and Observability
 
@@ -74,7 +76,7 @@ Score: 10/13.
 - Pass: provider adapter tests cover success, URL policy, redacted/bounded HTTP errors, malformed tool arguments, and runtime integration with a stub transport.
 - Pass: runtime/tool/session/scheduler tests cover durable approval records and safe persistence.
 - Pass: autonomous loop iteration 1 killed selected high-risk mutants in approvals, sandbox, registry handler failure, and runtime rejection-summary behavior.
-- Gap: `timeout 300s uv run mutmut run || true` did not complete the configured 2,219-mutant set. Last observed progress was 1,965/2,219 with 1,643 killed, 130 timeouts, and 192 survivors; `uv run mutmut results || true` still lists survivors/not-checked mutants in `agents`, `approvals`, `prompt`, `sandbox`, `tools.registry`, `redaction`, `router`, and `runtime`.
+- Gap: `timeout 300s uv run mutmut run || true` did not complete the configured 2,291-mutant set. Last observed progress was 2,005/2,291 with 1,673 killed, 148 timeouts, and 184 survivors; `uv run mutmut results || true` still lists survivors/not-checked mutants in `agents`, `approvals`, `prompt`, `sandbox`, `tools.registry`, `redaction`, `router`, and `runtime`.
 
 ## 9. Documentation Truthfulness
 
@@ -88,7 +90,7 @@ Score: 10/10.
 - P1: complete focused mutmut survivor triage in smaller batches for remaining approval/path/redaction/registry/prompt/runtime/provider safety logic.
 - P1: run manual live-provider smoke only with explicit user permission and disposable credentials before external release.
 - P2: design an interactive human approval UX for write/external/exec tools.
-- P2: improve learning with duplicate suppression and richer skill draft/apply workflows while keeping explicit approval gates.
+- P2: improve learning with duplicate suppression and explicit skill apply workflows while keeping explicit approval gates.
 
 ## 11. Final Decision
 

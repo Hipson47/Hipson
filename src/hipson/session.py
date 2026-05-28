@@ -115,7 +115,8 @@ CREATE TABLE IF NOT EXISTS approval_records (
   approved_by TEXT NOT NULL DEFAULT '',
   scope TEXT NOT NULL DEFAULT 'tool_call',
   metadata_json TEXT NOT NULL DEFAULT '{}',
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  expires_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_approval_records_session_created
@@ -194,6 +195,7 @@ class SessionStore:
         approved_by: str = "",
         scope: str = "tool_call",
         metadata: dict[str, object] | None = None,
+        expires_at: str | None = None,
     ) -> str:
         approval_id = uuid.uuid4().hex
         now = timestamp()
@@ -202,9 +204,9 @@ class SessionStore:
                 """
                 INSERT INTO approval_records (
                   id, session_id, tool_call_id, job_id, source, tool_name, risk_level,
-                  decision, reason, approved_by, scope, metadata_json, created_at
+                  decision, reason, approved_by, scope, metadata_json, created_at, expires_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     approval_id,
@@ -220,6 +222,7 @@ class SessionStore:
                     redact_text(scope),
                     _json_dumps_redacted(metadata or {}),
                     now,
+                    redact_text(expires_at or "") or None,
                 ),
             )
         return approval_id
@@ -307,6 +310,9 @@ class SessionStore:
         if remaining:
             rows.extend(self._search_memory_rows(clean_query, pattern, remaining))
         return [_search_message_row(row) for row in rows[:limit]]
+
+    def search_backend(self) -> str:
+        return "fts+fallback" if self.fts_enabled else "fallback"
 
     def add_memory(
         self,
@@ -625,6 +631,7 @@ class SessionStore:
     def _ensure_current_schema(self) -> None:
         with self.connection:
             self.connection.executescript(CURRENT_SCHEMA_ADDITIONS)
+            _ensure_approval_expires_column(self.connection)
 
     def _setup_fts(self) -> bool:
         try:
@@ -794,3 +801,10 @@ def _job_row(row: sqlite3.Row) -> dict[str, object]:
     data = dict(row)
     data["payload"] = _json_loads_object(str(data.pop("payload_json")))
     return data
+
+
+def _ensure_approval_expires_column(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("PRAGMA table_info(approval_records)").fetchall()
+    if any(str(row["name"]) == "expires_at" for row in rows):
+        return
+    connection.execute("ALTER TABLE approval_records ADD COLUMN expires_at TEXT")
