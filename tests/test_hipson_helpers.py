@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from hipson import agents as hipson_agents
+from hipson import hermes as hipson_hermes
 from hipson import memory as hipson_memory
 from hipson import project as hipson_project
 from hipson import router as hipson_router
@@ -771,6 +772,19 @@ def test_agent_router_uses_metadata():
 
     assert routed[0][0] == "ui"
     assert hipson_agents.route_agents(config, task="premium ui", sensitive=True) == []
+
+
+def test_project_agent_config_routes_creative_frontend_motion_tasks():
+    config = hipson_agents.load_json(Path("config/agents.json"))
+
+    routed = hipson_agents.route_agents(
+        config,
+        task="creative frontend motion ui scrollytelling landing page with scroll driven animation",
+        risk="ui",
+        context_chars=4200,
+    )
+
+    assert routed[0][0] == "creative_frontend_motion_architect"
 
 
 def test_agent_scoring_filters_and_scores_routing_signals():
@@ -2141,6 +2155,87 @@ def test_workflow_router_exec_placeholder_fallback_is_safe():
     )
     assert sidecar_task_command == 'hipson sidecar route --task "[task]" --risk normal'
     assert sidecar_command == 'hipson sidecar route --task "second opinion" --risk normal'
+
+
+def test_hermes_intake_event_uses_hipson_router_and_contract(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    env = {"HIPSON_HOME": str(tmp_path / "hipson"), "HERMES_HOME": str(tmp_path / "hermes")}
+
+    event = hipson_hermes.build_intake_event(
+        task="implement parser fix",
+        project=repo,
+        channel="telegram",
+        actor="hipson-bot",
+        env=env,
+    )
+
+    assert event["source"] == "hermes"
+    assert event["channel"] == "telegram"
+    assert event["route"]["mode"] == "exec"
+    assert event["route"]["recommended_skill"] == "executor-packet"
+    assert event["recommended_commands"][0].startswith("cd ")
+    assert event["recommended_commands"][1] == "hipson scan . --include-diff"
+    assert event["contract"]["responsibilities"]["Hipson"].startswith("workflow routing")
+    assert event["telegram_setup"]["env_file"] == str(tmp_path / "hermes" / ".env")
+
+
+def test_hermes_bus_records_and_reads_redacted_events(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    hipson_home = tmp_path / "hipson"
+    event = hipson_hermes.build_intake_event(task="fix auth token parser", project=repo)
+    event["task"] = "use token=abc123secretlong in status"
+
+    event_path = hipson_hermes.append_bus_event(event, hipson_home=hipson_home)
+    events = hipson_hermes.read_bus_events(hipson_home=hipson_home)
+
+    assert event_path == hipson_home / "hermes-bus" / "events.jsonl"
+    assert len(events) == 1
+    assert events[0]["event_id"] == event["event_id"]
+    assert events[0]["route"]["risk"] == "security"
+    assert "abc123secretlong" not in events[0]["task"]
+    assert "[REDACTED]" in events[0]["task"]
+
+
+def test_hermes_skill_install_uses_packaged_asset(tmp_path: Path):
+    hermes_home = tmp_path / "hermes"
+
+    result = hipson_hermes.install_hermes_skill(hermes_home_path=hermes_home)
+    second = hipson_hermes.install_hermes_skill(hermes_home_path=hermes_home)
+    target = Path(result["target"])
+
+    assert result["status"] == "installed"
+    assert result["overwritten"] is False
+    assert second["status"] == "exists"
+    assert target == hermes_home / "skills" / "hipson-codex-orchestrator" / "SKILL.md"
+    assert "hipson hermes intake" in target.read_text(encoding="utf-8")
+
+
+def test_hermes_intake_cli_writes_bus_and_returns_json(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    hipson_home = tmp_path / "hipson"
+    hermes_home = tmp_path / "hermes"
+
+    result = run_cli(
+        repo,
+        "hermes",
+        "intake",
+        "--project",
+        str(repo),
+        "--task",
+        "security review of auth token",
+        "--channel",
+        "telegram",
+        "--json",
+        env={"HIPSON_HOME": str(hipson_home), "HERMES_HOME": str(hermes_home)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    bus_file = hipson_home / "hermes-bus" / "events.jsonl"
+    assert payload["route"]["mode"] == "review"
+    assert payload["route"]["risk"] == "security"
+    assert payload["bus_event_path"] == str(bus_file)
+    assert payload["event_id"] in bus_file.read_text(encoding="utf-8")
 
 
 def test_sidecar_dry_run_redacts_packet_before_send_path(tmp_path: Path):

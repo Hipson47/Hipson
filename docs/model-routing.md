@@ -12,6 +12,7 @@ Use cheap paid models only. Do not use free models automatically.
 | Cheap code review | `coder_review_cheap` | `deepseek/deepseek-v3.2` | code-specific review |
 | Premium UI/UX review | `premium_ui_ux` | `deepseek/deepseek-v3.2` | visual quality, UX, accessibility and premium polish |
 | Visual direction | `visual_experience_director` | `deepseek/deepseek-v3.2` | art direction, motion interaction design, studio mode, Codex UI briefs |
+| Creative frontend motion | `creative_frontend_motion_architect` | `deepseek/deepseek-v3.2` | motion UI, scroll-driven animation, scrollytelling, frontend implementation prompts |
 | HyperFrames video | `hyperframes_video_director` | `deepseek/deepseek-v3.2` | website-to-video, launch videos, timeline QA, rendered video briefs |
 | Cheap critic | `critic_lite` | `deepseek/deepseek-v3.2` | assumptions and architecture critique |
 | Cheap memory | `memory_summarizer_cheap` | `google/gemini-3.1-flash-lite` | progress summaries, changelog compression |
@@ -94,6 +95,16 @@ Use `visual_experience_director` for:
 
 Avoid `visual_experience_director` for backend-only, security-only, database/API,
 or pure code review tasks.
+
+Use `creative_frontend_motion_architect` for:
+- premium creative frontend implementation planning;
+- motion UI, scroll-driven animation, pinned sections, scroll scrub timelines, and scrollytelling;
+- React/Next.js/TypeScript/Tailwind architecture for cinematic landing pages;
+- implementation-ready Codex/Cursor/Claude prompts for frontend agents;
+- reduced-motion, mobile motion simplification, and performance guardrails.
+
+Avoid `creative_frontend_motion_architect` for backend-only, security-only,
+database/API, rendered video, HyperFrames, or plain documentation work.
 
 Use `hyperframes_video_director` for:
 - HyperFrames;

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import cast
 
 from hipson import __version__, agents, learning, memory
+from hipson import hermes as hermes_bridge
 from hipson import project as project_mod
 from hipson.approvals import ApprovalPolicy
 from hipson.assets import runtime_asset
@@ -274,6 +275,94 @@ def command_route(args: argparse.Namespace) -> int:
         print(json.dumps(route, indent=2))
     else:
         print(format_text_route(route))
+    return 0
+
+
+def command_hermes_doctor(args: argparse.Namespace) -> int:
+    payload = hermes_bridge.doctor_payload()
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+    print(f"ok: {str(payload['ok']).lower()}")
+    print(f"hermes_cli: {payload['hermes_cli'] or 'missing'}")
+    print(f"hermes_version: {payload['hermes_version'] or 'unknown'}")
+    paths = cast(dict[str, object], payload["paths"])
+    print(f"hermes_home: {paths['hermes_home']}")
+    print(f"hermes_env: {paths['hermes_env']}")
+    print(f"hermes_config: {paths['hermes_config']}")
+    print(f"hipson_bus: {paths['bus_events']}")
+    print(f"hermes_skill: {'ok' if payload['hermes_skill_installed'] else 'missing'} - {paths['skill_target']}")
+    print(f"telegram_token_configured: {str(payload['telegram_token_configured']).lower()}")
+    print(f"telegram_allowed_users_configured: {str(payload['telegram_allowed_users_configured']).lower()}")
+    print("recommendations:")
+    for recommendation in cast(list[str], payload["recommendations"]):
+        print(f"- {recommendation}")
+    return 0
+
+
+def command_hermes_install_skill(args: argparse.Namespace) -> int:
+    result = hermes_bridge.install_hermes_skill(force=args.force)
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return 0
+    action = "Already installed" if result["status"] == "exists" else "Installed"
+    print(f"{action}: {result['target']}")
+    print(f"source: {result['source']}")
+    return 0
+
+
+def command_hermes_intake(args: argparse.Namespace) -> int:
+    try:
+        event = hermes_bridge.build_intake_event(
+            task=args.task,
+            project=args.project,
+            channel=args.channel,
+            actor=args.actor,
+        )
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    paths = hermes_bridge.hermes_paths()
+    event["bus_event_path"] = paths["bus_events"]
+    if not args.no_write:
+        hermes_bridge.append_bus_event(event)
+    rendered = hermes_bridge.render_intake(event)
+    if args.output:
+        write_output(rendered, args.output)
+    if args.json:
+        print(json.dumps(event, indent=2, ensure_ascii=False))
+    elif not args.output:
+        print(rendered)
+    return 0
+
+
+def command_hermes_events_list(args: argparse.Namespace) -> int:
+    events = hermes_bridge.read_bus_events(limit=args.limit)
+    if args.json:
+        print(json.dumps({"events": events}, indent=2, ensure_ascii=False))
+        return 0
+    if not events:
+        print("No Hermes bus events found.")
+        return 0
+    for event in events:
+        route = cast(dict[str, object], event.get("route", {}))
+        project = cast(dict[str, object], event.get("project", {}))
+        print(
+            f"{event.get('event_id', '')}: {event.get('status', '')} "
+            f"mode={route.get('mode', '')} risk={route.get('risk', '')} project={project.get('path', '')}"
+        )
+    return 0
+
+
+def command_hermes_events_show(args: argparse.Namespace) -> int:
+    event = hermes_bridge.find_bus_event(args.event_id)
+    if event is None:
+        print(f"Hermes bus event not found: {args.event_id}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(event, indent=2, ensure_ascii=False))
+    else:
+        print(hermes_bridge.render_intake(event))
     return 0
 
 
@@ -1046,6 +1135,35 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--task", required=True, help="Task description")
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
+
+    hermes = subparsers.add_parser("hermes", help="Bridge Hermes Agent with Hipson workflows")
+    hermes_sub = hermes.add_subparsers(dest="hermes_command", required=True)
+    hermes_doctor = hermes_sub.add_parser("doctor", help="Check Hermes/Hipson bridge readiness")
+    hermes_doctor.add_argument("--json", action="store_true", help="Print machine-readable bridge status")
+    hermes_doctor.set_defaults(func=command_hermes_doctor)
+    hermes_install_skill = hermes_sub.add_parser("install-skill", help="Install the Hipson workflow skill into Hermes")
+    hermes_install_skill.add_argument("--force", action="store_true", help="Overwrite an existing Hermes skill copy")
+    hermes_install_skill.add_argument("--json", action="store_true", help="Print machine-readable install result")
+    hermes_install_skill.set_defaults(func=command_hermes_install_skill)
+    hermes_intake = hermes_sub.add_parser("intake", help="Route and record one Hermes-originated Hipson task")
+    hermes_intake.add_argument("--task", required=True, help="Task description from Hermes or the user")
+    hermes_intake.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    hermes_intake.add_argument("--channel", default="cli", help="Origin channel, e.g. cli, telegram, discord")
+    hermes_intake.add_argument("--actor", default="hermes", help="Origin actor or bot identity")
+    hermes_intake.add_argument("--no-write", action="store_true", help="Do not append the event to the Hipson Hermes bus")
+    hermes_intake.add_argument("-o", "--output", help="Write a Markdown intake packet to a file")
+    hermes_intake.add_argument("--json", action="store_true", help="Print machine-readable intake event")
+    hermes_intake.set_defaults(func=command_hermes_intake)
+    hermes_events = hermes_sub.add_parser("events", help="Inspect Hermes bus events")
+    hermes_events_sub = hermes_events.add_subparsers(dest="hermes_events_command", required=True)
+    hermes_events_list = hermes_events_sub.add_parser("list", help="List recent Hermes bus events")
+    hermes_events_list.add_argument("--limit", type=int, default=20)
+    hermes_events_list.add_argument("--json", action="store_true", help="Print machine-readable events")
+    hermes_events_list.set_defaults(func=command_hermes_events_list)
+    hermes_events_show = hermes_events_sub.add_parser("show", help="Show one Hermes bus event")
+    hermes_events_show.add_argument("event_id")
+    hermes_events_show.add_argument("--json", action="store_true", help="Print machine-readable event")
+    hermes_events_show.set_defaults(func=command_hermes_events_show)
 
     chat = subparsers.add_parser(
         "chat",

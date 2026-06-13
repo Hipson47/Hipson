@@ -36,6 +36,14 @@ Not installed by default:
 
 ## High-Value UI/UX Stack
 
+Use Hipson's project-specific frontend skills first:
+- `skills/hipson-creative-frontend-motion-architect`: creative frontend,
+  motion UI, scroll-driven animation, scrollytelling, and implementation-ready
+  coding-agent prompts.
+- `skills/hipson-visual-experience-director`: art direction, visual experience
+  briefs, and visual QA.
+- `skills/hipson-premium-ui-ux`: screenshot-backed premium UI/UX review.
+
 Use these first for public-facing frontend work:
 - `anthropic/frontend-design`
 - `anthropic/brand-guidelines`

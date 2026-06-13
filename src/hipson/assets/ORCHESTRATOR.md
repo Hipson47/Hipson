@@ -22,6 +22,27 @@ Hipson is the local control hub for cross-repo AI engineering work.
 - Do not claim verification unless the command was run.
 - Do not expose secrets or broaden API access without a reason.
 
+## Hermes Bridge
+Hermes Agent may act as an intake, messaging, scheduler, and status layer, but
+Hipson remains the workflow authority and Codex remains the coding/review agent.
+The default control surface remains Codex: the user talks to Codex as before,
+and Codex decides whether Hermes is useful for a given task.
+
+Use:
+
+```bash
+hipson hermes intake --project /home/hipson47/code/<project> --task "<task>"
+```
+
+Use that bridge for tasks that benefit from cross-session status, scheduling,
+Telegram/gateway dispatch, or async bus events. Ordinary coding, review,
+verification, and packet work can go straight through `hipson route --task`.
+Hermes-originated work must still follow the Hipson route, packet, verification,
+and review contract. The JSONL bridge lives at
+`~/.config/hipson/hermes-bus/events.jsonl`; the installable Hermes skill lives at
+`~/.hermes/skills/hipson-codex-orchestrator/SKILL.md` after running
+`hipson hermes install-skill`.
+
 ## Hipson Compact
 Default to compact communication to preserve model context and usage limits.
 

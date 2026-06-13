@@ -11,6 +11,15 @@ Universal AI-assisted development workflow for Codex. Use it to run structured s
 ## Agent-Native Entry Point
 For non-trivial repo tasks, run `hipson route --task "..."` first. Use the returned `recommended_skill` and commands, then consult `references/hipson-agent-skills.md` or root `SKILLS.md` for the compact playbook.
 
+## Codex-First Hermes Bridge
+Codex remains the user's primary control surface. Do not require the user to
+talk to Hermes for normal software work.
+
+Use `hipson hermes intake --project <repo> --task "<task>"` only when the task
+benefits from Hermes-side status tracking, scheduling, Telegram/gateway
+dispatch, or cross-session bus events. For ordinary coding, review, verification,
+and packet generation, route through `hipson route --task "..."` directly.
+
 ## When To Use
 - Starting a new project.
 - Reviewing an existing repo.

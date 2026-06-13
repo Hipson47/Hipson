@@ -8,6 +8,12 @@ Be concise, direct, practical. Informal chat ok. All code, docs, and comments in
 - Inspect before editing.
 - Understand repo structure first.
 - For non-trivial repo tasks, run `hipson route --task "..."` and consult `SKILLS.md` before choosing scan, packet, sidecar, memory, or handoff flow.
+- Keep Codex as the user's primary control surface. The user should not need to
+  invoke Hermes manually for normal work; Codex decides when Hermes adds value.
+- Use `hipson hermes intake --project <repo> --task "<task>"` only when a task
+  benefits from Hermes-side intake/status tracking, scheduling, Telegram/gateway
+  dispatch, or cross-session bus events. For ordinary coding/review work, use
+  `hipson route --task "..."` directly.
 - Prefer minimal diffs.
 - Fix root cause, not symptoms.
 - Preserve working behavior unless change is required.
