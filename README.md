@@ -23,10 +23,15 @@ the source of truth.
 - **OpenRouter sidecars** for optional bounded second opinions.
 - **Codex installer** with dry-run mode, backups, and managed marker blocks.
 - **Agent-readable `SKILLS.md` and deterministic workflow router** for autonomous tool choice.
+- **Hermes Agent bridge** for intake, Telegram-ready dispatch, workflow bus events,
+  and Hipson-governed Codex packets.
 - **Secret redaction and sensitive-path guards** before persistence or provider calls.
 - **Dependency-light runtime** with `uv` and `ruff` for mature development workflow.
 - **Visual direction and optional HyperFrames video sidecars** for bounded UI,
   motion, and website-to-video briefs.
+- **Creative frontend motion architecture** for premium interactive websites,
+  scroll-driven animation, scrollytelling, and implementation-ready frontend
+  prompts.
 
 ## Install
 
@@ -58,6 +63,9 @@ cp .env.example .env
 
 uv run hipson doctor
 uv run hipson route --task "security review of auth"
+uv run hipson hermes doctor
+uv run hipson hermes install-skill
+uv run hipson hermes intake --project . --task "review failing CI"
 uv run hipson scan .
 uv run hipson packet review . --title "Review current delta" --include-diff -o runs/review-packet.md
 uv run hipson sidecar route --task "security review of release diff" --risk security
@@ -75,6 +83,10 @@ require API keys or cloud services.
 hipson doctor
 hipson route --task "implement parser fix"
 hipson route --task "security review of auth" --json
+hipson hermes doctor
+hipson hermes install-skill
+hipson hermes intake --project . --task "review failing CI" --channel telegram
+hipson hermes events list
 hipson scan . --include-diff
 hipson scan . --include-diff -o runs/latest-scan.md
 hipson scan-many repos.yaml -o scans/latest.md --json scans/latest.json
@@ -103,6 +115,7 @@ hipson learn apply-memory --session-id <session-id> --proposal-id <proposal-id> 
 hipson sidecar list
 hipson sidecar route --task "architecture security review" --risk security
 hipson sidecar route --task "studio mode interactive hero visual direction" --risk ui
+hipson sidecar route --task "creative frontend motion UI scrollytelling landing page" --risk ui
 hipson sidecar route --task "HyperFrames website to video launch short" --risk ui
 hipson sidecar route --task "security review" --risk security --task-type review --file src/auth.py --skills hipson-backend --context-chars 4200 --llm
 hipson sidecar run --agent reviewer_cheap --packet runs/review-packet.md --dry-run
