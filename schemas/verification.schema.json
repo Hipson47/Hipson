@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Verification",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "work_id",
+    "task",
+    "project",
+    "created_at_utc",
+    "status",
+    "results"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.verification" },
+    "schema_version": { "type": "string" },
+    "work_id": { "type": "string" },
+    "task": { "type": "string" },
+    "project": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "status": { "type": "string", "enum": ["passed", "failed"] },
+    "results": { "type": "array" }
+  }
+}

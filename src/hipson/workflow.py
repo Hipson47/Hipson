@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 from typing import TypedDict, cast
 
-from hipson import contracts, model_profiles
+from hipson import contracts, model_profiles, output_policy
 from hipson.packets import compile_executor_packet, compile_review_packet, csv_items
 from hipson.project import build_scan, changed_files, discover_commands, git_root, resolve_project
 from hipson.redaction import redact_text
@@ -43,6 +43,7 @@ class AIQualityPlan(TypedDict):
 
 
 class WorkPlan(TypedDict):
+    artifact_kind: str
     schema_version: str
     work_id: str
     created_at_utc: str
@@ -81,6 +82,7 @@ def build_work_plan(
     ai_agent: str | None = None,
     ai_model: str | None = None,
     ai_profile: str | None = None,
+    allow_unsafe_output: bool = False,
 ) -> WorkPlan:
     """Build a provider-free, auditable Codex work plan for one task."""
 
@@ -106,6 +108,7 @@ def build_work_plan(
         allowed_edit=allowed_edit,
         acceptance=acceptance,
         verification=verification_commands[0],
+        allow_unsafe_output=allow_unsafe_output,
     )
     preflight_plan = _packet_preflight_plan(packet_plan["path"])
     quality_plan = _ai_quality_plan(
@@ -158,6 +161,7 @@ def build_work_plan(
         next_actions.extend([quality_plan["dry_run_command"], quality_plan["run_command"]])
     next_actions.extend([verification_commands[0], memory_commands[0]])
     return {
+        "artifact_kind": "hipson.work_plan",
         "schema_version": contracts.SCHEMA_VERSION,
         "work_id": contracts.new_id("work"),
         "created_at_utc": contracts.timestamp(),
@@ -306,8 +310,19 @@ def print_work_plan(plan: WorkPlan, *, json_output: bool) -> None:
         print(render_work_plan(plan))
 
 
-def write_work_plan(plan: WorkPlan, output: str) -> Path:
-    path = Path(output).expanduser().resolve()
+def write_work_plan(
+    plan: WorkPlan,
+    output: str,
+    *,
+    cwd: str | Path | None = None,
+    allow_unsafe_output: bool = False,
+) -> Path:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="work output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(_json_safe_plan(plan), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
@@ -328,6 +343,7 @@ def _packet_plan(
     allowed_edit: str | None,
     acceptance: str | None,
     verification: str,
+    allow_unsafe_output: bool,
 ) -> PacketPlan:
     mode = route["mode"]
     packet_mode = _packet_mode(mode)
@@ -361,7 +377,7 @@ def _packet_plan(
             acceptance=acceptance,
             verification=verification,
         )
-        _write_packet(output, packet_text)
+        _write_packet(output, packet_text, cwd=project, allow_unsafe_output=allow_unsafe_output)
         written = True
         reason = "packet written locally"
     return {
@@ -549,8 +565,19 @@ def _verification_commands(commands: list[str], explicit: str | None) -> list[st
     return preferred + discovered
 
 
-def _write_packet(output: str, packet_text: str) -> None:
-    path = Path(output).expanduser()
+def _write_packet(
+    output: str,
+    packet_text: str,
+    *,
+    cwd: str | Path | None,
+    allow_unsafe_output: bool,
+) -> None:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="packet output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(packet_text, encoding="utf-8")
 

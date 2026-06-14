@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Quality Eval",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "ok",
+    "score",
+    "project",
+    "packet",
+    "sidecar",
+    "verification_status",
+    "finding_count",
+    "packet_chars",
+    "sidecar_chars",
+    "issues",
+    "checks"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.quality_eval" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "score": { "type": "integer" },
+    "project": { "type": "string" },
+    "packet": { "type": "string" },
+    "sidecar": { "type": "string" },
+    "verification_status": { "type": "string" },
+    "finding_count": { "type": "integer" },
+    "packet_chars": { "type": "integer" },
+    "sidecar_chars": { "type": "integer" },
+    "issues": { "type": "array" },
+    "checks": { "type": "array" }
+  }
+}

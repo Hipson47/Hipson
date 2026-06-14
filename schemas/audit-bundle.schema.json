@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Audit Bundle",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "work",
+    "evidence_records",
+    "latest_status",
+    "latest_quality_gate",
+    "latest_eval_ok",
+    "latest_gates",
+    "latest_release_claim_gate",
+    "unknowns"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.audit_bundle" },
+    "schema_version": { "type": "string" },
+    "work": { "type": "object" },
+    "evidence_records": { "type": "array" },
+    "latest_status": { "type": "string" },
+    "latest_quality_gate": { "type": "string" },
+    "latest_eval_ok": {},
+    "latest_gates": { "type": "object" },
+    "latest_release_claim_gate": { "type": "string" },
+    "unknowns": { "type": "array" }
+  }
+}

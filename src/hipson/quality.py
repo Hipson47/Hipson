@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hipson import output_policy
 from hipson.contracts import sha256_text, timestamp
 from hipson.redaction import redact_text, sanitize_path
 from hipson.verification import load_work_plan
@@ -33,13 +34,25 @@ def build_quality_report(
     verification_status = str(verification.get("status", "missing")) if verification else "missing"
     sidecar_present = bool(sidecar)
     ok = verification_status == "passed"
+    gate_summary = _gates(
+        verification_status=verification_status,
+        sidecar_present=sidecar_present,
+        decision=decision,
+    )
     return {
+        "artifact_kind": "hipson.quality_report",
         "schema_version": "1.0",
         "created_at_utc": timestamp(),
         "work_id": str(work.get("work_id", "")),
         "task": redact_text(str(work.get("task", ""))),
+        "project": str(work.get("project", "")),
         "ok": ok,
-        "quality_gate": "passed" if ok else "blocked",
+        "quality_gate": gate_summary["verification_gate"],
+        "verification_gate": gate_summary["verification_gate"],
+        "sidecar_eval_gate": gate_summary["sidecar_eval_gate"],
+        "human_decision_gate": gate_summary["human_decision_gate"],
+        "release_claim_gate": gate_summary["release_claim_gate"],
+        "gates": gate_summary,
         "verification_status": verification_status,
         "sidecar_present": sidecar_present,
         "ai_quality": _ai_quality_summary(work),
@@ -55,8 +68,19 @@ def build_quality_report(
     }
 
 
-def write_report(report: dict[str, Any], output: str | Path) -> Path:
-    path = Path(output).expanduser().resolve()
+def write_report(
+    report: dict[str, Any],
+    output: str | Path,
+    *,
+    cwd: str | Path | None = None,
+    allow_unsafe_output: bool = False,
+) -> Path:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="quality report output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
@@ -68,6 +92,10 @@ def render_report(report: dict[str, Any]) -> str:
         "",
         f"- Work ID: `{report['work_id']}`",
         f"- Quality gate: `{report['quality_gate']}`",
+        f"- Verification gate: `{report['verification_gate']}`",
+        f"- Sidecar eval gate: `{report['sidecar_eval_gate']}`",
+        f"- Human decision gate: `{report['human_decision_gate']}`",
+        f"- Release claim gate: `{report['release_claim_gate']}`",
         f"- Verification: `{report['verification_status']}`",
         f"- Sidecar present: `{str(report['sidecar_present']).lower()}`",
         f"- Decision: `{report['decision']}`",
@@ -134,6 +162,32 @@ def _summary(verification_status: str, sidecar_present: bool, decision: str) -> 
     if sidecar_present:
         return "Sidecar output is present, but local verification is missing or failed."
     return "No sidecar output is attached and local verification is missing or failed."
+
+
+def _gates(*, verification_status: str, sidecar_present: bool, decision: str) -> dict[str, str]:
+    verification_gate = "passed" if verification_status == "passed" else "blocked"
+    sidecar_eval_gate = "unverified" if sidecar_present else "not_applicable"
+    human_decision_gate = _human_decision_gate(decision)
+    release_claim_gate = "passed" if (
+        verification_gate == "passed"
+        and sidecar_eval_gate in {"passed", "not_applicable"}
+        and human_decision_gate == "passed"
+    ) else "blocked"
+    return {
+        "verification_gate": verification_gate,
+        "sidecar_eval_gate": sidecar_eval_gate,
+        "human_decision_gate": human_decision_gate,
+        "release_claim_gate": release_claim_gate,
+    }
+
+
+def _human_decision_gate(decision: str) -> str:
+    normalized = decision.strip().lower()
+    if normalized in {"accepted", "approved", "pass", "passed", "release", "released", "merge", "merged"}:
+        return "passed"
+    if normalized in {"rejected", "blocked", "failed", "fail"}:
+        return "blocked"
+    return "pending"
 
 
 def _verified_findings(verification: dict[str, Any] | None) -> list[str]:

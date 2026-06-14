@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Agent Contract",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "repo_state",
+    "supported_workflows",
+    "available_command_surfaces",
+    "artifact_types",
+    "risk_policy",
+    "path_write_policy",
+    "provider_policy",
+    "memory_policy",
+    "verification_policy",
+    "adapter_capabilities"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.agent_contract" },
+    "schema_version": { "type": "string" },
+    "repo_state": { "type": "object" },
+    "supported_workflows": { "type": "array" },
+    "available_command_surfaces": { "type": "object" },
+    "artifact_types": { "type": "object" },
+    "risk_policy": { "type": "object" },
+    "path_write_policy": { "type": "object" },
+    "provider_policy": { "type": "object" },
+    "memory_policy": { "type": "object" },
+    "verification_policy": { "type": "object" },
+    "adapter_capabilities": {
+      "type": "object",
+      "required": ["codex", "hermes", "mcp_future"],
+      "properties": {
+        "codex": { "type": "object" },
+        "hermes": { "type": "object" },
+        "mcp_future": { "type": "object" }
+      }
+    }
+  }
+}

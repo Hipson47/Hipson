@@ -1,19 +1,25 @@
 # Hipson
 
-Hipson is a local-first orchestration CLI for AI-assisted software work. It scans
-Git repositories, creates bounded agent packets, routes advisory sidecars, stores
-compact local memory, and installs a Codex workflow kit.
+Hipson is a local-first AI Development Control Plane for AI-native software work.
+It sits between coding agents and the repository: it routes work, bounds context,
+creates packets, prepares optional AI quality passes, runs local verification,
+records evidence, and preserves compact memory/handoff.
 
-The project is designed as an agent-native tool-use layer rather than a human
-dashboard: the repository, git diff, tests, and human-reviewed decisions stay
-the source of truth.
+Hipson is not another coding agent and not a classic developer dashboard. It is
+the trust and workflow layer for agent-driven full-stack development. The
+repository, git diff, tests, local command output, and human-reviewed decisions
+stay the source of truth.
 
 ## Features
 
 - **Provider-free 1.1 local-first core** for bounded, human-reviewed AI software work.
+- **First-class agent contract** through `hipson contract show --json`, exposing
+  workflow, artifact, risk, path, provider, memory, verification, and adapter policy.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Codex work briefs** through `hipson work`, joining route, scan, packet,
   verify, memory, and audit guidance into one local contract.
+- **Strict artifact contracts** with `artifact_kind` and JSON schemas for work,
+  verification, quality, evidence, and audit artifacts.
 - **Explicit AI quality layer** for optional model-selected or free OpenRouter
   second opinions on bounded packets without changing the provider-free default.
 - **Structured packet compiler** for review and implementation subagents.
@@ -66,6 +72,7 @@ cp repos.example.yaml repos.yaml
 cp .env.example .env
 
 uv run hipson doctor
+uv run hipson contract show --json
 uv run hipson route --task "security review of auth"
 uv run hipson work --task "security review of auth"
 uv run hipson hermes doctor
@@ -159,8 +166,12 @@ For audit-ready AI-dev work, write the machine-readable work plan, run the local
 verification step, then append evidence and inspect the audit bundle:
 
 ```bash
+hipson contract show --json
 hipson work --task "review current diff for test gaps" --ai-profile free_probe --write-packet --packet-output runs/review-packet.md --work-output runs/work.json
-hipson packet preflight runs/review-packet.md
+hipson packet preflight runs/review-packet.md -o runs/review-packet.preflight.json --json
+hipson sidecar run --agent reviewer_free --packet runs/review-packet.md --model openrouter/free --dry-run
+# Optional only after preflight and human review of packet contents:
+# hipson sidecar run --agent reviewer_free --packet runs/review-packet.md --model openrouter/free -o runs/sidecar.md
 hipson verify run --work runs/work.json --limit 1 -o runs/verify.json
 hipson quality report --work runs/work.json --verify runs/verify.json --sidecar runs/sidecar.md -o runs/quality.json
 hipson quality eval --packet runs/review-packet.md --sidecar runs/sidecar.md --verify runs/verify.json -o runs/quality-eval.json
@@ -169,13 +180,19 @@ hipson audit show --work runs/work.json
 hipson provider doctor
 ```
 
+This is the AI Review Control Kit workflow:
+
+```text
+current diff -> work plan -> packet -> preflight -> optional sidecar -> verify -> quality report/eval -> evidence -> audit
+```
+
 `hipson work` is still only a plan, but it now includes packet preflight as the
 local gate before any sidecar/provider command. `hipson verify run` records
-command output as redacted, bounded evidence. `hipson quality report` returns a
-blocked gate and non-zero exit when verification is missing or failed, and
-keeps sidecar metadata, finding IDs, and unverified claims separate from local
-proof. `hipson quality eval` is a local golden-packet-style check for empty
-sidecar output, missing structured findings, hallucinated file references,
+command output as redacted, bounded evidence. `hipson quality report` separates
+`verification_gate`, `sidecar_eval_gate`, `human_decision_gate`, and
+`release_claim_gate`; passed local verification does not imply sidecar findings
+are verified. `hipson quality eval` is a local golden-packet-style check for
+empty sidecar output, missing structured findings, hallucinated file references,
 repo-mismatched commands, and missing verification. `hipson evidence`/`hipson
 audit` connect verification, quality, eval results, task, packet, provider
 posture, claims, unknowns, and human decision.
@@ -288,8 +305,9 @@ contracts. Live provider calls, Telegram gateway operation, and full mutation
 closure are explicit release gates; do not treat them as proven unless the
 corresponding command output is recorded for the release.
 
-See `docs/CORE_STABILIZATION_ROADMAP.md` for the current core stabilization,
-skills/sidecar curation, mutation triage, and auditability contract.
+See `docs/AGENT_NATIVE_CORE.md` for the agent-native core contract,
+`docs/AI_FULL_STACK_DEV_WORKFLOW.md` for the full-stack workflow, and
+`docs/CORE_STABILIZATION_ROADMAP.md` for the broader stabilization roadmap.
 
 ## Project Layout
 
