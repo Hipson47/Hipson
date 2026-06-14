@@ -37,6 +37,9 @@ runs/<work_id>/
   evidence.jsonl
   audit.json
   summary.md
+  manifest.json
+  handoff.json
+  handoff.md
 ```
 
 Default execution is provider-free. `--ai-profile <name>` prepares the advisory
@@ -49,9 +52,33 @@ hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
 ```
 
 `--rerun-step` accepts `contract`, `preflight`, `verify`, `quality`,
-`quality_eval`, `evidence`, `audit`, or `summary`, and can be repeated. This is
-for repairing or refreshing missing/stale artifacts without repeating the full
-workflow.
+`quality_eval`, `evidence`, `audit`, `summary`, `handoff`, or `manifest`, and
+can be repeated. This is for repairing or refreshing missing/stale artifacts
+without repeating the full workflow.
+
+## Run Control
+
+After any review/autopilot run:
+
+```bash
+hipson run status --run runs/<work_id> --json
+hipson run validate --run runs/<work_id> --json
+hipson run handoff --run runs/<work_id> --json
+```
+
+`run status` gives agents a compact current-state payload. `run validate`
+checks required files and JSON artifact kinds. `run handoff` writes
+`handoff.json` and `handoff.md` for the next agent.
+
+Release/security claims are evaluated separately from verification:
+
+```bash
+hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
+```
+
+The claim is allowed only when audit evidence has a passed verification gate,
+a passed release claim gate, and the claim command records an approved human
+decision. Otherwise it writes a blocked claim with concrete reasons.
 
 ## Agent Bootstrap
 
@@ -81,11 +108,16 @@ server. The current tool set is:
 - `quality.report`;
 - `evidence.append`;
 - `audit.show`.
+- `run.status`;
+- `run.validate`;
+- `handoff.create`;
+- `release.claim`.
 
 Read-first tools are provider-free. `verify.run` and `evidence.append` are gated
 and require `approved=true` in the tool arguments before they execute local
-commands or write evidence. Provider-backed review remains an explicit sidecar
-action; MCP never hides provider calls.
+commands or write evidence. `handoff.create` and `release.claim` are also gated
+because they write run artifacts. Provider-backed review remains an explicit
+sidecar action; MCP never hides provider calls.
 
 ## Project Policy Enforcement
 
@@ -94,6 +126,8 @@ Invalid policy blocks the run. `denied_paths` block autopilot when the current
 git diff touches protected files. `local_only: true` blocks provider-backed
 sidecars even if `--run-sidecar` is passed. Prompt-required operations must be
 explicitly approved through the CLI.
+For implementation runs, `--allowed-edit` is checked against policy
+`denied_paths` and `allowed_paths` before the run bundle is created.
 
 ## Agent Surfaces Doctor
 

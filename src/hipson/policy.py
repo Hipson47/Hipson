@@ -61,6 +61,7 @@ def enforce_autopilot_policy(
     operation: str,
     run_sidecar: bool = False,
     approved_operations: list[str] | None = None,
+    write_paths: list[str] | None = None,
 ) -> dict[str, Any]:
     payload = load_policy(project_path)
     if not payload.get("valid"):
@@ -71,6 +72,7 @@ def enforce_autopilot_policy(
         raise SystemExit("Project policy payload must be an object")
     approved = set(approved_operations or [])
     _enforce_denied_paths(project_path, policy)
+    _enforce_write_scope(policy, write_paths or [])
     if run_sidecar:
         if policy.get("local_only") is True:
             raise SystemExit("Project policy local_only blocks provider_call; set local_only false before running sidecars.")
@@ -119,6 +121,33 @@ def _enforce_denied_paths(project_path: str | Path, policy: dict[str, Any]) -> N
     ]
     if blocked:
         raise SystemExit(f"Project policy denied paths changed: {', '.join(blocked)}")
+
+
+def _enforce_write_scope(policy: dict[str, Any], write_paths: list[str]) -> None:
+    if not write_paths:
+        return
+    denied = sorted(_path_set(policy.get("denied_paths")))
+    allowed = sorted(_path_set(policy.get("allowed_paths")))
+    normalized = sorted(_path_set(write_paths))
+    blocked_denied = [
+        path
+        for path in normalized
+        if any(path == denied_path or path.startswith(f"{denied_path.rstrip('/')}/") for denied_path in denied)
+    ]
+    if blocked_denied:
+        raise SystemExit(f"Project policy denied write scope: {', '.join(blocked_denied)}")
+    if allowed:
+        blocked_allowed = [
+            path
+            for path in normalized
+            if not any(path == allowed_path or path.startswith(f"{allowed_path.rstrip('/')}/") for allowed_path in allowed)
+        ]
+        if blocked_allowed:
+            allowed_text = ", ".join(allowed)
+            raise SystemExit(
+                f"Project policy allowed_paths excludes write scope: {', '.join(blocked_allowed)}. "
+                f"Allowed paths: {allowed_text}"
+            )
 
 
 def _policy_path(project: Path) -> Path | None:

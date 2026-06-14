@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, TextIO
 
-from hipson import agent_contract, evidence, packet_preflight, policy, quality, verification, workflow
+from hipson import agent_contract, evidence, packet_preflight, policy, quality, run_control, verification, workflow
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import resolve_project
 
@@ -19,7 +19,115 @@ MCP_TOOL_NAMES = (
     "quality.report",
     "evidence.append",
     "audit.show",
+    "run.status",
+    "run.validate",
+    "handoff.create",
+    "release.claim",
 )
+
+MCP_GATED_TOOLS = {"verify.run", "evidence.append", "handoff.create", "release.claim"}
+MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "contract.show": {
+        "type": "object",
+        "properties": {"project": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "policy.show": {
+        "type": "object",
+        "properties": {"project": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "work.create": {
+        "type": "object",
+        "properties": {
+            "project": {"type": "string"},
+            "task": {"type": "string"},
+            "include_diff": {"type": "boolean"},
+            "diff_lines": {"type": "integer"},
+        },
+        "additionalProperties": False,
+    },
+    "packet.preflight": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {"path": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "verify.run": {
+        "type": "object",
+        "required": ["work", "approved"],
+        "properties": {
+            "work": {"type": "string"},
+            "approved": {"type": "boolean"},
+            "limit": {"type": "integer"},
+            "timeout": {"type": "integer"},
+            "output": {"type": "string"},
+            "allow_unsafe_output": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "quality.report": {
+        "type": "object",
+        "required": ["work"],
+        "properties": {
+            "work": {"type": "string"},
+            "verify": {"type": "string"},
+            "sidecar": {"type": "string"},
+            "decision": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "evidence.append": {
+        "type": "object",
+        "required": ["work", "verification", "quality_report", "approved"],
+        "properties": {
+            "work": {"type": "string"},
+            "verification": {"type": "string"},
+            "quality_report": {"type": "string"},
+            "quality_eval": {"type": "string"},
+            "ledger_root": {"type": "string"},
+            "sidecar_report": {"type": "string"},
+            "decision": {"type": "string"},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "audit.show": {
+        "type": "object",
+        "required": ["work"],
+        "properties": {"work": {"type": "string"}, "ledger_root": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "run.status": {
+        "type": "object",
+        "required": ["run"],
+        "properties": {"run": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "run.validate": {
+        "type": "object",
+        "required": ["run"],
+        "properties": {"run": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "handoff.create": {
+        "type": "object",
+        "required": ["run", "approved"],
+        "properties": {"run": {"type": "string"}, "approved": {"type": "boolean"}},
+        "additionalProperties": False,
+    },
+    "release.claim": {
+        "type": "object",
+        "required": ["run", "claim", "approved"],
+        "properties": {
+            "run": {"type": "string"},
+            "claim": {"type": "string"},
+            "human_decision": {"type": "string"},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+}
 
 
 def server_catalog(*, project_path: str | Path = ".") -> dict[str, Any]:
@@ -67,10 +175,10 @@ def _tool(name: str) -> dict[str, Any]:
         "name": name,
         "read_first": True,
         "provider_free": True,
-        "approval_required": name in {"verify.run", "evidence.append"},
+        "approval_required": name in MCP_GATED_TOOLS,
         "description": _description(name),
         "fallback_command": _fallback_command(name),
-        "input_schema": {"type": "object", "additionalProperties": True},
+        "input_schema": MCP_INPUT_SCHEMAS[name],
     }
 
 
@@ -84,6 +192,10 @@ def _description(name: str) -> str:
         "quality.report": "Correlate work, verification, and optional sidecar artifacts.",
         "evidence.append": "Append a local evidence record to the run ledger.",
         "audit.show": "Read the audit bundle for handoff and release gate status.",
+        "run.status": "Read the status of a Hipson run bundle.",
+        "run.validate": "Validate expected run bundle artifacts and artifact kinds.",
+        "handoff.create": "Write a compact agent handoff artifact for the run bundle.",
+        "release.claim": "Evaluate and record a release claim against run evidence.",
     }
     return descriptions[name]
 
@@ -98,6 +210,10 @@ def _fallback_command(name: str) -> str:
         "quality.report": "hipson quality report --work runs/work.json --verify runs/verify.json -o runs/quality.json --json",
         "evidence.append": "hipson evidence append --work runs/work.json --verification runs/verify.json --quality-report runs/quality.json --json",
         "audit.show": "hipson audit show --work runs/work.json --json",
+        "run.status": "hipson run status --run runs/<work_id> --json",
+        "run.validate": "hipson run validate --run runs/<work_id> --json",
+        "handoff.create": "hipson run handoff --run runs/<work_id> --json",
+        "release.claim": "hipson release claim --run runs/<work_id> --claim \"release readiness\" --human-decision approved --json",
     }
     return commands[name]
 
@@ -162,7 +278,7 @@ def _mcp_tool_descriptor(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "description": _description(name),
-        "inputSchema": {"type": "object", "additionalProperties": True},
+        "inputSchema": MCP_INPUT_SCHEMAS[name],
     }
 
 
@@ -218,6 +334,26 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> dic
             work_path=str(arguments.get("work", "")),
             ledger_root=Path(str(arguments.get("ledger_root", project / "runs"))).expanduser().resolve(),
         )
+    if name == "run.status":
+        return run_control.build_status(str(arguments.get("run", "")))
+    if name == "run.validate":
+        return run_control.build_validation(str(arguments.get("run", "")))
+    if name == "handoff.create":
+        _require_mcp_approval(arguments, name)
+        run_dir = run_control.resolve_run(str(arguments.get("run", "")))
+        handoff = run_control.build_handoff(run_dir)
+        outputs = run_control.write_handoff(run_dir, handoff)
+        return {**handoff, "outputs": outputs}
+    if name == "release.claim":
+        _require_mcp_approval(arguments, name)
+        run_dir = run_control.resolve_run(str(arguments.get("run", "")))
+        claim = run_control.build_release_claim(
+            run_dir,
+            claim=str(arguments.get("claim", "")),
+            human_decision=str(arguments.get("human_decision", "pending")),
+        )
+        output = run_control.write_release_claim(run_dir, claim)
+        return {**claim, "output": str(output)}
     if name == "verify.run":
         _require_mcp_approval(arguments, name)
         work_plan = verification.load_work_plan(arguments.get("work", ""))

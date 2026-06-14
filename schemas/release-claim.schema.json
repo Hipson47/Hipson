@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Release Claim",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "work_id",
+    "run_dir",
+    "claim",
+    "allowed",
+    "status",
+    "human_decision",
+    "gates",
+    "reasons",
+    "safe_to_claim",
+    "unsafe_to_claim",
+    "audit"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.release_claim" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "claim": { "type": "string" },
+    "allowed": { "type": "boolean" },
+    "status": { "enum": ["allowed", "blocked"] },
+    "human_decision": { "type": "string" },
+    "gates": { "type": "object" },
+    "reasons": { "type": "array" },
+    "safe_to_claim": { "type": "array" },
+    "unsafe_to_claim": { "type": "array" },
+    "audit": { "type": "string" }
+  }
+}

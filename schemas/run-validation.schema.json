@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Run Validation",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "run_dir",
+    "ok",
+    "missing_required",
+    "invalid_json",
+    "kind_mismatches",
+    "issues",
+    "artifacts"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.run_validation" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "ok": { "type": "boolean" },
+    "missing_required": { "type": "array" },
+    "invalid_json": { "type": "array" },
+    "kind_mismatches": { "type": "array" },
+    "issues": { "type": "array" },
+    "artifacts": { "type": "object" }
+  }
+}

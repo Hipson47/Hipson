@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Agent Handoff",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "work_id",
+    "run_dir",
+    "task",
+    "project",
+    "status",
+    "gates",
+    "safe_claims",
+    "unsafe_claims",
+    "unknowns",
+    "summary_sha256",
+    "next_agent_step",
+    "artifacts"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.agent_handoff" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "task": { "type": "string" },
+    "project": { "type": "string" },
+    "status": { "type": "string" },
+    "gates": { "type": "object" },
+    "safe_claims": { "type": "array" },
+    "unsafe_claims": { "type": "array" },
+    "unknowns": { "type": "array" },
+    "summary_sha256": { "type": "string" },
+    "next_agent_step": { "type": "string" },
+    "artifacts": { "type": "object" }
+  }
+}

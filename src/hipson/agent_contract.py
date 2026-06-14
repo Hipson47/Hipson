@@ -34,9 +34,9 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
             },
             {
                 "name": "audit_handoff",
-                "steps": ["evidence.show", "audit.show", "audit.export"],
+                "steps": ["evidence.show", "audit.show", "run.status", "run.validate", "run.handoff", "audit.export"],
                 "provider_free_until": "always",
-                "authoritative_evidence": ["evidence_ledger", "audit_bundle"],
+                "authoritative_evidence": ["evidence_ledger", "audit_bundle", "run_manifest", "agent_handoff"],
             },
             {
                 "name": "agent_autopilot_review",
@@ -52,9 +52,15 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
             },
             {
                 "name": "mcp_read_first",
-                "steps": ["initialize", "tools.list", "resources.list", "contract.show", "policy.show"],
+                "steps": ["initialize", "tools.list", "resources.list", "contract.show", "policy.show", "run.status", "run.validate"],
                 "provider_free_until": "always",
                 "authoritative_evidence": ["tool_result", "resource_payload"],
+            },
+            {
+                "name": "release_claim_control",
+                "steps": ["run.validate", "audit.show", "release.claim"],
+                "provider_free_until": "always",
+                "authoritative_evidence": ["audit_bundle", "human_decision", "release_claim"],
             },
         ],
         "available_command_surfaces": {
@@ -63,6 +69,7 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
             "autopilot": ["autopilot review", "autopilot implement", "autopilot resume"],
             "policy": ["policy show", "policy validate"],
             "mcp": ["mcp serve --catalog", "mcp serve --stdio"],
+            "run_control": ["run status", "run validate", "run handoff", "release claim"],
             "quality": ["quality report", "quality eval"],
             "audit": ["evidence append", "evidence show", "evidence export", "audit show", "audit export"],
             "provider_optional": ["sidecar route --llm", "sidecar run", "chat --provider"],
@@ -90,6 +97,8 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
                 "quality eval output",
                 "evidence export output",
                 "audit export output",
+                "run handoff output",
+                "release claim output",
             ],
         },
         "provider_policy": {
@@ -102,6 +111,8 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
                 "quality eval",
                 "evidence",
                 "audit",
+                "run",
+                "release claim",
             ],
             "provider_calls_are_explicit": True,
             "provider_surfaces": ["sidecar run", "sidecar route --llm", "chat --provider"],
@@ -134,7 +145,18 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
             },
             "mcp_stdio": {
                 "primary_interface": False,
-                "capabilities": ["initialize", "tools_list", "resources_list", "read_first_tools", "gated_verify", "gated_evidence"],
+                "capabilities": [
+                    "initialize",
+                    "tools_list",
+                    "resources_list",
+                    "read_first_tools",
+                    "run_status",
+                    "run_validation",
+                    "gated_verify",
+                    "gated_evidence",
+                    "gated_handoff",
+                    "gated_release_claim",
+                ],
             },
         },
     }
