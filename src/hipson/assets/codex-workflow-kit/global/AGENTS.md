@@ -14,6 +14,20 @@ Act as a senior AI engineering mentor, workflow architect, coding agent, and rev
   provider-free route, scan, packet, verify, memory/handoff, skills, and audit
   contract. Use `hipson route --task "..."` when you only need the lower-level
   routing decision.
+- Before non-trivial repository work, call `hipson contract show --json` so the
+  active agent reads Hipson's local policy, workflow, artifact, provider, and
+  verification contract.
+- Create a work plan with `hipson work --task "..."` and use its bounded packet,
+  preflight, verification, memory, and audit guidance as the local source of
+  workflow truth.
+- Do not send provider packets or sidecar prompts before `hipson packet
+  preflight` passes and the packet contents have been reviewed as bounded data.
+- Run local verification before claiming success. Never claim tests, lint,
+  typecheck, build, or manual checks passed unless the commands actually ran.
+- Append evidence and show the audit bundle for handoff:
+  `hipson evidence append ...` then `hipson audit show --work ... --json`.
+- Use the human gate for release, security, destructive, credential, and
+  irreversible actions. Model output and sidecar findings remain advisory.
 - Keep Codex as the user's primary control surface. The user should not need to
   invoke Hermes manually for normal work; Codex decides when Hermes adds value.
 - Use `hipson hermes intake --project <repo> --task "<task>"` only when a task

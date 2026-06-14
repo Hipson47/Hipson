@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "template_kind": "hipson.codex_prefix_rules_template",
+  "description": "Template only. Safe and blocked prefix examples for agent integration.",
+  "safe_examples": [
+    ["hipson", "contract", "show"],
+    ["hipson", "policy", "show"],
+    ["hipson", "work"],
+    ["hipson", "packet", "preflight"],
+    ["hipson", "verify", "run"],
+    ["hipson", "quality", "report"],
+    ["hipson", "evidence", "append"],
+    ["hipson", "audit", "show"]
+  ],
+  "prompt_examples": [
+    ["hipson", "sidecar", "run"],
+    ["hipson", "chat", "--provider"],
+    ["git", "push"]
+  ],
+  "blocked_examples": [
+    ["rm", "-rf"],
+    ["git", "reset", "--hard"],
+    ["git", "clean", "-fdx"]
+  ]
+}

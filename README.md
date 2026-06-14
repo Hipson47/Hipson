@@ -10,11 +10,19 @@ the trust and workflow layer for agent-driven full-stack development. The
 repository, git diff, tests, local command output, and human-reviewed decisions
 stay the source of truth.
 
+Install it once, enable the agent integration, and coding agents can discover
+Hipson automatically: read the contract, create work plans, build packets, run
+preflight, verify locally, record evidence, and produce audit/handoff summaries.
+
 ## Features
 
 - **Provider-free 1.1 local-first core** for bounded, human-reviewed AI software work.
 - **First-class agent contract** through `hipson contract show --json`, exposing
   workflow, artifact, risk, path, provider, memory, verification, and adapter policy.
+- **AI Review Control Kit v0** through `hipson kit review`, producing a single
+  `runs/<work_id>/` bundle for agent review with resumable missing-step replay.
+- **Agent Autopilot Layer v0** through `hipson install agents`, `hipson agent
+  bootstrap`, `hipson autopilot review`, policy files, and an MCP skeleton.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Codex work briefs** through `hipson work`, joining route, scan, packet,
   verify, memory, and audit guidance into one local contract.
@@ -73,6 +81,11 @@ cp .env.example .env
 
 uv run hipson doctor
 uv run hipson contract show --json
+uv run hipson install agents --codex --dry-run
+uv run hipson agent bootstrap --target codex --json
+uv run hipson autopilot review --task "review current diff" --json
+uv run hipson kit review --project . --json
+uv run hipson kit review resume --run runs/<work_id> --json
 uv run hipson route --task "security review of auth"
 uv run hipson work --task "security review of auth"
 uv run hipson hermes doctor
@@ -99,6 +112,18 @@ hipson work --task "security review of auth"
 hipson work --task "implement parser fix" --allowed-edit src,tests --write-packet
 hipson work --task "review current diff for test gaps" --free-ai
 hipson work --task "review current diff for release risk" --ai-model openrouter/free
+hipson install agents --all --dry-run
+hipson install agents --codex --apply
+hipson agent bootstrap --target codex --json
+hipson agent bootstrap --target cursor --json
+hipson agent bootstrap --target claude --json
+hipson autopilot review --task "review current diff" --verify-profile quick --json
+hipson policy show --json
+hipson policy validate
+hipson mcp serve --json
+hipson kit review --project . --task "review current diff" --verify-profile quick --json
+hipson kit review --project . --task "review current diff" --verify-profile full --json
+hipson kit review resume --run runs/<work_id> --verify-profile release --json
 hipson hermes doctor
 hipson hermes install-skill
 hipson hermes intake --project . --task "review failing CI" --channel telegram
@@ -166,6 +191,21 @@ For audit-ready AI-dev work, write the machine-readable work plan, run the local
 verification step, then append evidence and inspect the audit bundle:
 
 ```bash
+hipson kit review --project . --task "review current diff for test gaps" --json
+```
+
+Use `--verify-profile quick`, `full`, or `release` to control verification
+breadth. `quick` runs the first planned local command, while `full` and
+`release` run every command listed in the work plan. If a run is interrupted or
+some artifacts are deleted, resume without rebuilding the work plan or packet:
+
+```bash
+hipson kit review resume --run runs/<work_id> --json
+```
+
+For manual control of the same steps:
+
+```bash
 hipson contract show --json
 hipson work --task "review current diff for test gaps" --ai-profile free_probe --write-packet --packet-output runs/review-packet.md --work-output runs/work.json
 hipson packet preflight runs/review-packet.md -o runs/review-packet.preflight.json --json
@@ -184,6 +224,22 @@ This is the AI Review Control Kit workflow:
 
 ```text
 current diff -> work plan -> packet -> preflight -> optional sidecar -> verify -> quality report/eval -> evidence -> audit
+```
+
+`hipson kit review` writes a single run bundle:
+
+```text
+runs/<work_id>/
+  contract.json
+  work.json
+  review-packet.md
+  preflight.json
+  verify.json
+  quality.json
+  quality-eval.json  # only when a sidecar report exists
+  evidence.jsonl
+  audit.json
+  summary.md
 ```
 
 `hipson work` is still only a plan, but it now includes packet preflight as the

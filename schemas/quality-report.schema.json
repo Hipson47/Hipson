@@ -38,7 +38,16 @@
     "sidecar_eval_gate": { "type": "string" },
     "human_decision_gate": { "type": "string" },
     "release_claim_gate": { "type": "string" },
-    "gates": { "type": "object" },
+    "gates": {
+      "type": "object",
+      "required": ["verification_gate", "sidecar_eval_gate", "human_decision_gate", "release_claim_gate"],
+      "properties": {
+        "verification_gate": { "type": "string" },
+        "sidecar_eval_gate": { "type": "string" },
+        "human_decision_gate": { "type": "string" },
+        "release_claim_gate": { "type": "string" }
+      }
+    },
     "verification_status": { "type": "string" },
     "sidecar_present": { "type": "boolean" },
     "decision": { "type": "string" },

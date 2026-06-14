@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from hipson import agent_contract as hipson_agent_contract
+from hipson import agent_install as hipson_agent_install
 from hipson import agents as hipson_agents
 from hipson import cli as hipson_cli
 from hipson import evidence as hipson_evidence
@@ -760,6 +761,12 @@ def test_packaged_assets_are_available_outside_repo_cwd(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert str(tmp_path / "codex") in result.stdout
     assert not (tmp_path / "codex").exists()
+
+
+def test_package_metadata_positions_hipson_as_control_plane():
+    assert 'description = "Local-first AI Development Control Plane for coding agents."' in Path(
+        "pyproject.toml"
+    ).read_text(encoding="utf-8")
 
 
 def test_runtime_asset_finds_default_agent_config():
@@ -1728,6 +1735,83 @@ def test_install_codex_apply_replaces_existing_marker_block(tmp_path: Path):
     assert "After" in text
     assert "\nold\n" not in text
     assert text.count(START_MARKER) == 1
+
+
+def test_install_agents_dry_run_does_not_overwrite_user_files(tmp_path: Path):
+    cursor_home = tmp_path / ".cursor"
+    rules = cursor_home / "rules"
+    rules.mkdir(parents=True)
+    cursor_file = rules / "hipson.mdc"
+    cursor_file.write_text("User Cursor rules\n", encoding="utf-8")
+
+    payload = hipson_agent_install.install_agents(
+        targets=["cursor", "codex"],
+        dry_run=True,
+        cursor_home=cursor_home,
+        codex_home=tmp_path / ".codex",
+    )
+
+    assert payload["mode"] == "dry-run"
+    assert cursor_file.read_text(encoding="utf-8") == "User Cursor rules\n"
+    assert not (tmp_path / ".codex").exists()
+
+
+def test_install_agents_apply_uses_managed_marker_blocks_and_backups(tmp_path: Path):
+    cursor_home = tmp_path / ".cursor"
+    claude_home = tmp_path / ".claude"
+    cursor_path = cursor_home / "rules" / "hipson.mdc"
+    claude_path = claude_home / "CLAUDE.md"
+    cursor_path.parent.mkdir(parents=True)
+    claude_path.parent.mkdir(parents=True)
+    cursor_path.write_text("Existing Cursor rules\n", encoding="utf-8")
+    claude_path.write_text("Existing Claude rules\n", encoding="utf-8")
+
+    hipson_agent_install.install_agents(
+        targets=["cursor", "claude"],
+        dry_run=False,
+        cursor_home=cursor_home,
+        claude_home=claude_home,
+    )
+
+    cursor_text = cursor_path.read_text(encoding="utf-8")
+    claude_text = claude_path.read_text(encoding="utf-8")
+    assert "Existing Cursor rules" in cursor_text
+    assert "Existing Claude rules" in claude_text
+    assert START_MARKER in cursor_text
+    assert END_MARKER in claude_text
+    assert "hipson contract show --json" in cursor_text
+    assert "hipson packet preflight" in claude_text
+    assert list(cursor_path.parent.glob("hipson.mdc.backup-*"))
+    assert list(claude_home.glob("CLAUDE.md.backup-*"))
+
+
+def test_agent_bootstrap_emits_stable_json_for_each_target(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    for target in ["codex", "cursor", "claude"]:
+        result = run_cli(tmp_path, "agent", "bootstrap", "--target", target, "--project", str(repo), "--json")
+
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["artifact_kind"] == "hipson.agent_bootstrap"
+        assert payload["target"] == target
+        assert payload["project"] == str(repo)
+        assert payload["contract_available"] is True
+        assert payload["recommended_first_command"] == "hipson contract show --json"
+        assert "installed_surfaces" in payload
+        assert "fallback_commands" in payload
+
+
+def test_codex_managed_instructions_contain_hipson_first_workflow():
+    text = runtime_asset("codex-workflow-kit/global/AGENTS.md").read_text(encoding="utf-8")
+
+    assert "hipson contract show --json" in text
+    assert 'hipson work --task "..."' in text
+    assert "hipson packet" in text and "preflight" in text
+    assert "Run local verification before claiming success" in text
+    assert "hipson evidence append" in text
+    assert "hipson audit show" in text
+    assert "Use the human gate" in text
 
 
 def test_packet_generation_redacts_before_persistence(tmp_path: Path):
@@ -3185,6 +3269,7 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
         ("scan-many", str(registry)),
         ("route", "--task", "security review of auth", "--json"),
         ("route", "--task", "implement parser fix"),
+        ("kit", "review", "--project", str(repo), "--task", "review current diff", "--no-diff", "--json"),
         ("work", "--task", "security review of auth", "--project", str(repo), "--no-diff", "--json"),
         ("work", "--task", "review current diff", "--project", str(repo), "--no-diff", "--ai-profile", "free_probe", "--json"),
         ("work", "--task", "implement parser fix", "--project", str(repo), "--no-diff", "--allowed-edit", "src,tests"),
@@ -3435,6 +3520,450 @@ def test_generated_artifact_json_validates_against_schemas(tmp_path: Path):
     ]
     for schema_name, payload in artifacts:
         assert_schema_valid(schema_name, payload)
+
+
+def test_review_kit_creates_expected_run_directory_and_schema_valid_artifacts(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    run_dir = Path(payload["run_dir"])
+    assert run_dir == repo / "runs" / payload["work_id"]
+    expected = {
+        "contract.json",
+        "work.json",
+        "review-packet.md",
+        "preflight.json",
+        "verify.json",
+        "quality.json",
+        "evidence.jsonl",
+        "audit.json",
+        "summary.md",
+    }
+    assert expected.issubset({path.name for path in run_dir.iterdir()})
+    assert not (run_dir / "quality-eval.json").exists()
+    assert_schema_valid("agent-contract.schema.json", json.loads((run_dir / "contract.json").read_text(encoding="utf-8")))
+    assert_schema_valid("work-plan.schema.json", json.loads((run_dir / "work.json").read_text(encoding="utf-8")))
+    assert_schema_valid("packet-preflight.schema.json", json.loads((run_dir / "preflight.json").read_text(encoding="utf-8")))
+    assert_schema_valid("verification.schema.json", json.loads((run_dir / "verify.json").read_text(encoding="utf-8")))
+    assert_schema_valid("quality-report.schema.json", json.loads((run_dir / "quality.json").read_text(encoding="utf-8")))
+    evidence_record = json.loads((run_dir / "evidence.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert_schema_valid("evidence-record.schema.json", evidence_record)
+    assert_schema_valid("audit-bundle.schema.json", json.loads((run_dir / "audit.json").read_text(encoding="utf-8")))
+
+
+def test_review_kit_verify_profile_full_runs_all_planned_commands(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    (repo / "pyproject.toml").write_text('[project]\nname = "sample"\ndependencies = ["pytest"]\n', encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_sample.py").write_text("def test_sample():\n    assert True\n", encoding="utf-8")
+
+    result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--verify-profile",
+        "full",
+        "--json",
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    run_dir = Path(payload["run_dir"])
+    work = json.loads((run_dir / "work.json").read_text(encoding="utf-8"))
+    verification = json.loads((run_dir / "verify.json").read_text(encoding="utf-8"))
+    assert payload["verify_profile"] == "full"
+    assert [item["command"] for item in verification["results"]] == work["verification"]
+    assert len(verification["results"]) == len(work["verification"])
+    assert len(verification["results"]) > 1
+    assert verification["status"] == "passed"
+
+
+def test_review_kit_resume_recreates_missing_artifacts_without_rebuilding_work(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    run_result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    run_dir = Path(json.loads(run_result.stdout)["run_dir"])
+    work_before = (run_dir / "work.json").read_text(encoding="utf-8")
+    packet_before = (run_dir / "review-packet.md").read_text(encoding="utf-8")
+    for name in ["contract.json", "preflight.json", "verify.json", "quality.json", "audit.json", "summary.md"]:
+        (run_dir / name).unlink()
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("review kit resume default must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        rc, stdout, stderr = run_cli_inprocess(
+            "kit",
+            "review",
+            "resume",
+            "--run",
+            str(run_dir),
+            "--json",
+        )
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    assert payload["mode"] == "resume"
+    assert payload["verify_profile"] == "quick"
+    assert (run_dir / "work.json").read_text(encoding="utf-8") == work_before
+    assert (run_dir / "review-packet.md").read_text(encoding="utf-8") == packet_before
+    for name in ["contract.json", "preflight.json", "verify.json", "quality.json", "audit.json", "summary.md"]:
+        assert (run_dir / name).exists()
+    assert {"contract.json", "preflight.json", "verify.json", "quality.json", "audit.json", "summary.md"}.issubset(
+        set(payload["created_artifacts"])
+    )
+    assert any(item.startswith("evidence.jsonl") for item in payload["created_artifacts"])
+    summary = (run_dir / "summary.md").read_text(encoding="utf-8")
+    assert "Verification profile: `quick`" in summary
+    assert_schema_valid("verification.schema.json", json.loads((run_dir / "verify.json").read_text(encoding="utf-8")))
+    assert_schema_valid("quality-report.schema.json", json.loads((run_dir / "quality.json").read_text(encoding="utf-8")))
+    assert_schema_valid("audit-bundle.schema.json", json.loads((run_dir / "audit.json").read_text(encoding="utf-8")))
+
+
+def test_review_kit_resume_requires_run_path(tmp_path: Path):
+    result = run_cli(tmp_path, "kit", "review", "resume", "--json")
+
+    assert result.returncode != 0
+    assert "resume requires --run" in result.stderr
+
+
+def test_review_kit_default_is_provider_and_network_free(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("review kit default must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        rc, stdout, stderr = run_cli_inprocess(
+            "kit",
+            "review",
+            "--project",
+            str(repo),
+            "--task",
+            "review current diff",
+            "--no-diff",
+            "--json",
+        )
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    assert payload["sidecar"]["status"] == "not_configured"
+
+
+def test_review_kit_ai_profile_prepares_sidecar_without_calling_provider(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_provider_chat(*_args, **_kwargs):
+        raise AssertionError("--ai-profile without --run-sidecar must not call provider")
+
+    old_provider_chat = hipson_agents.provider_chat
+    try:
+        hipson_agents.provider_chat = fail_provider_chat
+        rc, stdout, stderr = run_cli_inprocess(
+            "kit",
+            "review",
+            "--project",
+            str(repo),
+            "--task",
+            "review current diff for test gaps",
+            "--no-diff",
+            "--ai-profile",
+            "free_probe",
+            "--json",
+        )
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    run_dir = Path(payload["run_dir"])
+    assert payload["sidecar"]["status"] == "dry_run_prepared"
+    assert "sidecar run" in payload["sidecar"]["dry_run_command"]
+    assert not (run_dir / "sidecar.md").exists()
+    assert not (run_dir / "quality-eval.json").exists()
+
+
+def test_review_kit_run_sidecar_requires_explicit_ai_profile(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--run-sidecar",
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "--run-sidecar requires --ai-profile" in result.stderr
+
+
+def test_review_kit_summary_includes_gates_claims_unknowns_and_next_step(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    (repo / "tracked.txt").write_text("base\nchanged\n", encoding="utf-8")
+
+    result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    summary = Path(payload["artifacts"]["summary"]).read_text(encoding="utf-8")
+    assert "## Gates" in summary
+    assert "`verification_gate`: `passed`" in summary
+    assert "`release_claim_gate`: `blocked`" in summary
+    assert "## Safe To Claim" in summary
+    assert "listed verification commands passed" in summary
+    assert "## Unknowns" in summary
+    assert "Release claim gate is not passed." in summary
+    assert "## Next Agent Step" in summary
+    assert "Resolve the first unknown" in summary
+    assert "tracked.txt" in summary
+
+
+def test_review_kit_blocks_unsafe_run_root(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    unsafe_root = tmp_path / "outside-runs"
+
+    result = run_cli(
+        tmp_path,
+        "kit",
+        "review",
+        "--project",
+        str(repo),
+        "--run-root",
+        str(unsafe_root),
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "Unsafe review kit run root path" in result.stderr
+    assert not unsafe_root.exists()
+
+
+def test_autopilot_review_creates_expected_run_directory(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    run_dir = Path(payload["run_dir"])
+    assert payload["artifact_kind"] == "hipson.autopilot_review_run"
+    assert payload["autopilot"] is True
+    assert run_dir == repo / "runs" / payload["work_id"]
+    expected = {
+        "contract.json",
+        "work.json",
+        "review-packet.md",
+        "preflight.json",
+        "verify.json",
+        "quality.json",
+        "evidence.jsonl",
+        "audit.json",
+        "summary.md",
+    }
+    assert expected.issubset({path.name for path in run_dir.iterdir()})
+
+
+def test_autopilot_default_is_provider_and_network_free(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("autopilot default must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        rc, stdout, stderr = run_cli_inprocess(
+            "autopilot",
+            "review",
+            "--project",
+            str(repo),
+            "--task",
+            "review current diff",
+            "--no-diff",
+            "--json",
+        )
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    assert payload["sidecar"]["status"] == "not_configured"
+
+
+def test_autopilot_ai_profile_prepares_sidecar_without_run_sidecar(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_provider_chat(*_args, **_kwargs):
+        raise AssertionError("--ai-profile without --run-sidecar must not call provider")
+
+    old_provider_chat = hipson_agents.provider_chat
+    try:
+        hipson_agents.provider_chat = fail_provider_chat
+        rc, stdout, stderr = run_cli_inprocess(
+            "autopilot",
+            "review",
+            "--project",
+            str(repo),
+            "--task",
+            "review current diff",
+            "--no-diff",
+            "--ai-profile",
+            "free_probe",
+            "--json",
+        )
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    assert payload["sidecar"]["status"] == "dry_run_prepared"
+    assert "sidecar run" in payload["sidecar"]["dry_run_command"]
+
+
+def test_autopilot_run_sidecar_requires_explicit_ai_profile(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--run-sidecar",
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "--run-sidecar requires --ai-profile" in result.stderr
+
+
+def test_policy_validate_rejects_unsafe_deny_allow_conflicts(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    policy_dir = repo / ".hipson"
+    policy_dir.mkdir()
+    (policy_dir / "policy.json").write_text(
+        json.dumps(
+            {
+                "denied_paths": ["src"],
+                "allowed_paths": ["src"],
+                "prompt_required_operations": ["provider_call", "release_claim"],
+                "local_only": True,
+                "release_gates": ["verification_gate", "human_decision_gate", "release_claim_gate"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(tmp_path, "policy", "validate", "--project", str(repo), "--json")
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["artifact_kind"] == "hipson.project_policy"
+    assert payload["valid"] is False
+    assert any("both denied and allowed" in issue for issue in payload["issues"])
+
+
+def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("mcp catalog must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        rc, stdout, stderr = run_cli_inprocess("mcp", "serve", "--project", str(repo), "--json")
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
+
+    assert rc == 0, stderr
+    payload = json.loads(stdout)
+    assert payload["artifact_kind"] == "hipson.mcp_server_catalog"
+    assert payload["provider_policy"]["hidden_provider_calls"] is False
+    tool_names = {tool["name"] for tool in payload["tools"]}
+    assert {
+        "contract.show",
+        "work.create",
+        "packet.preflight",
+        "verify.run",
+        "quality.report",
+        "evidence.append",
+        "audit.show",
+    }.issubset(tool_names)
 
 
 def test_packet_output_outside_allowed_dirs_requires_explicit_override(tmp_path: Path):

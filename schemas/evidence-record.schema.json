@@ -25,12 +25,47 @@
     "event_id": { "type": "string" },
     "previous_hash": { "type": "string" },
     "created_at_utc": { "type": "string" },
-    "work": { "type": "object" },
+    "work": {
+      "type": "object",
+      "required": ["schema_version", "work_id", "created_at_utc", "task", "repo", "route", "packet", "packet_preflight", "ai_quality", "verification_commands", "memory_commands", "audit", "unknowns"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "work_id": { "type": "string" },
+        "created_at_utc": { "type": "string" },
+        "task": { "type": "string" },
+        "repo": { "type": "object" },
+        "route": { "type": "object" },
+        "packet": { "type": "object" },
+        "packet_preflight": { "type": "object" },
+        "ai_quality": { "type": "object" },
+        "verification_commands": { "type": "array" },
+        "memory_commands": { "type": "array" },
+        "audit": { "type": "array" },
+        "unknowns": { "type": "array" }
+      }
+    },
     "provider": { "type": "object" },
     "verification": { "type": "object" },
     "quality": { "type": "object" },
-    "gates": { "type": "object" },
-    "claims": { "type": "object" },
+    "gates": {
+      "type": "object",
+      "required": ["verification_gate", "sidecar_eval_gate", "human_decision_gate", "release_claim_gate"],
+      "properties": {
+        "verification_gate": { "type": "string" },
+        "sidecar_eval_gate": { "type": "string" },
+        "human_decision_gate": { "type": "string" },
+        "release_claim_gate": { "type": "string" }
+      }
+    },
+    "claims": {
+      "type": "object",
+      "required": ["safe", "unsafe", "evidence_refs"],
+      "properties": {
+        "safe": { "type": "array" },
+        "unsafe": { "type": "array" },
+        "evidence_refs": { "type": "array" }
+      }
+    },
     "unknowns": { "type": "array" },
     "human_decision": { "type": "object" },
     "record_hash": { "type": "string" }

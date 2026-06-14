@@ -112,6 +112,44 @@ The AI Review Control Kit workflow is:
 current diff -> work plan -> packet -> preflight -> optional sidecar -> verify -> quality report/eval -> evidence -> audit
 ```
 
+Run it through:
+
+```bash
+hipson kit review --project . --task "review current diff" --json
+```
+
+The command writes a single `runs/<work_id>/` directory with:
+
+- `contract.json`;
+- `work.json`;
+- `review-packet.md`;
+- `preflight.json`;
+- `verify.json`;
+- `quality.json`;
+- optional `quality-eval.json` when a sidecar report exists;
+- `evidence.jsonl`;
+- `audit.json`;
+- `summary.md`.
+
 Use it as the canonical path for agent-native full-stack development and
 handoff. The workflow is intentionally local-first. Provider calls are optional,
-explicit, and bounded by packet preflight.
+explicit, and bounded by packet preflight. `--ai-profile <name>` prepares the
+advisory sidecar path; the real provider call requires `--run-sidecar`.
+
+Verification profiles make repeated agent work predictable:
+
+- `--verify-profile quick` runs the first planned local verification command.
+- `--verify-profile full` runs every command listed in `work.json`.
+- `--verify-profile release` also runs every planned command, but labels the run
+  as release-oriented evidence for downstream review.
+
+If a run is interrupted, resume the existing run directory:
+
+```bash
+hipson kit review resume --run runs/<work_id> --json
+```
+
+Resume fills missing `contract.json`, `preflight.json`, `verify.json`,
+`quality.json`, `quality-eval.json`, `evidence.jsonl`, `audit.json`, or
+`summary.md` without rebuilding the existing work plan or packet. Missing
+`work.json` or `review-packet.md` requires a new run.
