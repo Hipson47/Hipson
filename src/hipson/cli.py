@@ -121,6 +121,19 @@ def _agent_install_targets(args: argparse.Namespace) -> list[str]:
 
 
 def command_doctor(args: argparse.Namespace) -> int:
+    if args.agent_surfaces:
+        payload = agent_bootstrap.agent_surfaces_report(project_path=Path.cwd())
+        if args.json:
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+        else:
+            print(f"contract_available: {str(payload['contract_available']).lower()}")
+            print(f"policy_valid: {str(payload['policy_valid']).lower()}")
+            surfaces = cast(dict[str, dict[str, object]], payload["surfaces"])
+            for name, surface in sorted(surfaces.items()):
+                print(f"{name}_installed: {str(surface.get('installed', False)).lower()}")
+            print(f"recommended_next_command: {payload['recommended_next_command']}")
+        return 0 if payload.get("contract_available") and payload.get("policy_valid") else 1
+
     codex_home, codex_warnings = detect_codex_home()
     hipson_home, hipson_warnings = detect_hipson_home()
     skill_results = validate_skills(PACKAGE_ROOT)
@@ -462,7 +475,7 @@ def command_mcp_serve(args: argparse.Namespace) -> int:
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
-    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json or args.catalog else _bounded_json(payload))
     return 0
 
 
@@ -1603,6 +1616,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")
+    doctor.add_argument("--agent-surfaces", action="store_true", help="Report agent integration readiness")
     doctor.add_argument("--json", action="store_true", help="Print machine-readable doctor output")
     doctor.set_defaults(func=command_doctor)
 
@@ -1723,6 +1737,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_serve = mcp_sub.add_parser("serve", help="Print MCP skeleton catalog")
     mcp_serve.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    mcp_serve.add_argument("--catalog", action="store_true", help="Print catalog-only MCP metadata")
     mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
     mcp_serve.set_defaults(func=command_mcp_serve)
 

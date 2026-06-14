@@ -51,7 +51,8 @@ warnings, policy summary, and fallback commands.
 
 ## MCP Skeleton
 
-`hipson mcp serve --json` exposes a read-first catalog for future MCP clients:
+`hipson mcp serve --catalog` exposes a read-first catalog for future MCP
+clients:
 
 - `contract.show`;
 - `work.create`;
@@ -61,8 +62,21 @@ warnings, policy summary, and fallback commands.
 - `evidence.append`;
 - `audit.show`.
 
-The skeleton does not hide provider calls. Provider-backed review remains an
+This is catalog-only in v0, not a protocol-complete MCP stdio server. The
+skeleton does not hide provider calls. Provider-backed review remains an
 explicit sidecar action.
+
+## Agent Surfaces Doctor
+
+Use:
+
+```bash
+hipson doctor --agent-surfaces --json
+```
+
+It reports whether Codex, Cursor, Claude, and MCP notes are installed, whether
+the current project policy is valid, whether the agent contract is available,
+and the recommended next command.
 
 ## Human Gate
 

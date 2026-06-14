@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Autopilot Review Run",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "work_id",
+    "run_dir",
+    "mode",
+    "verify_profile",
+    "status",
+    "autopilot",
+    "sidecar",
+    "gates",
+    "artifacts"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.autopilot_review_run" },
+    "schema_version": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "mode": { "enum": ["run"] },
+    "verify_profile": { "enum": ["quick", "full", "release"] },
+    "status": { "type": "string" },
+    "autopilot": { "type": "boolean" },
+    "sidecar": { "type": "object" },
+    "gates": { "type": "object" },
+    "artifacts": { "type": "object" }
+  }
+}

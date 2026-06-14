@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any, cast
 
@@ -73,6 +74,7 @@ def run_review_kit(
         work_id=work_id,
     )
     plan_payload = cast(dict[str, Any], plan)
+    _sync_run_preflight_plan(plan_payload, packet_path=paths["packet"], preflight_path=paths["preflight"])
     workflow.write_work_plan(plan, str(paths["work"]), cwd=project, allow_unsafe_output=allow_unsafe_output)
 
     preflight = packet_preflight.preflight_packet(paths["packet"])
@@ -491,6 +493,15 @@ def _run_sidecar(
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+
+def _sync_run_preflight_plan(plan: dict[str, Any], *, packet_path: Path, preflight_path: Path) -> None:
+    plan["packet_preflight"] = {
+        "command": shlex.join(["hipson", "packet", "preflight", str(packet_path), "-o", str(preflight_path), "--json"]),
+        "output": str(preflight_path),
+        "required_before_sidecar": True,
+        "reason": "Local packet safety gate before any provider-backed sidecar call.",
+    }
 
 
 def _load_json(path: Path) -> dict[str, Any]:

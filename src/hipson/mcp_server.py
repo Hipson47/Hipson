@@ -25,8 +25,13 @@ def server_catalog(*, project_path: str | Path = ".") -> dict[str, Any]:
         "artifact_kind": "hipson.mcp_server_catalog",
         "schema_version": SCHEMA_VERSION,
         "project": str(project),
-        "status": "skeleton",
+        "status": "catalog_only",
+        "server_mode": "catalog_only",
         "transport": "stdio",
+        "stdio_server": False,
+        "warnings": [
+            "This PR exposes an MCP catalog only; a protocol-complete stdio MCP server is not enabled yet."
+        ],
         "provider_policy": {
             "default": "provider_free",
             "hidden_provider_calls": False,

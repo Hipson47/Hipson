@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Agent Install",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["artifact_kind", "schema_version", "mode", "targets", "warnings"],
+  "properties": {
+    "artifact_kind": { "const": "hipson.agent_install" },
+    "schema_version": { "type": "string" },
+    "mode": { "enum": ["dry-run", "apply"] },
+    "targets": { "type": "object" },
+    "warnings": { "type": "array" }
+  }
+}
