@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Evidence Record",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "event_id",
+    "previous_hash",
+    "created_at_utc",
+    "work",
+    "provider",
+    "verification",
+    "quality",
+    "gates",
+    "claims",
+    "unknowns",
+    "human_decision",
+    "record_hash"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.evidence_record" },
+    "schema_version": { "type": "string" },
+    "event_id": { "type": "string" },
+    "previous_hash": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "work": { "type": "object" },
+    "provider": { "type": "object" },
+    "verification": { "type": "object" },
+    "quality": { "type": "object" },
+    "gates": { "type": "object" },
+    "claims": { "type": "object" },
+    "unknowns": { "type": "array" },
+    "human_decision": { "type": "object" },
+    "record_hash": { "type": "string" }
+  }
+}

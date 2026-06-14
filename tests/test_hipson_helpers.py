@@ -1,3 +1,4 @@
+import contextlib
 import io
 import json
 import os
@@ -6,12 +7,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+from hipson import agent_contract as hipson_agent_contract
 from hipson import agents as hipson_agents
+from hipson import cli as hipson_cli
+from hipson import evidence as hipson_evidence
 from hipson import hermes as hipson_hermes
 from hipson import memory as hipson_memory
+from hipson import packet_preflight as hipson_packet_preflight
 from hipson import project as hipson_project
 from hipson import router as hipson_router
 from hipson import session as hipson_session
+from hipson import verification as hipson_verification
 from hipson import workflow as hipson_workflow
 from hipson.assets import packaged_asset, runtime_asset
 from hipson.codex_install import END_MARKER, START_MARKER, detect_codex_home, install_codex, merge_managed_block
@@ -30,6 +36,7 @@ from hipson.redaction import REDACTION, SKIPPED, is_sensitive_path, redact_sensi
 from hipson.skills import find_skill_files, parse_frontmatter, validate_skill_file, validate_skills
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SCHEMA_ROOT = REPO_ROOT / "schemas"
 DEFAULT_CLI_TIMEOUT = 30
 
 
@@ -75,6 +82,55 @@ def run_cli(
         stderr = exc.stderr if isinstance(exc.stderr, str) else ""
         diagnostic = f"Command timed out after {timeout}s: {' '.join(command)}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
         return subprocess.CompletedProcess(command, 124, stdout, diagnostic)
+
+
+def run_cli_inprocess(*args: str) -> tuple[int, str, str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            rc = hipson_cli.main(list(args))
+    except SystemExit as exc:
+        rc = int(exc.code or 0) if isinstance(exc.code, int) else 1
+    return rc, stdout.getvalue(), stderr.getvalue()
+
+
+def assert_schema_valid(schema_name: str, payload: object) -> None:
+    schema = json.loads((SCHEMA_ROOT / schema_name).read_text(encoding="utf-8"))
+    _assert_json_schema_subset(schema, payload, path="$")
+
+
+def _assert_json_schema_subset(schema: dict[str, object], payload: object, *, path: str) -> None:
+    if "const" in schema:
+        assert payload == schema["const"], f"{path}: expected const {schema['const']!r}, got {payload!r}"
+    if "enum" in schema:
+        assert payload in schema["enum"], f"{path}: expected one of {schema['enum']!r}, got {payload!r}"
+    schema_type = schema.get("type")
+    if schema_type:
+        _assert_json_type(schema_type, payload, path=path)
+    if schema_type == "object" or isinstance(payload, dict):
+        assert isinstance(payload, dict), f"{path}: expected object"
+        for key in schema.get("required", []):
+            assert isinstance(key, str)
+            assert key in payload, f"{path}: missing required key {key}"
+        properties = schema.get("properties", {})
+        assert isinstance(properties, dict)
+        for key, property_schema in properties.items():
+            if key in payload and isinstance(property_schema, dict):
+                _assert_json_schema_subset(property_schema, payload[key], path=f"{path}.{key}")
+
+
+def _assert_json_type(schema_type: object, payload: object, *, path: str) -> None:
+    if schema_type == "object":
+        assert isinstance(payload, dict), f"{path}: expected object"
+    elif schema_type == "array":
+        assert isinstance(payload, list), f"{path}: expected array"
+    elif schema_type == "string":
+        assert isinstance(payload, str), f"{path}: expected string"
+    elif schema_type == "boolean":
+        assert isinstance(payload, bool), f"{path}: expected boolean"
+    elif schema_type == "integer":
+        assert isinstance(payload, int) and not isinstance(payload, bool), f"{path}: expected integer"
 
 
 def with_provider_env_defaults(root_env: Path, fallback_env: Path, fn) -> None:
@@ -2290,7 +2346,7 @@ def test_work_plan_renders_shell_safe_commands_for_untrusted_task_text(tmp_path:
 def test_work_plan_writes_review_packet_locally(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     (repo / "tracked.txt").write_text('base\npassword = "hunter2"\n', encoding="utf-8")
-    output = tmp_path / "review-packet.md"
+    output = repo / "runs" / "review-packet.md"
 
     plan = hipson_workflow.build_work_plan(
         task="review release claims",
@@ -2317,7 +2373,7 @@ def test_work_plan_requires_allowed_edit_for_written_executor_packet(tmp_path: P
             task="implement parser fix",
             project_path=str(repo),
             write_packet=True,
-            packet_output=str(tmp_path / "executor-packet.md"),
+            packet_output=str(repo / "runs" / "executor-packet.md"),
         )
     except ValueError as exc:
         assert "--allowed-edit" in str(exc)
@@ -2327,7 +2383,7 @@ def test_work_plan_requires_allowed_edit_for_written_executor_packet(tmp_path: P
 
 def test_work_plan_writes_executor_packet_with_explicit_scope(tmp_path: Path):
     repo = init_git_repo(tmp_path)
-    output = tmp_path / "executor-packet.md"
+    output = repo / "runs" / "executor-packet.md"
 
     plan = hipson_workflow.build_work_plan(
         task="implement parser fix",
@@ -3103,14 +3159,15 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     registry = tmp_path / "repos.yaml"
     registry.write_text(f"repos:\n  - name: Sample\n    path: {repo}\n", encoding="utf-8")
-    work_json = tmp_path / "smoke-work.json"
-    verify_json = tmp_path / "smoke-verification.json"
-    quality_json = tmp_path / "smoke-quality.json"
-    eval_json = tmp_path / "smoke-quality-eval.json"
+    work_json = repo / "runs" / "smoke-work.json"
+    verify_json = repo / "runs" / "smoke-verification.json"
+    quality_json = repo / "runs" / "smoke-quality.json"
+    eval_json = repo / "runs" / "smoke-quality-eval.json"
     sidecar_md = tmp_path / "smoke-sidecar.md"
+    packet_md = tmp_path / "smoke-packet.md"
     ledger_dir = tmp_path / "ledger"
-    audit_json = tmp_path / "audit.json"
-    evidence_json = tmp_path / "evidence-export.json"
+    audit_json = repo / "runs" / "audit.json"
+    evidence_json = repo / "runs" / "evidence-export.json"
     env = {
         "HOME": str(tmp_path / "home"),
         "CODEX_HOME": str(tmp_path / "codex"),
@@ -3118,6 +3175,7 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
         "XDG_CONFIG_HOME": str(tmp_path / "xdg"),
     }
     sidecar_md.write_text("Finding [S-1]: inspect tracked.txt\nRun `git diff --check`.\n", encoding="utf-8")
+    packet_md.write_text("Review tracked.txt\n", encoding="utf-8")
     commands = [
         ("--help",),
         ("doctor",),
@@ -3139,7 +3197,7 @@ def test_cli_subprocess_smoke_commands(tmp_path: Path):
             "--project",
             str(repo),
             "--packet",
-            str(work_json),
+            str(packet_md),
             "--sidecar",
             str(sidecar_md),
             "--verify",
@@ -3226,15 +3284,346 @@ def test_work_command_subprocess_json_contract(tmp_path: Path):
     assert "Hermes is optional status/intake infrastructure" in payload["audit"][-1]
 
 
+def test_contract_show_json_emits_stable_agent_contract(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    first = run_cli(repo, "contract", "show", "--project", str(repo), "--json")
+    second = run_cli(repo, "contract", "show", "--project", str(repo), "--json")
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == second.stdout
+    payload = json.loads(first.stdout)
+    assert list(payload) == sorted(payload)
+    assert payload["artifact_kind"] == "hipson.agent_contract"
+    assert payload["schema_version"] == "1.0"
+    assert payload["adapter_capabilities"]["codex"]["primary_interface"] is True
+    assert "mcp_future" in payload["adapter_capabilities"]
+    assert "verification_gate" in payload["risk_policy"]["gates"]
+    assert "work" in payload["available_command_surfaces"]["local_core"]
+    assert_schema_valid("agent-contract.schema.json", payload)
+
+
+def test_generated_artifact_json_validates_against_schemas(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    runs = repo / "runs"
+    work_json = runs / "schema-work.json"
+    preflight_json = runs / "schema-preflight.json"
+    verify_json = runs / "schema-verify.json"
+    quality_json = runs / "schema-quality.json"
+    eval_json = runs / "schema-quality-eval.json"
+    audit_json = runs / "schema-audit.json"
+    ledger_dir = runs / "schema-ledger"
+    packet_md = tmp_path / "schema-packet.md"
+    sidecar_md = tmp_path / "schema-sidecar.md"
+    packet_md.write_text("Review tracked.txt\n", encoding="utf-8")
+    sidecar_md.write_text("Finding [S-1]: inspect tracked.txt\nRun `git diff --check`.\n", encoding="utf-8")
+
+    contract_result = run_cli(repo, "contract", "show", "--project", str(repo), "--json")
+    work_result = run_cli(
+        tmp_path,
+        "work",
+        "--task",
+        "review current diff",
+        "--project",
+        str(repo),
+        "--no-diff",
+        "--work-output",
+        str(work_json),
+        "--json",
+    )
+    preflight_result = run_cli(
+        repo,
+        "packet",
+        "preflight",
+        str(packet_md),
+        "-o",
+        str(preflight_json),
+        "--json",
+    )
+    verify_result = run_cli(
+        tmp_path,
+        "verify",
+        "run",
+        "--work",
+        str(work_json),
+        "--limit",
+        "1",
+        "-o",
+        str(verify_json),
+        "--json",
+    )
+    quality_result = run_cli(
+        tmp_path,
+        "quality",
+        "report",
+        "--work",
+        str(work_json),
+        "--verify",
+        str(verify_json),
+        "--sidecar",
+        str(sidecar_md),
+        "-o",
+        str(quality_json),
+        "--json",
+    )
+    eval_result = run_cli(
+        tmp_path,
+        "quality",
+        "eval",
+        "--project",
+        str(repo),
+        "--packet",
+        str(packet_md),
+        "--sidecar",
+        str(sidecar_md),
+        "--verify",
+        str(verify_json),
+        "-o",
+        str(eval_json),
+        "--json",
+    )
+    evidence_result = run_cli(
+        tmp_path,
+        "evidence",
+        "append",
+        "--work",
+        str(work_json),
+        "--verification",
+        str(verify_json),
+        "--quality-report",
+        str(quality_json),
+        "--quality-eval",
+        str(eval_json),
+        "--ledger-dir",
+        str(ledger_dir),
+        "--json",
+    )
+    audit_result = run_cli(
+        tmp_path,
+        "audit",
+        "export",
+        "--work",
+        str(work_json),
+        "--ledger-dir",
+        str(ledger_dir),
+        "-o",
+        str(audit_json),
+    )
+
+    for result in [
+        contract_result,
+        work_result,
+        preflight_result,
+        verify_result,
+        quality_result,
+        eval_result,
+        evidence_result,
+        audit_result,
+    ]:
+        assert result.returncode == 0, result.stderr
+
+    artifacts = [
+        ("agent-contract.schema.json", json.loads(contract_result.stdout)),
+        ("work-plan.schema.json", json.loads(work_json.read_text(encoding="utf-8"))),
+        ("packet-preflight.schema.json", json.loads(preflight_json.read_text(encoding="utf-8"))),
+        ("verification.schema.json", json.loads(verify_json.read_text(encoding="utf-8"))),
+        ("quality-report.schema.json", json.loads(quality_json.read_text(encoding="utf-8"))),
+        ("quality-eval.schema.json", json.loads(eval_json.read_text(encoding="utf-8"))),
+        ("evidence-record.schema.json", json.loads(evidence_result.stdout)["record"]),
+        ("audit-bundle.schema.json", json.loads(audit_json.read_text(encoding="utf-8"))),
+    ]
+    for schema_name, payload in artifacts:
+        assert_schema_valid(schema_name, payload)
+
+
+def test_packet_output_outside_allowed_dirs_requires_explicit_override(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    unsafe_output = tmp_path / "packet.md"
+
+    blocked = run_cli(
+        tmp_path,
+        "work",
+        "--task",
+        "review release claims",
+        "--project",
+        str(repo),
+        "--no-diff",
+        "--write-packet",
+        "--packet-output",
+        str(unsafe_output),
+        "--json",
+    )
+    approved = run_cli(
+        tmp_path,
+        "work",
+        "--task",
+        "review release claims",
+        "--project",
+        str(repo),
+        "--no-diff",
+        "--write-packet",
+        "--packet-output",
+        str(unsafe_output),
+        "--allow-unsafe-output",
+        "--json",
+    )
+
+    assert blocked.returncode != 0
+    assert "Unsafe packet output path" in blocked.stderr
+    assert approved.returncode == 0, approved.stderr
+    assert unsafe_output.exists()
+
+
+def test_quality_eval_rejects_work_plan_packet_without_explicit_override(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    work_json = repo / "runs" / "eval-work.json"
+    verify_json = repo / "runs" / "eval-verify.json"
+    sidecar_md = tmp_path / "eval-sidecar.md"
+    sidecar_md.write_text("Finding [S-1]: inspect tracked.txt\nRun `git diff --check`.\n", encoding="utf-8")
+
+    work_result = run_cli(
+        tmp_path,
+        "work",
+        "--task",
+        "review current diff",
+        "--project",
+        str(repo),
+        "--no-diff",
+        "--work-output",
+        str(work_json),
+        "--json",
+    )
+    verify_result = run_cli(
+        tmp_path,
+        "verify",
+        "run",
+        "--work",
+        str(work_json),
+        "--limit",
+        "1",
+        "-o",
+        str(verify_json),
+        "--json",
+    )
+    blocked = run_cli(
+        tmp_path,
+        "quality",
+        "eval",
+        "--project",
+        str(repo),
+        "--packet",
+        str(work_json),
+        "--sidecar",
+        str(sidecar_md),
+        "--verify",
+        str(verify_json),
+        "--json",
+    )
+    approved = run_cli(
+        tmp_path,
+        "quality",
+        "eval",
+        "--project",
+        str(repo),
+        "--packet",
+        str(work_json),
+        "--sidecar",
+        str(sidecar_md),
+        "--verify",
+        str(verify_json),
+        "--allow-work-artifact-packet",
+        "--json",
+    )
+
+    assert work_result.returncode == 0, work_result.stderr
+    assert verify_result.returncode == 0, verify_result.stderr
+    assert blocked.returncode != 0
+    assert "work plan artifact" in blocked.stderr
+    assert approved.returncode == 0, approved.stderr
+    assert json.loads(approved.stdout)["artifact_kind"] == "hipson.quality_eval"
+
+
+def test_core_artifact_commands_do_not_call_provider_or_network(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    packet_md = tmp_path / "packet.md"
+    packet_md.write_text("Review tracked.txt\n", encoding="utf-8")
+    work_json = repo / "runs" / "no-provider-work.json"
+    verify_json = repo / "runs" / "no-provider-verify.json"
+    ledger_dir = repo / "runs" / "no-provider-ledger"
+    audit_json = repo / "runs" / "no-provider-audit.json"
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("core artifact commands must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    old_cwd = Path.cwd()
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        os.chdir(tmp_path)
+        commands = [
+            ("contract", "show", "--project", str(repo), "--json"),
+            (
+                "work",
+                "--task",
+                "review current diff",
+                "--project",
+                str(repo),
+                "--no-diff",
+                "--work-output",
+                "runs/no-provider-work.json",
+                "--json",
+            ),
+            ("packet", "preflight", str(packet_md), "-o", "runs/no-provider-preflight.json", "--json"),
+            (
+                "verify",
+                "run",
+                "--work",
+                str(work_json),
+                "--command",
+                f"{sys.executable} -c \"print('ok')\"",
+                "-o",
+                str(verify_json),
+                "--json",
+            ),
+            (
+                "evidence",
+                "append",
+                "--work",
+                str(work_json),
+                "--verification",
+                str(verify_json),
+                "--ledger-dir",
+                str(ledger_dir),
+                "--json",
+            ),
+            ("audit", "export", "--work", str(work_json), "--ledger-dir", str(ledger_dir), "-o", str(audit_json)),
+        ]
+        for command in commands:
+            rc, stdout, stderr = run_cli_inprocess(*command)
+            assert rc == 0, f"{command}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+    finally:
+        os.chdir(old_cwd)
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
+
+    assert hipson_agent_contract.build_agent_contract(repo)["artifact_kind"] == "hipson.agent_contract"
+    assert hipson_packet_preflight.preflight_packet(packet_md)["artifact_kind"] == "hipson.packet_preflight"
+    assert hipson_verification.load_work_plan(work_json)["artifact_kind"] == "hipson.work_plan"
+    assert hipson_evidence.audit_bundle(work_path=str(work_json), ledger_root=ledger_dir)["artifact_kind"] == "hipson.audit_bundle"
+
+
 def test_work_output_verify_evidence_audit_roundtrip_redacts_secrets(tmp_path: Path):
     repo = init_git_repo(tmp_path)
-    work_json = tmp_path / "work.json"
-    verify_json = tmp_path / "verify.json"
-    quality_json = tmp_path / "quality.json"
-    eval_json = tmp_path / "quality-eval.json"
+    work_json = repo / "runs" / "work.json"
+    verify_json = repo / "runs" / "verify.json"
+    quality_json = repo / "runs" / "quality.json"
+    eval_json = repo / "runs" / "quality-eval.json"
     sidecar_md = tmp_path / "sidecar.md"
     ledger_dir = tmp_path / "ledger"
-    audit_json = tmp_path / "audit.json"
+    audit_json = repo / "runs" / "audit.json"
     secret = "sk-test-secret1234567890"
 
     work_result = run_cli(
@@ -3341,10 +3730,12 @@ def test_work_output_verify_evidence_audit_roundtrip_redacts_secrets(tmp_path: P
     assert evidence_payload["record"]["previous_hash"] == ""
     assert evidence_payload["record"]["record_hash"]
     assert "listed verification commands passed" in evidence_payload["record"]["claims"]["safe"]
-    assert "quality report gate passed" in evidence_payload["record"]["claims"]["safe"]
-    assert "quality eval passed" in evidence_payload["record"]["claims"]["safe"]
+    assert "verification gate passed" in evidence_payload["record"]["claims"]["safe"]
+    assert "sidecar eval passed without local evidence conflicts" in evidence_payload["record"]["claims"]["safe"]
     assert evidence_payload["record"]["quality"]["summary"]["quality_gate"] == "passed"
     assert evidence_payload["record"]["quality"]["summary"]["eval_ok"] is True
+    assert evidence_payload["record"]["gates"]["sidecar_eval_gate"] == "unverified"
+    assert "sidecar findings verified" in evidence_payload["record"]["claims"]["unsafe"]
 
     audit_result = run_cli(
         tmp_path,
@@ -3363,6 +3754,7 @@ def test_work_output_verify_evidence_audit_roundtrip_redacts_secrets(tmp_path: P
     assert audit_payload["latest_status"] == "passed"
     assert audit_payload["latest_quality_gate"] == "passed"
     assert audit_payload["latest_eval_ok"] is True
+    assert audit_payload["latest_release_claim_gate"] == "blocked"
     assert audit_payload["work"]["work_id"] == work_payload["work_id"]
 
 
@@ -3426,8 +3818,8 @@ def test_packet_preflight_redacts_and_blocks_sensitive_paths(tmp_path: Path):
 
 def test_quality_report_correlates_verification_and_redacts_sidecar(tmp_path: Path):
     repo = init_git_repo(tmp_path)
-    work_json = tmp_path / "work.json"
-    verify_json = tmp_path / "verify.json"
+    work_json = repo / "runs" / "work.json"
+    verify_json = repo / "runs" / "verify.json"
     sidecar = tmp_path / "sidecar.md"
     secret = "sk-test-secret1234567890"
 
@@ -3492,6 +3884,11 @@ def test_quality_report_correlates_verification_and_redacts_sidecar(tmp_path: Pa
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["quality_gate"] == "passed"
+    assert payload["verification_gate"] == "passed"
+    assert payload["sidecar_eval_gate"] == "unverified"
+    assert payload["human_decision_gate"] == "pending"
+    assert payload["release_claim_gate"] == "blocked"
+    assert payload["gates"]["sidecar_eval_gate"] == "unverified"
     assert payload["verification_status"] == "passed"
     assert payload["sidecar_present"] is True
     assert payload["sidecar_metadata"]["agent"] == "reviewer_free"
@@ -3576,7 +3973,7 @@ def test_quality_eval_accepts_generated_sidecar_report_metadata(tmp_path: Path):
 
 def test_quality_report_blocks_missing_verification(tmp_path: Path):
     repo = init_git_repo(tmp_path)
-    work_json = tmp_path / "work.json"
+    work_json = repo / "runs" / "work.json"
 
     work_result = run_cli(
         tmp_path,
@@ -3606,9 +4003,9 @@ def test_quality_report_blocks_missing_verification(tmp_path: Path):
 
 def test_evidence_show_and_export_use_work_project_runs_by_default(tmp_path: Path):
     repo = init_git_repo(tmp_path)
-    work_json = tmp_path / "work.json"
-    verify_json = tmp_path / "verify.json"
-    export_json = tmp_path / "export.json"
+    work_json = repo / "runs" / "work.json"
+    verify_json = repo / "runs" / "verify.json"
+    export_json = repo / "runs" / "export.json"
 
     work_result = run_cli(
         tmp_path,

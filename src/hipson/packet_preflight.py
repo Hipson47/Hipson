@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hipson import output_policy
 from hipson.contracts import sha256_text, timestamp
 from hipson.redaction import is_sensitive_path, redact_text, sanitize_path
 
@@ -35,8 +36,19 @@ def preflight_packet(path: str | Path, *, max_chars: int = MAX_PACKET_CHARS) -> 
     return _payload(packet_path, redacted, errors, warnings, max_chars=max_chars)
 
 
-def write_preflight(payload: dict[str, Any], output: str | Path) -> Path:
-    path = Path(output).expanduser().resolve()
+def write_preflight(
+    payload: dict[str, Any],
+    output: str | Path,
+    *,
+    cwd: str | Path | None = None,
+    allow_unsafe_output: bool = False,
+) -> Path:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="packet preflight output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
@@ -44,6 +56,7 @@ def write_preflight(payload: dict[str, Any], output: str | Path) -> Path:
 
 def _payload(path: Path, redacted: str, errors: list[str], warnings: list[str], *, max_chars: int) -> dict[str, Any]:
     return {
+        "artifact_kind": "hipson.packet_preflight",
         "schema_version": "1.0",
         "created_at_utc": timestamp(),
         "ok": not errors,

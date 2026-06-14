@@ -11,6 +11,7 @@ from typing import cast
 
 from hipson import (
     __version__,
+    agent_contract,
     agents,
     evals,
     learning,
@@ -29,6 +30,7 @@ from hipson.approvals import ApprovalPolicy
 from hipson.assets import runtime_asset
 from hipson.codex_install import format_install_plan, install_codex
 from hipson.home import detect_codex_home, detect_hipson_home
+from hipson.output_policy import resolve_output_path
 from hipson.paths import package_root
 from hipson.project import (
     build_scan,
@@ -291,6 +293,16 @@ def command_route(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_contract_show(args: argparse.Namespace) -> int:
+    try:
+        contract = agent_contract.build_agent_contract(args.project)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    agent_contract.print_agent_contract(contract, json_output=args.json)
+    return 0
+
+
 def command_work(args: argparse.Namespace) -> int:
     try:
         plan = workflow.build_work_plan(
@@ -310,12 +322,18 @@ def command_work(args: argparse.Namespace) -> int:
             ai_agent=args.ai_agent,
             ai_model=args.ai_model,
             ai_profile=args.ai_profile,
+            allow_unsafe_output=args.allow_unsafe_output,
         )
     except (SystemExit, ValueError) as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     if args.work_output:
-        workflow.write_work_plan(plan, args.work_output)
+        workflow.write_work_plan(
+            plan,
+            args.work_output,
+            cwd=plan["project"],
+            allow_unsafe_output=args.allow_unsafe_output,
+        )
     workflow.print_work_plan(plan, json_output=args.json)
     return 0
 
@@ -326,7 +344,12 @@ def command_verify_run(args: argparse.Namespace) -> int:
         commands = args.command if args.command else verification.verification_commands(work_plan, limit=args.limit)
         result = verification.run_verification(work_plan=work_plan, commands=commands, timeout=args.timeout)
         output = args.output or verification.default_verification_output(work_plan)
-        written = verification.write_verification_artifact(result, output)
+        written = verification.write_verification_artifact(
+            result,
+            output,
+            cwd=str(work_plan.get("project", "")) or None,
+            allow_unsafe_output=args.allow_unsafe_output,
+        )
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
@@ -396,10 +419,12 @@ def command_evidence_show(args: argparse.Namespace) -> int:
 
 
 def command_evidence_export(args: argparse.Namespace) -> int:
+    output_cwd: str | None = None
     if args.work:
         work_plan = verification.load_work_plan(args.work)
         root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
         work_id = str(work_plan.get("work_id", ""))
+        output_cwd = str(work_plan.get("project", "")) or None
     else:
         root = evidence_mod.evidence_dir(args.ledger_dir)
     records = evidence_mod.read_records(root)
@@ -407,7 +432,12 @@ def command_evidence_export(args: argparse.Namespace) -> int:
         records = [record for record in records if str(record.get("work", {}).get("work_id", "")) == work_id]
     payload = {"schema_version": "1.0", "records": records}
     if args.output:
-        output = Path(args.output).expanduser().resolve()
+        output = resolve_output_path(
+            args.output,
+            cwd=output_cwd,
+            allow_unsafe=args.allow_unsafe_output,
+            description="evidence export output",
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"Wrote {output}")
@@ -432,6 +462,7 @@ def command_audit_show(args: argparse.Namespace) -> int:
     print(f"latest_status: {bundle['latest_status']}")
     print(f"latest_quality_gate: {bundle['latest_quality_gate']}")
     print(f"latest_eval_ok: {bundle['latest_eval_ok']}")
+    print(f"latest_release_claim_gate: {bundle['latest_release_claim_gate']}")
     print("unknowns:")
     for item in cast(list[object], bundle["unknowns"]):
         print(f"- {item}")
@@ -443,7 +474,12 @@ def command_audit_export(args: argparse.Namespace) -> int:
         work_plan = verification.load_work_plan(args.work)
         root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
         bundle = evidence_mod.audit_bundle(work_path=args.work, ledger_root=root)
-        output = Path(args.output).expanduser().resolve()
+        output = resolve_output_path(
+            args.output,
+            cwd=str(work_plan.get("project", "")) or None,
+            allow_unsafe=args.allow_unsafe_output,
+            description="audit export output",
+        )
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
     except SystemExit as exc:
@@ -509,7 +545,7 @@ def command_model_profile_recommend(args: argparse.Namespace) -> int:
 def command_packet_preflight(args: argparse.Namespace) -> int:
     payload = packet_preflight.preflight_packet(args.path, max_chars=args.max_chars)
     if args.output:
-        packet_preflight.write_preflight(payload, args.output)
+        packet_preflight.write_preflight(payload, args.output, allow_unsafe_output=args.allow_unsafe_output)
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
@@ -532,7 +568,12 @@ def command_quality_report(args: argparse.Namespace) -> int:
             decision=args.decision,
         )
         if args.output:
-            quality.write_report(report, args.output)
+            quality.write_report(
+                report,
+                args.output,
+                cwd=str(report.get("project", "")) or None,
+                allow_unsafe_output=args.allow_unsafe_output,
+            )
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -547,9 +588,15 @@ def command_quality_eval(args: argparse.Namespace) -> int:
             packet_path=args.packet,
             sidecar_path=args.sidecar,
             verification_path=args.verify,
+            allow_work_artifact_packet=args.allow_work_artifact_packet,
         )
         if args.output:
-            evals.write_eval(result, args.output)
+            evals.write_eval(
+                result,
+                args.output,
+                cwd=args.project,
+                allow_unsafe_output=args.allow_unsafe_output,
+            )
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -1415,6 +1462,13 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
 
+    contract = subparsers.add_parser("contract", help="Inspect the first-class Hipson agent contract")
+    contract_sub = contract.add_subparsers(dest="contract_command", required=True)
+    contract_show = contract_sub.add_parser("show", help="Show the local agent contract")
+    contract_show.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    contract_show.add_argument("--json", action="store_true", help="Print machine-readable agent contract")
+    contract_show.set_defaults(func=command_contract_show)
+
     work = subparsers.add_parser(
         "work",
         help="Build a provider-free Codex work brief from route, scan, packet, verify, and handoff steps",
@@ -1437,6 +1491,11 @@ def build_parser() -> argparse.ArgumentParser:
     work.add_argument("--ai-agent", help="Sidecar agent to use for the AI quality pass")
     work.add_argument("--ai-model", help="OpenRouter model slug to use for the AI quality pass")
     work.add_argument("--ai-profile", help="Curated model profile to use for the AI quality pass")
+    work.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow generated artifact outputs outside runs/, scans/, docs/, or memory/",
+    )
     work.add_argument("--json", action="store_true", help="Print machine-readable work plan")
     work.set_defaults(func=command_work)
 
@@ -1466,6 +1525,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify_run.add_argument("--limit", type=int, help="Run only the first N work-plan verification commands")
     verify_run.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Per-command timeout in seconds")
     verify_run.add_argument("-o", "--output", help="Write verification JSON artifact; defaults to runs/<work-id>-verification.json")
+    verify_run.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow verification output outside generated artifact directories",
+    )
     verify_run.add_argument("--json", action="store_true", help="Print machine-readable verification result")
     verify_run.set_defaults(func=command_verify_run)
 
@@ -1491,6 +1555,11 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_export.add_argument("--work", help="Optional work plan JSON path to filter records")
     evidence_export.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
     evidence_export.add_argument("-o", "--output", help="Write export JSON to a file")
+    evidence_export.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow evidence export output outside generated artifact directories",
+    )
     evidence_export.set_defaults(func=command_evidence_export)
 
     audit = subparsers.add_parser("audit", help="Show or export an audit bundle for a work plan")
@@ -1504,6 +1573,11 @@ def build_parser() -> argparse.ArgumentParser:
     audit_export.add_argument("--work", required=True, help="Work plan JSON path")
     audit_export.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
     audit_export.add_argument("-o", "--output", required=True, help="Audit bundle output path")
+    audit_export.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow audit output outside generated artifact directories",
+    )
     audit_export.set_defaults(func=command_audit_export)
 
     provider = subparsers.add_parser("provider", help="Inspect explicit provider readiness without sending repo data")
@@ -1623,6 +1697,11 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("path", help="Packet path")
     preflight.add_argument("--max-chars", type=int, default=packet_preflight.MAX_PACKET_CHARS)
     preflight.add_argument("-o", "--output", help="Write preflight JSON artifact")
+    preflight.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow preflight output outside generated artifact directories",
+    )
     preflight.add_argument("--json", action="store_true", help="Print machine-readable preflight result")
     preflight.set_defaults(func=command_packet_preflight)
     review = packet_sub.add_parser("review", help="Generate a read-only review packet")
@@ -1682,6 +1761,11 @@ def build_parser() -> argparse.ArgumentParser:
     quality_report.add_argument("--sidecar", help="Sidecar report path")
     quality_report.add_argument("--decision", default="pending", help="Human decision")
     quality_report.add_argument("-o", "--output", help="Write report JSON artifact")
+    quality_report.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow quality report output outside generated artifact directories",
+    )
     quality_report.add_argument("--json", action="store_true", help="Print machine-readable quality report")
     quality_report.set_defaults(func=command_quality_report)
     quality_eval = quality_sub.add_parser("eval", help="Evaluate a sidecar report against local repo evidence")
@@ -1690,6 +1774,16 @@ def build_parser() -> argparse.ArgumentParser:
     quality_eval.add_argument("--sidecar", required=True, help="Sidecar report path")
     quality_eval.add_argument("--verify", help="Verification JSON artifact path")
     quality_eval.add_argument("-o", "--output", help="Write eval JSON artifact")
+    quality_eval.add_argument(
+        "--allow-work-artifact-packet",
+        action="store_true",
+        help="Explicitly allow a work-plan JSON artifact to be evaluated as packet text",
+    )
+    quality_eval.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow quality eval output outside generated artifact directories",
+    )
     quality_eval.add_argument("--json", action="store_true", help="Print machine-readable eval result")
     quality_eval.set_defaults(func=command_quality_eval)
 

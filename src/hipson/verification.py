@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from hipson import output_policy
 from hipson.contracts import VerificationResult, sha256_text, timestamp
 from hipson.redaction import redact_text
 
@@ -56,6 +57,7 @@ def run_verification(
         raise SystemExit("No verification commands selected")
     results = [_run_one(command=command, cwd=project, timeout=timeout) for command in selected_commands]
     return {
+        "artifact_kind": "hipson.verification",
         "schema_version": "1.0",
         "work_id": str(work_plan.get("work_id", "")),
         "task": redact_text(str(work_plan.get("task", ""))),
@@ -66,8 +68,19 @@ def run_verification(
     }
 
 
-def write_verification_artifact(result: dict[str, Any], output: str | Path) -> Path:
-    path = Path(output).expanduser().resolve()
+def write_verification_artifact(
+    result: dict[str, Any],
+    output: str | Path,
+    *,
+    cwd: str | Path | None = None,
+    allow_unsafe_output: bool = False,
+) -> Path:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="verification output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     return path

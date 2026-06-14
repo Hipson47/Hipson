@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from hipson import quality
+from hipson import output_policy, quality
 from hipson.contracts import timestamp
 from hipson.project import discover_commands, resolve_project
 from hipson.redaction import redact_text, sanitize_path
@@ -23,10 +23,13 @@ def run_quality_eval(
     packet_path: str | Path | None = None,
     sidecar_path: str | Path,
     verification_path: str | Path | None = None,
+    allow_work_artifact_packet: bool = False,
 ) -> dict[str, Any]:
     project = resolve_project(str(project_path))
     sidecar_text = _read_bounded_text(sidecar_path)
     analysis_text = _analysis_text(sidecar_text)
+    if packet_path and not allow_work_artifact_packet:
+        _reject_work_artifact_packet(packet_path)
     packet_text = _read_bounded_text(packet_path) if packet_path else ""
     verification = _load_optional_json(verification_path)
     findings = quality.parse_sidecar_findings(analysis_text)
@@ -43,6 +46,7 @@ def run_quality_eval(
         issues.append(_issue("missing_verification", "error", "No passed local verification artifact was attached."))
     score = _score(issues)
     return {
+        "artifact_kind": "hipson.quality_eval",
         "schema_version": "1.0",
         "created_at_utc": timestamp(),
         "ok": not any(issue["severity"] == "error" for issue in issues),
@@ -83,11 +87,43 @@ def render_eval(result: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_eval(result: dict[str, Any], output: str | Path) -> Path:
-    path = Path(output).expanduser().resolve()
+def write_eval(
+    result: dict[str, Any],
+    output: str | Path,
+    *,
+    cwd: str | Path | None = None,
+    allow_unsafe_output: bool = False,
+) -> Path:
+    path = output_policy.resolve_output_path(
+        output,
+        cwd=cwd,
+        allow_unsafe=allow_unsafe_output,
+        description="quality eval output",
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
+
+
+def _reject_work_artifact_packet(path: str | Path) -> None:
+    artifact = Path(path).expanduser().resolve()
+    if not artifact.exists() or artifact.is_dir():
+        return
+    try:
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return
+    if not isinstance(data, dict):
+        return
+    artifact_kind = str(data.get("artifact_kind", ""))
+    looks_like_work = artifact_kind == "hipson.work_plan" or (
+        "work_id" in data and "repo_state" in data and "route" in data and "packet" in data
+    )
+    if looks_like_work:
+        raise SystemExit(
+            "Eval --packet received a work plan artifact. Pass the packet markdown path, "
+            "or use --allow-work-artifact-packet to explicitly evaluate the work artifact text."
+        )
 
 
 def _read_bounded_text(path: str | Path | None) -> str:
