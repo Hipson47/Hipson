@@ -62,6 +62,7 @@ hipson mcp serve --stdio
 ```
 
 The stdio server exposes read-first tools for contract, policy, work planning,
-packet preflight, quality report, and audit. Local execution/write tools such as
-`verify.run` and `evidence.append` require explicit `approved=true` tool
+packet preflight, quality report, audit, run status, and run validation. Local
+execution/write tools such as `verify.run`, `evidence.append`,
+`handoff.create`, and `release.claim` require explicit `approved=true` tool
 arguments.

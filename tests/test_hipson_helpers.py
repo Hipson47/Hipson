@@ -3660,6 +3660,9 @@ def test_review_kit_creates_expected_run_directory_and_schema_valid_artifacts(tm
         "evidence.jsonl",
         "audit.json",
         "summary.md",
+        "manifest.json",
+        "handoff.json",
+        "handoff.md",
     }
     assert expected.issubset({path.name for path in run_dir.iterdir()})
     assert not (run_dir / "quality-eval.json").exists()
@@ -3675,6 +3678,8 @@ def test_review_kit_creates_expected_run_directory_and_schema_valid_artifacts(tm
     evidence_record = json.loads((run_dir / "evidence.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert_schema_valid("evidence-record.schema.json", evidence_record)
     assert_schema_valid("audit-bundle.schema.json", json.loads((run_dir / "audit.json").read_text(encoding="utf-8")))
+    assert_schema_valid("run-manifest.schema.json", json.loads((run_dir / "manifest.json").read_text(encoding="utf-8")))
+    assert_schema_valid("agent-handoff.schema.json", json.loads((run_dir / "handoff.json").read_text(encoding="utf-8")))
 
 
 def test_review_kit_verify_profile_full_runs_all_planned_commands(tmp_path: Path):
@@ -4169,6 +4174,121 @@ def test_autopilot_resume_rerun_step_updates_verification(tmp_path: Path):
     assert "quality.json" in payload["updated_artifacts"]
 
 
+def test_run_status_validate_handoff_and_release_claim_artifacts(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    run_result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    run_dir = Path(json.loads(run_result.stdout)["run_dir"])
+
+    status_result = run_cli(tmp_path, "run", "status", "--run", str(run_dir), "--json")
+    validate_result = run_cli(tmp_path, "run", "validate", "--run", str(run_dir), "--json")
+    handoff_result = run_cli(tmp_path, "run", "handoff", "--run", str(run_dir), "--json")
+    claim_result = run_cli(
+        tmp_path,
+        "release",
+        "claim",
+        "--run",
+        str(run_dir),
+        "--claim",
+        "ready for release",
+        "--human-decision",
+        "approved",
+        "--json",
+    )
+
+    assert status_result.returncode == 0, status_result.stderr
+    assert validate_result.returncode == 0, validate_result.stderr
+    assert handoff_result.returncode == 0, handoff_result.stderr
+    assert claim_result.returncode != 0
+    status_payload = json.loads(status_result.stdout)
+    validate_payload = json.loads(validate_result.stdout)
+    handoff_payload = json.loads(handoff_result.stdout)
+    claim_payload = json.loads(claim_result.stdout)
+    assert_schema_valid("run-status.schema.json", status_payload)
+    assert_schema_valid("run-validation.schema.json", validate_payload)
+    assert_schema_valid("agent-handoff.schema.json", handoff_payload)
+    assert_schema_valid("release-claim.schema.json", claim_payload)
+    assert validate_payload["ok"] is True
+    assert handoff_payload["next_agent_step"]
+    assert claim_payload["allowed"] is False
+    assert "release_claim_gate is not passed" in "; ".join(claim_payload["reasons"])
+    assert (run_dir / "manifest.json").exists()
+    assert (run_dir / "handoff.json").exists()
+    assert (run_dir / "handoff.md").exists()
+    assert (run_dir / "release-claim.json").exists()
+
+
+def test_run_validate_reports_missing_required_artifact(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    run_result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    run_dir = Path(json.loads(run_result.stdout)["run_dir"])
+    (run_dir / "verify.json").unlink()
+
+    result = run_cli(tmp_path, "run", "validate", "--run", str(run_dir), "--json")
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert_schema_valid("run-validation.schema.json", payload)
+    assert payload["ok"] is False
+    assert "verification" in payload["missing_required"]
+
+
+def test_autopilot_implement_enforces_policy_allowed_paths(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    policy_dir = repo / ".hipson"
+    policy_dir.mkdir()
+    (policy_dir / "policy.json").write_text(
+        json.dumps(
+            {
+                "denied_paths": [],
+                "allowed_paths": ["src"],
+                "prompt_required_operations": ["provider_call"],
+                "local_only": True,
+                "release_gates": ["verification_gate", "human_decision_gate", "release_claim_gate"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "implement",
+        "--project",
+        str(repo),
+        "--task",
+        "implement tracked text update",
+        "--allowed-edit",
+        "tracked.txt",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "Project policy allowed_paths excludes write scope: tracked.txt" in result.stderr
+
+
 def test_policy_validate_rejects_unsafe_deny_allow_conflicts(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     policy_dir = repo / ".hipson"
@@ -4229,11 +4349,32 @@ def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
         "quality.report",
         "evidence.append",
         "audit.show",
+        "run.status",
+        "run.validate",
+        "handoff.create",
+        "release.claim",
     }.issubset(tool_names)
+    for tool in payload["tools"]:
+        assert tool["input_schema"]["type"] == "object"
+        assert "properties" in tool["input_schema"]
+        assert tool["input_schema"].get("additionalProperties") is False
 
 
 def test_mcp_stdio_lists_tools_and_calls_read_first_tools(tmp_path: Path):
     repo = init_git_repo(tmp_path)
+    run_result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    run_dir = Path(json.loads(run_result.stdout)["run_dir"])
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     requests = "\n".join(
@@ -4256,6 +4397,14 @@ def test_mcp_stdio_lists_tools_and_calls_read_first_tools(tmp_path: Path):
                     "params": {"name": "policy.show", "arguments": {"project": str(repo)}},
                 }
             ),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 5,
+                    "method": "tools/call",
+                    "params": {"name": "run.status", "arguments": {"run": str(run_dir)}},
+                }
+            ),
         ]
     )
 
@@ -4272,13 +4421,15 @@ def test_mcp_stdio_lists_tools_and_calls_read_first_tools(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     responses = [json.loads(line) for line in result.stdout.splitlines()]
-    assert [response["id"] for response in responses] == [1, 2, 3, 4]
+    assert [response["id"] for response in responses] == [1, 2, 3, 4, 5]
     tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
-    assert {"contract.show", "policy.show", "verify.run", "evidence.append"}.issubset(tool_names)
+    assert {"contract.show", "policy.show", "verify.run", "evidence.append", "run.status"}.issubset(tool_names)
     contract_payload = json.loads(responses[2]["result"]["content"][0]["text"])
     policy_payload = json.loads(responses[3]["result"]["content"][0]["text"])
+    status_payload = json.loads(responses[4]["result"]["content"][0]["text"])
     assert contract_payload["artifact_kind"] == "hipson.agent_contract"
     assert policy_payload["artifact_kind"] == "hipson.project_policy"
+    assert status_payload["artifact_kind"] == "hipson.run_status"
 
 
 def test_mcp_stdio_gated_write_tool_requires_approval(tmp_path: Path):

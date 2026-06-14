@@ -56,6 +56,9 @@ For agent-first usage, the same review bundle is available through autopilot:
 ```bash
 hipson autopilot review --task "review current diff for full-stack regressions" --json
 hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+hipson run status --run runs/<work_id> --json
+hipson run validate --run runs/<work_id> --json
+hipson run handoff --run runs/<work_id> --json
 ```
 
 For bounded implementation work, require an explicit edit scope:
@@ -67,6 +70,17 @@ hipson autopilot implement --task "implement bounded parser fix" --allowed-edit 
 Project policy is enforced before autopilot runs. Denied-path changes,
 `local_only` sidecar blocks, invalid policy, and prompt-required operations stop
 the workflow before packets or provider calls are used.
+For implementation tasks, `--allowed-edit` is checked against policy
+`denied_paths` and `allowed_paths`.
+
+Release claims are evaluated explicitly:
+
+```bash
+hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
+```
+
+This records whether the claim is supported. It does not replace the human
+release/security decision.
 
 The equivalent manual sequence is:
 

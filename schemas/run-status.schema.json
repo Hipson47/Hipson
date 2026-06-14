@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Run Status",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "work_id",
+    "run_dir",
+    "status",
+    "gates",
+    "missing_required",
+    "artifacts",
+    "recommended_next_command"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.run_status" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "status": { "type": "string" },
+    "gates": { "type": "object" },
+    "missing_required": { "type": "array" },
+    "artifacts": { "type": "object" },
+    "recommended_next_command": { "type": "string" }
+  }
+}

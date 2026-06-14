@@ -17,13 +17,25 @@ from hipson import (
     output_policy,
     packet_preflight,
     quality,
+    run_control,
     workflow,
 )
 from hipson import verification as verification_mod
 from hipson.project import resolve_project
 
 VERIFY_PROFILES = ("quick", "full", "release")
-RERUN_STEPS = ("contract", "preflight", "verify", "quality", "quality_eval", "evidence", "audit", "summary")
+RERUN_STEPS = (
+    "contract",
+    "preflight",
+    "verify",
+    "quality",
+    "quality_eval",
+    "evidence",
+    "audit",
+    "summary",
+    "handoff",
+    "manifest",
+)
 
 
 def run_review_kit(
@@ -47,6 +59,7 @@ def run_review_kit(
     sidecar_env: str | None = None,
     decision: str = "pending",
     allow_unsafe_output: bool = False,
+    workflow_name: str = "review_kit",
 ) -> dict[str, Any]:
     """Run the local-first AI Review Control Kit workflow."""
 
@@ -165,6 +178,18 @@ def run_review_kit(
         verify_profile=verify_profile,
     )
     paths["summary"].write_text(summary, encoding="utf-8")
+    handoff = run_control.build_handoff(run_dir)
+    handoff_paths = run_control.write_handoff(run_dir, handoff)
+    manifest = run_control.build_manifest(
+        run_dir,
+        workflow=workflow_name,
+        mode="run",
+        verify_profile=verify_profile,
+        status="passed" if quality_report.get("ok") else "blocked",
+        sidecar=sidecar_status,
+        gates=cast(dict[str, Any], audit.get("latest_gates", {})),
+    )
+    manifest_path = run_control.write_manifest(run_dir, manifest)
 
     return {
         "schema_version": contracts.SCHEMA_VERSION,
@@ -187,6 +212,9 @@ def run_review_kit(
             "evidence": str(ledger),
             "audit": str(paths["audit"]),
             "summary": str(paths["summary"]),
+            "handoff": handoff_paths["markdown"],
+            "handoff_json": handoff_paths["json"],
+            "manifest": str(manifest_path),
         },
     }
 
@@ -203,6 +231,7 @@ def resume_review_kit(
     decision: str = "pending",
     allow_unsafe_output: bool = False,
     rerun_steps: Sequence[str] = (),
+    workflow_name: str = "review_kit",
 ) -> dict[str, Any]:
     """Resume a review kit run by filling missing artifacts only."""
 
@@ -364,6 +393,7 @@ def resume_review_kit(
         audit = _load_json(paths["audit"])
 
     summary_exists = paths["summary"].exists()
+    summary_changed = False
     if "summary" in rerun or not summary_exists or evidence_changed:
         summary = render_summary(
             plan=plan_payload,
@@ -377,6 +407,42 @@ def resume_review_kit(
         )
         paths["summary"].write_text(summary, encoding="utf-8")
         (updated if summary_exists else created).append(paths["summary"].name)
+        summary_changed = True
+
+    handoff_json_exists = paths["handoff_json"].exists()
+    handoff_exists = paths["handoff"].exists()
+    if "handoff" in rerun or not handoff_json_exists or not handoff_exists or summary_changed or evidence_changed:
+        handoff = run_control.build_handoff(run_dir)
+        handoff_paths = run_control.write_handoff(run_dir, handoff)
+        if handoff_json_exists:
+            updated.append(Path(handoff_paths["json"]).name)
+        else:
+            created.append(Path(handoff_paths["json"]).name)
+        if handoff_exists:
+            updated.append(Path(handoff_paths["markdown"]).name)
+        else:
+            created.append(Path(handoff_paths["markdown"]).name)
+    else:
+        handoff_paths = {"json": str(paths["handoff_json"]), "markdown": str(paths["handoff"])}
+
+    manifest_exists = paths["manifest"].exists()
+    if "manifest" in rerun or not manifest_exists or created or updated:
+        manifest = run_control.build_manifest(
+            run_dir,
+            workflow=workflow_name,
+            mode="resume",
+            verify_profile=verify_profile,
+            status="passed" if quality_report.get("ok") else "blocked",
+            sidecar=sidecar_status,
+            gates=cast(dict[str, Any], audit.get("latest_gates", {})),
+            created_artifacts=created,
+            updated_artifacts=updated,
+            rerun_steps=sorted(rerun),
+        )
+        manifest_path = run_control.write_manifest(run_dir, manifest)
+        (updated if manifest_exists else created).append(manifest_path.name)
+    else:
+        manifest_path = paths["manifest"]
 
     return {
         "schema_version": contracts.SCHEMA_VERSION,
@@ -402,6 +468,9 @@ def resume_review_kit(
             "evidence": str(ledger),
             "audit": str(paths["audit"]),
             "summary": str(paths["summary"]),
+            "handoff": handoff_paths["markdown"],
+            "handoff_json": handoff_paths["json"],
+            "manifest": str(manifest_path),
         },
     }
 
@@ -467,6 +536,9 @@ def _run_paths(run_dir: Path) -> dict[str, Path]:
         "sidecar": run_dir / "sidecar.md",
         "audit": run_dir / "audit.json",
         "summary": run_dir / "summary.md",
+        "manifest": run_dir / "manifest.json",
+        "handoff": run_dir / "handoff.md",
+        "handoff_json": run_dir / "handoff.json",
     }
 
 

@@ -54,6 +54,8 @@ can route them safely:
 - `hipson.audit_bundle`.
 - agent bootstrap, install, policy, doctor, review-kit, autopilot, and MCP
   catalog artifacts used by agent integrations.
+- run manifest, run status, run validation, agent handoff, and release claim
+  artifacts used for resumable agent handoff and release gate audit.
 
 Schemas live under `schemas/` and are intentionally structural. They define the
 required control-plane fields while leaving room for compatible additions.
@@ -162,8 +164,19 @@ Autopilot uses the same artifact model:
 hipson autopilot review --task "review current diff" --json
 hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
 hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+hipson run status --run runs/<work_id> --json
+hipson run validate --run runs/<work_id> --json
+hipson run handoff --run runs/<work_id> --json
+hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
 ```
 
 Project policy is checked before autopilot runs. Denied-path changes, invalid
 policy, local-only sidecar blocks, and prompt-required operations stop the
 workflow before packets or provider calls are used.
+For implementation runs, the explicit `--allowed-edit` scope is also checked
+against project `denied_paths` and `allowed_paths`.
+
+Run bundles include `manifest.json`, `handoff.json`, and `handoff.md`.
+`run validate` checks required artifacts and artifact kinds. `release claim`
+records whether a claim is supported by local evidence and a human decision; it
+does not make release decisions by itself.

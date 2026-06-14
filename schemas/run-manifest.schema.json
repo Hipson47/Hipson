@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Run Manifest",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "created_at_utc",
+    "work_id",
+    "run_dir",
+    "workflow",
+    "mode",
+    "verify_profile",
+    "status",
+    "sidecar",
+    "gates",
+    "artifacts"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.run_manifest" },
+    "schema_version": { "type": "string" },
+    "created_at_utc": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "workflow": { "type": "string" },
+    "mode": { "enum": ["run", "resume"] },
+    "verify_profile": { "type": "string" },
+    "status": { "type": "string" },
+    "sidecar": { "type": "object" },
+    "gates": { "type": "object" },
+    "artifacts": { "type": "object" }
+  }
+}

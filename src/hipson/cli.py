@@ -24,6 +24,7 @@ from hipson import (
     provider_doctor,
     quality,
     review_kit,
+    run_control,
     verification,
     workflow,
 )
@@ -382,6 +383,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 decision=args.decision,
                 allow_unsafe_output=args.allow_unsafe_output,
                 rerun_steps=args.rerun_step,
+                workflow_name="review_kit",
             )
         else:
             result = review_kit.run_review_kit(
@@ -399,6 +401,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 sidecar_env=args.sidecar_env,
                 decision=args.decision,
                 allow_unsafe_output=args.allow_unsafe_output,
+                workflow_name="review_kit",
             )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -437,6 +440,7 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
             sidecar_env=args.sidecar_env,
             decision=args.decision,
             allow_unsafe_output=args.allow_unsafe_output,
+            workflow_name="autopilot_review",
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -460,6 +464,7 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
             operation="autopilot_implement",
             run_sidecar=args.run_sidecar,
             approved_operations=args.approve_operation,
+            write_paths=_csv_arg(args.allowed_edit),
         )
         result = review_kit.run_review_kit(
             task=args.task,
@@ -481,6 +486,7 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
             sidecar_env=args.sidecar_env,
             decision=args.decision,
             allow_unsafe_output=args.allow_unsafe_output,
+            workflow_name="autopilot_implement",
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -493,6 +499,12 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
         print(f"run_dir: {result['run_dir']}")
         print(f"summary: {result['artifacts']['summary']}")
     return 0 if result.get("status") == "passed" else 1
+
+
+def _csv_arg(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def command_autopilot_resume(args: argparse.Namespace) -> int:
@@ -508,6 +520,7 @@ def command_autopilot_resume(args: argparse.Namespace) -> int:
             decision=args.decision,
             allow_unsafe_output=args.allow_unsafe_output,
             rerun_steps=args.rerun_step,
+            workflow_name="autopilot_resume",
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -560,6 +573,56 @@ def command_mcp_serve(args: argparse.Namespace) -> int:
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json or args.catalog else _bounded_json(payload))
     return 0
+
+
+def command_run_status(args: argparse.Namespace) -> int:
+    try:
+        payload = run_control.build_status(args.run)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0
+
+
+def command_run_validate(args: argparse.Namespace) -> int:
+    try:
+        payload = run_control.build_validation(args.run)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0 if payload.get("ok") else 1
+
+
+def command_run_handoff(args: argparse.Namespace) -> int:
+    try:
+        run_dir = run_control.resolve_run(args.run)
+        payload = run_control.build_handoff(run_dir)
+        paths = run_control.write_handoff(run_dir, payload)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    payload = {**payload, "outputs": paths}
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else run_control.render_handoff(payload))
+    return 0
+
+
+def command_release_claim(args: argparse.Namespace) -> int:
+    try:
+        run_dir = run_control.resolve_run(args.run)
+        payload = run_control.build_release_claim(
+            run_dir,
+            claim=args.claim,
+            human_decision=args.human_decision,
+        )
+        output = run_control.write_release_claim(run_dir, payload)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    payload = {**payload, "output": str(output)}
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0 if payload.get("allowed") else 1
 
 
 def command_work(args: argparse.Namespace) -> int:
@@ -1901,6 +1964,30 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_serve.add_argument("--stdio", action="store_true", help="Run the minimal MCP stdio JSON-RPC server")
     mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
     mcp_serve.set_defaults(func=command_mcp_serve)
+
+    run = subparsers.add_parser("run", help="Inspect and validate Hipson run bundles")
+    run_sub = run.add_subparsers(dest="run_command", required=True)
+    run_status = run_sub.add_parser("status", help="Show run bundle status")
+    run_status.add_argument("--run", required=True, help="Existing runs/<work_id> directory")
+    run_status.add_argument("--json", action="store_true", help="Print machine-readable run status")
+    run_status.set_defaults(func=command_run_status)
+    run_validate = run_sub.add_parser("validate", help="Validate expected run bundle artifacts")
+    run_validate.add_argument("--run", required=True, help="Existing runs/<work_id> directory")
+    run_validate.add_argument("--json", action="store_true", help="Print machine-readable run validation")
+    run_validate.set_defaults(func=command_run_validate)
+    run_handoff = run_sub.add_parser("handoff", help="Write a compact handoff for the next agent")
+    run_handoff.add_argument("--run", required=True, help="Existing runs/<work_id> directory")
+    run_handoff.add_argument("--json", action="store_true", help="Print machine-readable handoff")
+    run_handoff.set_defaults(func=command_run_handoff)
+
+    release = subparsers.add_parser("release", help="Evaluate release/security claims against run evidence")
+    release_sub = release.add_subparsers(dest="release_command", required=True)
+    release_claim = release_sub.add_parser("claim", help="Record a release claim evaluation")
+    release_claim.add_argument("--run", required=True, help="Existing runs/<work_id> directory")
+    release_claim.add_argument("--claim", required=True, help="Claim to evaluate against local evidence")
+    release_claim.add_argument("--human-decision", default="pending", help="Human decision for this claim")
+    release_claim.add_argument("--json", action="store_true", help="Print machine-readable release claim")
+    release_claim.set_defaults(func=command_release_claim)
 
     work = subparsers.add_parser(
         "work",

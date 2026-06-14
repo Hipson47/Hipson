@@ -24,6 +24,8 @@ preflight, verify locally, record evidence, and produce audit/handoff summaries.
 - **Agent Autopilot Layer v0** through `hipson install agents`, `hipson agent
   bootstrap`, `hipson autopilot review`, `hipson autopilot implement`, policy
   files, and a minimal read-first MCP stdio surface.
+- **Run control artifacts** with `manifest.json`, `handoff.json`, `handoff.md`,
+  run validation, run status, and release-claim evaluation.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Codex work briefs** through `hipson work`, joining route, scan, packet,
   verify, memory, and audit guidance into one local contract.
@@ -87,6 +89,10 @@ uv run hipson agent bootstrap --target codex --json
 uv run hipson autopilot review --task "review current diff" --json
 uv run hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
 uv run hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+uv run hipson run status --run runs/<work_id> --json
+uv run hipson run validate --run runs/<work_id> --json
+uv run hipson run handoff --run runs/<work_id> --json
+uv run hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
 uv run hipson kit review --project . --json
 uv run hipson kit review resume --run runs/<work_id> --json
 uv run hipson route --task "security review of auth"
@@ -123,6 +129,10 @@ hipson agent bootstrap --target claude --json
 hipson autopilot review --task "review current diff" --verify-profile quick --json
 hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
 hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+hipson run status --run runs/<work_id> --json
+hipson run validate --run runs/<work_id> --json
+hipson run handoff --run runs/<work_id> --json
+hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
 hipson doctor --agent-surfaces --json
 hipson policy show --json
 hipson policy validate
@@ -220,6 +230,22 @@ hipson autopilot implement --task "implement bounded parser fix" --allowed-edit 
 Project policy is enforced before autopilot runs. `denied_paths` block runs when
 the current diff touches protected files, `local_only` blocks provider-backed
 sidecars, and prompt-required operations must be explicitly approved.
+For implementation runs, `--allowed-edit` is checked against project policy:
+`denied_paths` always block, and non-empty `allowed_paths` define the permitted
+write scope.
+
+Every review/autopilot run now also writes run-control artifacts:
+
+```text
+runs/<work_id>/
+  manifest.json
+  handoff.json
+  handoff.md
+```
+
+Use `hipson run validate` before handoff, `hipson run status` for agent
+coordination, and `hipson release claim` to record whether a release/security
+claim is supported by local evidence and a human decision.
 
 For manual control of the same steps:
 
