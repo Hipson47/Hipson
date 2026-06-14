@@ -21,7 +21,7 @@
     "schema_version": { "type": "string" },
     "work_id": { "type": "string" },
     "run_dir": { "type": "string" },
-    "mode": { "enum": ["run"] },
+    "mode": { "enum": ["run", "resume"] },
     "verify_profile": { "enum": ["quick", "full", "release"] },
     "status": { "type": "string" },
     "autopilot": { "type": "boolean" },

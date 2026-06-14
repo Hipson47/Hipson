@@ -13,6 +13,24 @@ from hipson import project as project_mod
 from hipson.redaction import redact_text, sanitize_path
 
 SCHEMA_VERSION = "1.0"
+ARTIFACT_SCHEMAS = {
+    "hipson.agent_bootstrap": "schemas/agent-bootstrap.schema.json",
+    "hipson.agent_contract": "schemas/agent-contract.schema.json",
+    "hipson.agent_install": "schemas/agent-install.schema.json",
+    "hipson.agent_surfaces_doctor": "schemas/agent-surfaces-doctor.schema.json",
+    "hipson.audit_bundle": "schemas/audit-bundle.schema.json",
+    "hipson.autopilot_implement_run": "schemas/autopilot-implement-run.schema.json",
+    "hipson.autopilot_review_run": "schemas/autopilot-review-run.schema.json",
+    "hipson.evidence_record": "schemas/evidence-record.schema.json",
+    "hipson.mcp_server_catalog": "schemas/mcp-server-catalog.schema.json",
+    "hipson.packet_preflight": "schemas/packet-preflight.schema.json",
+    "hipson.project_policy": "schemas/project-policy.schema.json",
+    "hipson.quality_eval": "schemas/quality-eval.schema.json",
+    "hipson.quality_report": "schemas/quality-report.schema.json",
+    "hipson.review_kit_run": "schemas/review-kit-run.schema.json",
+    "hipson.verification": "schemas/verification.schema.json",
+    "hipson.work_plan": "schemas/work-plan.schema.json",
+}
 
 
 class RepoState(TypedDict):

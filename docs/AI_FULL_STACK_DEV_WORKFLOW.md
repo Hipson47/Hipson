@@ -42,12 +42,31 @@ If the workflow is interrupted, resume the same run and recreate only missing
 artifacts:
 
 ```bash
-hipson kit review resume --run runs/<work_id> --json
+hipson kit review resume --run runs/<work_id> --rerun-step verify --json
 ```
 
 Resume requires the original `work.json` and `review-packet.md`. If either is
 missing, start a new review kit run so the packet and work contract stay
 auditable.
+`--rerun-step` can refresh a stale artifact without repeating the whole
+workflow.
+
+For agent-first usage, the same review bundle is available through autopilot:
+
+```bash
+hipson autopilot review --task "review current diff for full-stack regressions" --json
+hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+```
+
+For bounded implementation work, require an explicit edit scope:
+
+```bash
+hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
+```
+
+Project policy is enforced before autopilot runs. Denied-path changes,
+`local_only` sidecar blocks, invalid policy, and prompt-required operations stop
+the workflow before packets or provider calls are used.
 
 The equivalent manual sequence is:
 

@@ -54,8 +54,14 @@ After installing, check agent readiness:
 hipson doctor --agent-surfaces --json
 ```
 
-For MCP clients, v0 provides a catalog-only surface:
+For MCP clients, v0 provides a catalog and a minimal stdio surface:
 
 ```bash
 hipson mcp serve --catalog
+hipson mcp serve --stdio
 ```
+
+The stdio server exposes read-first tools for contract, policy, work planning,
+packet preflight, quality report, and audit. Local execution/write tools such as
+`verify.run` and `evidence.append` require explicit `approved=true` tool
+arguments.

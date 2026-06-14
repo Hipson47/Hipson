@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Agent Surfaces Doctor",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "project",
+    "surfaces",
+    "policy_valid",
+    "policy_issues",
+    "contract_available",
+    "recommended_next_command",
+    "warnings"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.agent_surfaces_doctor" },
+    "schema_version": { "type": "string" },
+    "project": { "type": "string" },
+    "surfaces": { "type": "object" },
+    "policy_valid": { "type": "boolean" },
+    "policy_issues": { "type": "array" },
+    "contract_available": { "type": "boolean" },
+    "recommended_next_command": { "type": "string" },
+    "warnings": { "type": "array" }
+  }
+}
