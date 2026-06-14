@@ -10,8 +10,12 @@ the source of truth.
 
 ## Features
 
-- **Stable 1.1 local-first CLI** for bounded, human-reviewed AI software work.
+- **Provider-free 1.1 local-first core** for bounded, human-reviewed AI software work.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
+- **Codex work briefs** through `hipson work`, joining route, scan, packet,
+  verify, memory, and audit guidance into one local contract.
+- **Explicit AI quality layer** for optional model-selected or free OpenRouter
+  second opinions on bounded packets without changing the provider-free default.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
 - **Runtime session observability** for inspecting SQLite-backed chat sessions.
@@ -63,6 +67,7 @@ cp .env.example .env
 
 uv run hipson doctor
 uv run hipson route --task "security review of auth"
+uv run hipson work --task "security review of auth"
 uv run hipson hermes doctor
 uv run hipson hermes install-skill
 uv run hipson hermes intake --project . --task "review failing CI"
@@ -83,6 +88,10 @@ require API keys or cloud services.
 hipson doctor
 hipson route --task "implement parser fix"
 hipson route --task "security review of auth" --json
+hipson work --task "security review of auth"
+hipson work --task "implement parser fix" --allowed-edit src,tests --write-packet
+hipson work --task "review current diff for test gaps" --free-ai
+hipson work --task "review current diff for release risk" --ai-model openrouter/free
 hipson hermes doctor
 hipson hermes install-skill
 hipson hermes intake --project . --task "review failing CI" --channel telegram
@@ -119,6 +128,7 @@ hipson sidecar route --task "creative frontend motion UI scrollytelling landing 
 hipson sidecar route --task "HyperFrames website to video launch short" --risk ui
 hipson sidecar route --task "security review" --risk security --task-type review --file src/auth.py --skills hipson-backend --context-chars 4200 --llm
 hipson sidecar run --agent reviewer_cheap --packet runs/review-packet.md --dry-run
+hipson sidecar run --agent reviewer_free --packet runs/review-packet.md --model openrouter/free --dry-run
 
 hipson skill validate
 hipson check-setup
@@ -138,6 +148,57 @@ The router returns the recommended Hipson skill and exact safe commands. It work
 with Codex-style CLI workflows; Claude and Cursor can consume Hipson packets
 manually. Codex has the most native install support. Core Hipson requires no API
 key.
+
+For day-to-day Codex work, `hipson work --task "..."` is the higher-level local
+contract. It remains provider-free, embeds a redacted scan, recommends a small
+curated skill/sidecar set, prepares the packet command, lists verification
+commands, and states what is still unknown. Use `--write-packet` only when the
+packet scope is bounded; executor packets require explicit `--allowed-edit`.
+
+For audit-ready AI-dev work, write the machine-readable work plan, run the local
+verification step, then append evidence and inspect the audit bundle:
+
+```bash
+hipson work --task "review current diff for test gaps" --ai-profile free_probe --write-packet --packet-output runs/review-packet.md --work-output runs/work.json
+hipson packet preflight runs/review-packet.md
+hipson verify run --work runs/work.json --limit 1 -o runs/verify.json
+hipson quality report --work runs/work.json --verify runs/verify.json --sidecar runs/sidecar.md -o runs/quality.json
+hipson quality eval --packet runs/review-packet.md --sidecar runs/sidecar.md --verify runs/verify.json -o runs/quality-eval.json
+hipson evidence append --work runs/work.json --verification runs/verify.json --quality-report runs/quality.json --quality-eval runs/quality-eval.json
+hipson audit show --work runs/work.json
+hipson provider doctor
+```
+
+`hipson work` is still only a plan, but it now includes packet preflight as the
+local gate before any sidecar/provider command. `hipson verify run` records
+command output as redacted, bounded evidence. `hipson quality report` returns a
+blocked gate and non-zero exit when verification is missing or failed, and
+keeps sidecar metadata, finding IDs, and unverified claims separate from local
+proof. `hipson quality eval` is a local golden-packet-style check for empty
+sidecar output, missing structured findings, hallucinated file references,
+repo-mismatched commands, and missing verification. `hipson evidence`/`hipson
+audit` connect verification, quality, eval results, task, packet, provider
+posture, claims, unknowns, and human decision.
+
+Curated model profiles are visible through:
+
+```bash
+hipson model profile list
+hipson model profile recommend --task "security review of auth" --risk security
+```
+
+When a task would benefit from an extra AI quality pass, keep it explicit:
+
+```bash
+hipson work --task "review current diff for test gaps" --free-ai
+hipson work --task "review current diff for release risk" --ai-model openrouter/free
+```
+
+These flags prepare a sidecar command for a bounded packet and include a dry-run
+preview command. Hipson does not send packets to providers unless the user runs
+the sidecar command. Free and model-selected sidecars are advisory only; local
+diffs, tests, and human review remain authoritative. Unsafe profile/task
+combinations are blocked before the sidecar command is prepared.
 
 ## Runtime Preview
 
@@ -207,13 +268,28 @@ auto-activate skills.
 ## Workflow
 
 1. Run `hipson doctor`.
-2. Run `hipson route --task "..."` for non-trivial work.
-3. Run `hipson scan .` or `hipson scan-many repos.yaml`.
+2. Run `hipson work --task "..."` for the default Codex loop.
+3. Use the generated route -> scan -> packet/execute -> verify -> memory/handoff
+   contract.
 4. Search memory when prior decisions matter.
-5. Generate a bounded review or executor packet.
-6. Route advisory sidecars when a second opinion is useful.
-7. Review the resulting git diff and verification output.
-8. Fold durable decisions back into project memory or progress docs.
+5. Route advisory sidecars only when a bounded packet exists and a second
+   opinion is useful.
+6. Review the resulting git diff and verification output.
+7. Fold durable decisions back into project memory or progress docs.
+
+`hipson route --task "..."` remains the lower-level deterministic router when an
+agent only needs the recommended mode and safe commands.
+
+## Release Posture
+
+Hipson is local-first and provider-free by default. The core CLI paths are
+covered by tests, static checks, package smoke checks, and redaction/sandbox
+contracts. Live provider calls, Telegram gateway operation, and full mutation
+closure are explicit release gates; do not treat them as proven unless the
+corresponding command output is recorded for the release.
+
+See `docs/CORE_STABILIZATION_ROADMAP.md` for the current core stabilization,
+skills/sidecar curation, mutation triage, and auditability contract.
 
 ## Project Layout
 

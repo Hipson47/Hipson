@@ -26,10 +26,10 @@ The installer:
 - copies the current kit files into the Codex home.
 
 ## Usage
-In any repository, ask Codex to route non-trivial work first:
+In any repository, ask Codex to build a local work brief for non-trivial work:
 
 ```text
-Run hipson route --task "implement parser fix"
+Run hipson work --task "implement parser fix"
 ```
 
 Useful prompts:

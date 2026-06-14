@@ -3,6 +3,10 @@
 ## Default Rule
 Use cheap paid models only. Do not use free models automatically.
 
+Free models are available as an explicit quality lane, not as the default. Use
+`openrouter/free` when the user wants a no-cost second opinion and the packet is
+bounded, redacted, non-sensitive, and low-stakes.
+
 ## Recommended Tiers
 
 | Tier | Agent | Model | Use for |
@@ -10,6 +14,8 @@ Use cheap paid models only. Do not use free models automatically.
 | Cheap sanity review | `reviewer_lite` | `deepseek/deepseek-v3.2` | quick second opinion, checklist review |
 | Cheap reliable review | `reviewer_cheap` | `deepseek/deepseek-v3.2` | normal repo delta review |
 | Cheap code review | `coder_review_cheap` | `deepseek/deepseek-v3.2` | code-specific review |
+| Free first-pass review | `reviewer_free` | `openrouter/free` | opt-in test gaps, sanity checks, packet critique |
+| Free first-pass code review | `coder_review_free` | `openrouter/free` | opt-in implementation sanity review |
 | Premium UI/UX review | `premium_ui_ux` | `deepseek/deepseek-v3.2` | visual quality, UX, accessibility and premium polish |
 | Visual direction | `visual_experience_director` | `deepseek/deepseek-v3.2` | art direction, motion interaction design, studio mode, Codex UI briefs |
 | Creative frontend motion | `creative_frontend_motion_architect` | `deepseek/deepseek-v3.2` | motion UI, scroll-driven animation, scrollytelling, frontend implementation prompts |
@@ -44,6 +50,18 @@ Use `hipson sidecar route --task "..." --risk ...` for deterministic suggestions
 from `config/agents.json`. The router reads `expertise`, `use_when`,
 `avoid_when`, `context_budget`, and `can_handle_sensitive_context`; it is a
 gate, not an autonomous decision maker.
+
+Use `hipson work --free-ai` or `hipson work --ai-model <model-slug>` when the
+daily workflow should include an explicit AI quality pass. The work brief will
+prepare both a dry-run preview and a provider run command:
+
+```bash
+hipson work --task "review current diff for test gaps" --free-ai
+hipson work --task "review current diff for release risk" --ai-model openrouter/free
+```
+
+Use `hipson sidecar run --model <model-slug>` to override the configured model
+for one packet without adding a new agent entry.
 
 ## Optional LLM Router
 
@@ -140,4 +158,21 @@ Use `architect_strong` or `architect_max` for:
 - deciding between competing approaches.
 
 ## Free Model Policy
-Do not use free models unless the user explicitly asks for a free-only run.
+Do not use free models unless the user explicitly asks for a free-only run or
+passes `--free-ai` / `--ai-model openrouter/free`.
+
+Free models are good for:
+
+- first-pass review;
+- test gap brainstorming;
+- packet clarity critique;
+- low-stakes implementation sanity checks;
+- summary or handoff drafts.
+
+Do not use free models for:
+
+- secrets or sensitive customer context;
+- final security approval;
+- release signoff;
+- live-provider readiness claims;
+- decisions that override local verification.

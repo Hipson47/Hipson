@@ -46,7 +46,7 @@ hipson hermes intake --project /home/hipson47/code/<project> --task "<task>"
 That command records an append-only JSONL event under
 `~/.config/hipson/hermes-bus/events.jsonl`, returns the Hipson route, and gives
 Hermes exact next commands. Ordinary coding, review, verification, and task
-packet work should go straight through `hipson route --task "..."`.
+packet work should go straight through `hipson work --task "..."`.
 
 Install Hermes' workflow instructions with:
 

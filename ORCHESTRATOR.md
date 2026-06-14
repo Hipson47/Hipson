@@ -36,7 +36,7 @@ hipson hermes intake --project /home/hipson47/code/<project> --task "<task>"
 
 Use that bridge for tasks that benefit from cross-session status, scheduling,
 Telegram/gateway dispatch, or async bus events. Ordinary coding, review,
-verification, and packet work can go straight through `hipson route --task`.
+verification, and packet work can go straight through `hipson work --task`.
 Hermes-originated work must still follow the Hipson route, packet, verification,
 and review contract. The JSONL bridge lives at
 `~/.config/hipson/hermes-bus/events.jsonl`; the installable Hermes skill lives at

@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "profiles": {
+    "free_probe": {
+      "agent": "reviewer_free",
+      "model": "openrouter/free",
+      "cost_tier": "free",
+      "quality_tier": "first-pass",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["free review", "test gaps", "packet critique", "low-stakes sanity"],
+      "avoid_when": ["sensitive context", "final approval", "release signoff", "hard security"],
+      "notes": "No-cost first pass for bounded, redacted, low-risk packets only."
+    },
+    "cheap_review": {
+      "agent": "reviewer_cheap",
+      "model": "deepseek/deepseek-v3.2",
+      "cost_tier": "cheap",
+      "quality_tier": "normal-review",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["repo delta review", "regression review", "test gaps", "normal code review"],
+      "avoid_when": ["sensitive context", "final security approval", "large context"],
+      "notes": "Default paid review lane for normal bounded packets."
+    },
+    "code_review": {
+      "agent": "coder_review_cheap",
+      "model": "deepseek/deepseek-v3.2",
+      "cost_tier": "cheap",
+      "quality_tier": "implementation-review",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["implementation review", "type issue", "api misuse", "test quality"],
+      "avoid_when": ["visual design", "product strategy", "sensitive context"],
+      "notes": "Implementation-focused review for bounded code packets."
+    },
+    "cheap_memory": {
+      "agent": "memory_summarizer_cheap",
+      "model": "google/gemini-3.1-flash-lite",
+      "cost_tier": "cheap",
+      "quality_tier": "summary",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["handoff", "progress summary", "changelog compression"],
+      "avoid_when": ["code approval", "security decision", "final review"],
+      "notes": "Summarization profile; never a quality approval lane."
+    },
+    "long_context": {
+      "agent": "long_context_cheap",
+      "model": "x-ai/grok-4.20",
+      "cost_tier": "medium",
+      "quality_tier": "long-context",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["large docs", "multi-repo scan", "long packet synthesis"],
+      "avoid_when": ["small diff", "sensitive context", "fast sanity check"],
+      "notes": "Use only when context size justifies the larger budget."
+    },
+    "strong_arch": {
+      "agent": "architect_strong",
+      "model": "openai/gpt-5.5",
+      "cost_tier": "premium",
+      "quality_tier": "architecture",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["architecture", "maintainability", "security design", "high risk"],
+      "avoid_when": ["tiny task", "cheap sanity check", "sensitive context"],
+      "notes": "Escalation lane for important architecture decisions."
+    },
+    "ui_visual": {
+      "agent": "premium_ui_ux",
+      "model": "deepseek/deepseek-v3.2",
+      "cost_tier": "cheap",
+      "quality_tier": "visual-review",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["ui", "ux", "screenshot", "accessibility", "responsive polish"],
+      "avoid_when": ["backend only", "security only", "no screenshots"],
+      "notes": "Screenshot-backed UI/UX review lane."
+    },
+    "security_gate": {
+      "agent": "reviewer_cheap",
+      "model": "deepseek/deepseek-v3.2",
+      "cost_tier": "cheap",
+      "quality_tier": "security-review",
+      "requires_opt_in": true,
+      "sensitive_allowed": false,
+      "use_when": ["security review", "auth", "secret handling", "data loss"],
+      "avoid_when": ["sensitive raw secrets", "human-only final approval without verification"],
+      "notes": "Advisory security review lane. Human review and local verification remain required."
+    }
+  }
+}
