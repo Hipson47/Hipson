@@ -9,7 +9,11 @@ description: Use for structured Codex development workflows with Architect, Exec
 Universal AI-assisted development workflow for Codex. Use it to run structured software work with clear roles, portable prompts, focused implementation, and reliable review.
 
 ## Agent-Native Entry Point
-For non-trivial repo tasks, run `hipson route --task "..."` first. Use the returned `recommended_skill` and commands, then consult `references/hipson-agent-skills.md` or root `SKILLS.md` for the compact playbook.
+For non-trivial repo tasks, run `hipson work --task "..."` first. It builds a
+provider-free Codex work brief with the route, redacted scan, packet command,
+verification commands, memory/handoff command, curated skills, and audit
+contract. Use `hipson route --task "..."` when only the lower-level routing
+decision and safe commands are needed.
 
 ## Codex-First Hermes Bridge
 Codex remains the user's primary control surface. Do not require the user to
@@ -18,7 +22,8 @@ talk to Hermes for normal software work.
 Use `hipson hermes intake --project <repo> --task "<task>"` only when the task
 benefits from Hermes-side status tracking, scheduling, Telegram/gateway
 dispatch, or cross-session bus events. For ordinary coding, review, verification,
-and packet generation, route through `hipson route --task "..."` directly.
+and packet generation, route through `hipson work --task "..."` or
+`hipson route --task "..."` directly.
 
 ## When To Use
 - Starting a new project.
@@ -35,7 +40,8 @@ and packet generation, route through `hipson route --task "..."` directly.
 
 ## Core Workflow
 1. Intake: restate the goal, constraints, risks, and expected output.
-2. Repo scan: inspect structure, package files, commands, tests, docs, and existing conventions.
+2. Work brief: run `hipson work --task "..."` for the default route -> scan ->
+   packet/execute -> verify -> memory/handoff contract.
 3. Context map: identify relevant files, ownership boundaries, dependencies, and unknowns.
 4. Plan: define small implementation steps and verification points.
 5. Task packet: create a bounded prompt for Executor when delegation is useful.

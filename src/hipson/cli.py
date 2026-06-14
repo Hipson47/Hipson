@@ -9,7 +9,20 @@ import sys
 from pathlib import Path
 from typing import cast
 
-from hipson import __version__, agents, learning, memory
+from hipson import (
+    __version__,
+    agents,
+    evals,
+    learning,
+    memory,
+    model_profiles,
+    packet_preflight,
+    provider_doctor,
+    quality,
+    verification,
+    workflow,
+)
+from hipson import evidence as evidence_mod
 from hipson import hermes as hermes_bridge
 from hipson import project as project_mod
 from hipson.approvals import ApprovalPolicy
@@ -276,6 +289,272 @@ def command_route(args: argparse.Namespace) -> int:
     else:
         print(format_text_route(route))
     return 0
+
+
+def command_work(args: argparse.Namespace) -> int:
+    try:
+        plan = workflow.build_work_plan(
+            task=args.task,
+            project_path=args.project,
+            include_diff=args.include_diff,
+            diff_lines=args.diff_lines,
+            write_packet=args.write_packet,
+            packet_output=args.packet_output,
+            inspect=args.inspect,
+            allowed_edit=args.allowed_edit,
+            acceptance=args.acceptance,
+            verification=args.verification,
+            skills=args.skills,
+            ai_quality=args.ai_quality,
+            ai_free=args.free_ai,
+            ai_agent=args.ai_agent,
+            ai_model=args.ai_model,
+            ai_profile=args.ai_profile,
+        )
+    except (SystemExit, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    if args.work_output:
+        workflow.write_work_plan(plan, args.work_output)
+    workflow.print_work_plan(plan, json_output=args.json)
+    return 0
+
+
+def command_verify_run(args: argparse.Namespace) -> int:
+    try:
+        work_plan = verification.load_work_plan(args.work)
+        commands = args.command if args.command else verification.verification_commands(work_plan, limit=args.limit)
+        result = verification.run_verification(work_plan=work_plan, commands=commands, timeout=args.timeout)
+        output = args.output or verification.default_verification_output(work_plan)
+        written = verification.write_verification_artifact(result, output)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps({**result, "output": str(written)}, indent=2, ensure_ascii=False))
+    else:
+        print(f"verification: {result['status']}")
+        print(f"output: {written}")
+        for item in result["results"]:
+            print(f"- {item['command']}: {item['status']} ({item['exit_code']})")
+    return 0 if result["status"] == "passed" else 1
+
+
+def command_evidence_append(args: argparse.Namespace) -> int:
+    try:
+        work_plan = verification.load_work_plan(args.work)
+        ledger_root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
+        verification_payload = evidence_mod.load_json_artifact(args.verification)
+        quality_report_payload = evidence_mod.load_json_artifact(args.quality_report)
+        quality_eval_payload = evidence_mod.load_json_artifact(args.quality_eval)
+        record = evidence_mod.build_evidence_record(
+            work_plan=work_plan,
+            verification=verification_payload,
+            quality_report=quality_report_payload,
+            quality_eval=quality_eval_payload,
+            sidecar_report=args.sidecar_report,
+            ledger_root=ledger_root,
+            human_decision=args.decision,
+        )
+        path = evidence_mod.append_record(ledger_root, record)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps({"ledger": str(path), "record": record}, indent=2, ensure_ascii=False))
+    else:
+        print(f"Appended evidence {record['event_id']} to {path}")
+    return 0
+
+
+def command_evidence_show(args: argparse.Namespace) -> int:
+    if args.work:
+        work_plan = verification.load_work_plan(args.work)
+        root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
+    else:
+        root = evidence_mod.evidence_dir(args.ledger_dir)
+    records = evidence_mod.read_records(root)
+    if args.work:
+        work_id = str(work_plan.get("work_id", ""))
+        records = [record for record in records if str(record.get("work", {}).get("work_id", "")) == work_id]
+    if args.latest and records:
+        records = [records[-1]]
+    if args.json:
+        print(json.dumps({"ledger": str(evidence_mod.ledger_path(root)), "records": records}, indent=2, ensure_ascii=False))
+        return 0
+    if not records:
+        print("No evidence records found.")
+        return 0
+    for record in records:
+        work = cast(dict[str, object], record.get("work", {}))
+        verification_payload = cast(dict[str, object], record.get("verification", {}))
+        print(
+            f"{record.get('event_id', '')}: work={work.get('work_id', '')} "
+            f"verification={verification_payload.get('status', 'unknown')}"
+        )
+    return 0
+
+
+def command_evidence_export(args: argparse.Namespace) -> int:
+    if args.work:
+        work_plan = verification.load_work_plan(args.work)
+        root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
+        work_id = str(work_plan.get("work_id", ""))
+    else:
+        root = evidence_mod.evidence_dir(args.ledger_dir)
+    records = evidence_mod.read_records(root)
+    if args.work:
+        records = [record for record in records if str(record.get("work", {}).get("work_id", "")) == work_id]
+    payload = {"schema_version": "1.0", "records": records}
+    if args.output:
+        output = Path(args.output).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Wrote {output}")
+    else:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
+
+
+def command_audit_show(args: argparse.Namespace) -> int:
+    try:
+        work_plan = verification.load_work_plan(args.work)
+        root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
+        bundle = evidence_mod.audit_bundle(work_path=args.work, ledger_root=root)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps(bundle, indent=2, ensure_ascii=False))
+        return 0
+    work = cast(dict[str, object], bundle["work"])
+    print(f"work: {work.get('work_id', '')}")
+    print(f"latest_status: {bundle['latest_status']}")
+    print(f"latest_quality_gate: {bundle['latest_quality_gate']}")
+    print(f"latest_eval_ok: {bundle['latest_eval_ok']}")
+    print("unknowns:")
+    for item in cast(list[object], bundle["unknowns"]):
+        print(f"- {item}")
+    return 0
+
+
+def command_audit_export(args: argparse.Namespace) -> int:
+    try:
+        work_plan = verification.load_work_plan(args.work)
+        root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
+        bundle = evidence_mod.audit_bundle(work_path=args.work, ledger_root=root)
+        output = Path(args.output).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    print(f"Wrote {output}")
+    return 0
+
+
+def command_provider_doctor(args: argparse.Namespace) -> int:
+    try:
+        payload = provider_doctor.doctor_payload(config_path=args.config, env_path=args.env)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0 if payload["ok"] else 1
+    print(f"ok: {str(payload['ok']).lower()}")
+    print(f"config: {payload['config']}")
+    print(f"sent_repo_data: {str(payload['sent_repo_data']).lower()}")
+    print("providers:")
+    for name, status in cast(dict[str, dict[str, object]], payload["providers"]).items():
+        key_status = "present" if status.get("api_key_present") else "missing optional"
+        print(f"- {name}: url={'ok' if status.get('url_ok') else 'failed'} key={key_status}")
+    print("recommendations:")
+    for recommendation in cast(list[str], payload["recommendations"]):
+        print(f"- {recommendation}")
+    return 0 if payload["ok"] else 1
+
+
+def command_model_profile_list(args: argparse.Namespace) -> int:
+    payload = model_profiles.load_profiles(args.config)
+    profiles = model_profiles.profiles(payload)
+    if args.json:
+        print(json.dumps({"schema_version": payload.get("schema_version", "1.0"), "profiles": profiles}, indent=2))
+        return 0
+    for name, profile in sorted(profiles.items()):
+        print(f"{name}: agent={profile.get('agent')} model={profile.get('model')} tier={profile.get('quality_tier')}")
+    return 0
+
+
+def command_model_profile_show(args: argparse.Namespace) -> int:
+    try:
+        profile = model_profiles.get_profile(args.name, args.config)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    print(json.dumps(profile, indent=2) if args.json else model_profiles.render_profile(profile))
+    return 0
+
+
+def command_model_profile_recommend(args: argparse.Namespace) -> int:
+    try:
+        profile = model_profiles.recommend_profile(task=args.task, risk=args.risk, path=args.config)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    print(json.dumps(profile, indent=2) if args.json else model_profiles.render_profile(profile))
+    return 0
+
+
+def command_packet_preflight(args: argparse.Namespace) -> int:
+    payload = packet_preflight.preflight_packet(args.path, max_chars=args.max_chars)
+    if args.output:
+        packet_preflight.write_preflight(payload, args.output)
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"ok: {str(payload['ok']).lower()}")
+        print(f"path: {payload['path']}")
+        print(f"sha256: {payload['sha256'] or 'none'}")
+        for error in cast(list[str], payload["errors"]):
+            print(f"error: {error}")
+        for warning in cast(list[str], payload["warnings"]):
+            print(f"warning: {warning}")
+    return 0 if payload["ok"] else 1
+
+
+def command_quality_report(args: argparse.Namespace) -> int:
+    try:
+        report = quality.build_quality_report(
+            work_path=args.work,
+            verification_path=args.verify,
+            sidecar_path=args.sidecar,
+            decision=args.decision,
+        )
+        if args.output:
+            quality.write_report(report, args.output)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else quality.render_report(report))
+    return 0 if report.get("ok") else 1
+
+
+def command_quality_eval(args: argparse.Namespace) -> int:
+    try:
+        result = evals.run_quality_eval(
+            project_path=args.project,
+            packet_path=args.packet,
+            sidecar_path=args.sidecar,
+            verification_path=args.verify,
+        )
+        if args.output:
+            evals.write_eval(result, args.output)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, ensure_ascii=False) if args.json else evals.render_eval(result))
+    return 0 if result.get("ok") else 1
 
 
 def command_hermes_doctor(args: argparse.Namespace) -> int:
@@ -1136,6 +1415,105 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
 
+    work = subparsers.add_parser(
+        "work",
+        help="Build a provider-free Codex work brief from route, scan, packet, verify, and handoff steps",
+    )
+    work.add_argument("--task", required=True, help="Task description")
+    work.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    work.add_argument("--include-diff", action="store_true", default=True, help="Include redacted diff context")
+    work.add_argument("--no-diff", dest="include_diff", action="store_false", help="Do not include diff context")
+    work.add_argument("--diff-lines", type=int, default=120, help="Diff line budget for the embedded scan")
+    work.add_argument("--write-packet", action="store_true", help="Write the selected local review/executor packet")
+    work.add_argument("--packet-output", help="Packet output path; defaults to runs/review-packet.md or runs/executor-packet.md")
+    work.add_argument("--work-output", help="Write the machine-readable work plan JSON to this path")
+    work.add_argument("--inspect", help="Comma-separated files to inspect for executor packets")
+    work.add_argument("--allowed-edit", help="Comma-separated edit scope required for writing executor packets")
+    work.add_argument("--acceptance", help="Observable acceptance criterion for executor packets")
+    work.add_argument("--verification", help="Primary verification command for the work brief")
+    work.add_argument("--skills", help="Comma-separated extra skills or references to include")
+    work.add_argument("--ai-quality", action="store_true", help="Prepare an explicit advisory AI quality pass")
+    work.add_argument("--free-ai", action="store_true", help="Use OpenRouter's free model router for the AI quality pass")
+    work.add_argument("--ai-agent", help="Sidecar agent to use for the AI quality pass")
+    work.add_argument("--ai-model", help="OpenRouter model slug to use for the AI quality pass")
+    work.add_argument("--ai-profile", help="Curated model profile to use for the AI quality pass")
+    work.add_argument("--json", action="store_true", help="Print machine-readable work plan")
+    work.set_defaults(func=command_work)
+
+    model = subparsers.add_parser("model", help="Inspect curated AI model profiles")
+    model_sub = model.add_subparsers(dest="model_command", required=True)
+    model_profile = model_sub.add_parser("profile", help="Curated model profile commands")
+    model_profile.add_argument("--config", help="Model profile config JSON")
+    model_profile_sub = model_profile.add_subparsers(dest="model_profile_command", required=True)
+    model_profile_list = model_profile_sub.add_parser("list", help="List model profiles")
+    model_profile_list.add_argument("--json", action="store_true", help="Print machine-readable profiles")
+    model_profile_list.set_defaults(func=command_model_profile_list)
+    model_profile_show = model_profile_sub.add_parser("show", help="Show one model profile")
+    model_profile_show.add_argument("name")
+    model_profile_show.add_argument("--json", action="store_true", help="Print machine-readable profile")
+    model_profile_show.set_defaults(func=command_model_profile_show)
+    model_profile_recommend = model_profile_sub.add_parser("recommend", help="Recommend a profile for a task")
+    model_profile_recommend.add_argument("--task", required=True, help="Task description")
+    model_profile_recommend.add_argument("--risk", default="normal", help="Risk hint")
+    model_profile_recommend.add_argument("--json", action="store_true", help="Print machine-readable profile")
+    model_profile_recommend.set_defaults(func=command_model_profile_recommend)
+
+    verify = subparsers.add_parser("verify", help="Run verification commands from a Hipson work plan")
+    verify_sub = verify.add_subparsers(dest="verify_command", required=True)
+    verify_run = verify_sub.add_parser("run", help="Run local verification commands from a work JSON artifact")
+    verify_run.add_argument("--work", required=True, help="Work plan JSON path from hipson work --work-output")
+    verify_run.add_argument("--command", action="append", help="Override verification command; repeatable")
+    verify_run.add_argument("--limit", type=int, help="Run only the first N work-plan verification commands")
+    verify_run.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Per-command timeout in seconds")
+    verify_run.add_argument("-o", "--output", help="Write verification JSON artifact; defaults to runs/<work-id>-verification.json")
+    verify_run.add_argument("--json", action="store_true", help="Print machine-readable verification result")
+    verify_run.set_defaults(func=command_verify_run)
+
+    evidence = subparsers.add_parser("evidence", help="Manage local Hipson evidence ledger records")
+    evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_append = evidence_sub.add_parser("append", help="Append one evidence record for a work plan")
+    evidence_append.add_argument("--work", required=True, help="Work plan JSON path")
+    evidence_append.add_argument("--verification", help="Verification JSON artifact path")
+    evidence_append.add_argument("--quality-report", help="Quality report JSON artifact path")
+    evidence_append.add_argument("--quality-eval", help="Quality eval JSON artifact path")
+    evidence_append.add_argument("--sidecar-report", help="Optional sidecar report path or id")
+    evidence_append.add_argument("--decision", default="pending", help="Human decision, e.g. pending, accepted, blocked")
+    evidence_append.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
+    evidence_append.add_argument("--json", action="store_true", help="Print machine-readable appended record")
+    evidence_append.set_defaults(func=command_evidence_append)
+    evidence_show = evidence_sub.add_parser("show", help="Show evidence ledger records")
+    evidence_show.add_argument("--work", help="Optional work plan JSON path to filter records")
+    evidence_show.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
+    evidence_show.add_argument("--latest", action="store_true", help="Show only the latest record")
+    evidence_show.add_argument("--json", action="store_true", help="Print machine-readable records")
+    evidence_show.set_defaults(func=command_evidence_show)
+    evidence_export = evidence_sub.add_parser("export", help="Export evidence ledger records")
+    evidence_export.add_argument("--work", help="Optional work plan JSON path to filter records")
+    evidence_export.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
+    evidence_export.add_argument("-o", "--output", help="Write export JSON to a file")
+    evidence_export.set_defaults(func=command_evidence_export)
+
+    audit = subparsers.add_parser("audit", help="Show or export an audit bundle for a work plan")
+    audit_sub = audit.add_subparsers(dest="audit_command", required=True)
+    audit_show = audit_sub.add_parser("show", help="Show an audit bundle")
+    audit_show.add_argument("--work", required=True, help="Work plan JSON path")
+    audit_show.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
+    audit_show.add_argument("--json", action="store_true", help="Print machine-readable audit bundle")
+    audit_show.set_defaults(func=command_audit_show)
+    audit_export = audit_sub.add_parser("export", help="Export an audit bundle JSON file")
+    audit_export.add_argument("--work", required=True, help="Work plan JSON path")
+    audit_export.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
+    audit_export.add_argument("-o", "--output", required=True, help="Audit bundle output path")
+    audit_export.set_defaults(func=command_audit_export)
+
+    provider = subparsers.add_parser("provider", help="Inspect explicit provider readiness without sending repo data")
+    provider_sub = provider.add_subparsers(dest="provider_command", required=True)
+    provider_doctor_cmd = provider_sub.add_parser("doctor", help="Check provider and agent config readiness")
+    provider_doctor_cmd.add_argument("--config", help="Agent config JSON; defaults to packaged config")
+    provider_doctor_cmd.add_argument("--env", help="Provider env file")
+    provider_doctor_cmd.add_argument("--json", action="store_true", help="Print machine-readable provider status")
+    provider_doctor_cmd.set_defaults(func=command_provider_doctor)
+
     hermes = subparsers.add_parser("hermes", help="Bridge Hermes Agent with Hipson workflows")
     hermes_sub = hermes.add_subparsers(dest="hermes_command", required=True)
     hermes_doctor = hermes_sub.add_parser("doctor", help="Check Hermes/Hipson bridge readiness")
@@ -1241,6 +1619,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     packet = subparsers.add_parser("packet", help="Generate bounded agent packets")
     packet_sub = packet.add_subparsers(dest="packet_command", required=True)
+    preflight = packet_sub.add_parser("preflight", help="Check a packet before sidecar/provider use")
+    preflight.add_argument("path", help="Packet path")
+    preflight.add_argument("--max-chars", type=int, default=packet_preflight.MAX_PACKET_CHARS)
+    preflight.add_argument("-o", "--output", help="Write preflight JSON artifact")
+    preflight.add_argument("--json", action="store_true", help="Print machine-readable preflight result")
+    preflight.set_defaults(func=command_packet_preflight)
     review = packet_sub.add_parser("review", help="Generate a read-only review packet")
     review.add_argument("project", help="Project directory")
     review.add_argument("--title", required=True, help="Review title")
@@ -1284,10 +1668,30 @@ def build_parser() -> argparse.ArgumentParser:
     sidecar_run = sidecar_sub.add_parser("run", help="Run a sidecar agent on a packet")
     sidecar_run.add_argument("--agent", required=True, help="Agent name from config")
     sidecar_run.add_argument("--packet", required=True, help="Markdown packet path")
+    sidecar_run.add_argument("--model", help="Override the configured OpenRouter model for this run")
     sidecar_run.add_argument("-o", "--output", help="Output report path")
     sidecar_run.add_argument("--dry-run", action="store_true", help="Print provider request without calling API")
     sidecar_run.add_argument("--max-packet-chars", type=int, default=agents.DEFAULT_MAX_PACKET_CHARS, help="Maximum packet characters sent to provider")
     sidecar_run.set_defaults(func=command_sidecar_run)
+
+    quality_parser = subparsers.add_parser("quality", help="Correlate work, verification, and sidecar quality artifacts")
+    quality_sub = quality_parser.add_subparsers(dest="quality_command", required=True)
+    quality_report = quality_sub.add_parser("report", help="Build a local quality report")
+    quality_report.add_argument("--work", required=True, help="Work plan JSON path")
+    quality_report.add_argument("--verify", help="Verification JSON artifact path")
+    quality_report.add_argument("--sidecar", help="Sidecar report path")
+    quality_report.add_argument("--decision", default="pending", help="Human decision")
+    quality_report.add_argument("-o", "--output", help="Write report JSON artifact")
+    quality_report.add_argument("--json", action="store_true", help="Print machine-readable quality report")
+    quality_report.set_defaults(func=command_quality_report)
+    quality_eval = quality_sub.add_parser("eval", help="Evaluate a sidecar report against local repo evidence")
+    quality_eval.add_argument("--project", default=".", help="Project directory")
+    quality_eval.add_argument("--packet", help="Packet path used by the sidecar")
+    quality_eval.add_argument("--sidecar", required=True, help="Sidecar report path")
+    quality_eval.add_argument("--verify", help="Verification JSON artifact path")
+    quality_eval.add_argument("-o", "--output", help="Write eval JSON artifact")
+    quality_eval.add_argument("--json", action="store_true", help="Print machine-readable eval result")
+    quality_eval.set_defaults(func=command_quality_eval)
 
     memory_parser = subparsers.add_parser("memory", help="Manage local Hipson memory")
     memory_parser.add_argument("--memory-dir", help="Memory directory; defaults to repo-local memory/")

@@ -1,5 +1,15 @@
 # AI Coding Workflow
 
+## Hipson Work Brief
+- Run `hipson work --task "..."` at the start of non-trivial Codex work.
+- Treat the generated route, scan, packet command, verification list,
+  memory/handoff command, selected skills, and audit contract as the local work
+  brief.
+- Use `hipson route --task "..."` when only the lower-level route result is
+  needed.
+- Do not involve Hermes unless the task needs status tracking, scheduling,
+  Telegram/gateway dispatch, or cross-session bus events.
+
 ## Spec-Driven Development
 - Start with observable behavior, not implementation guesses.
 - Convert user intent into acceptance criteria before editing.

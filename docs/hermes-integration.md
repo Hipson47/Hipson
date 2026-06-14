@@ -32,7 +32,7 @@ Hermes is optional and should be used by Codex only when the task needs:
 - long-running workflow handoff.
 
 For ordinary coding, review, verification, and task-packet work, Codex should
-use `hipson route --task "..."` directly. The user does not need to run Hermes
+use `hipson work --task "..."` directly. The user does not need to run Hermes
 commands manually.
 
 ## Commands
@@ -87,7 +87,7 @@ Each event includes:
 
 - event id, timestamp, channel, and actor;
 - resolved project path and git root;
-- result from `hipson route --task`;
+- result from `hipson route --task` inside the `hipson work`/Hermes intake flow;
 - recommended Hipson commands;
 - Hermes/Hipson/Codex responsibility contract;
 - Telegram setup metadata;

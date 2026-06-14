@@ -110,6 +110,10 @@ def validate_base_url(raw_url: str, *, allow_local_http: bool = False) -> str:
         raise ProviderError("Unsupported provider URL scheme", parsed.scheme)
     if not parsed.netloc:
         raise ProviderError("Malformed provider URL", "missing host")
+    if parsed.username or parsed.password:
+        raise ProviderError("Provider base URL must not contain credentials")
+    if _query_contains_secret(parsed.query):
+        raise ProviderError("Provider base URL must not contain secret query parameters")
     if parsed.scheme == "https":
         return raw
     if _is_local_http(parsed) and allow_local_http:
@@ -265,3 +269,12 @@ def _bounded_redacted(text: str, *, max_chars: int = MAX_PROVIDER_ERROR_CHARS) -
 
 def _is_local_http(parsed: urllib.parse.ParseResult) -> bool:
     return (parsed.hostname or "").casefold() in LOCAL_HTTP_HOSTS
+
+
+def _query_contains_secret(query: str) -> bool:
+    names = {"api_key", "apikey", "key", "token", "secret", "password", "passwd", "access_token"}
+    for key, _value in urllib.parse.parse_qsl(query, keep_blank_values=True):
+        normalized = key.lower().replace("-", "_")
+        if normalized in names or normalized.endswith("_token") or normalized.endswith("_secret"):
+            return True
+    return False

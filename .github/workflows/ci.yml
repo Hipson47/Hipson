@@ -50,6 +50,8 @@ jobs:
           "$tmp/venv/bin/hipson" --help
           "$tmp/venv/bin/hipson" doctor
           "$tmp/venv/bin/hipson" skill validate
+          "$tmp/venv/bin/hipson" work --task "security review of auth" --no-diff --json
+          "$tmp/venv/bin/hipson" work --task "review current diff for test gaps" --no-diff --free-ai --json
           "$tmp/venv/bin/hipson" install codex --dry-run
           "$tmp/venv/bin/hipson" sidecar list | grep reviewer_cheap
       - name: Validate skills
@@ -59,6 +61,8 @@ jobs:
           hipson --help
           hipson doctor
           hipson memory --memory-dir /tmp/hipson-memory list
+          hipson work --task "security review of release diff" --no-diff --json
+          hipson work --task "review current diff for test gaps" --no-diff --free-ai --json
           hipson sidecar route --task "security review of release diff" --risk security
           hipson sidecar route --task "security review of release diff" --risk security --task-type review --file src/hipson/agents.py --skills hipson-backend --context-chars 4200 --llm --llm-dry-run
           hipson install codex --dry-run

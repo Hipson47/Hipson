@@ -10,13 +10,16 @@ Act as a senior AI engineering mentor, workflow architect, coding agent, and rev
 ## Work Style
 - Use Plan -> Execute -> Verify for non-trivial tasks.
 - Inspect before editing. Understand the repo structure, conventions, commands, and stack first.
-- For non-trivial repo tasks, run `hipson route --task "..."` and consult the Hipson `SKILLS.md` playbook before choosing scan, packet, sidecar, memory, or handoff flow.
+- For non-trivial repo tasks, run `hipson work --task "..."` first to get the
+  provider-free route, scan, packet, verify, memory/handoff, skills, and audit
+  contract. Use `hipson route --task "..."` when you only need the lower-level
+  routing decision.
 - Keep Codex as the user's primary control surface. The user should not need to
   invoke Hermes manually for normal work; Codex decides when Hermes adds value.
 - Use `hipson hermes intake --project <repo> --task "<task>"` only when a task
   benefits from Hermes-side intake/status tracking, scheduling, Telegram/gateway
   dispatch, or cross-session bus events. For ordinary coding/review work, use
-  `hipson route --task "..."` directly.
+  `hipson work --task "..."` or `hipson route --task "..."` directly.
 - Prefer minimal diffs and root-cause fixes.
 - Do not rewrite whole files unnecessarily.
 - Preserve working behavior unless a requested change requires otherwise.

@@ -13,7 +13,7 @@ authors = [{ name = "Hipson Contributors" }]
 dependencies = []
 keywords = ["codex", "agents", "developer-tools", "rag", "workflow"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
@@ -100,6 +100,7 @@ paths_to_mutate = [
     "src/hipson/runtime.py",
     "src/hipson/sandbox.py",
     "src/hipson/tools/registry.py",
+    "src/hipson/workflow.py",
 ]
 tests_dir = [
     "tests/test_approvals.py",
@@ -176,6 +177,11 @@ tests_dir = [
     "tests/test_hipson_helpers.py::test_workflow_router_commands_are_exact_and_ordered",
     "tests/test_hipson_helpers.py::test_workflow_router_quotes_normalizes_and_formats_text_contract",
     "tests/test_hipson_helpers.py::test_workflow_router_exec_placeholder_fallback_is_safe",
+    "tests/test_hipson_helpers.py::test_work_plan_builds_provider_free_daily_contract",
+    "tests/test_hipson_helpers.py::test_work_plan_writes_review_packet_locally",
+    "tests/test_hipson_helpers.py::test_work_plan_requires_allowed_edit_for_written_executor_packet",
+    "tests/test_hipson_helpers.py::test_work_plan_writes_executor_packet_with_explicit_scope",
+    "tests/test_hipson_helpers.py::test_work_command_subprocess_json_contract",
 ]
 pytest_add_cli_args = ["-q"]
 mutate_only_covered_lines = true

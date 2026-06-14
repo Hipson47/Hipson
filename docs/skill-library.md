@@ -41,6 +41,27 @@ There are two copies with different jobs:
 
 After installing new global skills, restart Codex so the runtime skill list refreshes.
 
+## Curation Matrix
+
+Prefer a small task-fit set over broad skill dumping. `hipson work --task "..."`
+uses this style of curation when it prepares a Codex work brief.
+
+| Work type | Use first | Optional sidecar |
+|---|---|---|
+| Repo state or orientation | `repo-delta-scan` | none |
+| Bounded implementation | `executor-packet`, `skills/hipson-gpt/skill_ai-coding-workflows.md` | `coder_review_cheap` after a diff exists |
+| Code or release review | `review-packet` | `reviewer_cheap` |
+| Free first-pass AI quality review | `review-packet` or `executor-packet` | `reviewer_free` or `coder_review_free` |
+| Security-sensitive review | `review-packet`, `skills/external/openai-curated/security-threat-model` | `reviewer_cheap` |
+| Architecture critique | `skills/hipson-gpt/skill_reasoning-decomposition.md` | `architect_strong` or `critic_lite` |
+| UI/UX review | `skills/hipson-premium-ui-ux` | `premium_ui_ux` |
+| Visual or motion direction | `skills/hipson-visual-experience-director`, `skills/hipson-creative-frontend-motion-architect` | `visual_experience_director` |
+| Handoff or progress memory | `handoff`, `memory` | `memory_summarizer_cheap` |
+
+Sidecars are optional second opinions. Use them only after creating bounded,
+redacted context, and never send secrets, credentials, private keys, broad logs,
+or sensitive customer data.
+
 ## UI/UX And Motion Agent Usage
 
 For premium frontend review, use the `premium_ui_ux` sidecar together with

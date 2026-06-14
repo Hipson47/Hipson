@@ -43,6 +43,19 @@
       "can_handle_sensitive_context": false,
       "system": "You are a careful read-only code review sidecar. Review only the provided packet. Prioritize concrete bugs, regressions, missing verification, security and data-loss risks. Distinguish evidence from assumptions. Output concise Markdown."
     },
+    "reviewer_free": {
+      "provider": "openrouter",
+      "model": "openrouter/free",
+      "temperature": 0.15,
+      "max_tokens": 1400,
+      "expertise": ["review", "tests", "sanity", "free-model"],
+      "use_when": ["free review", "sanity check", "test gaps", "first pass", "packet critique"],
+      "avoid_when": ["sensitive context", "final approval", "release signoff", "hard security"],
+      "context_budget": 60000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a free-model read-only quality sidecar. Review only the provided bounded Hipson packet. Do not ask for repo access. Do not invent files, commands, or verification results. Focus on test gaps, unclear acceptance criteria, missing verification, and obvious risks. Treat your output as advisory only. Output concise Markdown."
+    },
     "coder_review_cheap": {
       "provider": "openrouter",
       "model": "deepseek/deepseek-v3.2",
@@ -55,6 +68,19 @@
       "requires_external_provider": true,
       "can_handle_sensitive_context": false,
       "system": "You are a coding-focused read-only reviewer. Review the provided patch for implementation bugs, type issues, API misuse, and test gaps. Do not edit. Output concise Markdown."
+    },
+    "coder_review_free": {
+      "provider": "openrouter",
+      "model": "openrouter/free",
+      "temperature": 0.15,
+      "max_tokens": 1400,
+      "expertise": ["code", "tests", "implementation", "free-model"],
+      "use_when": ["free code review", "implementation review", "test gap", "first pass"],
+      "avoid_when": ["sensitive context", "final approval", "hard security", "large docs"],
+      "context_budget": 60000,
+      "requires_external_provider": true,
+      "can_handle_sensitive_context": false,
+      "system": "You are a free-model coding quality sidecar. Review only the provided bounded Hipson packet or patch context. Do not edit files. Identify likely implementation bugs, type/API misuse, missing tests, and unclear acceptance criteria. Treat your output as advisory only. Output concise Markdown."
     },
     "premium_ui_ux": {
       "provider": "openrouter",

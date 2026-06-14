@@ -34,6 +34,16 @@ Latest Hermes-style real-agent completion verification:
 - `uv run ruff check .`, `uv run mypy src/hipson`, configured Bandit, compileall, doctor, and skill validation passed.
 - Real-provider adapter tests use stub transports only; no live provider credentials or network checks were used.
 
+Latest Codex daily-workflow stabilization:
+
+- Added `hipson work` as a provider-free route -> scan -> packet -> verify ->
+  memory/handoff brief.
+- Added tests for provider-free work plans, review packet writes, executor packet
+  scope requirements, executor packet writes, CLI JSON output, and CLI smoke.
+- Added CI smoke coverage for `hipson work` in editable and installed-wheel paths.
+- This does not close mutation triage; it adds observable workflow contracts for
+  future mutation batches.
+
 Mutmut reconnaissance was rerun with `timeout 300s uv run mutmut run || true`. It did not complete the configured 2,219-mutant set within the timeout. Last observed progress was 1,965/2,219 mutants with 1,643 killed, 130 timeouts, and 192 survivors. `uv run mutmut results || true` still reported survivors, timeouts, and not-checked mutants in safety-adjacent modules.
 
 Latest provider/tool-loop approval/search/learning completion pass reran `timeout 300s uv run mutmut run || true`. It generated 2,291 mutants and again did not complete within the timeout. Last observed progress was 2,005/2,291 mutants with 1,673 killed, 148 timeouts, and 184 survivors. `uv run mutmut results || true` still reports survivors/timeouts/not-checked mutants in `agents`, `approvals`, `prompt`, `sandbox`, `redaction`, `router`, `runtime`, and `tools.registry`.
@@ -67,6 +77,7 @@ Still not claimed:
 - Write/external/exec/dangerous `hipson tool run`.
 - Completed mutation survivor triage.
 - Live-provider smoke readiness.
+- Hermes Telegram gateway readiness.
 
 Newly implemented after the original stabilization note:
 
