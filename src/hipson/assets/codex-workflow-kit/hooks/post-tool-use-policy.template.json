@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "template_kind": "hipson.codex_post_tool_use_policy_template",
+  "description": "Template only. Review before enabling in Codex.",
+  "rules": [
+    {
+      "after": {
+        "prefix_rule": ["git", "diff"]
+      },
+      "recommend": "hipson work --task \"review current diff\""
+    },
+    {
+      "after": {
+        "prefix_rule": ["hipson", "verify", "run"]
+      },
+      "recommend": "hipson evidence append --work runs/<work_id>/work.json --verification runs/<work_id>/verify.json --quality-report runs/<work_id>/quality.json"
+    },
+    {
+      "after": {
+        "prefix_rule": ["hipson", "evidence", "append"]
+      },
+      "recommend": "hipson audit show --work runs/<work_id>/work.json --json"
+    }
+  ]
+}

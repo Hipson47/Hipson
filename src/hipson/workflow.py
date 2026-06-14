@@ -83,10 +83,12 @@ def build_work_plan(
     ai_model: str | None = None,
     ai_profile: str | None = None,
     allow_unsafe_output: bool = False,
+    work_id: str | None = None,
 ) -> WorkPlan:
     """Build a provider-free, auditable Codex work plan for one task."""
 
     project = resolve_project(project_path)
+    actual_work_id = work_id or contracts.new_id("work")
     route = route_task(task)
     scan = build_scan(project, include_diff=include_diff, diff_lines=diff_lines)
     root = git_root(project)
@@ -163,7 +165,7 @@ def build_work_plan(
     return {
         "artifact_kind": "hipson.work_plan",
         "schema_version": contracts.SCHEMA_VERSION,
-        "work_id": contracts.new_id("work"),
+        "work_id": actual_work_id,
         "created_at_utc": contracts.timestamp(),
         "task": task,
         "project": str(project),

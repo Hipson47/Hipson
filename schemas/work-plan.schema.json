@@ -31,15 +31,71 @@
     "created_at_utc": { "type": "string" },
     "task": { "type": "string" },
     "project": { "type": "string" },
-    "repo_state": { "type": "object" },
-    "route": { "type": "object" },
+    "repo_state": {
+      "type": "object",
+      "required": ["path", "git_root", "head", "branch", "dirty", "diff_hash"],
+      "properties": {
+        "path": { "type": "string" },
+        "git_root": { "type": "string" },
+        "head": { "type": "string" },
+        "branch": { "type": "string" },
+        "dirty": { "type": "boolean" },
+        "diff_hash": { "type": "string" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "required": ["mode", "risk", "recommended_skill", "commands", "requires_human_review", "reason"],
+      "properties": {
+        "mode": { "type": "string" },
+        "risk": { "type": "string" },
+        "recommended_skill": { "type": "string" },
+        "commands": { "type": "array" },
+        "requires_human_review": { "type": "boolean" },
+        "reason": { "type": "string" }
+      }
+    },
     "scan": { "type": "string" },
     "changed_files": { "type": "array" },
     "discovered_commands": { "type": "array" },
     "selected_skills": { "type": "array" },
-    "packet": { "type": "object" },
-    "packet_preflight": { "type": "object" },
-    "ai_quality": { "type": "object" },
+    "packet": {
+      "type": "object",
+      "required": ["mode", "path", "command", "written", "reason"],
+      "properties": {
+        "mode": { "type": "string" },
+        "path": { "type": "string" },
+        "command": { "type": "string" },
+        "written": { "type": "boolean" },
+        "reason": { "type": "string" }
+      }
+    },
+    "packet_preflight": {
+      "type": "object",
+      "required": ["command", "output", "required_before_sidecar", "reason"],
+      "properties": {
+        "command": { "type": "string" },
+        "output": { "type": "string" },
+        "required_before_sidecar": { "type": "boolean" },
+        "reason": { "type": "string" }
+      }
+    },
+    "ai_quality": {
+      "type": "object",
+      "required": ["enabled", "mode", "profile", "agent", "model", "packet_path", "dry_run_command", "run_command", "reason", "cautions"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "type": "string" },
+        "profile": { "type": "string" },
+        "agent": { "type": "string" },
+        "model": { "type": "string" },
+        "packet_path": { "type": "string" },
+        "dry_run_command": { "type": "string" },
+        "run_command": { "type": "string" },
+        "reason": { "type": "string" },
+        "cautions": { "type": "array" }
+      }
+    },
     "verification": { "type": "array" },
     "memory": { "type": "array" },
     "audit": { "type": "array" },

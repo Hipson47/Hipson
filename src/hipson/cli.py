@@ -11,20 +11,27 @@ from typing import cast
 
 from hipson import (
     __version__,
+    agent_bootstrap,
     agent_contract,
+    agent_install,
     agents,
     evals,
     learning,
+    mcp_server,
     memory,
     model_profiles,
     packet_preflight,
     provider_doctor,
     quality,
+    review_kit,
     verification,
     workflow,
 )
 from hipson import evidence as evidence_mod
 from hipson import hermes as hermes_bridge
+from hipson import (
+    policy as policy_mod,
+)
 from hipson import project as project_mod
 from hipson.approvals import ApprovalPolicy
 from hipson.assets import runtime_asset
@@ -99,6 +106,18 @@ def _positive_limit(value: int, *, default: int = 20, maximum: int = 100) -> int
     if value <= 0:
         return default
     return min(value, maximum)
+
+
+def _agent_install_targets(args: argparse.Namespace) -> list[str]:
+    if args.all:
+        return ["all"]
+    targets = []
+    for name in agent_install.AGENT_TARGETS:
+        if getattr(args, name):
+            targets.append(name)
+    if not targets:
+        raise SystemExit("Select at least one agent target or pass --all.")
+    return targets
 
 
 def command_doctor(args: argparse.Namespace) -> int:
@@ -300,6 +319,150 @@ def command_contract_show(args: argparse.Namespace) -> int:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
     agent_contract.print_agent_contract(contract, json_output=args.json)
+    return 0
+
+
+def command_install_agents(args: argparse.Namespace) -> int:
+    try:
+        targets = _agent_install_targets(args)
+        result = agent_install.install_agents(
+            targets=targets,
+            dry_run=args.dry_run,
+            codex_home=args.codex_home,
+            cursor_home=args.cursor_home,
+            claude_home=args.claude_home,
+            mcp_home=args.mcp_home,
+        )
+    except (SystemExit, ValueError, OSError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(agent_install.format_agent_install(result))
+    return 0
+
+
+def command_agent_bootstrap(args: argparse.Namespace) -> int:
+    try:
+        payload = agent_bootstrap.build_bootstrap(target=args.target, project_path=args.project)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0
+
+
+def command_kit_review(args: argparse.Namespace) -> int:
+    try:
+        if getattr(args, "review_action", None) == "resume":
+            if not args.resume_run:
+                raise SystemExit("hipson kit review resume requires --run runs/<work_id>")
+            result = review_kit.resume_review_kit(
+                run_path=args.resume_run,
+                verify_profile=args.verify_profile,
+                verify_limit=args.verify_limit,
+                timeout=args.timeout,
+                run_sidecar=args.run_sidecar,
+                sidecar_config=args.sidecar_config,
+                sidecar_env=args.sidecar_env,
+                decision=args.decision,
+                allow_unsafe_output=args.allow_unsafe_output,
+            )
+        else:
+            result = review_kit.run_review_kit(
+                task=args.task,
+                project_path=args.project,
+                run_root=args.run_root,
+                include_diff=args.include_diff,
+                diff_lines=args.diff_lines,
+                verify_profile=args.verify_profile,
+                verify_limit=args.verify_limit,
+                timeout=args.timeout,
+                ai_profile=args.ai_profile,
+                run_sidecar=args.run_sidecar,
+                sidecar_config=args.sidecar_config,
+                sidecar_env=args.sidecar_env,
+                decision=args.decision,
+                allow_unsafe_output=args.allow_unsafe_output,
+            )
+    except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"review kit: {result['status']}")
+        print(f"run_dir: {result['run_dir']}")
+        print(f"summary: {result['artifacts']['summary']}")
+    return 0 if result.get("status") == "passed" else 1
+
+
+def command_autopilot_review(args: argparse.Namespace) -> int:
+    try:
+        result = review_kit.run_review_kit(
+            task=args.task,
+            project_path=args.project,
+            run_root=args.run_root,
+            include_diff=args.include_diff,
+            diff_lines=args.diff_lines,
+            verify_profile=args.verify_profile,
+            verify_limit=args.verify_limit,
+            timeout=args.timeout,
+            ai_profile=args.ai_profile,
+            run_sidecar=args.run_sidecar,
+            sidecar_config=args.sidecar_config,
+            sidecar_env=args.sidecar_env,
+            decision=args.decision,
+            allow_unsafe_output=args.allow_unsafe_output,
+        )
+    except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    result = {**result, "artifact_kind": "hipson.autopilot_review_run", "autopilot": True}
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"autopilot review: {result['status']}")
+        print(f"run_dir: {result['run_dir']}")
+        print(f"summary: {result['artifacts']['summary']}")
+    return 0 if result.get("status") == "passed" else 1
+
+
+def command_policy_show(args: argparse.Namespace) -> int:
+    try:
+        payload = policy_mod.load_policy(args.project)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0 if payload.get("valid") else 1
+
+
+def command_policy_validate(args: argparse.Namespace) -> int:
+    try:
+        payload = policy_mod.validate_policy(args.project)
+    except (SystemExit, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    elif payload.get("valid"):
+        print("policy: valid")
+    else:
+        print("policy: invalid")
+        for issue in cast(list[str], payload.get("issues", [])):
+            print(f"- {issue}")
+    return 0 if payload.get("valid") else 1
+
+
+def command_mcp_serve(args: argparse.Namespace) -> int:
+    try:
+        payload = mcp_server.server_catalog(project_path=args.project)
+    except SystemExit as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc.code, int) else 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
     return 0
 
 
@@ -1469,6 +1632,100 @@ def build_parser() -> argparse.ArgumentParser:
     contract_show.add_argument("--json", action="store_true", help="Print machine-readable agent contract")
     contract_show.set_defaults(func=command_contract_show)
 
+    agent = subparsers.add_parser("agent", help="Agent integration discovery and bootstrap")
+    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+    bootstrap = agent_sub.add_parser("bootstrap", help="Emit an agent bootstrap payload")
+    bootstrap.add_argument("--target", choices=agent_install.AGENT_TARGETS, required=True)
+    bootstrap.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    bootstrap.add_argument("--json", action="store_true", help="Print machine-readable bootstrap payload")
+    bootstrap.set_defaults(func=command_agent_bootstrap)
+
+    kit = subparsers.add_parser("kit", help="Run productized Hipson workflow kits")
+    kit_sub = kit.add_subparsers(dest="kit_command", required=True)
+    kit_review = kit_sub.add_parser("review", help="Run AI Review Control Kit v0 on the current repository diff")
+    kit_review.add_argument(
+        "review_action",
+        nargs="?",
+        choices=["resume"],
+        metavar="{resume}",
+        help="Resume an existing run with --run and recreate only missing artifacts",
+    )
+    kit_review.add_argument("--task", default="review current diff", help="Review task description")
+    kit_review.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    kit_review.add_argument("--run-root", default="runs", help="Generated run root; defaults to <project>/runs")
+    kit_review.add_argument("--run", dest="resume_run", help="Existing runs/<work_id> directory for review resume")
+    kit_review.add_argument("--include-diff", action="store_true", default=True, help="Include redacted diff context")
+    kit_review.add_argument("--no-diff", dest="include_diff", action="store_false", help="Do not include diff context")
+    kit_review.add_argument("--diff-lines", type=int, default=120, help="Diff line budget for the embedded scan")
+    kit_review.add_argument(
+        "--verify-profile",
+        choices=review_kit.VERIFY_PROFILES,
+        default="quick",
+        help="Verification breadth: quick runs the first command; full/release run all planned commands",
+    )
+    kit_review.add_argument("--verify-limit", type=int, default=None, help="Explicitly run only the first N commands")
+    kit_review.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Verification timeout per command")
+    kit_review.add_argument("--ai-profile", help="Prepare an advisory sidecar pass from this curated profile")
+    kit_review.add_argument("--run-sidecar", action="store_true", help="Explicitly run the provider-backed sidecar")
+    kit_review.add_argument("--sidecar-config", help="Agent config JSON for --run-sidecar")
+    kit_review.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
+    kit_review.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
+    kit_review.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow the review kit run root outside generated artifact directories",
+    )
+    kit_review.add_argument("--json", action="store_true", help="Print machine-readable review kit result")
+    kit_review.set_defaults(func=command_kit_review)
+
+    autopilot = subparsers.add_parser("autopilot", help="Run agent-first Hipson automation workflows")
+    autopilot_sub = autopilot.add_subparsers(dest="autopilot_command", required=True)
+    autopilot_review = autopilot_sub.add_parser("review", help="Run provider-free autopilot review workflow")
+    autopilot_review.add_argument("--task", required=True, help="Review task description")
+    autopilot_review.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    autopilot_review.add_argument("--run-root", default="runs", help="Generated run root; defaults to <project>/runs")
+    autopilot_review.add_argument("--include-diff", action="store_true", default=True, help="Include redacted diff context")
+    autopilot_review.add_argument("--no-diff", dest="include_diff", action="store_false", help="Do not include diff context")
+    autopilot_review.add_argument("--diff-lines", type=int, default=120, help="Diff line budget for the embedded scan")
+    autopilot_review.add_argument(
+        "--verify-profile",
+        choices=review_kit.VERIFY_PROFILES,
+        default="quick",
+        help="Verification breadth: quick runs the first command; full/release run all planned commands",
+    )
+    autopilot_review.add_argument("--verify-limit", type=int, default=None, help="Explicitly run only the first N commands")
+    autopilot_review.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Verification timeout per command")
+    autopilot_review.add_argument("--ai-profile", help="Prepare an advisory sidecar pass from this curated profile")
+    autopilot_review.add_argument("--run-sidecar", action="store_true", help="Explicitly run the provider-backed sidecar")
+    autopilot_review.add_argument("--sidecar-config", help="Agent config JSON for --run-sidecar")
+    autopilot_review.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
+    autopilot_review.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
+    autopilot_review.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow the autopilot run root outside generated artifact directories",
+    )
+    autopilot_review.add_argument("--json", action="store_true", help="Print machine-readable autopilot result")
+    autopilot_review.set_defaults(func=command_autopilot_review)
+
+    policy = subparsers.add_parser("policy", help="Inspect and validate .hipson project policy")
+    policy_sub = policy.add_subparsers(dest="policy_command", required=True)
+    policy_show = policy_sub.add_parser("show", help="Show merged project policy")
+    policy_show.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    policy_show.add_argument("--json", action="store_true", help="Print machine-readable project policy")
+    policy_show.set_defaults(func=command_policy_show)
+    policy_validate = policy_sub.add_parser("validate", help="Validate project policy")
+    policy_validate.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    policy_validate.add_argument("--json", action="store_true", help="Print machine-readable validation result")
+    policy_validate.set_defaults(func=command_policy_validate)
+
+    mcp = subparsers.add_parser("mcp", help="Expose Hipson's read-first MCP skeleton")
+    mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_serve = mcp_sub.add_parser("serve", help="Print MCP skeleton catalog")
+    mcp_serve.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
+    mcp_serve.set_defaults(func=command_mcp_serve)
+
     work = subparsers.add_parser(
         "work",
         help="Build a provider-free Codex work brief from route, scan, packet, verify, and handoff steps",
@@ -1690,6 +1947,21 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--apply", action="store_true")
     codex.set_defaults(func=command_install_codex)
+    agents_install = install_sub.add_parser("agents", help="Install Hipson instructions for coding agents")
+    agent_mode = agents_install.add_mutually_exclusive_group(required=True)
+    agent_mode.add_argument("--dry-run", action="store_true")
+    agent_mode.add_argument("--apply", action="store_true")
+    agents_install.add_argument("--codex", action="store_true", help="Install Codex integration")
+    agents_install.add_argument("--cursor", action="store_true", help="Install Cursor integration")
+    agents_install.add_argument("--claude", action="store_true", help="Install Claude Code integration")
+    agents_install.add_argument("--mcp", action="store_true", help="Install MCP client integration notes")
+    agents_install.add_argument("--all", action="store_true", help="Install all agent integrations")
+    agents_install.add_argument("--codex-home", help="Override Codex home for install/testing")
+    agents_install.add_argument("--cursor-home", help="Override Cursor home for install/testing")
+    agents_install.add_argument("--claude-home", help="Override Claude home for install/testing")
+    agents_install.add_argument("--mcp-home", help="Override MCP integration home for install/testing")
+    agents_install.add_argument("--json", action="store_true", help="Print machine-readable install result")
+    agents_install.set_defaults(func=command_install_agents)
 
     packet = subparsers.add_parser("packet", help="Generate bounded agent packets")
     packet_sub = packet.add_subparsers(dest="packet_command", required=True)

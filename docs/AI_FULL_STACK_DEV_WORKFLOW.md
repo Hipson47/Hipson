@@ -15,6 +15,42 @@ current diff -> work plan -> packet -> preflight -> optional sidecar -> verify -
 Use this when an AI developer or coding agent needs to move from an open diff to
 an auditable handoff.
 
+The productized first-run command is:
+
+```bash
+hipson kit review --project . --task "review current diff for full-stack regressions" --json
+```
+
+It creates one bundle under `runs/<work_id>/` containing the contract, work
+plan, packet, preflight, verification, quality report, evidence ledger, audit
+bundle, and `summary.md`.
+
+Verification breadth is explicit:
+
+```bash
+hipson kit review --project . --task "review current diff for full-stack regressions" --verify-profile quick --json
+hipson kit review --project . --task "review current diff for full-stack regressions" --verify-profile full --json
+hipson kit review --project . --task "review current diff for full-stack regressions" --verify-profile release --json
+```
+
+`quick` runs the first planned local command. `full` and `release` run all
+commands listed in `work.json`. `--verify-limit N` can still be used as an
+explicit override when the caller intentionally wants only the first `N`
+commands.
+
+If the workflow is interrupted, resume the same run and recreate only missing
+artifacts:
+
+```bash
+hipson kit review resume --run runs/<work_id> --json
+```
+
+Resume requires the original `work.json` and `review-packet.md`. If either is
+missing, start a new review kit run so the packet and work contract stay
+auditable.
+
+The equivalent manual sequence is:
+
 ```bash
 hipson contract show --json
 hipson work --task "review current diff for full-stack regressions" --project . --include-diff --write-packet --packet-output runs/review-packet.md --work-output runs/work.json
@@ -32,6 +68,14 @@ local evidence, not model confidence.
 
 Sidecars are optional and advisory. Use them only after packet preflight and a
 human review of packet contents.
+
+```bash
+hipson kit review --project . --task "review current diff for full-stack regressions" --ai-profile free_probe --json
+# Optional real provider call:
+# hipson kit review --project . --task "review current diff for full-stack regressions" --ai-profile free_probe --run-sidecar --json
+```
+
+Manual sidecar control remains available:
 
 ```bash
 hipson sidecar run --agent reviewer_free --packet runs/review-packet.md --model openrouter/free --dry-run

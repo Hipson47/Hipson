@@ -18,12 +18,39 @@
   "properties": {
     "artifact_kind": { "const": "hipson.audit_bundle" },
     "schema_version": { "type": "string" },
-    "work": { "type": "object" },
+    "work": {
+      "type": "object",
+      "required": ["schema_version", "work_id", "created_at_utc", "task", "repo", "route", "packet", "packet_preflight", "ai_quality", "verification_commands", "memory_commands", "audit", "unknowns"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "work_id": { "type": "string" },
+        "created_at_utc": { "type": "string" },
+        "task": { "type": "string" },
+        "repo": { "type": "object" },
+        "route": { "type": "object" },
+        "packet": { "type": "object" },
+        "packet_preflight": { "type": "object" },
+        "ai_quality": { "type": "object" },
+        "verification_commands": { "type": "array" },
+        "memory_commands": { "type": "array" },
+        "audit": { "type": "array" },
+        "unknowns": { "type": "array" }
+      }
+    },
     "evidence_records": { "type": "array" },
     "latest_status": { "type": "string" },
     "latest_quality_gate": { "type": "string" },
     "latest_eval_ok": {},
-    "latest_gates": { "type": "object" },
+    "latest_gates": {
+      "type": "object",
+      "required": ["verification_gate", "sidecar_eval_gate", "human_decision_gate", "release_claim_gate"],
+      "properties": {
+        "verification_gate": { "type": "string" },
+        "sidecar_eval_gate": { "type": "string" },
+        "human_decision_gate": { "type": "string" },
+        "release_claim_gate": { "type": "string" }
+      }
+    },
     "latest_release_claim_gate": { "type": "string" },
     "unknowns": { "type": "array" }
   }

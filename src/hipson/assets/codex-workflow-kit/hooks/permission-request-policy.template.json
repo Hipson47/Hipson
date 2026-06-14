@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "template_kind": "hipson.codex_permission_request_policy_template",
+  "description": "Template only. Review before enabling in Codex.",
+  "rules": [
+    {
+      "match": {
+        "prefix_rule": ["hipson", "contract", "show"]
+      },
+      "decision": "allow",
+      "reason": "Read-only Hipson agent contract."
+    },
+    {
+      "match": {
+        "prefix_rule": ["hipson", "packet", "preflight"]
+      },
+      "decision": "allow",
+      "reason": "Local packet safety check before sidecar use."
+    },
+    {
+      "match": {
+        "prefix_rule": ["hipson", "sidecar", "run"]
+      },
+      "decision": "prompt",
+      "reason": "Provider-backed sidecars must be explicit and advisory."
+    },
+    {
+      "match": {
+        "prefix_rule": ["rm", "-rf"]
+      },
+      "decision": "block",
+      "reason": "Broad destructive operations require explicit human approval outside this template."
+    }
+  ]
+}
