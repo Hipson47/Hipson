@@ -11,6 +11,7 @@ from hipson import agent_contract as hipson_agent_contract
 from hipson import agent_install as hipson_agent_install
 from hipson import agents as hipson_agents
 from hipson import cli as hipson_cli
+from hipson import contracts as hipson_contracts
 from hipson import evidence as hipson_evidence
 from hipson import hermes as hipson_hermes
 from hipson import memory as hipson_memory
@@ -1861,6 +1862,7 @@ def test_doctor_agent_surfaces_reports_policy_contract_and_next_command(tmp_path
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
+    assert_schema_valid("agent-surfaces-doctor.schema.json", payload)
     assert payload["artifact_kind"] == "hipson.agent_surfaces_doctor"
     assert payload["contract_available"] is True
     assert payload["policy_valid"] is True
@@ -3477,9 +3479,22 @@ def test_contract_show_json_emits_stable_agent_contract(tmp_path: Path):
     assert payload["schema_version"] == "1.0"
     assert payload["adapter_capabilities"]["codex"]["primary_interface"] is True
     assert "mcp_future" in payload["adapter_capabilities"]
+    assert "mcp_stdio" in payload["adapter_capabilities"]
     assert "verification_gate" in payload["risk_policy"]["gates"]
     assert "work" in payload["available_command_surfaces"]["local_core"]
     assert_schema_valid("agent-contract.schema.json", payload)
+
+
+def test_agent_contract_lists_registered_artifact_schemas(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(repo, "contract", "show", "--project", str(repo), "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["artifact_types"] == dict(sorted(hipson_contracts.ARTIFACT_SCHEMAS.items()))
+    for schema_path in payload["artifact_types"].values():
+        assert (REPO_ROOT / schema_path).exists(), schema_path
 
 
 def test_generated_artifact_json_validates_against_schemas(tmp_path: Path):
@@ -4008,6 +4023,152 @@ def test_autopilot_run_sidecar_requires_explicit_ai_profile(tmp_path: Path):
     assert "--run-sidecar requires --ai-profile" in result.stderr
 
 
+def test_autopilot_implement_creates_executor_run(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "implement",
+        "--project",
+        str(repo),
+        "--task",
+        "implement tracked text update",
+        "--allowed-edit",
+        "tracked.txt",
+        "--acceptance",
+        "tracked text update is bounded",
+        "--verification",
+        "git diff --check",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert_schema_valid("autopilot-implement-run.schema.json", payload)
+    assert payload["artifact_kind"] == "hipson.autopilot_implement_run"
+    assert payload["autopilot"] is True
+    run_dir = Path(payload["run_dir"])
+    work = json.loads((run_dir / "work.json").read_text(encoding="utf-8"))
+    assert work["route"]["mode"] == "exec"
+    assert work["packet"]["mode"] == "exec"
+    assert "tracked.txt" in (run_dir / "review-packet.md").read_text(encoding="utf-8")
+    assert (run_dir / "preflight.json").exists()
+    assert (run_dir / "verify.json").exists()
+    assert (run_dir / "quality.json").exists()
+    assert (run_dir / "audit.json").exists()
+
+
+def test_autopilot_review_enforces_policy_denied_paths(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    policy_dir = repo / ".hipson"
+    policy_dir.mkdir()
+    (policy_dir / "policy.json").write_text(
+        json.dumps(
+            {
+                "denied_paths": ["tracked.txt"],
+                "allowed_paths": [],
+                "prompt_required_operations": ["provider_call"],
+                "local_only": True,
+                "release_gates": ["verification_gate", "human_decision_gate", "release_claim_gate"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (repo / "tracked.txt").write_text("base\nchanged\n", encoding="utf-8")
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "Project policy denied paths changed: tracked.txt" in result.stderr
+
+
+def test_autopilot_run_sidecar_blocked_by_local_only_policy(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    policy_dir = repo / ".hipson"
+    policy_dir.mkdir()
+    (policy_dir / "policy.json").write_text(
+        json.dumps(
+            {
+                "denied_paths": [],
+                "allowed_paths": [],
+                "prompt_required_operations": ["provider_call"],
+                "local_only": True,
+                "release_gates": ["verification_gate", "human_decision_gate", "release_claim_gate"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--ai-profile",
+        "free_probe",
+        "--run-sidecar",
+        "--approve-operation",
+        "provider_call",
+        "--no-diff",
+        "--json",
+    )
+
+    assert result.returncode != 0
+    assert "Project policy local_only blocks provider_call" in result.stderr
+
+
+def test_autopilot_resume_rerun_step_updates_verification(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    run_result = run_cli(
+        tmp_path,
+        "autopilot",
+        "review",
+        "--project",
+        str(repo),
+        "--task",
+        "review current diff",
+        "--no-diff",
+        "--json",
+    )
+    assert run_result.returncode == 0, run_result.stderr
+    run_dir = Path(json.loads(run_result.stdout)["run_dir"])
+
+    resume_result = run_cli(
+        tmp_path,
+        "autopilot",
+        "resume",
+        "--run",
+        str(run_dir),
+        "--rerun-step",
+        "verify",
+        "--json",
+    )
+
+    assert resume_result.returncode == 0, resume_result.stderr
+    payload = json.loads(resume_result.stdout)
+    assert_schema_valid("autopilot-review-run.schema.json", payload)
+    assert payload["mode"] == "resume"
+    assert payload["autopilot"] is True
+    assert payload["rerun_steps"] == ["verify"]
+    assert "verify.json" in payload["updated_artifacts"]
+    assert "quality.json" in payload["updated_artifacts"]
+
+
 def test_policy_validate_rejects_unsafe_deny_allow_conflicts(tmp_path: Path):
     repo = init_git_repo(tmp_path)
     policy_dir = repo / ".hipson"
@@ -4055,12 +4216,13 @@ def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
     payload = json.loads(stdout)
     assert_schema_valid("mcp-server-catalog.schema.json", payload)
     assert payload["artifact_kind"] == "hipson.mcp_server_catalog"
-    assert payload["status"] == "catalog_only"
-    assert payload["stdio_server"] is False
+    assert payload["status"] == "stdio_available"
+    assert payload["stdio_server"] is True
     assert payload["provider_policy"]["hidden_provider_calls"] is False
     tool_names = {tool["name"] for tool in payload["tools"]}
     assert {
         "contract.show",
+        "policy.show",
         "work.create",
         "packet.preflight",
         "verify.run",
@@ -4068,6 +4230,85 @@ def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
         "evidence.append",
         "audit.show",
     }.issubset(tool_names)
+
+
+def test_mcp_stdio_lists_tools_and_calls_read_first_tools(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    requests = "\n".join(
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "contract.show", "arguments": {"project": str(repo)}},
+                }
+            ),
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {"name": "policy.show", "arguments": {"project": str(repo)}},
+                }
+            ),
+        ]
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "hipson.cli", "mcp", "serve", "--project", str(repo), "--stdio"],
+        cwd=tmp_path,
+        env=env,
+        input=requests + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=DEFAULT_CLI_TIMEOUT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    responses = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [response["id"] for response in responses] == [1, 2, 3, 4]
+    tool_names = {tool["name"] for tool in responses[1]["result"]["tools"]}
+    assert {"contract.show", "policy.show", "verify.run", "evidence.append"}.issubset(tool_names)
+    contract_payload = json.loads(responses[2]["result"]["content"][0]["text"])
+    policy_payload = json.loads(responses[3]["result"]["content"][0]["text"])
+    assert contract_payload["artifact_kind"] == "hipson.agent_contract"
+    assert policy_payload["artifact_kind"] == "hipson.project_policy"
+
+
+def test_mcp_stdio_gated_write_tool_requires_approval(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    request = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "verify.run", "arguments": {"work": str(repo / "runs" / "missing-work.json")}},
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "hipson.cli", "mcp", "serve", "--project", str(repo), "--stdio"],
+        cwd=tmp_path,
+        env=env,
+        input=request + "\n",
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=DEFAULT_CLI_TIMEOUT,
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["result"]["isError"] is True
+    assert "verify.run requires approved=true" in response["result"]["content"][0]["text"]
 
 
 def test_packet_output_outside_allowed_dirs_requires_explicit_override(tmp_path: Path):

@@ -381,6 +381,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 sidecar_env=args.sidecar_env,
                 decision=args.decision,
                 allow_unsafe_output=args.allow_unsafe_output,
+                rerun_steps=args.rerun_step,
             )
         else:
             result = review_kit.run_review_kit(
@@ -413,6 +414,14 @@ def command_kit_review(args: argparse.Namespace) -> int:
 
 def command_autopilot_review(args: argparse.Namespace) -> int:
     try:
+        if args.run_sidecar and not args.ai_profile:
+            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+        policy_mod.enforce_autopilot_policy(
+            project_path=args.project,
+            operation="autopilot_review",
+            run_sidecar=args.run_sidecar,
+            approved_operations=args.approve_operation,
+        )
         result = review_kit.run_review_kit(
             task=args.task,
             project_path=args.project,
@@ -437,6 +446,77 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
         print(f"autopilot review: {result['status']}")
+        print(f"run_dir: {result['run_dir']}")
+        print(f"summary: {result['artifacts']['summary']}")
+    return 0 if result.get("status") == "passed" else 1
+
+
+def command_autopilot_implement(args: argparse.Namespace) -> int:
+    try:
+        if args.run_sidecar and not args.ai_profile:
+            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+        policy_mod.enforce_autopilot_policy(
+            project_path=args.project,
+            operation="autopilot_implement",
+            run_sidecar=args.run_sidecar,
+            approved_operations=args.approve_operation,
+        )
+        result = review_kit.run_review_kit(
+            task=args.task,
+            project_path=args.project,
+            run_root=args.run_root,
+            include_diff=args.include_diff,
+            diff_lines=args.diff_lines,
+            inspect=args.inspect,
+            allowed_edit=args.allowed_edit,
+            acceptance=args.acceptance,
+            verification=args.verification,
+            skills=args.skills,
+            verify_profile=args.verify_profile,
+            verify_limit=args.verify_limit,
+            timeout=args.timeout,
+            ai_profile=args.ai_profile,
+            run_sidecar=args.run_sidecar,
+            sidecar_config=args.sidecar_config,
+            sidecar_env=args.sidecar_env,
+            decision=args.decision,
+            allow_unsafe_output=args.allow_unsafe_output,
+        )
+    except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    result = {**result, "artifact_kind": "hipson.autopilot_implement_run", "autopilot": True}
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"autopilot implement: {result['status']}")
+        print(f"run_dir: {result['run_dir']}")
+        print(f"summary: {result['artifacts']['summary']}")
+    return 0 if result.get("status") == "passed" else 1
+
+
+def command_autopilot_resume(args: argparse.Namespace) -> int:
+    try:
+        result = review_kit.resume_review_kit(
+            run_path=args.run,
+            verify_profile=args.verify_profile,
+            verify_limit=args.verify_limit,
+            timeout=args.timeout,
+            run_sidecar=args.run_sidecar,
+            sidecar_config=args.sidecar_config,
+            sidecar_env=args.sidecar_env,
+            decision=args.decision,
+            allow_unsafe_output=args.allow_unsafe_output,
+            rerun_steps=args.rerun_step,
+        )
+    except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
+        print(exc, file=sys.stderr)
+        return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
+    result = {**result, "artifact_kind": "hipson.autopilot_review_run", "autopilot": True}
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"autopilot resume: {result['status']}")
         print(f"run_dir: {result['run_dir']}")
         print(f"summary: {result['artifacts']['summary']}")
     return 0 if result.get("status") == "passed" else 1
@@ -471,6 +551,9 @@ def command_policy_validate(args: argparse.Namespace) -> int:
 
 def command_mcp_serve(args: argparse.Namespace) -> int:
     try:
+        if args.stdio:
+            mcp_server.serve_stdio(project_path=args.project, stdin=sys.stdin, stdout=sys.stdout)
+            return 0
         payload = mcp_server.server_catalog(project_path=args.project)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
@@ -1668,6 +1751,13 @@ def build_parser() -> argparse.ArgumentParser:
     kit_review.add_argument("--project", default=".", help="Target repository; defaults to current directory")
     kit_review.add_argument("--run-root", default="runs", help="Generated run root; defaults to <project>/runs")
     kit_review.add_argument("--run", dest="resume_run", help="Existing runs/<work_id> directory for review resume")
+    kit_review.add_argument(
+        "--rerun-step",
+        action="append",
+        default=[],
+        choices=review_kit.RERUN_STEPS,
+        help="Resume mode: recompute one existing step; repeatable",
+    )
     kit_review.add_argument("--include-diff", action="store_true", default=True, help="Include redacted diff context")
     kit_review.add_argument("--no-diff", dest="include_diff", action="store_false", help="Do not include diff context")
     kit_review.add_argument("--diff-lines", type=int, default=120, help="Diff line budget for the embedded scan")
@@ -1715,12 +1805,82 @@ def build_parser() -> argparse.ArgumentParser:
     autopilot_review.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
     autopilot_review.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
     autopilot_review.add_argument(
+        "--approve-operation",
+        action="append",
+        default=[],
+        help="Explicitly approve a policy prompt-required operation such as provider_call",
+    )
+    autopilot_review.add_argument(
         "--allow-unsafe-output",
         action="store_true",
         help="Explicitly allow the autopilot run root outside generated artifact directories",
     )
     autopilot_review.add_argument("--json", action="store_true", help="Print machine-readable autopilot result")
     autopilot_review.set_defaults(func=command_autopilot_review)
+
+    autopilot_implement = autopilot_sub.add_parser("implement", help="Run bounded autopilot implementation workflow")
+    autopilot_implement.add_argument("--task", required=True, help="Implementation task description")
+    autopilot_implement.add_argument("--project", default=".", help="Target repository; defaults to current directory")
+    autopilot_implement.add_argument("--run-root", default="runs", help="Generated run root; defaults to <project>/runs")
+    autopilot_implement.add_argument("--include-diff", action="store_true", default=True, help="Include redacted diff context")
+    autopilot_implement.add_argument("--no-diff", dest="include_diff", action="store_false", help="Do not include diff context")
+    autopilot_implement.add_argument("--diff-lines", type=int, default=120, help="Diff line budget for the embedded scan")
+    autopilot_implement.add_argument("--inspect", help="Comma-separated files to inspect for executor packets")
+    autopilot_implement.add_argument("--allowed-edit", required=True, help="Comma-separated edit scope required for executor packets")
+    autopilot_implement.add_argument("--acceptance", help="Observable acceptance criterion for executor packets")
+    autopilot_implement.add_argument("--verification", help="Primary verification command for the work brief")
+    autopilot_implement.add_argument("--skills", help="Comma-separated extra skills or references to include")
+    autopilot_implement.add_argument(
+        "--verify-profile",
+        choices=review_kit.VERIFY_PROFILES,
+        default="quick",
+        help="Verification breadth: quick runs the first command; full/release run all planned commands",
+    )
+    autopilot_implement.add_argument("--verify-limit", type=int, default=None, help="Explicitly run only the first N commands")
+    autopilot_implement.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Verification timeout per command")
+    autopilot_implement.add_argument("--ai-profile", help="Prepare an advisory sidecar pass from this curated profile")
+    autopilot_implement.add_argument("--run-sidecar", action="store_true", help="Explicitly run the provider-backed sidecar")
+    autopilot_implement.add_argument("--sidecar-config", help="Agent config JSON for --run-sidecar")
+    autopilot_implement.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
+    autopilot_implement.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
+    autopilot_implement.add_argument(
+        "--approve-operation",
+        action="append",
+        default=[],
+        help="Explicitly approve a policy prompt-required operation such as provider_call",
+    )
+    autopilot_implement.add_argument(
+        "--allow-unsafe-output",
+        action="store_true",
+        help="Explicitly allow the autopilot run root outside generated artifact directories",
+    )
+    autopilot_implement.add_argument("--json", action="store_true", help="Print machine-readable autopilot result")
+    autopilot_implement.set_defaults(func=command_autopilot_implement)
+
+    autopilot_resume = autopilot_sub.add_parser("resume", help="Resume an autopilot run and optionally rerun selected steps")
+    autopilot_resume.add_argument("--run", required=True, help="Existing runs/<work_id> directory")
+    autopilot_resume.add_argument(
+        "--rerun-step",
+        action="append",
+        default=[],
+        choices=review_kit.RERUN_STEPS,
+        help="Recompute one existing step; repeatable",
+    )
+    autopilot_resume.add_argument(
+        "--verify-profile",
+        choices=review_kit.VERIFY_PROFILES,
+        default="quick",
+        help="Verification breadth used if verify is missing or rerun",
+    )
+    autopilot_resume.add_argument("--verify-limit", type=int, default=None, help="Explicitly run only the first N commands")
+    autopilot_resume.add_argument("--timeout", type=int, default=verification.DEFAULT_TIMEOUT, help="Verification timeout per command")
+    autopilot_resume.add_argument("--run-sidecar", action="store_true", help="Explicitly run the provider-backed sidecar if missing")
+    autopilot_resume.add_argument("--sidecar-config", help="Agent config JSON for --run-sidecar")
+    autopilot_resume.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
+    autopilot_resume.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
+    autopilot_resume.add_argument("--allow-unsafe-output", action="store_true", help="Explicitly allow unsafe output paths")
+    autopilot_resume.add_argument("--json", action="store_true", help="Print machine-readable autopilot result")
+    autopilot_resume.set_defaults(func=command_autopilot_resume)
 
     policy = subparsers.add_parser("policy", help="Inspect and validate .hipson project policy")
     policy_sub = policy.add_subparsers(dest="policy_command", required=True)
@@ -1733,11 +1893,12 @@ def build_parser() -> argparse.ArgumentParser:
     policy_validate.add_argument("--json", action="store_true", help="Print machine-readable validation result")
     policy_validate.set_defaults(func=command_policy_validate)
 
-    mcp = subparsers.add_parser("mcp", help="Expose Hipson's read-first MCP skeleton")
+    mcp = subparsers.add_parser("mcp", help="Expose Hipson's read-first MCP surface")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
-    mcp_serve = mcp_sub.add_parser("serve", help="Print MCP skeleton catalog")
+    mcp_serve = mcp_sub.add_parser("serve", help="Serve MCP stdio or print MCP catalog")
     mcp_serve.add_argument("--project", default=".", help="Target repository; defaults to current directory")
     mcp_serve.add_argument("--catalog", action="store_true", help="Print catalog-only MCP metadata")
+    mcp_serve.add_argument("--stdio", action="store_true", help="Run the minimal MCP stdio JSON-RPC server")
     mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
     mcp_serve.set_defaults(func=command_mcp_serve)
 

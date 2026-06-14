@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -22,6 +23,7 @@ from hipson import verification as verification_mod
 from hipson.project import resolve_project
 
 VERIFY_PROFILES = ("quick", "full", "release")
+RERUN_STEPS = ("contract", "preflight", "verify", "quality", "quality_eval", "evidence", "audit", "summary")
 
 
 def run_review_kit(
@@ -31,6 +33,11 @@ def run_review_kit(
     run_root: str | Path = "runs",
     include_diff: bool = True,
     diff_lines: int = 120,
+    inspect: str | None = None,
+    allowed_edit: str | None = None,
+    acceptance: str | None = None,
+    verification: str | None = None,
+    skills: str | None = None,
     verify_profile: str = "quick",
     verify_limit: int | None = None,
     timeout: int = verification_mod.DEFAULT_TIMEOUT,
@@ -69,6 +76,11 @@ def run_review_kit(
         diff_lines=diff_lines,
         write_packet=True,
         packet_output=str(paths["packet"]),
+        inspect=inspect,
+        allowed_edit=allowed_edit,
+        acceptance=acceptance,
+        verification=verification,
+        skills=skills,
         ai_profile=ai_profile,
         allow_unsafe_output=allow_unsafe_output,
         work_id=work_id,
@@ -103,9 +115,9 @@ def run_review_kit(
         verify_profile=verify_profile,
         verify_limit=verify_limit,
     )
-    verification = verification_mod.run_verification(work_plan=plan_payload, commands=commands, timeout=timeout)
+    verification_result = verification_mod.run_verification(work_plan=plan_payload, commands=commands, timeout=timeout)
     verification_mod.write_verification_artifact(
-        verification,
+        verification_result,
         paths["verification"],
         cwd=project,
         allow_unsafe_output=allow_unsafe_output,
@@ -131,7 +143,7 @@ def run_review_kit(
 
     record = evidence.build_evidence_record(
         work_plan=plan_payload,
-        verification=verification,
+        verification=verification_result,
         quality_report=quality_report,
         quality_eval=quality_eval,
         sidecar_report=str(sidecar_path) if sidecar_path else "",
@@ -144,7 +156,7 @@ def run_review_kit(
 
     summary = render_summary(
         plan=plan_payload,
-        verification=verification,
+        verification=verification_result,
         quality_report=quality_report,
         quality_eval=quality_eval,
         evidence_record=record,
@@ -190,10 +202,12 @@ def resume_review_kit(
     sidecar_env: str | None = None,
     decision: str = "pending",
     allow_unsafe_output: bool = False,
+    rerun_steps: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Resume a review kit run by filling missing artifacts only."""
 
     _validate_verify_profile(verify_profile)
+    rerun = _validate_rerun_steps(rerun_steps)
     run_dir = Path(run_path).expanduser()
     if not run_dir.is_absolute():
         run_dir = Path.cwd() / run_dir
@@ -219,11 +233,13 @@ def resume_review_kit(
     created: list[str] = []
     updated: list[str] = []
 
-    if not paths["contract"].exists():
+    if "contract" in rerun or not paths["contract"].exists():
+        contract_exists = paths["contract"].exists()
         _write_json(paths["contract"], agent_contract.build_agent_contract(project))
-        created.append(paths["contract"].name)
+        (updated if contract_exists else created).append(paths["contract"].name)
 
-    if not paths["preflight"].exists():
+    if "preflight" in rerun or not paths["preflight"].exists():
+        preflight_exists = paths["preflight"].exists()
         preflight = packet_preflight.preflight_packet(paths["packet"])
         packet_preflight.write_preflight(
             preflight,
@@ -231,7 +247,7 @@ def resume_review_kit(
             cwd=project,
             allow_unsafe_output=allow_unsafe_output,
         )
-        created.append(paths["preflight"].name)
+        (updated if preflight_exists else created).append(paths["preflight"].name)
 
     sidecar_status = _sidecar_status(plan_payload, run_sidecar=run_sidecar)
     sidecar_path = paths["sidecar"] if paths["sidecar"].exists() else None
@@ -251,10 +267,11 @@ def resume_review_kit(
         created.append(paths["sidecar"].name)
     sidecar_created = paths["sidecar"].name in created
 
-    verification_created = False
-    if paths["verification"].exists():
+    verification_changed = False
+    if paths["verification"].exists() and "verify" not in rerun:
         verification = _load_json(paths["verification"])
     else:
+        verification_exists = paths["verification"].exists()
         commands = _verification_commands_for_profile(
             plan_payload,
             verify_profile=verify_profile,
@@ -267,12 +284,12 @@ def resume_review_kit(
             cwd=project,
             allow_unsafe_output=allow_unsafe_output,
         )
-        created.append(paths["verification"].name)
-        verification_created = True
+        (updated if verification_exists else created).append(paths["verification"].name)
+        verification_changed = True
 
     quality_exists = paths["quality"].exists()
     quality_changed = False
-    if not quality_exists or verification_created or sidecar_created:
+    if "quality" in rerun or not quality_exists or verification_changed or sidecar_created:
         quality_report = quality.build_quality_report(
             work_path=paths["work"],
             verification_path=paths["verification"],
@@ -293,7 +310,9 @@ def resume_review_kit(
     quality_eval_exists = paths["quality_eval"].exists()
     quality_eval_changed = False
     quality_eval: dict[str, Any] | None
-    if sidecar_path is not None and (not quality_eval_exists or verification_created or sidecar_created):
+    if sidecar_path is not None and (
+        "quality_eval" in rerun or not quality_eval_exists or verification_changed or sidecar_created
+    ):
         quality_eval = evals.run_quality_eval(
             project_path=project,
             packet_path=paths["packet"],
@@ -319,7 +338,7 @@ def resume_review_kit(
         if str(record.get("work", {}).get("work_id", "")) == str(plan_payload.get("work_id", ""))
     ]
     evidence_changed = False
-    if not records or verification_created or quality_changed or quality_eval_changed or sidecar_created:
+    if "evidence" in rerun or not records or verification_changed or quality_changed or quality_eval_changed or sidecar_created:
         record = evidence.build_evidence_record(
             work_plan=plan_payload,
             verification=verification,
@@ -337,7 +356,7 @@ def resume_review_kit(
         ledger = evidence.ledger_path(run_dir)
 
     audit_exists = paths["audit"].exists()
-    if not audit_exists or evidence_changed:
+    if "audit" in rerun or not audit_exists or evidence_changed:
         audit = evidence.audit_bundle(work_path=str(paths["work"]), ledger_root=run_dir)
         _write_json(paths["audit"], audit)
         (updated if audit_exists else created).append(paths["audit"].name)
@@ -345,7 +364,7 @@ def resume_review_kit(
         audit = _load_json(paths["audit"])
 
     summary_exists = paths["summary"].exists()
-    if not summary_exists or evidence_changed:
+    if "summary" in rerun or not summary_exists or evidence_changed:
         summary = render_summary(
             plan=plan_payload,
             verification=verification,
@@ -369,6 +388,7 @@ def resume_review_kit(
         "status": "passed" if quality_report.get("ok") else "blocked",
         "created_artifacts": created,
         "updated_artifacts": updated,
+        "rerun_steps": sorted(rerun),
         "sidecar": sidecar_status,
         "gates": audit.get("latest_gates", {}),
         "artifacts": {
@@ -515,6 +535,14 @@ def _validate_verify_profile(profile: str) -> None:
     if profile not in VERIFY_PROFILES:
         values = ", ".join(VERIFY_PROFILES)
         raise SystemExit(f"--verify-profile must be one of: {values}")
+
+
+def _validate_rerun_steps(steps: Sequence[str]) -> set[str]:
+    values = {step for step in steps if step}
+    invalid = sorted(values - set(RERUN_STEPS))
+    if invalid:
+        raise SystemExit(f"--rerun-step must be one of: {', '.join(RERUN_STEPS)}")
+    return values
 
 
 def _verification_commands_for_profile(

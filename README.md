@@ -22,7 +22,8 @@ preflight, verify locally, record evidence, and produce audit/handoff summaries.
 - **AI Review Control Kit v0** through `hipson kit review`, producing a single
   `runs/<work_id>/` bundle for agent review with resumable missing-step replay.
 - **Agent Autopilot Layer v0** through `hipson install agents`, `hipson agent
-  bootstrap`, `hipson autopilot review`, policy files, and an MCP skeleton.
+  bootstrap`, `hipson autopilot review`, `hipson autopilot implement`, policy
+  files, and a minimal read-first MCP stdio surface.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Codex work briefs** through `hipson work`, joining route, scan, packet,
   verify, memory, and audit guidance into one local contract.
@@ -84,6 +85,8 @@ uv run hipson contract show --json
 uv run hipson install agents --codex --dry-run
 uv run hipson agent bootstrap --target codex --json
 uv run hipson autopilot review --task "review current diff" --json
+uv run hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
+uv run hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
 uv run hipson kit review --project . --json
 uv run hipson kit review resume --run runs/<work_id> --json
 uv run hipson route --task "security review of auth"
@@ -118,13 +121,16 @@ hipson agent bootstrap --target codex --json
 hipson agent bootstrap --target cursor --json
 hipson agent bootstrap --target claude --json
 hipson autopilot review --task "review current diff" --verify-profile quick --json
+hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
+hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
 hipson doctor --agent-surfaces --json
 hipson policy show --json
 hipson policy validate
 hipson mcp serve --catalog
+hipson mcp serve --stdio
 hipson kit review --project . --task "review current diff" --verify-profile quick --json
 hipson kit review --project . --task "review current diff" --verify-profile full --json
-hipson kit review resume --run runs/<work_id> --verify-profile release --json
+hipson kit review resume --run runs/<work_id> --verify-profile release --rerun-step verify --json
 hipson hermes doctor
 hipson hermes install-skill
 hipson hermes intake --project . --task "review failing CI" --channel telegram
@@ -201,8 +207,19 @@ breadth. `quick` runs the first planned local command, while `full` and
 some artifacts are deleted, resume without rebuilding the work plan or packet:
 
 ```bash
-hipson kit review resume --run runs/<work_id> --json
+hipson kit review resume --run runs/<work_id> --rerun-step verify --json
 ```
+
+For bounded implementation planning, agents can use the same run bundle with an
+executor packet and explicit edit scope:
+
+```bash
+hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
+```
+
+Project policy is enforced before autopilot runs. `denied_paths` block runs when
+the current diff touches protected files, `local_only` blocks provider-backed
+sidecars, and prompt-required operations must be explicitly approved.
 
 For manual control of the same steps:
 

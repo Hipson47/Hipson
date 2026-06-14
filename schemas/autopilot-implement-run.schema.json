@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Hipson Autopilot Review Run",
+  "title": "Hipson Autopilot Implement Run",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -17,11 +17,11 @@
     "artifacts"
   ],
   "properties": {
-    "artifact_kind": { "const": "hipson.autopilot_review_run" },
+    "artifact_kind": { "const": "hipson.autopilot_implement_run" },
     "schema_version": { "type": "string" },
     "work_id": { "type": "string" },
     "run_dir": { "type": "string" },
-    "mode": { "enum": ["run", "resume"] },
+    "mode": { "enum": ["run"] },
     "verify_profile": { "enum": ["quick", "full", "release"] },
     "status": { "type": "string" },
     "autopilot": { "type": "boolean" },

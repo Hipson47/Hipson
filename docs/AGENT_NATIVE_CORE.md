@@ -34,7 +34,7 @@ The JSON includes:
 - `provider_policy`;
 - `memory_policy`;
 - `verification_policy`;
-- `adapter_capabilities` for `codex`, `hermes`, and `mcp_future`.
+- `adapter_capabilities` for `codex`, `hermes`, `mcp_future`, and `mcp_stdio`.
 
 Codex remains the primary coding interface. Hermes is optional status, intake,
 Telegram, scheduler, and long-flow infrastructure. Future MCP adapters should
@@ -52,6 +52,8 @@ can route them safely:
 - `hipson.quality_eval`;
 - `hipson.evidence_record`;
 - `hipson.audit_bundle`.
+- agent bootstrap, install, policy, doctor, review-kit, autopilot, and MCP
+  catalog artifacts used by agent integrations.
 
 Schemas live under `schemas/` and are intentionally structural. They define the
 required control-plane fields while leaving room for compatible additions.
@@ -146,10 +148,22 @@ Verification profiles make repeated agent work predictable:
 If a run is interrupted, resume the existing run directory:
 
 ```bash
-hipson kit review resume --run runs/<work_id> --json
+hipson kit review resume --run runs/<work_id> --rerun-step verify --json
 ```
 
 Resume fills missing `contract.json`, `preflight.json`, `verify.json`,
 `quality.json`, `quality-eval.json`, `evidence.jsonl`, `audit.json`, or
 `summary.md` without rebuilding the existing work plan or packet. Missing
 `work.json` or `review-packet.md` requires a new run.
+
+Autopilot uses the same artifact model:
+
+```bash
+hipson autopilot review --task "review current diff" --json
+hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
+hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+```
+
+Project policy is checked before autopilot runs. Denied-path changes, invalid
+policy, local-only sidecar blocks, and prompt-required operations stop the
+workflow before packets or provider calls are used.
