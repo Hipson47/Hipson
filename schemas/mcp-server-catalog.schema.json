@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson MCP Server Catalog",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "project",
+    "status",
+    "server_mode",
+    "transport",
+    "stdio_server",
+    "warnings",
+    "provider_policy",
+    "tools",
+    "resources"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.mcp_server_catalog" },
+    "schema_version": { "type": "string" },
+    "project": { "type": "string" },
+    "status": { "const": "catalog_only" },
+    "server_mode": { "const": "catalog_only" },
+    "transport": { "type": "string" },
+    "stdio_server": { "type": "boolean" },
+    "warnings": { "type": "array" },
+    "provider_policy": {
+      "type": "object",
+      "required": ["default", "hidden_provider_calls", "provider_calls_require"],
+      "properties": {
+        "default": { "type": "string" },
+        "hidden_provider_calls": { "type": "boolean" },
+        "provider_calls_require": { "type": "array" }
+      }
+    },
+    "tools": { "type": "array" },
+    "resources": { "type": "array" }
+  }
+}

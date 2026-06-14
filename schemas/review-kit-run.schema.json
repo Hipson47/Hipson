@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Review Kit Run",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "work_id",
+    "run_dir",
+    "mode",
+    "verify_profile",
+    "status",
+    "sidecar",
+    "gates",
+    "artifacts"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.review_kit_run" },
+    "schema_version": { "type": "string" },
+    "work_id": { "type": "string" },
+    "run_dir": { "type": "string" },
+    "mode": { "enum": ["run", "resume"] },
+    "verify_profile": { "enum": ["quick", "full", "release"] },
+    "status": { "type": "string" },
+    "sidecar": { "type": "object" },
+    "gates": { "type": "object" },
+    "artifacts": {
+      "type": "object",
+      "required": ["contract", "work", "packet", "preflight", "verification", "quality", "evidence", "audit", "summary"],
+      "properties": {
+        "contract": { "type": "string" },
+        "work": { "type": "string" },
+        "packet": { "type": "string" },
+        "preflight": { "type": "string" },
+        "verification": { "type": "string" },
+        "quality": { "type": "string" },
+        "quality_eval": { "type": "string" },
+        "evidence": { "type": "string" },
+        "audit": { "type": "string" },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+}

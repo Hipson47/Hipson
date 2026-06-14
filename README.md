@@ -118,9 +118,10 @@ hipson agent bootstrap --target codex --json
 hipson agent bootstrap --target cursor --json
 hipson agent bootstrap --target claude --json
 hipson autopilot review --task "review current diff" --verify-profile quick --json
+hipson doctor --agent-surfaces --json
 hipson policy show --json
 hipson policy validate
-hipson mcp serve --json
+hipson mcp serve --catalog
 hipson kit review --project . --task "review current diff" --verify-profile quick --json
 hipson kit review --project . --task "review current diff" --verify-profile full --json
 hipson kit review resume --run runs/<work_id> --verify-profile release --json

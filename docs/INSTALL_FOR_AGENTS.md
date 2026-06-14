@@ -45,3 +45,17 @@ hipson policy validate
 The policy controls default workflow, denied paths, prompt-required operations,
 local-only defaults, release gates, and agent integration settings. Deny/allow
 path conflicts fail validation.
+
+## Health Check
+
+After installing, check agent readiness:
+
+```bash
+hipson doctor --agent-surfaces --json
+```
+
+For MCP clients, v0 provides a catalog-only surface:
+
+```bash
+hipson mcp serve --catalog
+```

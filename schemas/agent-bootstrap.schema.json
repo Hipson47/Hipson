@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Agent Bootstrap",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "artifact_kind",
+    "schema_version",
+    "target",
+    "project",
+    "contract_available",
+    "recommended_first_command",
+    "installed_surfaces",
+    "warnings",
+    "fallback_commands"
+  ],
+  "properties": {
+    "artifact_kind": { "const": "hipson.agent_bootstrap" },
+    "schema_version": { "type": "string" },
+    "target": { "enum": ["codex", "cursor", "claude", "mcp"] },
+    "project": { "type": "string" },
+    "contract_available": { "type": "boolean" },
+    "contract_artifact_kind": { "type": "string" },
+    "recommended_first_command": { "type": "string" },
+    "recommended_first_tool": { "type": "string" },
+    "installed_surfaces": { "type": "object" },
+    "policy": { "type": "object" },
+    "warnings": { "type": "array" },
+    "fallback_commands": { "type": "array" }
+  }
+}

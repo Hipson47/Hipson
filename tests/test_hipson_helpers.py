@@ -1739,50 +1739,101 @@ def test_install_codex_apply_replaces_existing_marker_block(tmp_path: Path):
 
 def test_install_agents_dry_run_does_not_overwrite_user_files(tmp_path: Path):
     cursor_home = tmp_path / ".cursor"
+    claude_home = tmp_path / ".claude"
+    mcp_home = tmp_path / ".hipson-mcp"
+    codex_home = tmp_path / ".codex"
     rules = cursor_home / "rules"
     rules.mkdir(parents=True)
     cursor_file = rules / "hipson.mdc"
     cursor_file.write_text("User Cursor rules\n", encoding="utf-8")
 
     payload = hipson_agent_install.install_agents(
-        targets=["cursor", "codex"],
+        targets=["all"],
         dry_run=True,
         cursor_home=cursor_home,
-        codex_home=tmp_path / ".codex",
+        claude_home=claude_home,
+        mcp_home=mcp_home,
+        codex_home=codex_home,
     )
 
+    assert_schema_valid("agent-install.schema.json", payload)
     assert payload["mode"] == "dry-run"
     assert cursor_file.read_text(encoding="utf-8") == "User Cursor rules\n"
-    assert not (tmp_path / ".codex").exists()
+    assert not codex_home.exists()
+    assert not claude_home.exists()
+    assert not mcp_home.exists()
 
 
 def test_install_agents_apply_uses_managed_marker_blocks_and_backups(tmp_path: Path):
     cursor_home = tmp_path / ".cursor"
     claude_home = tmp_path / ".claude"
+    mcp_home = tmp_path / ".hipson-mcp"
     cursor_path = cursor_home / "rules" / "hipson.mdc"
     claude_path = claude_home / "CLAUDE.md"
+    mcp_path = mcp_home / "hipson-mcp.md"
     cursor_path.parent.mkdir(parents=True)
     claude_path.parent.mkdir(parents=True)
+    mcp_path.parent.mkdir(parents=True)
     cursor_path.write_text("Existing Cursor rules\n", encoding="utf-8")
     claude_path.write_text("Existing Claude rules\n", encoding="utf-8")
+    mcp_path.write_text("Existing MCP notes\n", encoding="utf-8")
 
-    hipson_agent_install.install_agents(
-        targets=["cursor", "claude"],
+    payload = hipson_agent_install.install_agents(
+        targets=["cursor", "claude", "mcp"],
         dry_run=False,
         cursor_home=cursor_home,
         claude_home=claude_home,
+        mcp_home=mcp_home,
     )
 
+    assert_schema_valid("agent-install.schema.json", payload)
     cursor_text = cursor_path.read_text(encoding="utf-8")
     claude_text = claude_path.read_text(encoding="utf-8")
+    mcp_text = mcp_path.read_text(encoding="utf-8")
     assert "Existing Cursor rules" in cursor_text
     assert "Existing Claude rules" in claude_text
+    assert "Existing MCP notes" in mcp_text
     assert START_MARKER in cursor_text
     assert END_MARKER in claude_text
+    assert START_MARKER in mcp_text
     assert "hipson contract show --json" in cursor_text
     assert "hipson packet preflight" in claude_text
+    assert "hipson mcp serve" in mcp_text
     assert list(cursor_path.parent.glob("hipson.mdc.backup-*"))
     assert list(claude_home.glob("CLAUDE.md.backup-*"))
+    assert list(mcp_home.glob("hipson-mcp.md.backup-*"))
+
+
+def test_install_agents_apply_replaces_managed_marker_blocks(tmp_path: Path):
+    cursor_home = tmp_path / ".cursor"
+    cursor_path = cursor_home / "rules" / "hipson.mdc"
+    cursor_path.parent.mkdir(parents=True)
+    cursor_path.write_text(f"Before\n{START_MARKER}\nold\n{END_MARKER}\nAfter\n", encoding="utf-8")
+
+    hipson_agent_install.install_agents(targets=["cursor"], dry_run=False, cursor_home=cursor_home)
+
+    text = cursor_path.read_text(encoding="utf-8")
+    assert "Before" in text
+    assert "After" in text
+    assert "\nold\n" not in text
+    assert text.count(START_MARKER) == 1
+    assert text.count(END_MARKER) == 1
+
+
+def test_install_agents_codex_writes_hook_templates_without_force_enable(tmp_path: Path):
+    codex_home = tmp_path / ".codex"
+
+    payload = hipson_agent_install.install_agents(targets=["codex"], dry_run=False, codex_home=codex_home)
+
+    assert_schema_valid("agent-install.schema.json", payload)
+    hooks = sorted((codex_home / "hooks").glob("*.template.json"))
+    assert {path.name for path in hooks} == {
+        "permission-request-policy.template.json",
+        "post-tool-use-policy.template.json",
+        "prefix-rules.template.json",
+    }
+    assert not list((codex_home / "hooks").glob("*.enabled.json"))
+    assert all("Template only" in path.read_text(encoding="utf-8") for path in hooks)
 
 
 def test_agent_bootstrap_emits_stable_json_for_each_target(tmp_path: Path):
@@ -1793,6 +1844,7 @@ def test_agent_bootstrap_emits_stable_json_for_each_target(tmp_path: Path):
 
         assert result.returncode == 0, result.stderr
         payload = json.loads(result.stdout)
+        assert_schema_valid("agent-bootstrap.schema.json", payload)
         assert payload["artifact_kind"] == "hipson.agent_bootstrap"
         assert payload["target"] == target
         assert payload["project"] == str(repo)
@@ -1800,6 +1852,47 @@ def test_agent_bootstrap_emits_stable_json_for_each_target(tmp_path: Path):
         assert payload["recommended_first_command"] == "hipson contract show --json"
         assert "installed_surfaces" in payload
         assert "fallback_commands" in payload
+
+
+def test_doctor_agent_surfaces_reports_policy_contract_and_next_command(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    result = run_cli(repo, "doctor", "--agent-surfaces", "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["artifact_kind"] == "hipson.agent_surfaces_doctor"
+    assert payload["contract_available"] is True
+    assert payload["policy_valid"] is True
+    assert "surfaces" in payload
+    assert payload["recommended_next_command"]
+
+
+def test_agent_surface_commands_do_not_call_provider_or_network(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+
+    def fail_call(*_args, **_kwargs):
+        raise AssertionError("agent surface command must not call providers or network")
+
+    old_provider_chat = hipson_agents.provider_chat
+    old_urlopen = hipson_agents.urllib.request.urlopen
+    try:
+        hipson_agents.provider_chat = fail_call
+        hipson_agents.urllib.request.urlopen = fail_call
+        commands = [
+            ("contract", "show", "--project", str(repo), "--json"),
+            ("install", "agents", "--cursor", "--dry-run", "--cursor-home", str(tmp_path / ".cursor"), "--json"),
+            ("agent", "bootstrap", "--target", "codex", "--project", str(repo), "--json"),
+            ("policy", "show", "--project", str(repo), "--json"),
+            ("doctor", "--agent-surfaces", "--json"),
+            ("mcp", "serve", "--project", str(repo), "--catalog"),
+        ]
+        for command in commands:
+            rc, _stdout, stderr = run_cli_inprocess(*command)
+            assert rc == 0, f"{command}: {stderr}"
+    finally:
+        hipson_agents.provider_chat = old_provider_chat
+        hipson_agents.urllib.request.urlopen = old_urlopen
 
 
 def test_codex_managed_instructions_contain_hipson_first_workflow():
@@ -3539,6 +3632,7 @@ def test_review_kit_creates_expected_run_directory_and_schema_valid_artifacts(tm
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
+    assert_schema_valid("review-kit-run.schema.json", payload)
     run_dir = Path(payload["run_dir"])
     assert run_dir == repo / "runs" / payload["work_id"]
     expected = {
@@ -3554,8 +3648,12 @@ def test_review_kit_creates_expected_run_directory_and_schema_valid_artifacts(tm
     }
     assert expected.issubset({path.name for path in run_dir.iterdir()})
     assert not (run_dir / "quality-eval.json").exists()
+    work_payload = json.loads((run_dir / "work.json").read_text(encoding="utf-8"))
+    assert work_payload["packet_preflight"]["output"] == str(run_dir / "preflight.json")
+    assert str(run_dir / "review-packet.md") in work_payload["packet_preflight"]["command"]
+    assert str(run_dir / "preflight.json") in work_payload["packet_preflight"]["command"]
     assert_schema_valid("agent-contract.schema.json", json.loads((run_dir / "contract.json").read_text(encoding="utf-8")))
-    assert_schema_valid("work-plan.schema.json", json.loads((run_dir / "work.json").read_text(encoding="utf-8")))
+    assert_schema_valid("work-plan.schema.json", work_payload)
     assert_schema_valid("packet-preflight.schema.json", json.loads((run_dir / "preflight.json").read_text(encoding="utf-8")))
     assert_schema_valid("verification.schema.json", json.loads((run_dir / "verify.json").read_text(encoding="utf-8")))
     assert_schema_valid("quality-report.schema.json", json.loads((run_dir / "quality.json").read_text(encoding="utf-8")))
@@ -3639,6 +3737,7 @@ def test_review_kit_resume_recreates_missing_artifacts_without_rebuilding_work(t
 
     assert rc == 0, stderr
     payload = json.loads(stdout)
+    assert_schema_valid("review-kit-run.schema.json", payload)
     assert payload["mode"] == "resume"
     assert payload["verify_profile"] == "quick"
     assert (run_dir / "work.json").read_text(encoding="utf-8") == work_before
@@ -3811,6 +3910,7 @@ def test_autopilot_review_creates_expected_run_directory(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
+    assert_schema_valid("autopilot-review-run.schema.json", payload)
     run_dir = Path(payload["run_dir"])
     assert payload["artifact_kind"] == "hipson.autopilot_review_run"
     assert payload["autopilot"] is True
@@ -3929,6 +4029,7 @@ def test_policy_validate_rejects_unsafe_deny_allow_conflicts(tmp_path: Path):
 
     assert result.returncode != 0
     payload = json.loads(result.stdout)
+    assert_schema_valid("project-policy.schema.json", payload)
     assert payload["artifact_kind"] == "hipson.project_policy"
     assert payload["valid"] is False
     assert any("both denied and allowed" in issue for issue in payload["issues"])
@@ -3945,14 +4046,17 @@ def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
     try:
         hipson_agents.provider_chat = fail_call
         hipson_agents.urllib.request.urlopen = fail_call
-        rc, stdout, stderr = run_cli_inprocess("mcp", "serve", "--project", str(repo), "--json")
+        rc, stdout, stderr = run_cli_inprocess("mcp", "serve", "--project", str(repo), "--catalog")
     finally:
         hipson_agents.provider_chat = old_provider_chat
         hipson_agents.urllib.request.urlopen = old_urlopen
 
     assert rc == 0, stderr
     payload = json.loads(stdout)
+    assert_schema_valid("mcp-server-catalog.schema.json", payload)
     assert payload["artifact_kind"] == "hipson.mcp_server_catalog"
+    assert payload["status"] == "catalog_only"
+    assert payload["stdio_server"] is False
     assert payload["provider_policy"]["hidden_provider_calls"] is False
     tool_names = {tool["name"] for tool in payload["tools"]}
     assert {

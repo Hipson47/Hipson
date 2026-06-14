@@ -58,6 +58,33 @@ def build_bootstrap(*, target: str, project_path: str | Path = ".") -> dict[str,
     }
 
 
+def agent_surfaces_report(*, project_path: str | Path = ".") -> dict[str, Any]:
+    project = resolve_project(str(project_path))
+    warnings: list[str] = []
+    try:
+        agent_contract.build_agent_contract(project)
+        contract_available = True
+    except SystemExit as exc:
+        contract_available = False
+        warnings.append(str(exc))
+    policy_payload = policy.load_policy(project)
+    warnings.extend(policy_payload.get("warnings", []))
+    surfaces = installed_surfaces()
+    return {
+        "artifact_kind": "hipson.agent_surfaces_doctor",
+        "schema_version": SCHEMA_VERSION,
+        "project": str(project),
+        "surfaces": surfaces,
+        "policy_valid": bool(policy_payload.get("valid")),
+        "policy_issues": policy_payload.get("issues", []),
+        "contract_available": contract_available,
+        "recommended_next_command": "hipson install agents --all --dry-run"
+        if not any(surface.get("installed") for surface in surfaces.values())
+        else "hipson agent bootstrap --target codex --json",
+        "warnings": warnings,
+    }
+
+
 def installed_surfaces() -> dict[str, dict[str, object]]:
     codex_home, codex_warnings = detect_codex_home()
     hipson_home, hipson_warnings = detect_hipson_home()
