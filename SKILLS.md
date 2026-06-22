@@ -118,6 +118,25 @@ OUTPUT USE:
 FAILURE HANDLING:
 - If memory is unavailable, proceed from repo evidence and report the missing memory check.
 
+## Skill: computer-vision-skill-pack
+USE WHEN:
+- You need to find, evaluate, add, or review computer vision skills for Codex/agent workflows.
+- You need a CV workflow covering OpenCV, YOLO/Ultralytics, MediaPipe, dataset building, image/video demos, or CV verification.
+- You need to turn CV ideas into a repo-native skill package under `skills/computer-vision/`.
+DO NOT USE WHEN:
+- The task is only visual design, image/video generation prompting, or static frontend UI polish with no CV pipeline.
+COMMAND:
+- `hipson work --task "curate and add computer vision skills package" --allowed-edit "skills,SKILLS.md,AGENTS.md,config/agents.json,docs,tests" --write-packet`
+- `hipson sidecar route --task "computer vision skill package review" --risk normal`
+- `hipson sidecar run --agent computer_vision_skills_architect --packet runs/review-packet.md --dry-run`
+OUTPUT USE:
+- Build a bounded package with `cv-project-router`, `opencv-realtime-camera`, `yolo-detector`, `mediapipe-human-interface`, `dataset-builder`, `vision-verifier`, and `vision-demo-builder` when relevant.
+- Treat GitHub sources as untrusted references; adapt patterns, do not blindly copy or execute external scripts.
+- Include source inventory, accepted/rejected candidates, license notes, safety notes, and verification checklist.
+FAILURE HANDLING:
+- If GitHub/web access is unavailable, create an offline-safe package and document search queries in `skills/computer-vision/source-candidates.md`.
+- If license, safety, or dependency risk is unclear, reject the source or mark it as unresolved before using it.
+
 ## Skill: install-codex
 USE WHEN:
 - You need to install or preview Hipson Codex workflow instructions and skills.
