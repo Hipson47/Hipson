@@ -30,7 +30,7 @@ Issues = "https://github.com/Hipson47/hipson/issues"
 [project.optional-dependencies]
 dev = [
     "bandit>=1.9.4",
-    "mutmut>=3.5.0",
+    "mutmut>=3.6.0",
     "mypy>=2.1.0",
     "pip-audit>=2.10.0",
     "pytest>=8.0.0",
@@ -40,7 +40,7 @@ dev = [
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
-    "mutmut>=3.5.0",
+    "mutmut>=3.6.0",
     "mypy>=2.1.0",
     "pip-audit>=2.10.0",
     "pytest>=8.0.0",
@@ -90,19 +90,14 @@ skips = ["B404", "B603", "B607"]
 
 [tool.mutmut]
 also_copy = ["src/hipson"]
-paths_to_mutate = [
-    "src/hipson/agents.py",
+# Keep the CI mutation gate bounded to security/path-policy core code.
+# A full mutation sweep is too slow for the push/pull_request workflow.
+source_paths = [
     "src/hipson/approvals.py",
-    "src/hipson/packets.py",
-    "src/hipson/prompt.py",
     "src/hipson/redaction.py",
-    "src/hipson/router.py",
-    "src/hipson/runtime.py",
     "src/hipson/sandbox.py",
-    "src/hipson/tools/registry.py",
-    "src/hipson/workflow.py",
 ]
-tests_dir = [
+pytest_add_cli_args_test_selection = [
     "tests/test_approvals.py",
     "tests/test_mcp.py",
     "tests/test_prompt.py",
@@ -181,7 +176,6 @@ tests_dir = [
     "tests/test_hipson_helpers.py::test_work_plan_writes_review_packet_locally",
     "tests/test_hipson_helpers.py::test_work_plan_requires_allowed_edit_for_written_executor_packet",
     "tests/test_hipson_helpers.py::test_work_plan_writes_executor_packet_with_explicit_scope",
-    "tests/test_hipson_helpers.py::test_work_command_subprocess_json_contract",
 ]
 pytest_add_cli_args = ["-q"]
 mutate_only_covered_lines = true

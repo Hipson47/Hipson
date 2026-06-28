@@ -27,6 +27,13 @@ MAX_EVENT_TASK_CHARS = 2_000
 MAX_EVENT_CHANNEL_CHARS = 80
 MAX_EVENT_ACTOR_CHARS = 120
 MAX_RENDERED_TASK_CHARS = 260
+TELEGRAM_BOT_ENV_KEY = "TELEGRAM_BOT_TOKEN"
+TELEGRAM_ALLOWED_USERS_ENV_KEY = "TELEGRAM_ALLOWED_USERS"
+GATEWAY_ALLOWED_USERS_ENV_KEY = "GATEWAY_ALLOWED_USERS"
+SETUP_BOT_ENV_FIELD = "token_key"
+SETUP_ALLOWLIST_ENV_FIELD = "allowlist_key"
+TELEGRAM_BOT_CONFIGURED_FIELD = "telegram_token_configured"
+TELEGRAM_ALLOWED_USERS_CONFIGURED_FIELD = "telegram_allowed_users_configured"
 
 
 class HermesPaths(TypedDict):
@@ -254,8 +261,8 @@ def telegram_setup(paths: HermesPaths) -> dict[str, Any]:
         "defer_until_cli_works": True,
         "env_file": paths["hermes_env"],
         "config_file": paths["hermes_config"],
-        "token_key": "TELEGRAM_BOT_TOKEN",
-        "allowlist_key": "TELEGRAM_ALLOWED_USERS",
+        SETUP_BOT_ENV_FIELD: TELEGRAM_BOT_ENV_KEY,
+        SETUP_ALLOWLIST_ENV_FIELD: TELEGRAM_ALLOWED_USERS_ENV_KEY,
         "commands": ["hermes setup", "hermes gateway setup", "hermes gateway status", "hermes pairing list"],
     }
 
@@ -307,12 +314,12 @@ def _hermes_version(hermes_bin: str | None) -> str:
 
 def _env_flags(env_path: Path) -> dict[str, bool]:
     if not env_path.exists():
-        return {"telegram_token_configured": False, "telegram_allowed_users_configured": False}
+        return {TELEGRAM_BOT_CONFIGURED_FIELD: False, TELEGRAM_ALLOWED_USERS_CONFIGURED_FIELD: False}
     text = env_path.read_text(encoding="utf-8", errors="replace")
     return {
-        "telegram_token_configured": _has_non_empty_env_key(text, "TELEGRAM_BOT_TOKEN"),
-        "telegram_allowed_users_configured": _has_non_empty_env_key(text, "TELEGRAM_ALLOWED_USERS")
-        or _has_non_empty_env_key(text, "GATEWAY_ALLOWED_USERS"),
+        TELEGRAM_BOT_CONFIGURED_FIELD: _has_non_empty_env_key(text, TELEGRAM_BOT_ENV_KEY),
+        TELEGRAM_ALLOWED_USERS_CONFIGURED_FIELD: _has_non_empty_env_key(text, TELEGRAM_ALLOWED_USERS_ENV_KEY)
+        or _has_non_empty_env_key(text, GATEWAY_ALLOWED_USERS_ENV_KEY),
     }
 
 

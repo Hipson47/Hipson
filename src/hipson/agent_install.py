@@ -45,7 +45,8 @@ def install_agents(
         "warnings": [],
     }
     target_payload = payload["targets"]
-    assert isinstance(target_payload, dict)
+    if not isinstance(target_payload, dict):
+        raise TypeError("agent install targets payload must be a dictionary")
 
     if "codex" in selected:
         target_payload["codex"] = _install_codex_surface(
