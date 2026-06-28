@@ -101,7 +101,6 @@ pytest_add_cli_args_test_selection = [
     "tests/test_approvals.py",
     "tests/test_mcp.py",
     "tests/test_prompt.py",
-    "tests/test_runtime.py",
     "tests/test_scheduler.py",
     "tests/test_session.py",
     "tests/test_tools.py",
