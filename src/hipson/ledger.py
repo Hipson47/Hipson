@@ -183,10 +183,15 @@ def _timestamp() -> str:
 class Ledger:
     """One SQLite connection; callers must close it (or use contextlib.closing)."""
 
-    def __init__(self, db: str | Path | None = None) -> None:
+    def __init__(self, db: str | Path | None = None, *, create: bool = True) -> None:
         self.path = Path(db).expanduser().resolve() if db is not None else default_ledger_db()
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
+        if create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        # mode=rw refuses to create a missing file, even if it disappears after a caller's existence check.
+        target = self.path if create else self.path.as_uri() + "?mode=rw"
+        self.connection = sqlite3.connect(
+            target, uri=not create, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
+        )
         self.connection.row_factory = sqlite3.Row
         try:
             self.connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")

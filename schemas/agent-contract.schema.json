@@ -35,7 +35,8 @@
       "properties": {
         "codex": { "type": "object" },
         "hermes": { "type": "object" },
-        "mcp_future": { "type": "object" }
+        "mcp_future": { "type": "object" },
+        "mcp_stdio": { "type": "object" }
       }
     }
   }

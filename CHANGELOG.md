@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Expose the central task ledger through nine MCP stdio tools, with explicit
+  approval for writes, CLI-compatible JSON payloads, a server-configured store,
+  non-creating reads, and recoverable, redacted tool errors.
 - Add a transactional SQLite task ledger and `hipson task` CLI for lead-recorded
   assignments, overlapping path claims, lifecycle transitions, and append-only events.
 

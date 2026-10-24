@@ -66,3 +66,8 @@ packet preflight, quality report, audit, run status, and run validation. Local
 execution/write tools such as `verify.run`, `evidence.append`,
 `handoff.create`, and `release.claim` require explicit `approved=true` tool
 arguments.
+
+The central ledger also exposes `task.show`, `task.events`, `task.list`, and
+`task.board`, plus gated `task.open`, `task.assign`, `task.finish`, `task.event`,
+and `task.status` tools. See [Task Ledger](TASK_LEDGER.md#mcp-stdio-s2) for the
+Windows/WSL launch command and argument contracts.

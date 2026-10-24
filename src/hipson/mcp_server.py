@@ -3,12 +3,25 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any, TextIO
 
-from hipson import agent_contract, evidence, packet_preflight, policy, quality, run_control, verification, workflow
+from hipson import (
+    agent_contract,
+    evidence,
+    ledger,
+    packet_preflight,
+    policy,
+    quality,
+    run_control,
+    verification,
+    workflow,
+)
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import resolve_project
+from hipson.redaction import redact_text
 
 MCP_TOOL_NAMES = (
     "contract.show",
@@ -23,9 +36,21 @@ MCP_TOOL_NAMES = (
     "run.validate",
     "handoff.create",
     "release.claim",
+    "task.show",
+    "task.events",
+    "task.list",
+    "task.board",
+    "task.open",
+    "task.assign",
+    "task.finish",
+    "task.event",
+    "task.status",
 )
 
-MCP_GATED_TOOLS = {"verify.run", "evidence.append", "handoff.create", "release.claim"}
+MCP_GATED_TOOLS = {
+    "verify.run", "evidence.append", "handoff.create", "release.claim",
+    "task.open", "task.assign", "task.finish", "task.event", "task.status",
+}
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "contract.show": {
         "type": "object",
@@ -127,6 +152,94 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
+    "task.show": {
+        "type": "object",
+        "required": ["task"],
+        "properties": {"task": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "task.events": {
+        "type": "object",
+        "required": ["task"],
+        "properties": {"task": {"type": "string"}, "after": {"type": "integer"}},
+        "additionalProperties": False,
+    },
+    "task.list": {
+        "type": "object",
+        "properties": {
+            "project": {"type": "string"},
+            "status": {"type": "string", "enum": list(ledger.STATUSES)},
+        },
+        "additionalProperties": False,
+    },
+    "task.board": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "task.open": {
+        "type": "object",
+        "required": ["project", "title", "objective", "approved"],
+        "properties": {
+            "project": {"type": "string"},
+            "title": {"type": "string"},
+            "objective": {"type": "string"},
+            "acceptance": {"type": "array", "items": {"type": "string"}},
+            "lead": {"type": "string"},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "task.assign": {
+        "type": "object",
+        "required": ["task", "actor", "role", "mode", "approved"],
+        "properties": {
+            "task": {"type": "string"},
+            "actor": {"type": "string"},
+            "role": {"type": "string", "enum": list(ledger.ROLES)},
+            "mode": {"type": "string", "enum": list(ledger.MODES)},
+            "scope": {"type": "array", "items": {"type": "string"}},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "task.finish": {
+        "type": "object",
+        "required": ["assignment", "result", "summary", "approved"],
+        "properties": {
+            "assignment": {"type": "string"},
+            "result": {"type": "string", "enum": list(ledger.RESULTS)},
+            "summary": {"type": "string"},
+            "ref": {"type": "array", "items": {"type": "string"}},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "task.event": {
+        "type": "object",
+        "required": ["task", "actor", "type", "summary", "approved"],
+        "properties": {
+            "task": {"type": "string"},
+            "actor": {"type": "string"},
+            "type": {"type": "string"},
+            "summary": {"type": "string"},
+            "ref": {"type": "array", "items": {"type": "string"}},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "task.status": {
+        "type": "object",
+        "required": ["task", "to", "actor", "approved"],
+        "properties": {
+            "task": {"type": "string"},
+            "to": {"type": "string", "enum": list(ledger.STATUSES)},
+            "actor": {"type": "string"},
+            "summary": {"type": "string"},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
 }
 
 
@@ -196,6 +309,15 @@ def _description(name: str) -> str:
         "run.validate": "Validate expected run bundle artifacts and artifact kinds.",
         "handoff.create": "Write a compact agent handoff artifact for the run bundle.",
         "release.claim": "Evaluate and record a release claim against run evidence.",
+        "task.show": "Read a central ledger task with all assignments and current claims.",
+        "task.events": "Read task events after an exclusive sequence cursor (default 0).",
+        "task.list": "List central ledger tasks, optionally filtered by project and status.",
+        "task.board": "Read non-terminal tasks with active assignments across all projects.",
+        "task.open": "Open a lead-managed task in the central ledger (default lead: claude).",
+        "task.assign": "Record a worker assignment and claim rw scope on behalf of the lead.",
+        "task.finish": "Finish an assignment and release its path claims.",
+        "task.event": "Append a lead-recorded task event on behalf of a worker.",
+        "task.status": "Transition a task's lifecycle status on behalf of the lead.",
     }
     return descriptions[name]
 
@@ -214,6 +336,15 @@ def _fallback_command(name: str) -> str:
         "run.validate": "hipson run validate --run runs/<work_id> --json",
         "handoff.create": "hipson run handoff --run runs/<work_id> --json",
         "release.claim": "hipson release claim --run runs/<work_id> --claim \"release readiness\" --human-decision approved --json",
+        "task.show": "hipson task show --task T-0001 --json",
+        "task.events": "hipson task events --task T-0001 --after 0 --json",
+        "task.list": "hipson task list --json",
+        "task.board": "hipson task board --json",
+        "task.open": "hipson task open --project . --title \"...\" --objective \"...\" --json",
+        "task.assign": "hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src --json",
+        "task.finish": "hipson task finish --assignment A-0001 --result passed --summary \"...\" --json",
+        "task.event": "hipson task event --task T-0001 --actor codex --type progress --summary \"...\" --json",
+        "task.status": "hipson task status --task T-0001 --to review --actor claude --json",
     }
     return commands[name]
 
@@ -269,7 +400,7 @@ def _handle_request(line: str, *, project: Path) -> dict[str, Any] | None:
             return _result(request_id, _call_tool(params, project=project))
     except SystemExit as exc:
         return _tool_error(request_id, str(exc))
-    except (OSError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, json.JSONDecodeError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return _tool_error(request_id, str(exc))
     return _error(request_id, -32601, f"Unknown method: {method}")
 
@@ -304,7 +435,9 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": False}
 
 
-def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> dict[str, Any]:
+def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> object:
+    if name.startswith("task.") and name in MCP_INPUT_SCHEMAS:
+        return _task_tool_payload(name, arguments)
     if name == "contract.show":
         return agent_contract.build_agent_contract(arguments.get("project", project))
     if name == "policy.show":
@@ -392,13 +525,80 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> dic
     raise SystemExit(f"Unknown tool: {name}")
 
 
+def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
+    if name in MCP_GATED_TOOLS:
+        _require_mcp_approval(arguments, name)
+    _validate_task_arguments(name, arguments)
+    if "project" in arguments:
+        arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
+    # The ledger is central: never derive its DB or project filters from --project.
+    db = ledger.default_ledger_db()
+    create = name in MCP_GATED_TOOLS
+    if not create and not db.exists():
+        if name in ("task.show", "task.events"):
+            raise ledger.LedgerError(f"Task not found: {arguments['task']}")
+        return []
+    # closing() preserves the ledger's own transactions, including committed conflicts.
+    with closing(ledger.Ledger(db, create=create)) as store:
+        if name == "task.open":
+            return store.open_task(
+                project=arguments["project"], title=arguments["title"], objective=arguments["objective"],
+                acceptance=arguments.get("acceptance", []), lead=arguments.get("lead", "claude"),
+            )
+        if name == "task.assign":
+            return store.assign(
+                arguments["task"], actor=arguments["actor"], role=arguments["role"], mode=arguments["mode"],
+                scope=arguments.get("scope", []),
+            )
+        if name == "task.finish":
+            return store.finish(
+                arguments["assignment"], result=arguments["result"], summary=arguments["summary"],
+                refs=arguments.get("ref", []),
+            )
+        if name == "task.event":
+            return store.add_event(
+                arguments["task"], actor=arguments["actor"], type=arguments["type"], summary=arguments["summary"],
+                refs=arguments.get("ref", []),
+            )
+        if name == "task.status":
+            return store.set_status(
+                arguments["task"], to=arguments["to"], actor=arguments["actor"], summary=arguments.get("summary", ""),
+            )
+        if name == "task.show":
+            return store.show(arguments["task"])
+        if name == "task.events":
+            return store.events(arguments["task"], after=arguments.get("after", 0))
+        if name == "task.list":
+            return store.list_tasks(project=arguments.get("project"), status=arguments.get("status"))
+        return store.board()
+
+
+def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
+    """Enforce the task tools' bounded schemas before opening a database."""
+    schema = MCP_INPUT_SCHEMAS[name]
+    for key in schema.get("required", []):
+        if key not in arguments:
+            raise ValueError(f"{name} requires argument: {key}")
+    types = {"string": str, "integer": int, "boolean": bool, "array": list}
+    for key, value in arguments.items():
+        field = schema["properties"].get(key)
+        if field is None:
+            raise ValueError(f"{name}: unknown argument: {key}")
+        if type(value) is not types[field["type"]]:
+            raise ValueError(f"{name}: {key} must be {field['type']}")
+        if isinstance(value, list) and any(not isinstance(item, str) for item in value):
+            raise ValueError(f"{name}: {key} must contain strings")
+        if "enum" in field and value not in field["enum"]:
+            raise ValueError(f"{name}: {key} must be one of {field['enum']}")
+
+
 def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:
     if arguments.get("approved") is not True:
         raise SystemExit(f"{tool_name} requires approved=true for MCP write/gated execution")
 
 
 def _tool_error(request_id: object, message: str) -> dict[str, Any]:
-    return _result(request_id, {"content": [{"type": "text", "text": message}], "isError": True})
+    return _result(request_id, {"content": [{"type": "text", "text": redact_text(message)}], "isError": True})
 
 
 def _result(request_id: object, result: dict[str, Any]) -> dict[str, Any]:

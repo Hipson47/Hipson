@@ -1,4 +1,4 @@
-# Task ledger (S1)
+# Task ledger (S1–S2)
 
 Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
@@ -7,8 +7,8 @@ authenticated identities**. This CLI does not enforce that operational boundary.
 
 The database defaults to `<detect_hipson_home()>/ledger.sqlite`. `HIPSON_LEDGER`
 overrides the default; `--db PATH` overrides both. Every subcommand supports
-`--db` and `--json` (also accepted before the subcommand). No provider, Hermes,
-MCP integration, or worker execution is involved.
+`--db` and `--json` (also accepted before the subcommand). The CLI and MCP tools
+use the same central ledger; no provider, Hermes, or worker execution is involved.
 
 ```sh
 hipson task open --project . --title "Add ledger" --objective "Track worker ownership" \
@@ -86,5 +86,67 @@ Use `status` for transitions and `assign`/`finish` for assignment state.
 CLI success returns 0; operation, conflict, and storage errors return 1 with a
 message on stderr; argument errors follow argparse (2). There are no automatic
 retries after a successful commit: inspect the ledger before replaying an
-operation whose response was lost. S2–S4 can add wrapper integration, recovery
+operation whose response was lost. Later stages can add wrapper integration, recovery
 and idempotency policies, and richer orchestration without making workers writers.
+
+## MCP stdio (S2)
+
+Claude Code can drive the ledger directly through the existing MCP server. From
+Windows, start the WSL-installed CLI with the Linux project path:
+
+```sh
+wsl.exe -d Ubuntu -- hipson mcp serve --project /home/hipson47/code/Hipson --stdio
+```
+
+Ensure `hipson` is on the WSL process's PATH (or use its absolute installed path).
+The server's `--project` configures existing project tools; it does **not** select
+the ledger database, filter the task board/list, or supply `task.open.project`.
+Task tools use only the trusted server environment to select the store:
+`HIPSON_LEDGER` overrides the default `HIPSON_HOME/ledger.sqlite` (or the
+detected Hipson home when unset). MCP arguments cannot select a database;
+`db` is rejected. The CLI's `--db` option remains available. Relative paths
+resolve against the server's working directory, as in the CLI.
+
+Read tools never create a missing database or its directory. With no store,
+`task.list` and `task.board` return empty arrays; `task.show` and `task.events`
+return `Task not found` errors. Approved write tools may initialize the store.
+
+| Tool | Required arguments | Optional arguments |
+| --- | --- | --- |
+| `task.show` | `task` | none |
+| `task.events` | `task` | `after` (exclusive, default `0`) |
+| `task.list` | none | `project`, `status` |
+| `task.board` | none | none |
+| `task.open` | `project`, `title`, `objective`, `approved=true` | `acceptance`, `lead` (default `claude`) |
+| `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope` |
+| `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
+| `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
+| `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty) |
+
+`acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
+options. Role, mode, result, and status enums match the CLI. An `rw` assignment
+requires a nonempty `scope`; `ro` may omit it. Unknown arguments are rejected.
+All five write tools require the literal boolean `approved: true`, checked before
+opening the database. Approval is an execution gate, not identity authentication;
+the lead remains responsible for recording worker activity.
+
+Example `tools/call` request (one JSON object per line on stdio):
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task.open","arguments":{"project":"/home/hipson47/code/Hipson","title":"Add MCP tools","objective":"Let the lead drive the ledger","acceptance":["Lifecycle works over stdio"],"approved":true}}}
+```
+
+Successful results put the same payload as CLI `--json` into
+`result.content[0].text`, with `isError: false`: open/show/status return task
+views, assign/finish return assignments, event returns one event, and
+events/list/board return arrays. Task and event objects conform to
+`schemas/task.schema.json` and `schemas/task-event.schema.json`; assignments
+use the former's `$defs.assignment` definition.
+
+Ledger validation, missing IDs, invalid transitions/scopes, claim conflicts,
+path-resolution errors, and storage failures return `isError: true` with a
+redacted message in text content. The server continues accepting requests.
+A claim conflict still commits its
+`claim_conflict` event; read `task.events` to inspect it. Inspect committed state
+before retrying a write whose response was lost. `tools/list` and
+`hipson mcp serve --catalog` expose all nine input schemas and write gates.

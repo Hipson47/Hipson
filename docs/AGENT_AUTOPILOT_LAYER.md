@@ -111,7 +111,13 @@ server. The current tool set is:
 - `run.status`;
 - `run.validate`;
 - `handoff.create`;
-- `release.claim`.
+- `release.claim`;
+- `task.show`, `task.events`, `task.list`, `task.board`;
+- `task.open`, `task.assign`, `task.finish`, `task.event`, `task.status`.
+
+The five task write tools require `approved=true`. Task tools use the central
+ledger independently of the server's project; see [Task Ledger](TASK_LEDGER.md#mcp-stdio-s2)
+for arguments, payloads, and database selection.
 
 Read-first tools are provider-free. `verify.run` and `evidence.append` are gated
 and require `approved=true` in the tool arguments before they execute local
