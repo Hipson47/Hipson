@@ -180,7 +180,7 @@ read creates no files. Custom ledgers outside `runs/` remain accessible through
 
 ## Roadmap
 
-See `docs/AI_DEV_FIRST_EXPANSION_PLAN.md` for the broader AI-dev-first product
+See `docs/archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md` for the broader AI-dev-first product
 roadmap that connects this quality layer to model profiles, subagent curation,
 verification evidence, audit export, and workflow packs.
 

@@ -61,7 +61,7 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Treat AI as a quality multiplier rather than hidden automation: free or
   model-selected OpenRouter sidecars are opt-in, bounded, redacted, and advisory.
 - Develop Hipson as an AI-dev-first local trust layer, not a classic developer
-  tool with AI added; use `docs/AI_DEV_FIRST_EXPANSION_PLAN.md` as the product
+  tool with AI added; use `docs/archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md` as the product
   roadmap for subagent orchestration, model profiles, evidence, and workflow
   packs.
 - Current AI Review Control Kit state: `hipson work --ai-profile` prepares
