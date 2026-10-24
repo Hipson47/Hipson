@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Task Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_kind", "schema_version", "seq", "task", "actor", "type", "summary", "refs", "timestamp"],
+  "properties": {
+    "artifact_kind": { "const": "hipson.task_event" },
+    "schema_version": { "const": "1.0" },
+    "seq": { "type": "integer", "minimum": 1 },
+    "task": { "type": "string", "pattern": "^T-[0-9]{4,}$" },
+    "actor": { "type": "string", "minLength": 1, "description": "Label recorded by the lead on behalf of a worker, not an authenticated identity." },
+    "type": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string" },
+    "refs": { "type": "array", "items": { "type": "string" } },
+    "timestamp": { "type": "string", "format": "date-time" }
+  }
+}

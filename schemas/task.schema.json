@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_kind", "schema_version", "id", "project", "title", "objective", "acceptance", "status", "lead", "created_at", "updated_at", "revision"],
+  "properties": {
+    "artifact_kind": { "const": "hipson.task" },
+    "schema_version": { "const": "1.0" },
+    "id": { "type": "string", "pattern": "^T-[0-9]{4,}$" },
+    "project": { "type": "string", "minLength": 1 },
+    "title": { "type": "string", "minLength": 1 },
+    "objective": { "type": "string", "minLength": 1 },
+    "acceptance": { "type": "array", "items": { "type": "string" } },
+    "status": { "enum": ["open", "in_progress", "blocked", "review", "done", "cancelled"] },
+    "lead": { "type": "string", "minLength": 1, "description": "Recorded lead label, not an authenticated identity." },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "revision": { "type": "integer", "minimum": 1 },
+    "assignments": { "type": "array", "items": { "$ref": "#/$defs/assignment" } },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assignment", "path"],
+        "properties": {
+          "assignment": { "type": "string", "pattern": "^A-[0-9]{4,}$" },
+          "path": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "task", "actor", "role", "mode", "scope", "status", "started_at", "ended_at"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^A-[0-9]{4,}$" },
+        "task": { "type": "string", "pattern": "^T-[0-9]{4,}$" },
+        "actor": { "type": "string", "minLength": 1, "description": "Worker label recorded by the lead, not an authenticated identity." },
+        "role": { "enum": ["builder", "reviewer", "explorer", "researcher"] },
+        "mode": { "enum": ["ro", "rw"] },
+        "scope": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "status": { "enum": ["active", "passed", "failed", "cancelled"] },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

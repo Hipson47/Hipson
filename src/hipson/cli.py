@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import cast
 
@@ -17,6 +19,7 @@ from hipson import (
     agents,
     evals,
     learning,
+    ledger,
     mcp_server,
     memory,
     model_profiles,
@@ -1756,10 +1759,103 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_task(args: argparse.Namespace) -> int:
+    try:
+        with closing(ledger.Ledger(args.db)) as store:
+            payload: object
+            if args.task_command == "open":
+                payload = store.open_task(
+                    project=args.project,
+                    title=args.title,
+                    objective=args.objective,
+                    acceptance=args.acceptance,
+                    lead=args.lead,
+                )
+            elif args.task_command == "assign":
+                payload = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope)
+            elif args.task_command == "finish":
+                payload = store.finish(args.assignment, result=args.result, summary=args.summary, refs=args.ref)
+            elif args.task_command == "event":
+                payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
+            elif args.task_command == "status":
+                payload = store.set_status(args.task, to=args.to, actor=args.actor, summary=args.summary)
+            elif args.task_command == "show":
+                payload = store.show(args.task)
+            elif args.task_command == "events":
+                payload = store.events(args.task, after=args.after)
+            elif args.task_command == "list":
+                payload = store.list_tasks(project=args.project, status=args.status)
+            else:
+                tasks = store.board()
+                if not args.json:
+                    for task in tasks:
+                        active = ", ".join(
+                            f"{item['id']} {item['actor']}:{item['role']}/{item['mode']}"
+                            for item in task["assignments"]
+                        ) or "unassigned"
+                        title = _bounded_cli(" ".join(task["title"].split()), limit=60)
+                        print(f"{task['id']} [{task['status']}] {title} | {' '.join(active.split())}")
+                    if not tasks:
+                        print("No active tasks.")
+                    return 0
+                payload = tasks
+    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hipson", description="Hipson Codex-native local dev workflow tool")
     parser.add_argument("--version", action="version", version=f"hipson {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    task = subparsers.add_parser("task", help="Record lead-managed tasks, assignments, claims, and events")
+    task.add_argument("--db", help="Task ledger SQLite path; overrides HIPSON_LEDGER")
+    task.add_argument("--json", action="store_true", help="Print machine-readable task output")
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_parsers = {
+        name: task_sub.add_parser(name, help=help_text)
+        for name, help_text in (
+            ("open", "Open a task"),
+            ("assign", "Assign a worker and claim write scope"),
+            ("finish", "Finish an assignment and release its claims"),
+            ("event", "Append a task event"),
+            ("status", "Transition a task"),
+            ("show", "Show a task with assignments and claims"),
+            ("events", "List task events in sequence order"),
+            ("list", "List tasks"),
+            ("board", "Show non-terminal tasks with active assignments"),
+        )
+    }
+    for name, task_parser in task_parsers.items():
+        task_parser.add_argument("--db", default=argparse.SUPPRESS, help="Task ledger SQLite path")
+        task_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        task_parser.set_defaults(func=command_task)
+        if name in ("assign", "event", "status", "show", "events"):
+            task_parser.add_argument("--task", required=True)
+        if name in ("assign", "event", "status"):
+            task_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        if name in ("finish", "event"):
+            task_parser.add_argument("--summary", required=True)
+            task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
+    task_parsers["open"].add_argument("--project", required=True)
+    task_parsers["open"].add_argument("--title", required=True)
+    task_parsers["open"].add_argument("--objective", required=True)
+    task_parsers["open"].add_argument("--acceptance", action="append", default=[], help="Acceptance criterion; repeatable")
+    task_parsers["open"].add_argument("--lead", default="claude")
+    task_parsers["assign"].add_argument("--role", choices=ledger.ROLES, required=True)
+    task_parsers["assign"].add_argument("--mode", choices=ledger.MODES, required=True)
+    task_parsers["assign"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")
+    task_parsers["finish"].add_argument("--assignment", required=True)
+    task_parsers["finish"].add_argument("--result", choices=ledger.RESULTS, required=True)
+    task_parsers["event"].add_argument("--type", required=True)
+    task_parsers["status"].add_argument("--to", choices=ledger.STATUSES, required=True)
+    task_parsers["status"].add_argument("--summary", default="")
+    task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
+    task_parsers["list"].add_argument("--project")
+    task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")
     doctor.add_argument("--agent-surfaces", action="store_true", help="Report agent integration readiness")

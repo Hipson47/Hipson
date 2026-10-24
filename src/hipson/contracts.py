@@ -33,6 +33,8 @@ ARTIFACT_SCHEMAS = {
     "hipson.run_manifest": "schemas/run-manifest.schema.json",
     "hipson.run_status": "schemas/run-status.schema.json",
     "hipson.run_validation": "schemas/run-validation.schema.json",
+    "hipson.task": "schemas/task.schema.json",
+    "hipson.task_event": "schemas/task-event.schema.json",
     "hipson.verification": "schemas/verification.schema.json",
     "hipson.work_plan": "schemas/work-plan.schema.json",
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add a transactional SQLite task ledger and `hipson task` CLI for lead-recorded
+  assignments, overlapping path claims, lifecycle transitions, and append-only events.
+
 ## 1.1.0
 
 - Add agent-readable `SKILLS.md` playbook and packaged asset copy.
