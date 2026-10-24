@@ -1,16 +1,22 @@
 # Hipson Progress
 
-## Current Goal
+Historical progress reference. Verification counts and machine-readiness claims
+below are earlier recorded snapshots, not current checkout evidence. Active work
+is tracked in the [task ledger](TASK_LEDGER.md); use the [documentation index](README.md)
+and [changelog](../CHANGELOG.md) for current interfaces and unreleased changes.
+
+## Recorded Goal
 Build this repository into a portable, git-ready Hipson Orchestrator Hub for cross-repo AI workflow coordination, delta review, sidecar agents, and durable handoff.
 
-## Current State
+## Recorded State
 - The repository has its own `.git` root and no longer relies on a parent user-profile git root.
 - Python package entrypoint `hipson` lives under `src/hipson/`.
 - Runtime assets are bundled under `src/hipson/assets/` so installed packages can run without a source checkout.
 - Runtime asset lookup ignores untrusted CWD files unless `HIPSON_DEV_ROOT` is explicitly set to a valid source checkout.
 - `repos.yaml` is local-only and ignored.
 - `repos.example.yaml` is the portable template for other developers.
-- OpenRouter provider keys live outside the repo.
+- OpenRouter provider keys are not versioned; use exported variables or ignored
+  local `.env` / Hipson-home `agents.env` files.
 - Generated `runs/`, `scans/`, and `memory/*.jsonl` artifacts are ignored by default.
 - Packet generation is compiled through structured packet specs.
 - `hipson work` creates a provider-free Codex work brief that joins route,
@@ -24,7 +30,8 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - `hipson model profile`, `hipson packet preflight`, and `hipson quality report`
   start the AI Review Control Kit layer for curated model choice, packet safety,
   and evidence-backed quality reporting.
-- Local JSONL memory is available through `hipson memory add/search/list`.
+- Local JSONL memory is available through `hipson memory add`,
+  `hipson memory search`, and `hipson memory list`.
 - Sidecar agents include routing metadata and can be suggested with `hipson sidecar route`.
 - Optional LLM routing is available behind `hipson sidecar route --llm` and sends only redacted routing summaries.
 - Canonical source docs live under `knowledge/source/`.
@@ -60,10 +67,10 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
   security review, implementation, and handoff each have small preferred sets.
 - Treat AI as a quality multiplier rather than hidden automation: free or
   model-selected OpenRouter sidecars are opt-in, bounded, redacted, and advisory.
-- Develop Hipson as an AI-dev-first local trust layer, not a classic developer
-  tool with AI added; use `docs/archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md` as the product
-  roadmap for subagent orchestration, model profiles, evidence, and workflow
-  packs.
+- Develop Hipson as an AI-dev-first local trust layer. The
+  [archived expansion plan](archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md)
+  records the earlier product roadmap for subagent orchestration, model profiles,
+  evidence, and workflow packs; it is historical background.
 - Current AI Review Control Kit state: `hipson work --ai-profile` prepares
   model-profile sidecar commands, includes packet preflight before sidecar use,
   blocks unsafe profile/task combinations, and `hipson quality report` returns a
@@ -82,13 +89,16 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
   `quality.report`, `quality.eval`, and `quality.summary`; audit bundles expose
   `latest_quality_gate` and `latest_eval_ok`.
 
-## Verification
+## Historical Verification
 - `uv run ruff check .`: passed.
 - `python3 scripts/run_tests.py`: passed, 63/63 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke from a temporary venv outside the repo, including fake-CWD asset shadowing checks: passed.
-- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
+- Editable install smoke checks were recorded as passed for help, doctor, scan,
+  memory, sidecar routing, skill validation, and Codex install previews. Current
+  routing syntax requires a task: `hipson sidecar route --task "review current diff"`
+  or `hipson sidecar route --task "review current diff" --llm --llm-dry-run`.
 - `bash -n src/hipson/assets/codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 - Secret scan excluding generated reports and test fixtures: passed.
@@ -113,7 +123,8 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - `uv build`: passed and included `src/hipson/workflow.py` in the wheel.
 - `git diff --check`: passed.
 - `hipson work --task "review current diff for test gaps" --free-ai --json`
-  should expose an advisory `ai_quality` contract after the AI quality layer pass.
+  now exposes the advisory `ai_quality` contract; this prepares commands without
+  calling a provider.
 
 ## Risks
 - `repos.yaml` must stay local because it may contain developer-specific absolute paths.
@@ -121,18 +132,18 @@ Build this repository into a portable, git-ready Hipson Orchestrator Hub for cro
 - Cheap paid models can produce false positives; Architect must verify findings.
 - Telegram control still needs a BotFather token and Telegram allowlist/pairing in
   `~/.hermes/.env`; do not add bot tokens to Hipson memory, packets, or bus events.
-- Full mutation survivor triage remains open; `hipson work` is now included in
-  mutmut targets, but complete mutation closure is not claimed.
+- Full mutation survivor triage remains open. Current mutmut targets are
+  `approvals.py`, `redaction.py`, and `sandbox.py`, not `hipson work`; complete
+  mutation closure is not claimed.
 - Live provider smoke is still manual and credential-gated.
 - Free/model-selected sidecars can produce noisy or wrong advice; their output
   must never replace local verification or human review.
 
-## Next Task
-Continue the two-week AI Review Control Kit sprint in
-`docs/NEXT_TWO_WEEK_EXECUTION_PLAN.md`: add fixture-backed golden packet evals,
-prototype explicit provider model discovery cache commands, connect quality/eval
-artifacts to release evidence docs, then run focused mutmut batches for workflow,
-provider, approval, sandbox, and redaction boundaries.
+## Historical Next-Task Plan
+The [two-week execution plan](archive/2026-q2-planning/NEXT_TWO_WEEK_EXECUTION_PLAN.md)
+is archived and no longer assigns current work. It proposed fixture-backed
+packet evals, model-discovery cache commands, evidence integration, and focused
+mutation batches. Consult the task ledger for the current assignment.
 
 ## Handoff Notes
 For a fresh local setup:

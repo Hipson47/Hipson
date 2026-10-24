@@ -9,23 +9,33 @@ Give Hipson cheap sidecar intelligence without wasting main-context tokens.
 3. Local RAG memory: best for durable project knowledge and reusable decisions.
 
 ## OpenRouter Sidecars
-Configured in `config/agents.json`.
+The source checkout defaults to `src/hipson/assets/config/agents.json` (bundled in
+installed packages); `config/agents.json` is the tracked mirror. Select a custom
+file explicitly with `hipson sidecar --config PATH ...`.
 
 Run:
 
 ```bash
-python3 scripts/hipson_agents.py list
-python3 scripts/hipson_agents.py run --agent reviewer_lite --packet /tmp/review-packet.md
+hipson sidecar list
+hipson sidecar run --agent reviewer_lite --packet runs/review-packet.md --dry-run
 ```
 
-Secrets live outside the repo:
+After packet preflight and content review, omit `--dry-run` for an explicit
+provider call. `scripts/hipson_agents.py` remains a compatibility wrapper.
+
+Keep secrets in exported environment variables or ignored local env files:
 
 ```bash
 mkdir -p ~/.config/hipson
 cp .env.example .env
 ```
 
-Do not store real provider keys in `config/`. For local development, use repo-root `.env`. For one shared config across many repos, use `~/.config/hipson/agents.env` or set `HIPSON_AGENTS_ENV`.
+Do not store real provider keys in `config/`. For local development, use the
+current working directory's ignored `.env`. For shared configuration, use
+`<Hipson home>/agents.env` (normally `~/.config/hipson/agents.env`), or select a
+file with `HIPSON_AGENTS_ENV` or `hipson sidecar --env PATH ...`. Exported values
+win; absent an explicit env file, the working-directory `.env` precedes the
+shared file. Hipson home honors `HIPSON_HOME`, then `XDG_CONFIG_HOME/hipson`.
 
 ## Guardrails
 - Send packets, not full repos.
@@ -46,10 +56,11 @@ Do not store real provider keys in `config/`. For local development, use repo-ro
 - Changelog or progress summarization.
 - Second opinion on a small architecture decision.
 
-For design and frontend packets, use `docs/skill-library.md` to choose the relevant
-vendored skill excerpts from `skills/external/`. Sidecars do not read the repository
-by themselves, so include the needed snippets, screenshots, and file context in the
-packet.
+For design and frontend packets, use the [skill library](skill-library.md) to
+choose relevant vendored skill excerpts from `skills/external/`. Sidecars do not
+read the repository themselves. The current runner sends text only: include
+needed snippets, file context, and visual observations from local screenshot
+review. Screenshot paths alone do not send image contents to the provider.
 
 ## Bad Sidecar Tasks
 - Direct repo edits.
@@ -71,4 +82,5 @@ should survive across sessions without sending broad context to providers:
 Keep memory compact. Store decisions and handoffs, not transcripts.
 
 ## Model Routing
-Use `docs/model-routing.md` as the source of truth for choosing sidecar models by task difficulty and cost.
+Use [model routing](model-routing.md) for configured sidecar roles and routing
+controls. Its dated pricing snapshot is historical, not a live cost guarantee.

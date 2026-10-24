@@ -1,5 +1,9 @@
 # OpenRouter Model Discovery Design
 
+Status: design proposal, not implemented. `hipson provider --help` currently
+exposes only `doctor`; there is no model-discovery command or cache. The cache
+and allowlist JSON below are proposed shapes, not artifacts emitted by Hipson.
+
 Hipson can support OpenRouter model discovery, but it must not turn provider
 catalog access into hidden AI execution. Discovery is metadata-only, opt-in, and
 cacheable. Provider-backed review remains explicit sidecar work on bounded
@@ -23,12 +27,8 @@ Useful official references:
 
 1. No discovery call runs during `hipson work`, `hipson quality report`, or
    `hipson quality eval`.
-2. Discovery must be explicit, for example:
-
-   ```bash
-   hipson provider models discover --provider openrouter --output runs/openrouter-models.json
-   ```
-
+2. A future discovery command must be explicit, select OpenRouter, and write
+   metadata to a chosen generated artifact path such as `runs/openrouter-models.json`.
 3. Discovery output is metadata, not a recommendation to use every returned
    model.
 4. Model profiles remain the curated product surface. Discovery only refreshes
@@ -83,9 +83,9 @@ Useful official references:
 
 ## Doctor Extension
 
-`hipson provider doctor` should eventually report:
+`hipson provider doctor` already reports configured API-key presence, URL/config
+validity, and agent readiness without network access. A future extension could report:
 
-- whether the OpenRouter API key is present without printing it;
 - whether model discovery cache exists;
 - cache age;
 - whether configured profile models still appear in the cache;
@@ -100,5 +100,5 @@ commands. The correct fallback is:
 
 - keep existing curated profiles;
 - mark discovery cache as missing or stale;
-- recommend explicit `provider models discover` only when the user wants live
-  provider metadata.
+- offer an explicit metadata refresh only once discovery is implemented and
+  the user wants live provider metadata.

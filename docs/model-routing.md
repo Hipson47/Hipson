@@ -7,7 +7,12 @@ Free models are available as an explicit quality lane, not as the default. Use
 `openrouter/free` when the user wants a no-cost second opinion and the packet is
 bounded, redacted, non-sensitive, and low-stakes.
 
-## Recommended Tiers
+## Configured Tiers
+
+These are the checked-in agent/model mappings, not a live availability or
+pricing check. Runtime defaults come from `src/hipson/assets/config/agents.json`;
+`config/agents.json` is the tracked mirror. Use `hipson sidecar --config PATH ...`
+to select another file.
 
 | Tier | Agent | Model | Use for |
 |---|---|---|---|
@@ -28,7 +33,8 @@ bounded, redacted, non-sensitive, and low-stakes.
 
 
 ## Cost Snapshot
-Snapshot from OpenRouter model listings on 2026-05-17:
+Historical snapshot from OpenRouter model listings on 2026-05-17; prices,
+availability, and context limits have not been revalidated for this docs pass:
 
 | Model | Input / 1M | Output / 1M | Context |
 |---|---:|---:|---:|
@@ -47,7 +53,7 @@ Snapshot from OpenRouter model listings on 2026-05-17:
 ## Practical Routing
 
 Use `hipson sidecar route --task "..." --risk ...` for deterministic suggestions
-from `config/agents.json`. The router reads `expertise`, `use_when`,
+from the selected agent config. The router reads `expertise`, `use_when`,
 `avoid_when`, `context_budget`, and `can_handle_sensitive_context`; it is a
 gate, not an autonomous decision maker.
 

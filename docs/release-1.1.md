@@ -3,6 +3,9 @@
 Hipson 1.1.0 adds an agent-readable playbook and deterministic workflow router.
 The release keeps Hipson local-first and provider-free by default.
 
+These notes describe the 1.1.0 baseline. Later agent, runtime, task-ledger, and
+evidence additions are tracked in [Unreleased](../CHANGELOG.md#unreleased).
+
 ## Added
 
 - Root `SKILLS.md` with compact agent skill entries.

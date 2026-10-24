@@ -1,6 +1,10 @@
 # Hipson 1.0 Readiness
 
-This checklist defines what should block or allow a stable Hipson 1.0 release.
+Historical checklist for the Hipson 1.0 release. The package version is now
+`1.1.0` in `pyproject.toml`; the posture and external gates below describe the
+earlier release plan, not current release evidence. See
+[1.1 release notes](release-1.1.md) and the [changelog](../CHANGELOG.md) for the
+subsequent release and current unreleased work.
 
 ## Release Posture
 
@@ -59,10 +63,15 @@ hipson skill validate
 python -m hipson.cli scan /definitely/missing/path
 hipson install codex --dry-run
 hipson sidecar route --task "security review" --risk security
-hipson sidecar route --task "release verification packaging CI gates docs review" --risk architecture --task-type review --file pyproject.toml --skills hipson-gpt --context-chars 4200 --llm
+hipson sidecar route --task "release verification packaging CI gates docs review" --risk architecture --task-type review --file pyproject.toml --skills hipson-gpt --context-chars 4200 --llm --llm-dry-run
 ```
+
+The missing-path scan is a negative check and should exit nonzero. The LLM
+router example is a preview; omit `--llm-dry-run` only for an authorized provider
+call. These commands are a checklist, not results from this documentation pass.
 
 ## Release Decision
 
-The package is prepared as `1.0.0`. Publish the rewritten public branch, wait for
-remote CI, then tag `v1.0.0`.
+The original plan prepared `1.0.0`, then called for publishing the rewritten
+public branch, waiting for remote CI, and tagging `v1.0.0`. This historical plan
+does not establish whether those external steps occurred or authorize them now.

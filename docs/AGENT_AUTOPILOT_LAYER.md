@@ -21,8 +21,11 @@ For bounded implementation work, use an executor packet with explicit edit
 scope:
 
 ```bash
-hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
+hipson autopilot implement --task "implement bounded CLI parser fix" --allowed-edit src/hipson/cli.py,tests --verification "git diff --check" --json
 ```
+
+Implementation mode prepares an executor packet and runs verification; the coding
+agent performs the edits. Hipson does not implement the requested change itself.
 
 It writes:
 
@@ -113,9 +116,10 @@ server. The current tool set is:
 - `handoff.create`;
 - `release.claim`;
 - `task.show`, `task.events`, `task.list`, `task.board`;
-- `task.open`, `task.assign`, `task.finish`, `task.event`, `task.status`.
+- `task.open`, `task.assign`, `task.finish`, `task.reap`, `task.event`, `task.status`.
 
-The five task write tools require `approved=true`. Task tools use the central
+The six task write tools require `approved=true`, including `task.reap` with
+`dry_run=true`. Task tools use the central
 ledger independently of the server's project; see [Task Ledger](TASK_LEDGER.md#mcp-stdio-s2)
 for arguments, payloads, and database selection.
 

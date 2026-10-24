@@ -1,4 +1,4 @@
-# Task ledger (S1–S3a)
+# Task ledger
 
 Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
@@ -9,6 +9,37 @@ The database defaults to `<detect_hipson_home()>/ledger.sqlite`. `HIPSON_LEDGER`
 overrides the default; `--db PATH` overrides both. Every subcommand supports
 `--db` and `--json` (also accepted before the subcommand). The CLI and MCP tools
 use the same central ledger; no provider, Hermes, or worker execution is involved.
+
+## Lead and worker flow
+
+1. The lead opens a task with its project, objective, acceptance criteria, and
+   lead label using `hipson task open`.
+2. A lead-controlled wrapper records `hipson task assign` before launching the
+   worker. It supplies the worker's actor/role/mode, explicit `--scope` paths for
+   `rw` claims, and its own `--owner-pid`, `--owner-boot-id`, and `--owner-host`
+   (optionally `--lease-seconds`). The wrapper establishes its process group as
+   described under [Orphan recovery](#orphan-recovery-s3a). Assignment atomically
+   claims the paths and advances an open task to `in_progress`.
+3. The worker runs its bounded brief and returns changes and verification
+   evidence. It does not spawn agents, write the ledger, commit/push, or create
+   progress/handoff notes. The wrapper or lead records any progress events.
+4. The wrapper calls `hipson task finish` with the assignment ID, result,
+   summary, and evidence refs. This ends the assignment and releases its claims;
+   it does not complete the task or independently verify the worker's report.
+5. The lead inspects the diff and verifies acceptance criteria, then uses
+   `hipson task status` to move the task to `review` and, once accepted, `done`.
+   Failed work can return from review to `in_progress` for another assignment.
+6. For an interrupted wrapper, inspect `hipson task reap --dry-run`, then run
+   `hipson task reap` to cancel proven orphans and release their claims. Reaping
+   does not change task status; the lead decides how to resume or close it.
+
+The wrapper is an external integration owned by the lead, not a worker launcher
+provided by `hipson task`. A finished assignment or a `passed` result is a
+recorded outcome, not an enforced verification gate on task status.
+
+## CLI examples
+
+These commands are issued by the lead or its wrapper on the worker's behalf:
 
 ```sh
 hipson task open --project . --title "Add ledger" --objective "Track worker ownership" \
@@ -94,7 +125,7 @@ Use `status` for transitions and `assign`/`finish`/`reap` for assignment state.
 CLI success returns 0; operation, conflict, and storage errors return 1 with a
 message on stderr; argument errors follow argparse (2). There are no automatic
 retries after a successful commit: inspect the ledger before replaying an
-operation whose response was lost. Later stages can add wrapper integration,
+operation whose response was lost. Later stages can add built-in worker wrappers,
 idempotency policies, and richer orchestration without making workers writers.
 
 ## Orphan recovery (S3a)

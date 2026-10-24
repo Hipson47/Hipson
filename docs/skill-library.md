@@ -37,9 +37,14 @@ There are two copies with different jobs:
 
 - `skills/external/`: versioned project reference for Hipson packets, sidecar prompts,
   audits, and future packaging.
-- `~/.codex/skills`: active Codex skill install on this machine.
+- `<Codex home>/skills`: active Codex skill install; `CODEX_HOME` selects the
+  home, otherwise it defaults to `~/.codex`.
 
 After installing new global skills, restart Codex so the runtime skill list refreshes.
+
+Vendored source paths and recorded tree hashes are listed in
+[vendored-skills-provenance.json](vendored-skills-provenance.json); these are
+snapshot records, not a live upstream integrity check.
 
 ## Curation Matrix
 
@@ -94,6 +99,10 @@ Good UI/UX packets should include:
 - current implementation files;
 - target brand and audience;
 - explicit acceptance criteria for visual quality, accessibility, and responsive behavior.
+
+Native visual agents must actually inspect the screenshots. The current sidecar
+runner sends packet text only; include inspected visual observations for those
+reviews, since a screenshot path does not transmit the image.
 
 ## Subagent Prompting
 

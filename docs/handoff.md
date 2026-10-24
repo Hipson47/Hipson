@@ -1,5 +1,10 @@
 # Hipson Handoff
 
+Reference setup and historical handoff snapshot. The verification counts below
+are earlier recorded results, not checks of the current checkout. Use the
+[documentation index](README.md), [task ledger](TASK_LEDGER.md), and
+[changelog](../CHANGELOG.md) for current interfaces and work tracking.
+
 ## Context
 This repo is the local Hipson Orchestrator Hub.
 
@@ -11,7 +16,7 @@ Important paths:
 - `scripts/hipson_project.py`: scans and packet generation.
 - `scripts/hipson_agents.py`: OpenRouter sidecar runner.
 - `config/agents.json`: sidecar agent definitions.
-- `docs/release-1.0.md`: release-readiness gates and remaining blockers.
+- `docs/release-1.0.md`: historical 1.0 release-readiness checklist.
 - `memory/`: local JSONL memory store, with generated `*.jsonl` ignored.
 - `skills/hipson-gpt/`: reference knowledge package.
 - `knowledge/source/`: canonical source reference documents.
@@ -26,13 +31,16 @@ Important paths:
 - Use cheap paid OpenRouter models by default.
 - Use `HIPSON_HOME` for Hipson config and `CODEX_HOME` only for Codex config.
 
-## Verification
+## Historical Verification
 - `uv run ruff check .`: passed.
 - `python3 scripts/run_tests.py`: passed, 63/63 tests.
 - `python3 -m compileall src scripts tests`: passed.
 - `uv build`: passed.
 - Wheel install smoke: `hipson --help`, `hipson doctor`, `hipson skill validate`, `hipson install codex --dry-run`, and fake-CWD asset shadowing checks passed from a temporary venv outside the repo.
-- `hipson --help`, `hipson doctor`, `hipson scan .`, `hipson memory list`, `hipson sidecar route`, `hipson sidecar route --llm --llm-dry-run`, `hipson skill validate`, `hipson install codex --dry-run`: passed in editable install smoke checks.
+- Editable install smoke checks were recorded as passed for help, doctor, scan,
+  memory, sidecar routing, skill validation, and Codex install previews. Current
+  routing syntax requires a task: `hipson sidecar route --task "review current diff"`
+  or `hipson sidecar route --task "review current diff" --llm --llm-dry-run`.
 - `bash -n src/hipson/assets/codex-workflow-kit/install.sh`: passed.
 - `python3 -m json.tool config/agents.json`: passed.
 
@@ -51,4 +59,5 @@ uv run hipson install codex --dry-run
 ## Remaining Risks
 - Sidecar packets must be generated carefully to avoid leaking sensitive project context.
 - Sidecar reports are advisory and must be verified locally.
-- Stable 1.0 should wait for remote CI on the rewritten public branch.
+- Release readiness requires fresh remote CI and human approval; the historical
+  1.0 plan does not establish the current release state.

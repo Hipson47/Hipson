@@ -77,7 +77,8 @@ They should not be used for:
 
 Every AI quality pass must preserve these rules:
 
-- no provider call happens unless the user runs the sidecar command;
+- no provider call happens without an explicit provider action, such as a sidecar
+  command or a kit/autopilot run with `--run-sidecar`;
 - the dry-run preview comes first;
 - packets are bounded and redacted;
 - free/model-selected output is advisory;
@@ -180,14 +181,14 @@ read creates no files. Custom ledgers outside `runs/` remain accessible through
 
 ## Roadmap
 
-See `docs/archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md` for the broader AI-dev-first product
-roadmap that connects this quality layer to model profiles, subagent curation,
-verification evidence, audit export, and workflow packs.
+See the [archived AI-dev-first expansion plan](archive/2026-q2-planning/AI_DEV_FIRST_EXPANSION_PLAN.md)
+for historical background connecting this quality layer to model profiles,
+subagent curation, verification evidence, audit export, and workflow packs.
 
-Near-term:
+Already available:
 
 - keep `hipson work --free-ai` and `--ai-model` as explicit opt-ins;
-- add curated free sidecars such as `reviewer_free` and `coder_review_free`;
+- use curated free sidecars such as `reviewer_free` and `coder_review_free`;
 - document when free models are appropriate;
 - keep free models excluded from default routing.
 - use `hipson provider doctor` to check provider and agent readiness without
@@ -195,7 +196,7 @@ Near-term:
 
 Next:
 
-- add model profile presets for quality, cost, speed, long-context, UI review,
-  and security review;
+- extend the existing presets in `config/model_profiles.json` for additional
+  quality, cost, and speed needs; review, long-context, UI, and security presets exist;
 - keep improving `hipson quality report` finding adjudication;
 - expand `hipson quality eval` into fixture-backed golden packet evals.

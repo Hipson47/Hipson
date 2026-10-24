@@ -2,30 +2,38 @@
 
 ## Unreleased
 
-- Add explicit worker mode to agent instructions and installer output: lead-assigned
-  workers stay within their brief, skip orchestration and progress/handoff notes,
-  and return verification evidence without committing, pushing, or writing the task
-  ledger. Preserve the standalone workflow outside worker mode.
-- Harden evidence appends with interprocess locking, recursive credential-key and string redaction,
-  optional unauthenticated actor/task attribution, task filters, and
-  `hipson evidence verify`. Preserve existing ledger records and hashes. Complete
-  MCP `hipson://latest-audit` and align audit/evidence ledger defaults with the
-  work plan's project. Redact nested work plan fields and release claim copies.
-- Read JSONL using physical newlines, preserving Unicode separators inside
-  records. Validate evidence/audit shapes, isolate corrupt latest-audit candidates
-  with explicit diagnostics, and return a schema-valid empty audit bundle.
-- Recover orphaned task assignments through `hipson task reap` and gated MCP
-  `task.reap`, with read-only dry runs, optional PID/boot/host ownership and UTC
-  leases, and automatic recovery before overlapping write claims are checked.
-  Migrate task ledger databases from v1 to v2 transactionally, preserving history.
-- Keep orphan claims while either the runner PID or its worker process group
-  survives. Make CLI/MCP ledger reads non-migrating and read-only, including
-  sidecar-free snapshots of checkpointed WAL stores in read-only directories.
-- Expose the central task ledger through nine MCP stdio tools, with explicit
-  approval for writes, CLI-compatible JSON payloads, a server-configured store,
-  non-creating reads, and recoverable, redacted tool errors.
-- Add a transactional SQLite task ledger and `hipson task` CLI for lead-recorded
-  assignments, overlapping path claims, lifecycle transitions, and append-only events.
+- **Task ledger and recovery**
+  - Add a transactional SQLite ledger and `hipson task` CLI for lead-recorded
+    tasks, assignments, overlapping path claims, lifecycle transitions, and
+    append-only events.
+  - Expose ten MCP `task.*` tools with explicit approval for all six writes,
+    CLI-compatible JSON, a server-configured store, non-creating reads, and
+    recoverable, redacted errors.
+  - Recover orphaned assignments through CLI/MCP `task reap`/`task.reap`, with
+    read-only CLI dry runs, optional PID/boot/host ownership, UTC leases, and
+    automatic recovery before overlapping write claims are checked. Preserve
+    claims while either the runner PID or its worker process group survives.
+  - Migrate v1 stores to v2 transactionally, preserving history. Keep CLI/MCP
+    reads non-migrating and read-only, including snapshots of checkpointed WAL
+    stores without creating SQLite sidecars in read-only directories.
+- **Lead and worker instructions**
+  - Add worker mode to agent instructions and installer output: lead-assigned
+    workers stay within their brief, skip orchestration and progress/handoff
+    notes, and return verification evidence without committing, pushing, or
+    writing the task ledger. Preserve the standalone workflow outside worker mode.
+- **Evidence and audit**
+  - Serialize evidence appends with interprocess locking; recursively redact
+    credential-key values and strings before hashing. Add optional unauthenticated
+    actor/task attribution, task filters, and `hipson evidence verify`, preserving
+    existing records and hashes. Redact nested work plans and release claim copies.
+  - Complete MCP `hipson://latest-audit`; align audit/evidence ledger defaults
+    with the work plan's project. Validate candidate shapes, isolate corrupt
+    artifacts with diagnostics, and return a schema-valid empty audit bundle.
+  - Split JSONL on physical newlines, preserving Unicode separators within records.
+- **Documentation**
+  - Move historical planning and audit material to `docs/archive/` with an archive index.
+  - Index the live docs, document the lead/worker ledger flow, and correct CLI,
+    path, provider, and historical-status guidance.
 
 ## 1.1.0
 

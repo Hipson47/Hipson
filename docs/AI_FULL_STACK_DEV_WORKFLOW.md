@@ -64,8 +64,11 @@ hipson run handoff --run runs/<work_id> --json
 For bounded implementation work, require an explicit edit scope:
 
 ```bash
-hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
+hipson autopilot implement --task "implement bounded CLI parser fix" --allowed-edit src/hipson/cli.py,tests --verification "git diff --check" --json
 ```
+
+This prepares an executor packet and verification bundle. The coding agent
+performs the implementation; Hipson does not edit the source on its behalf.
 
 Project policy is enforced before autopilot runs. Denied-path changes,
 `local_only` sidecar blocks, invalid policy, and prompt-required operations stop

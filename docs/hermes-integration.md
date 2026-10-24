@@ -77,7 +77,7 @@ Hipson writes Hermes intake events to:
 ~/.config/hipson/hermes-bus/events.jsonl
 ```
 
-Override with:
+This default honors `XDG_CONFIG_HOME/hipson`. Override Hipson home explicitly with:
 
 ```bash
 export HIPSON_HOME=/path/to/hipson-home
@@ -87,14 +87,15 @@ Each event includes:
 
 - event id, timestamp, channel, and actor;
 - resolved project path and git root;
-- result from `hipson route --task` inside the `hipson work`/Hermes intake flow;
+- result from the same deterministic router used by `hipson route --task "..."`;
 - recommended Hipson commands;
 - Hermes/Hipson/Codex responsibility contract;
 - Telegram setup metadata;
 - safety rules.
 
-The bus is append-only JSONL. It is intentionally simple so Hermes can consume it
-without a daemon or extra dependency.
+The bus is append-only JSONL. Intake records routing metadata; it does not run
+`hipson work`, start a worker, or dispatch a Telegram message. Hermes consumes
+these events without a Hipson daemon or extra dependency.
 
 ## Hermes Skill
 
@@ -119,6 +120,9 @@ export HERMES_HOME=/path/to/hermes-home
 ## Telegram
 
 Do this last, after `hermes` CLI chat and `hipson hermes doctor` are healthy.
+The commands below belong to the separately installed Hermes CLI; check that
+installation's help before gateway setup. Hipson's bridge does not provision or
+verify a live Telegram gateway.
 
 Official Hermes docs store secrets in:
 

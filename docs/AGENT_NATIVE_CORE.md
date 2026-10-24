@@ -63,9 +63,9 @@ required control-plane fields while leaving room for compatible additions.
 ## Path And Write Policy
 
 Generated artifacts are expected under generated artifact directories such as
-`runs/`, `scans/`, `docs/`, or `memory/`. Commands reject path traversal, broad
-home/profile paths, and sensitive paths such as env files, keys, and local
-databases.
+`runs/`, `scans/`, `docs/`, or `memory/`. Artifact output commands reject path
+traversal, broad home/profile paths, and sensitive paths such as env files, keys,
+and local databases.
 
 The explicit override is:
 
@@ -74,7 +74,9 @@ The explicit override is:
 ```
 
 Use it only when the caller intentionally wants to write outside the generated
-artifact policy.
+artifact policy. Sensitive output paths remain blocked even with this override.
+This policy covers the artifact output surfaces listed in the agent contract;
+the task ledger's `--db` selects a separate store.
 
 ## Provider Policy
 
@@ -162,13 +164,16 @@ Autopilot uses the same artifact model:
 
 ```bash
 hipson autopilot review --task "review current diff" --json
-hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
+hipson autopilot implement --task "implement bounded CLI parser fix" --allowed-edit src/hipson/cli.py,tests --json
 hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
 hipson run status --run runs/<work_id> --json
 hipson run validate --run runs/<work_id> --json
 hipson run handoff --run runs/<work_id> --json
 hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
 ```
+
+`autopilot implement` prepares a scoped executor packet and verification bundle;
+the coding agent still performs the implementation.
 
 Project policy is checked before autopilot runs. Denied-path changes, invalid
 policy, local-only sidecar blocks, and prompt-required operations stop the

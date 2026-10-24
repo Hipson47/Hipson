@@ -1,5 +1,11 @@
 # Mutation Triage Notes
 
+Status: historical verification and partial mutation-run snapshots, not current
+checkout results. Counts and survivor IDs below belong to those earlier runs.
+The current `pyproject.toml` bounds mutmut to `approvals.py`, `redaction.py`, and
+`sandbox.py`; other module batches require an explicitly scoped configuration
+change. No complete mutation-closure claim is made here.
+
 ## 1. Run
 
 Post-test stabilization pass after Runtime Observability + Approval-Gated Learning MVP, updated after the local provider-free production readiness repair.
@@ -57,7 +63,7 @@ uv run mutmut results || true
 
 If the full configured run remains too broad, run smaller module batches or use mutmut's current supported filtering options after checking `uv run mutmut run --help`.
 
-## 2. Current Post-Test State
+## 2. Recorded Post-Test State
 
 Runtime Observability + Approval-Gated Learning MVP is implemented and documented.
 
@@ -117,7 +123,7 @@ Newly implemented after the original stabilization note:
 
 ## 5. Observed Survivors
 
-Current signal from the latest `timeout 300s uv run mutmut run || true`:
+Recorded signal from the historical `timeout 300s uv run mutmut run || true`:
 
 - The run did not complete within `timeout 300s`.
 - Last observed progress was 2,005/2,291 mutants.
