@@ -703,10 +703,14 @@ def command_evidence_append(args: argparse.Namespace) -> int:
             sidecar_report=args.sidecar_report,
             ledger_root=ledger_root,
             human_decision=args.decision,
+            actor=args.actor,
+            task_id=args.task_id,
         )
         path = evidence_mod.append_record(ledger_root, record)
-    except SystemExit as exc:
-        print(exc, file=sys.stderr)
+    except (SystemExit, ValueError, OSError) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        if not isinstance(exc, SystemExit):
+            return 1
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps({"ledger": str(path), "record": record}, indent=2, ensure_ascii=False))
@@ -721,7 +725,7 @@ def command_evidence_show(args: argparse.Namespace) -> int:
         root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
     else:
         root = evidence_mod.evidence_dir(args.ledger_dir)
-    records = evidence_mod.read_records(root)
+    records = evidence_mod.read_records(root, task_id=args.task_id)
     if args.work:
         work_id = str(work_plan.get("work_id", ""))
         records = [record for record in records if str(record.get("work", {}).get("work_id", "")) == work_id]
@@ -741,6 +745,21 @@ def command_evidence_show(args: argparse.Namespace) -> int:
             f"verification={verification_payload.get('status', 'unknown')}"
         )
     return 0
+
+
+def command_evidence_verify(args: argparse.Namespace) -> int:
+    try:
+        result = evidence_mod.verify_chain(evidence_mod.evidence_dir(args.ledger_dir))
+    except (OSError, UnicodeError) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"evidence chain: {'passed' if result['ok'] else 'broken'} ({result['record_count']} records)")
+        for error in result["errors"]:
+            print(f"- line {error['line']}: {error['error']}")
+    return 0 if result["ok"] else 1
 
 
 def command_evidence_export(args: argparse.Namespace) -> int:
@@ -775,7 +794,7 @@ def command_audit_show(args: argparse.Namespace) -> int:
     try:
         work_plan = verification.load_work_plan(args.work)
         root = evidence_mod.evidence_dir(args.ledger_dir, project=work_plan.get("project"))
-        bundle = evidence_mod.audit_bundle(work_path=args.work, ledger_root=root)
+        bundle = evidence_mod.audit_bundle(work_path=args.work, ledger_root=root, task_id=args.task_id)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
@@ -2179,15 +2198,22 @@ def build_parser() -> argparse.ArgumentParser:
     evidence_append.add_argument("--quality-eval", help="Quality eval JSON artifact path")
     evidence_append.add_argument("--sidecar-report", help="Optional sidecar report path or id")
     evidence_append.add_argument("--decision", default="pending", help="Human decision, e.g. pending, accepted, blocked")
+    evidence_append.add_argument("--actor", help="Recorded actor label (not authenticated)")
+    evidence_append.add_argument("--task-id", type=evidence_mod.validate_task_id, help="Task ledger id, e.g. T-0001 (pattern only)")
     evidence_append.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
     evidence_append.add_argument("--json", action="store_true", help="Print machine-readable appended record")
     evidence_append.set_defaults(func=command_evidence_append)
     evidence_show = evidence_sub.add_parser("show", help="Show evidence ledger records")
     evidence_show.add_argument("--work", help="Optional work plan JSON path to filter records")
+    evidence_show.add_argument("--task-id", type=evidence_mod.validate_task_id, help="Filter by task ledger id")
     evidence_show.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
     evidence_show.add_argument("--latest", action="store_true", help="Show only the latest record")
     evidence_show.add_argument("--json", action="store_true", help="Print machine-readable records")
     evidence_show.set_defaults(func=command_evidence_show)
+    evidence_verify = evidence_sub.add_parser("verify", help="Verify evidence record hashes and chain links")
+    evidence_verify.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
+    evidence_verify.add_argument("--json", action="store_true", help="Print machine-readable chain verification")
+    evidence_verify.set_defaults(func=command_evidence_verify)
     evidence_export = evidence_sub.add_parser("export", help="Export evidence ledger records")
     evidence_export.add_argument("--work", help="Optional work plan JSON path to filter records")
     evidence_export.add_argument("--ledger-dir", help="Ledger directory; defaults to cwd/runs")
@@ -2203,6 +2229,7 @@ def build_parser() -> argparse.ArgumentParser:
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
     audit_show = audit_sub.add_parser("show", help="Show an audit bundle")
     audit_show.add_argument("--work", required=True, help="Work plan JSON path")
+    audit_show.add_argument("--task-id", type=evidence_mod.validate_task_id, help="Filter by task ledger id")
     audit_show.add_argument("--ledger-dir", help="Ledger directory; defaults to <project>/runs")
     audit_show.add_argument("--json", action="store_true", help="Print machine-readable audit bundle")
     audit_show.set_defaults(func=command_audit_show)

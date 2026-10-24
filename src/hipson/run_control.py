@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from hipson.contracts import SCHEMA_VERSION, sha256_text, timestamp
-from hipson.evidence import LEDGER_FILE
-from hipson.redaction import redact_text
+from hipson.evidence import LEDGER_FILE, read_records
+from hipson.redaction import redact_text, redact_value
 
 RUN_ARTIFACTS = {
     "contract": "contract.json",
@@ -245,7 +245,7 @@ def build_release_claim(run_path: str | Path, *, claim: str, human_decision: str
         reasons.append("release_claim_gate is not passed in audit evidence")
     if human_gate != "passed":
         reasons.append("human decision for this claim is not approved")
-    return {
+    return redact_value({
         "artifact_kind": "hipson.release_claim",
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": timestamp(),
@@ -257,15 +257,15 @@ def build_release_claim(run_path: str | Path, *, claim: str, human_decision: str
         "human_decision": redact_text(human_decision),
         "gates": gates if isinstance(gates, dict) else {},
         "reasons": reasons,
-        "safe_to_claim": [claim] if allowed else [],
-        "unsafe_to_claim": [] if allowed else [claim],
+        "safe_to_claim": [redact_text(claim)] if allowed else [],
+        "unsafe_to_claim": [] if allowed else [redact_text(claim)],
         "audit": str(run_dir / RUN_ARTIFACTS["audit"]),
-    }
+    })
 
 
 def write_release_claim(run_dir: Path, claim: dict[str, Any]) -> Path:
     path = run_dir / RUN_ARTIFACTS["release_claim"]
-    _write_json(path, claim)
+    _write_json(path, redact_value(claim))
     return path
 
 
@@ -312,10 +312,7 @@ def _next_agent_step(gates: dict[str, Any], unknowns: object) -> str:
 
 
 def _latest_evidence_record(run_dir: Path) -> dict[str, Any]:
-    path = run_dir / LEDGER_FILE
-    if not path.exists():
-        return {}
-    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    records = read_records(run_dir)
     return records[-1] if records else {}
 
 

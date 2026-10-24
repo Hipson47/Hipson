@@ -145,7 +145,7 @@ def read_bus_events(
     if not event_path.exists():
         return []
     events: list[dict[str, Any]] = []
-    for line in event_path.read_text(encoding="utf-8", errors="replace").splitlines():
+    for line in event_path.read_text(encoding="utf-8", errors="replace").split("\n"):
         if not line.strip():
             continue
         try:
@@ -351,7 +351,7 @@ def _doctor_recommendations(hermes_bin: str | None, skill_installed: bool, env_f
 def _event_count(path: Path) -> int:
     if not path.exists():
         return 0
-    return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip())
+    return sum(1 for line in path.read_text(encoding="utf-8", errors="replace").split("\n") if line.strip())
 
 
 def _bounded(value: str, limit: int) -> str:

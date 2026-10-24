@@ -10,7 +10,7 @@ from typing import TypedDict, cast
 from hipson import contracts, model_profiles, output_policy
 from hipson.packets import compile_executor_packet, compile_review_packet, csv_items
 from hipson.project import build_scan, changed_files, discover_commands, git_root, resolve_project
-from hipson.redaction import redact_text
+from hipson.redaction import redact_value
 from hipson.router import RouteResult, route_task
 
 
@@ -626,6 +626,4 @@ def _ai_quality_lines(plan: AIQualityPlan) -> list[str]:
 
 
 def _json_safe_plan(plan: WorkPlan) -> dict[str, object]:
-    payload = cast(dict[str, object], dict(plan))
-    payload["scan"] = redact_text(cast(str, payload["scan"]))
-    return payload
+    return cast(dict[str, object], redact_value(dict(plan)))

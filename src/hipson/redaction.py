@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 REDACTION = "[REDACTED]"
 SKIPPED = "[sensitive file skipped]"
+
+# Whole credential names only, case-insensitive with '_' and '-' interchangeable
+# or omitted. Include the assignment vocabulary in SECRET_PATTERNS below.
+CREDENTIAL_KEYS = {
+    "password", "passwd", "secret", "token", "apikey", "accesskey", "privatekey",
+    "authorization", "cookie", "clientsecret", "credential", "credentials",
+    "accesstoken", "refreshtoken", "accesskeyid", "secretaccesskey",
+    "awssecretaccesskey", "openrouterapikey",
+}
 
 SECRET_PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
@@ -46,6 +56,26 @@ def redact_text(text: str) -> str:
         else:
             redacted = pattern.sub(REDACTION, redacted)
     return redacted
+
+
+def redact_value(value: Any) -> Any:
+    """Copy JSON-like data, masking credential values of any type and string patterns.
+
+    Match whole credential keys after case folding and removing '_' / '-'; never
+    substring-match unrelated fields such as token_count or requires_credentials.
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {
+            key: REDACTION
+            if isinstance(key, str) and key.casefold().replace("_", "").replace("-", "") in CREDENTIAL_KEYS
+            else redact_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_value(item) for item in value]
+    return value
 
 
 def is_sensitive_path(path: str | Path) -> bool:

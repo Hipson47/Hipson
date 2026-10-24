@@ -3,14 +3,60 @@
 from __future__ import annotations
 
 import json
+import re
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from hipson.contracts import SCHEMA_VERSION, new_id, stable_hash, timestamp, work_run_from_plan
-from hipson.redaction import redact_text
+from hipson.redaction import redact_text, redact_value
 from hipson.verification import load_work_plan
 
 LEDGER_FILE = "evidence.jsonl"
+# Absolute end-of-string in Python and JSON Schema; '$' alone admits a final newline.
+TASK_ID_PATTERN = r"^T-[0-9]{4,}(?![\s\S])"
+
+try:
+    import fcntl
+except ImportError:  # Windows and other platforms without flock.
+    fcntl = None  # type: ignore[assignment]
+
+
+def validate_task_id(task_id: str | None) -> str | None:
+    if task_id is not None and (not isinstance(task_id, str) or re.fullmatch(TASK_ID_PATTERN, task_id) is None):
+        raise ValueError("task_id must match T-[0-9]{4,}, for example T-0001")
+    return task_id
+
+
+@contextmanager
+def _ledger_lock(root: Path) -> Iterator[None]:
+    """Serialize cooperating writers; never unlink a flock file (inode identity matters)."""
+    if fcntl is not None:
+        with (root / ".evidence.lock").open("a", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return
+    # mkdir is atomic across processes too. Fail closed on stale locks rather
+    # than guessing whether another writer is alive and risking a fork.
+    lock_dir = root / ".evidence.lock.d"
+    deadline = time.monotonic() + 30
+    while True:
+        try:
+            lock_dir.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Evidence lock timed out; check for a stale lock: {lock_dir}") from None
+            time.sleep(0.01)
+    try:
+        yield
+    finally:
+        lock_dir.rmdir()
 
 
 def evidence_dir(path: str | None = None, *, project: str | Path | None = None) -> Path:
@@ -25,14 +71,75 @@ def ledger_path(root: Path) -> Path:
     return root / LEDGER_FILE
 
 
-def read_records(root: Path) -> list[dict[str, Any]]:
+def _require_fields(value: object, label: str, **fields: type) -> dict[str, Any]:
+    """Check decoded shapes before consumers access nested fields (no coercion)."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    for name, kind in fields.items():
+        if not isinstance(value.get(name), kind):
+            raise ValueError(f"{label}.{name} must be {kind.__name__}")
+    return value
+
+
+def _validate_work(value: object) -> None:
+    _require_fields(
+        value, "Work", schema_version=str, work_id=str, created_at_utc=str, task=str,
+        repo=dict, route=dict, packet=dict, packet_preflight=dict, ai_quality=dict,
+        verification_commands=list, memory_commands=list, audit=list, unknowns=list,
+    )
+
+
+def _validate_gates(value: object) -> None:
+    _require_fields(value, "Gates", verification_gate=str, sidecar_eval_gate=str,
+                    human_decision_gate=str, release_claim_gate=str)
+
+
+def _validate_record(value: object) -> dict[str, Any]:
+    record = _require_fields(
+        value, "Record", artifact_kind=str, schema_version=str, event_id=str,
+        previous_hash=str, created_at_utc=str, work=dict, provider=dict,
+        verification=dict, quality=dict, gates=dict, claims=dict, unknowns=list,
+        human_decision=dict, record_hash=str,
+    )
+    if record["artifact_kind"] != "hipson.evidence_record":
+        raise ValueError("Record.artifact_kind must be hipson.evidence_record")
+    _validate_work(record["work"])
+    _validate_gates(record["gates"])
+    _require_fields(record["claims"], "Claims", safe=list, unsafe=list, evidence_refs=list)
+    if "summary" in record["quality"]:
+        _require_fields(record["quality"], "Quality", summary=dict)
+    if "status" in record["verification"]:
+        _require_fields(record["verification"], "Verification", status=str)
+    if "actor" in record:
+        _require_fields(record, "Record", actor=str)
+    if "task_id" in record:
+        _require_fields(record, "Record", task_id=str)
+        validate_task_id(record["task_id"])
+    return record
+
+
+def _decode_record(line: str) -> dict[str, Any]:
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        raise ValueError("Invalid JSON record") from None
+    return _validate_record(value)
+
+
+def read_records(root: Path, *, task_id: str | None = None) -> list[dict[str, Any]]:
+    validate_task_id(task_id)
     path = ledger_path(root)
     if not path.exists():
         return []
     records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
         if line.strip():
-            records.append(json.loads(line))
+            try:
+                record = _decode_record(line)
+            except ValueError as exc:
+                raise ValueError(f"{path}: line {line_number}: {exc}") from None
+            if task_id is None or record.get("task_id") == task_id:
+                records.append(record)
     return records
 
 
@@ -42,11 +149,48 @@ def latest_hash(root: Path) -> str:
 
 
 def append_record(root: Path, record: dict[str, Any]) -> Path:
+    """Finalize and append atomically; update the caller's record to the persisted payload."""
+    validate_task_id(record.get("task_id"))
+    if "actor" in record and not isinstance(record["actor"], str):
+        raise ValueError("actor must be a string (an unauthenticated recorded label)")
     root.mkdir(parents=True, exist_ok=True)
     path = ledger_path(root)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    with _ledger_lock(root):
+        payload = redact_value(record)
+        payload["previous_hash"] = latest_hash(root)
+        payload["record_hash"] = stable_hash({key: value for key, value in payload.items() if key != "record_hash"})
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+        record.clear()
+        record.update(payload)
     return path
+
+
+def verify_chain(root: Path) -> dict[str, Any]:
+    """Check stored bytes' decoded values without redacting or repairing old records."""
+    errors: list[dict[str, Any]] = []
+    count = 0
+    previous_hash = ""
+    path = ledger_path(root)
+    if path.exists():
+        with _ledger_lock(root):
+            lines = path.read_text(encoding="utf-8").split("\n")
+        for line_number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            count += 1
+            try:
+                record = _decode_record(line)
+            except ValueError as exc:
+                errors.append({"line": line_number, "error": str(exc)})
+                continue
+            if record.get("previous_hash") != previous_hash:
+                errors.append({"line": line_number, "error": "previous_hash does not match preceding record_hash"})
+            expected = stable_hash({key: value for key, value in record.items() if key != "record_hash"})
+            if record.get("record_hash") != expected:
+                errors.append({"line": line_number, "error": "record_hash does not match record contents"})
+            previous_hash = record.get("record_hash", "")
+    return {"ledger": str(path), "ok": not errors, "record_count": count, "errors": errors}
 
 
 def build_evidence_record(
@@ -58,7 +202,12 @@ def build_evidence_record(
     sidecar_report: str | None = None,
     ledger_root: Path,
     human_decision: str = "pending",
+    actor: str | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
+    validate_task_id(task_id)
+    if actor is not None and not isinstance(actor, str):
+        raise ValueError("actor must be a string (an unauthenticated recorded label)")
     verification_payload = verification or {}
     quality_report_payload = quality_report or {}
     quality_eval_payload = quality_eval or {}
@@ -73,7 +222,8 @@ def build_evidence_record(
         "artifact_kind": "hipson.evidence_record",
         "schema_version": SCHEMA_VERSION,
         "event_id": new_id("evidence"),
-        "previous_hash": latest_hash(ledger_root),
+        # append_record supplies the authoritative link and hash under its lock.
+        "previous_hash": "",
         "created_at_utc": timestamp(),
         "work": work_run_from_plan(work_plan),
         "provider": {
@@ -95,6 +245,11 @@ def build_evidence_record(
         "unknowns": _unknowns(work_plan, verification_payload, quality_report_payload, quality_eval_payload, gates),
         "human_decision": {"required": True, "outcome": redact_text(human_decision)},
     }
+    if actor is not None:
+        record["actor"] = actor
+    if task_id is not None:
+        record["task_id"] = task_id
+    record = redact_value(record)
     record["record_hash"] = stable_hash({key: value for key, value in record.items() if key != "record_hash"})
     return record
 
@@ -114,22 +269,82 @@ def load_json_artifact(path: str | None) -> dict[str, Any] | None:
     return data
 
 
-def audit_bundle(*, work_path: str, ledger_root: Path) -> dict[str, Any]:
+def audit_bundle(*, work_path: str, ledger_root: Path, task_id: str | None = None) -> dict[str, Any]:
     work_plan = load_work_plan(work_path)
     work_id = str(work_plan.get("work_id", ""))
     records = [
         record
-        for record in read_records(ledger_root)
+        for record in read_records(ledger_root, task_id=task_id)
         if str(record.get("work", {}).get("work_id", "")) == work_id
     ]
+    return _audit_bundle(work_run_from_plan(work_plan), records)
+
+
+def latest_audit_bundle(project: Path) -> dict[str, Any]:
+    """Read the newest project audit or derive one from evidence in project/runs."""
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    candidate_errors: list[dict[str, str]] = []
+    for path in (project / "runs").rglob("audit.json"):
+        try:
+            bundle = _validate_audit_bundle(json.loads(path.read_text(encoding="utf-8")))
+            if _belongs_to_project(bundle["work"], project):
+                candidates.append((path.stat().st_mtime_ns, bundle))
+        except (OSError, ValueError) as exc:
+            candidate_errors.append({"path": str(path), "error": redact_text(str(exc))})
+    for path in (project / "runs").rglob(LEDGER_FILE):
+        try:
+            records = [record for record in read_records(path.parent) if _belongs_to_project(record["work"], project)]
+            if records:
+                latest = records[-1]
+                work = latest["work"]
+                matching = [record for record in records if record["work"]["work_id"] == work["work_id"]]
+                candidates.append((path.stat().st_mtime_ns, _audit_bundle(work, matching)))
+        except (OSError, ValueError) as exc:
+            candidate_errors.append({"path": str(path), "error": redact_text(str(exc))})
+    if candidates:
+        result = max(candidates, key=lambda candidate: candidate[0])[1]
+    else:
+        result = _audit_bundle(work_run_from_plan({"repo_state": {"path": str(project)}}), [])
+        result["project"] = str(project)
+        result["unknowns"] = ["No readable audit bundle or evidence records found for this project under runs/."]
+    if candidate_errors:
+        result["candidate_errors"] = candidate_errors
+        result["unknowns"] = [*result["unknowns"], "Corrupt or unreadable audit candidates found; see candidate_errors."]
+    return result
+
+
+def _validate_audit_bundle(value: object) -> dict[str, Any]:
+    bundle = _require_fields(
+        value, "Audit", artifact_kind=str, schema_version=str, work=dict, evidence_records=list,
+        latest_status=str, latest_quality_gate=str, latest_gates=dict,
+        latest_release_claim_gate=str, unknowns=list,
+    )
+    if bundle["artifact_kind"] != "hipson.audit_bundle" or "latest_eval_ok" not in bundle:
+        raise ValueError("Expected hipson.audit_bundle with latest_eval_ok")
+    _validate_work(bundle["work"])
+    _validate_gates(bundle["latest_gates"])
+    for record in bundle["evidence_records"]:
+        _validate_record(record)
+    return bundle
+
+
+def _belongs_to_project(work: object, project: Path) -> bool:
+    repo = work.get("repo") if isinstance(work, dict) else None
+    path = repo.get("path") if isinstance(repo, dict) else None
+    return isinstance(path, str) and bool(path) and Path(path).expanduser().resolve() == project.resolve()
+
+
+def _audit_bundle(work: dict[str, Any], records: list[dict[str, Any]]) -> dict[str, Any]:
     latest = records[-1] if records else None
     latest_quality = latest.get("quality", {}) if latest else {}
     latest_quality_summary = latest_quality.get("summary", {}) if isinstance(latest_quality, dict) else {}
-    latest_gates = latest.get("gates", {}) if latest else {}
+    latest_gates = latest.get("gates", {}) if latest else dict.fromkeys(
+        ("verification_gate", "sidecar_eval_gate", "human_decision_gate", "release_claim_gate"), "no-evidence"
+    )
     return {
         "artifact_kind": "hipson.audit_bundle",
         "schema_version": SCHEMA_VERSION,
-        "work": work_run_from_plan(work_plan),
+        "work": work,
         "evidence_records": records,
         "latest_status": latest.get("verification", {}).get("status", "no-evidence") if latest else "no-evidence",
         "latest_quality_gate": latest_quality_summary.get("quality_gate", "no-quality") if latest else "no-evidence",

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Harden evidence appends with interprocess locking, recursive credential-key and string redaction,
+  optional unauthenticated actor/task attribution, task filters, and
+  `hipson evidence verify`. Preserve existing ledger records and hashes. Complete
+  MCP `hipson://latest-audit` and align audit/evidence ledger defaults with the
+  work plan's project. Redact nested work plan fields and release claim copies.
+- Read JSONL using physical newlines, preserving Unicode separators inside
+  records. Validate evidence/audit shapes, isolate corrupt latest-audit candidates
+  with explicit diagnostics, and return a schema-valid empty audit bundle.
 - Recover orphaned task assignments through `hipson task reap` and gated MCP
   `task.reap`, with read-only dry runs, optional PID/boot/host ownership and UTC
   leases, and automatic recovery before overlapping write claims are checked.

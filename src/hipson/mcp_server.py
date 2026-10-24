@@ -111,9 +111,11 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "verification": {"type": "string"},
             "quality_report": {"type": "string"},
             "quality_eval": {"type": "string"},
-            "ledger_root": {"type": "string"},
+            "ledger_root": {"type": "string", "description": "Defaults to the work plan project's runs/ directory."},
             "sidecar_report": {"type": "string"},
             "decision": {"type": "string"},
+            "actor": {"type": "string", "description": "Recorded label; not authenticated."},
+            "task_id": {"type": "string", "pattern": evidence.TASK_ID_PATTERN},
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -121,7 +123,11 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "audit.show": {
         "type": "object",
         "required": ["work"],
-        "properties": {"work": {"type": "string"}, "ledger_root": {"type": "string"}},
+        "properties": {
+            "work": {"type": "string"},
+            "ledger_root": {"type": "string", "description": "Defaults to the work plan project's runs/ directory."},
+            "task_id": {"type": "string", "pattern": evidence.TASK_ID_PATTERN},
+        },
         "additionalProperties": False,
     },
     "run.status": {
@@ -436,6 +442,8 @@ def _read_resource(params: object, *, project: Path) -> dict[str, Any]:
         payload = agent_contract.build_agent_contract(project)
     elif uri == "hipson://policy":
         payload = policy.load_policy(project)
+    elif uri == "hipson://latest-audit":
+        payload = evidence.latest_audit_bundle(project)
     else:
         raise SystemExit(f"Unknown resource URI: {uri}")
     return {"contents": [{"uri": uri, "mimeType": "application/json", "text": json.dumps(payload, ensure_ascii=False)}]}
@@ -480,9 +488,11 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> obj
             decision=str(arguments.get("decision", "pending")),
         )
     if name == "audit.show":
+        work_plan = verification.load_work_plan(str(arguments.get("work", "")))
         return evidence.audit_bundle(
             work_path=str(arguments.get("work", "")),
-            ledger_root=Path(str(arguments.get("ledger_root", project / "runs"))).expanduser().resolve(),
+            ledger_root=evidence.evidence_dir(arguments.get("ledger_root"), project=work_plan.get("project")),
+            task_id=arguments.get("task_id"),
         )
     if name == "run.status":
         return run_control.build_status(str(arguments.get("run", "")))
@@ -536,6 +546,8 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> obj
             sidecar_report=arguments.get("sidecar_report", ""),
             ledger_root=ledger_root,
             human_decision=str(arguments.get("decision", "pending")),
+            actor=arguments.get("actor"),
+            task_id=arguments.get("task_id"),
         )
         path = evidence.append_record(ledger_root, record)
         return {"ledger": str(path), "record": record}

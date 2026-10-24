@@ -52,6 +52,18 @@
       }
     },
     "latest_release_claim_gate": { "type": "string" },
-    "unknowns": { "type": "array" }
+    "unknowns": { "type": "array" },
+    "candidate_errors": {
+      "description": "Corrupt or unreadable candidates skipped by latest-audit; absent when none failed.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "error"],
+        "properties": {
+          "path": { "type": "string" },
+          "error": { "type": "string" }
+        }
+      }
+    }
   }
 }
