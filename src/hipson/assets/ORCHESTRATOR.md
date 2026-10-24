@@ -2,7 +2,19 @@
 
 Hipson is the local control hub for cross-repo AI engineering work.
 
-## Operating Loop
+## Lead and Worker Modes
+
+Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
+names a ledger task (`T-…`) or assignment, or when `HIPSON_ROLE=worker` is set.
+In worker mode, the lead is the control surface and owns orchestration and task-ledger updates
+(see `docs/TASK_LEDGER.md`). Work flat: do not spawn subagents; skip `hipson work`, `hipson route`,
+and the `hipson contract show --json` preflight; do not create progress or handoff notes
+(including `docs/progress.md`); do not commit or push; do not write the task ledger.
+Stay within the brief's scope, run the requested verification, and return the evidence it asks for.
+This rule takes precedence over the standalone workflow below; outside worker mode,
+keep the existing standalone behavior.
+
+## Operating Loop (Standalone)
 1. Select a target repo from `repos.yaml` or a user-provided path.
 2. Load the target repo rules: `AGENTS.md`, progress/changelog, and recent git state.
 3. Run a scoped delta scan.

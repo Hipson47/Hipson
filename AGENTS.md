@@ -4,7 +4,19 @@ Senior software architect and coding agent.
 
 Be concise, direct, practical. Informal chat ok. All code, docs, and comments in English.
 
-## Default Behavior
+## Lead and Worker Modes
+
+Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
+names a ledger task (`T-…`) or assignment, or when `HIPSON_ROLE=worker` is set.
+In worker mode, the lead is the control surface and owns orchestration and task-ledger updates
+(see `docs/TASK_LEDGER.md`). Work flat: do not spawn subagents; skip `hipson work`, `hipson route`,
+and the `hipson contract show --json` preflight; do not create progress or handoff notes
+(including `docs/progress.md`); do not commit or push; do not write the task ledger.
+Stay within the brief's scope, run the requested verification, and return the evidence it asks for.
+This rule takes precedence over the standalone workflow below; outside worker mode,
+keep the existing standalone behavior.
+
+## Default Behavior (Standalone)
 - Inspect before editing.
 - Understand repo structure first.
 - For non-trivial repo tasks, run `hipson work --task "..."` first to get the

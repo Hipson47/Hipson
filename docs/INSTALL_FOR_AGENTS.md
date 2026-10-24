@@ -21,7 +21,19 @@ Apply mode preserves existing files by merging a Hipson managed marker block and
 creating backups before changes. Codex installs also generate hook/rule
 templates under the Codex hooks directory. Templates are not force-enabled.
 
-## Codex Rules
+## Lead and Worker Modes
+
+Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
+names a ledger task (`T-…`) or assignment, or when `HIPSON_ROLE=worker` is set.
+In worker mode, the lead is the control surface and owns orchestration and task-ledger updates
+(see `docs/TASK_LEDGER.md`). Work flat: do not spawn subagents; skip `hipson work`, `hipson route`,
+and the `hipson contract show --json` preflight; do not create progress or handoff notes
+(including `docs/progress.md`); do not commit or push; do not write the task ledger.
+Stay within the brief's scope, run the requested verification, and return the evidence it asks for.
+This rule takes precedence over the standalone workflow below; outside worker mode,
+keep the existing standalone behavior.
+
+## Codex Rules (Standalone)
 
 The managed Codex block tells Codex to:
 

@@ -7,7 +7,19 @@ Act as a senior AI engineering mentor, workflow architect, coding agent, and rev
 - Communicate in the user's language when clear; otherwise use concise English.
 - Write code, comments, file contents, prompts, and technical artifacts in English unless the project explicitly requires another language.
 
-## Work Style
+## Lead and Worker Modes
+
+Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
+names a ledger task (`T-…`) or assignment, or when `HIPSON_ROLE=worker` is set.
+In worker mode, the lead is the control surface and owns orchestration and task-ledger updates
+(see `docs/TASK_LEDGER.md`). Work flat: do not spawn subagents; skip `hipson work`, `hipson route`,
+and the `hipson contract show --json` preflight; do not create progress or handoff notes
+(including `docs/progress.md`); do not commit or push; do not write the task ledger.
+Stay within the brief's scope, run the requested verification, and return the evidence it asks for.
+This rule takes precedence over the standalone workflow below; outside worker mode,
+keep the existing standalone behavior.
+
+## Work Style (Standalone)
 - Use Plan -> Execute -> Verify for non-trivial tasks.
 - Inspect before editing. Understand the repo structure, conventions, commands, and stack first.
 - For non-trivial repo tasks, run `hipson work --task "..."` first to get the

@@ -3,7 +3,19 @@
 ## Purpose
 This project is the control hub for Hipson-style AI engineering work across many repositories. Hipson acts as an architect, reviewer, mentor, and orchestration layer. Codex can still execute code when that is the right move, but cross-project work should be driven by repo state, git diffs, progress files, and bounded task packets.
 
-## Default Mode
+## Lead and Worker Modes
+
+Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
+names a ledger task (`T-…`) or assignment, or when `HIPSON_ROLE=worker` is set.
+In worker mode, the lead is the control surface and owns orchestration and task-ledger updates
+(see `docs/TASK_LEDGER.md`). Work flat: do not spawn subagents; skip `hipson work`, `hipson route`,
+and the `hipson contract show --json` preflight; do not create progress or handoff notes
+(including `docs/progress.md`); do not commit or push; do not write the task ledger.
+Stay within the brief's scope, run the requested verification, and return the evidence it asks for.
+This rule takes precedence over the standalone workflow below; outside worker mode,
+keep the existing standalone behavior.
+
+## Default Mode (Standalone)
 Hipson should default to:
 - understand the project state before acting;
 - use delta scans instead of full rescans when possible;

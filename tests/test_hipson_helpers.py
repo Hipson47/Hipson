@@ -1763,6 +1763,93 @@ def test_install_agents_dry_run_does_not_overwrite_user_files(tmp_path: Path):
     assert not codex_home.exists()
     assert not claude_home.exists()
     assert not mcp_home.exists()
+    assert hipson_agent_install.format_agent_install(payload) == f"""Mode: dry-run
+Targets:
+- claude: {claude_home}
+  - ensure directory {claude_home}
+  - merge Hipson marker block into {claude_home / 'CLAUDE.md'}
+- codex: {codex_home}
+  - ensure directory {codex_home}
+  - merge Hipson marker block into {codex_home / 'AGENTS.md'}
+  - replace skill directory {codex_home / 'skills' / 'hipson-subagent-orchestration'}
+  - replace skill directory {codex_home / 'skills' / 'hipson-workflow'}
+  - write template {codex_home / 'hooks' / 'permission-request-policy.template.json'}
+  - write template {codex_home / 'hooks' / 'post-tool-use-policy.template.json'}
+  - write template {codex_home / 'hooks' / 'prefix-rules.template.json'}
+- cursor: {cursor_home}
+  - ensure directory {cursor_home / 'rules'}
+  - merge Hipson marker block into {cursor_home / 'rules' / 'hipson.mdc'}
+- mcp: {mcp_home}
+  - ensure directory {mcp_home}
+  - merge Hipson marker block into {mcp_home / 'hipson-mcp.md'}"""
+
+
+def test_install_agents_worker_mode_preserves_standalone_workflows(tmp_path: Path):
+    homes = {target: tmp_path / target for target in hipson_agent_install.AGENT_TARGETS}
+    payload = hipson_agent_install.install_agents(
+        targets=["all"],
+        dry_run=False,
+        codex_home=homes["codex"],
+        cursor_home=homes["cursor"],
+        claude_home=homes["claude"],
+        mcp_home=homes["mcp"],
+    )
+
+    assert_schema_valid("agent-install.schema.json", payload)
+    instructions = {
+        "codex": homes["codex"] / "AGENTS.md",
+        "cursor": homes["cursor"] / "rules" / "hipson.mdc",
+        "claude": homes["claude"] / "CLAUDE.md",
+        "mcp": homes["mcp"] / "hipson-mcp.md",
+    }
+    root_instructions = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    expected_worker_rule = root_instructions.split("## Lead and Worker Modes\n\n", 1)[1].split("\n## ", 1)[0].strip()
+    required_clauses = (
+        "task brief says you are a worker for a lead",
+        "contains `Worker rules:`",
+        "names a ledger task (`T-…`) or assignment",
+        "`HIPSON_ROLE=worker` is set",
+        "the lead is the control surface and owns orchestration and task-ledger updates",
+        "`docs/TASK_LEDGER.md`",
+        "Work flat: do not spawn subagents",
+        "skip `hipson work`, `hipson route`, and the `hipson contract show --json` preflight",
+        "do not create progress or handoff notes (including `docs/progress.md`)",
+        "do not commit or push",
+        "do not write the task ledger",
+        "Stay within the brief's scope, run the requested verification, and return the evidence it asks for",
+        "takes precedence over the standalone workflow below",
+        "outside worker mode, keep the existing standalone behavior",
+    )
+    for target, path in instructions.items():
+        text = path.read_text(encoding="utf-8")
+        worker_rule, standalone = text.split("## Lead and Worker Modes\n\n", 1)[1].split("\n## ", 1)
+        assert worker_rule.strip() == expected_worker_rule, target
+        for clause in required_clauses:
+            assert clause in " ".join(worker_rule.split()), (target, clause)
+        assert 'hipson work --task "..."' in standalone, target
+        assert "hipson contract show --json" in standalone, target
+        assert "hipson packet" in standalone and "preflight" in standalone, target
+        assert "Run local verification before claiming success" in standalone, target
+        assert "evidence" in standalone and "audit" in standalone, target
+        assert text.count(START_MARKER) == text.count(END_MARKER) == 1, target
+
+
+def test_worker_mode_rule_stays_in_sync_across_instruction_sources():
+    paths = [
+        "AGENTS.md",
+        "ORCHESTRATOR.md",
+        "src/hipson/assets/ORCHESTRATOR.md",
+        "src/hipson/assets/codex-workflow-kit/global/AGENTS.md",
+        "SKILLS.md",
+        "src/hipson/assets/SKILLS.md",
+        "docs/INSTALL_FOR_AGENTS.md",
+        "docs/hipson-orchestrator.md",
+    ]
+    rules = []
+    for path in paths:
+        text = (REPO_ROOT / path).read_text(encoding="utf-8")
+        rules.append(text.split("## Lead and Worker Modes\n\n", 1)[1].split("\n## ", 1)[0].strip())
+        assert rules[-1] == rules[0], path
 
 
 def test_install_agents_apply_uses_managed_marker_blocks_and_backups(tmp_path: Path):

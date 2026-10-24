@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add explicit worker mode to agent instructions and installer output: lead-assigned
+  workers stay within their brief, skip orchestration and progress/handoff notes,
+  and return verification evidence without committing, pushing, or writing the task
+  ledger. Preserve the standalone workflow outside worker mode.
 - Harden evidence appends with interprocess locking, recursive credential-key and string redaction,
   optional unauthenticated actor/task attribution, task filters, and
   `hipson evidence verify`. Preserve existing ledger records and hashes. Complete
