@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="941" height="362" viewBox="0 0 941 362" role="img" aria-label="Real Hipson task ledger events for one task">
+<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;font-size:13px}</style>
+<rect width="941" height="362" rx="12" fill="#0d1117"/>
+<rect x="0.5" y="0.5" width="940" height="361" rx="12" fill="none" stroke="#30363d"/>
+<circle cx="24" cy="22" r="6" fill="#ff5f57"/><circle cx="44" cy="22" r="6" fill="#febc2e"/><circle cx="64" cy="22" r="6" fill="#28c840"/>
+<text x="28" y="56" fill="#8b949e">$ hipson task events --task T-0003</text>
+<text x="28" y="94" fill="#6e7681">23:12:59</text>
+<text x="106.0" y="94" fill="#e8916b">claude</text>
+<text x="168.4" y="94" fill="#d2a8ff">opened</text>
+<text x="246.4" y="94" fill="#c9d1d9">S4a evidence hardening</text>
+<text x="28" y="118" fill="#6e7681">23:12:59</text>
+<text x="106.0" y="118" fill="#7ee787">codex</text>
+<text x="168.4" y="118" fill="#79c0ff">assigned</text>
+<text x="246.4" y="118" fill="#c9d1d9">A-0004: builder (rw)</text>
+<text x="28" y="142" fill="#6e7681">23:20:30</text>
+<text x="106.0" y="142" fill="#7ee787">codex</text>
+<text x="168.4" y="142" fill="#7ee787">finished</text>
+<text x="246.4" y="142" fill="#c9d1d9">passed: worker process exit=0 model=gpt-6.1-sol effort=xhigh</text>
+<text x="28" y="166" fill="#6e7681">23:22:22</text>
+<text x="106.0" y="166" fill="#7ee787">codex</text>
+<text x="168.4" y="166" fill="#79c0ff">assigned</text>
+<text x="246.4" y="166" fill="#c9d1d9">A-0005: reviewer (ro)</text>
+<text x="28" y="190" fill="#6e7681">23:27:40</text>
+<text x="106.0" y="190" fill="#7ee787">codex</text>
+<text x="168.4" y="190" fill="#7ee787">finished</text>
+<text x="246.4" y="190" fill="#c9d1d9">passed: worker process exit=0 model=gpt-6.1-sol effort=xhigh</text>
+<text x="28" y="214" fill="#6e7681">23:28:07</text>
+<text x="106.0" y="214" fill="#7ee787">codex</text>
+<text x="168.4" y="214" fill="#79c0ff">assigned</text>
+<text x="246.4" y="214" fill="#c9d1d9">A-0006: builder (rw)</text>
+<text x="28" y="238" fill="#6e7681">23:33:33</text>
+<text x="106.0" y="238" fill="#7ee787">codex</text>
+<text x="168.4" y="238" fill="#7ee787">finished</text>
+<text x="246.4" y="238" fill="#c9d1d9">passed: worker process exit=0 model=gpt-6.1-sol effort=xhigh</text>
+<text x="28" y="262" fill="#6e7681">23:35:16</text>
+<text x="106.0" y="262" fill="#e8916b">claude</text>
+<text x="168.4" y="262" fill="#e8916b">result</text>
+<text x="246.4" y="262" fill="#c9d1d9">lead verified: 377/377 tests, ruff/mypy/bandit clean, redaction probe ok; committed</text>
+<text x="28" y="286" fill="#6e7681">23:35:17</text>
+<text x="106.0" y="286" fill="#e8916b">claude</text>
+<text x="168.4" y="286" fill="#d2a8ff">status</text>
+<text x="246.4" y="286" fill="#c9d1d9">in_progress -&gt; review</text>
+<text x="28" y="310" fill="#6e7681">23:35:17</text>
+<text x="106.0" y="310" fill="#e8916b">claude</text>
+<text x="168.4" y="310" fill="#d2a8ff">status</text>
+<text x="246.4" y="310" fill="#c9d1d9">S4a committed</text>
+<text x="28" y="344" fill="#6e7681">real ledger, 2026-10-24 (UTC) · worker results are process results; the lead verifies before done</text>
+</svg>
