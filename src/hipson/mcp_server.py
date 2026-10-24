@@ -43,13 +43,14 @@ MCP_TOOL_NAMES = (
     "task.open",
     "task.assign",
     "task.finish",
+    "task.reap",
     "task.event",
     "task.status",
 )
 
 MCP_GATED_TOOLS = {
     "verify.run", "evidence.append", "handoff.create", "release.claim",
-    "task.open", "task.assign", "task.finish", "task.event", "task.status",
+    "task.open", "task.assign", "task.finish", "task.reap", "task.event", "task.status",
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "contract.show": {
@@ -199,6 +200,10 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "role": {"type": "string", "enum": list(ledger.ROLES)},
             "mode": {"type": "string", "enum": list(ledger.MODES)},
             "scope": {"type": "array", "items": {"type": "string"}},
+            "owner_pid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+            "owner_boot_id": {"type": "string", "minLength": 1},
+            "owner_host": {"type": "string", "minLength": 1},
+            "lease_seconds": {"type": "integer", "minimum": 0},
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -211,6 +216,16 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "result": {"type": "string", "enum": list(ledger.RESULTS)},
             "summary": {"type": "string"},
             "ref": {"type": "array", "items": {"type": "string"}},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
+    "task.reap": {
+        "type": "object",
+        "required": ["approved"],
+        "properties": {
+            "task": {"type": "string"},
+            "dry_run": {"type": "boolean"},
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -316,6 +331,7 @@ def _description(name: str) -> str:
         "task.open": "Open a lead-managed task in the central ledger (default lead: claude).",
         "task.assign": "Record a worker assignment and claim rw scope on behalf of the lead.",
         "task.finish": "Finish an assignment and release its path claims.",
+        "task.reap": "Cancel orphaned assignments and release claims, or preview with dry_run.",
         "task.event": "Append a lead-recorded task event on behalf of a worker.",
         "task.status": "Transition a task's lifecycle status on behalf of the lead.",
     }
@@ -343,6 +359,7 @@ def _fallback_command(name: str) -> str:
         "task.open": "hipson task open --project . --title \"...\" --objective \"...\" --json",
         "task.assign": "hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src --json",
         "task.finish": "hipson task finish --assignment A-0001 --result passed --summary \"...\" --json",
+        "task.reap": "hipson task reap --dry-run --json",
         "task.event": "hipson task event --task T-0001 --actor codex --type progress --summary \"...\" --json",
         "task.status": "hipson task status --task T-0001 --to review --actor claude --json",
     }
@@ -533,13 +550,14 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
     # The ledger is central: never derive its DB or project filters from --project.
     db = ledger.default_ledger_db()
-    create = name in MCP_GATED_TOOLS
+    dry_run = name == "task.reap" and arguments.get("dry_run", False)
+    create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
-        if name in ("task.show", "task.events"):
+        if name in ("task.show", "task.events") or (name == "task.reap" and "task" in arguments):
             raise ledger.LedgerError(f"Task not found: {arguments['task']}")
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
-    with closing(ledger.Ledger(db, create=create)) as store:
+    with closing(ledger.Ledger(db, create=create, read_only=not create)) as store:
         if name == "task.open":
             return store.open_task(
                 project=arguments["project"], title=arguments["title"], objective=arguments["objective"],
@@ -549,12 +567,16 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
             return store.assign(
                 arguments["task"], actor=arguments["actor"], role=arguments["role"], mode=arguments["mode"],
                 scope=arguments.get("scope", []),
+                owner_pid=arguments.get("owner_pid"), owner_boot_id=arguments.get("owner_boot_id"),
+                owner_host=arguments.get("owner_host"), lease_seconds=arguments.get("lease_seconds"),
             )
         if name == "task.finish":
             return store.finish(
                 arguments["assignment"], result=arguments["result"], summary=arguments["summary"],
                 refs=arguments.get("ref", []),
             )
+        if name == "task.reap":
+            return store.reap(task=arguments.get("task"), dry_run=dry_run)
         if name == "task.event":
             return store.add_event(
                 arguments["task"], actor=arguments["actor"], type=arguments["type"], summary=arguments["summary"],
@@ -590,6 +612,12 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             raise ValueError(f"{name}: {key} must contain strings")
         if "enum" in field and value not in field["enum"]:
             raise ValueError(f"{name}: {key} must be one of {field['enum']}")
+        if "minimum" in field and value < field["minimum"]:
+            raise ValueError(f"{name}: {key} must be at least {field['minimum']}")
+        if "maximum" in field and value > field["maximum"]:
+            raise ValueError(f"{name}: {key} must be at most {field['maximum']}")
+        if isinstance(value, str) and len(value) < field.get("minLength", 0):
+            raise ValueError(f"{name}: {key} must not be empty")
 
 
 def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:

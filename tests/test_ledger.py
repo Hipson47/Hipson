@@ -24,8 +24,8 @@ def _open(store, project, title="Ledger"):
     )
 
 
-def _assign(store, task, scope=("src",), mode="rw", actor="codex"):
-    return store.assign(task, actor=actor, role="builder", mode=mode, scope=scope)
+def _assign(store, task, scope=("src",), mode="rw", actor="codex", **owner):
+    return store.assign(task, actor=actor, role="builder", mode=mode, scope=scope, **owner)
 
 
 def _error(fn, message, error=LedgerError):
@@ -69,8 +69,17 @@ def _strict_errors(schema, payload, root, path="$"):
             errors.append(f"{path}: minLength")
         if "pattern" in schema and re.search(schema["pattern"], payload) is None:
             errors.append(f"{path}: pattern")
+        if schema.get("format") == "date-time":
+            try:
+                parsed = datetime.fromisoformat(payload)
+                if "T" not in payload or parsed.utcoffset() is None:
+                    raise ValueError("Expected a timestamp with timezone")
+            except ValueError:
+                errors.append(f"{path}: format")
     if isinstance(payload, int) and "minimum" in schema and payload < schema["minimum"]:
         errors.append(f"{path}: minimum")
+    if isinstance(payload, int) and "maximum" in schema and payload > schema["maximum"]:
+        errors.append(f"{path}: maximum")
     if isinstance(payload, list):
         if schema.get("uniqueItems") and len(set(map(json.dumps, payload))) != len(payload):
             errors.append(f"{path}: uniqueItems")
@@ -342,7 +351,7 @@ def test_ledger_schema_version_wal_and_append_only_events(tmp_path: Path):
         assert store.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert store.connection.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
         for sql in ("UPDATE events SET summary = 'changed'", "DELETE FROM events"):
             _error(lambda sql=sql: store.connection.execute(sql), "append-only", sqlite3.IntegrityError)
         assert len(store.events(task)) == 1 and store.show(task)["revision"] == 1

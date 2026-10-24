@@ -1761,7 +1761,15 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
 
 def command_task(args: argparse.Namespace) -> int:
     try:
-        with closing(ledger.Ledger(args.db)) as store:
+        dry_run = args.task_command == "reap" and args.dry_run
+        read_only = args.task_command in ("show", "events", "list", "board") or dry_run
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        if read_only and not db.exists():
+            if args.task_command in ("show", "events") or (dry_run and args.task is not None):
+                raise ledger.LedgerError(f"Task not found: {args.task}")
+            print("No active tasks." if args.task_command == "board" and not args.json else "[]")
+            return 0
+        with closing(ledger.Ledger(db, read_only=read_only)) as store:
             payload: object
             if args.task_command == "open":
                 payload = store.open_task(
@@ -1772,9 +1780,15 @@ def command_task(args: argparse.Namespace) -> int:
                     lead=args.lead,
                 )
             elif args.task_command == "assign":
-                payload = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope)
+                payload = store.assign(
+                    args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
+                    owner_pid=args.owner_pid, owner_boot_id=args.owner_boot_id, owner_host=args.owner_host,
+                    lease_seconds=args.lease_seconds,
+                )
             elif args.task_command == "finish":
                 payload = store.finish(args.assignment, result=args.result, summary=args.summary, refs=args.ref)
+            elif args.task_command == "reap":
+                payload = store.reap(task=args.task, dry_run=args.dry_run)
             elif args.task_command == "event":
                 payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
             elif args.task_command == "status":
@@ -1821,6 +1835,7 @@ def build_parser() -> argparse.ArgumentParser:
             ("open", "Open a task"),
             ("assign", "Assign a worker and claim write scope"),
             ("finish", "Finish an assignment and release its claims"),
+            ("reap", "Cancel orphaned assignments and release their claims"),
             ("event", "Append a task event"),
             ("status", "Transition a task"),
             ("show", "Show a task with assignments and claims"),
@@ -1848,8 +1863,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["assign"].add_argument("--role", choices=ledger.ROLES, required=True)
     task_parsers["assign"].add_argument("--mode", choices=ledger.MODES, required=True)
     task_parsers["assign"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")
+    task_parsers["assign"].add_argument("--owner-pid", type=int, help="PID of the owner on owner-host")
+    task_parsers["assign"].add_argument("--owner-boot-id", help="Owner's Linux boot ID")
+    task_parsers["assign"].add_argument("--owner-host", help="Owner's hostname; required for liveness recovery")
+    task_parsers["assign"].add_argument("--lease-seconds", type=int, help="Lease duration; 0 expires immediately")
     task_parsers["finish"].add_argument("--assignment", required=True)
     task_parsers["finish"].add_argument("--result", choices=ledger.RESULTS, required=True)
+    task_parsers["reap"].add_argument("--task", help="Only inspect assignments for this task")
+    task_parsers["reap"].add_argument("--dry-run", action="store_true", help="Report orphans without writing")
     task_parsers["event"].add_argument("--type", required=True)
     task_parsers["status"].add_argument("--to", choices=ledger.STATUSES, required=True)
     task_parsers["status"].add_argument("--summary", default="")

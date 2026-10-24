@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Recover orphaned task assignments through `hipson task reap` and gated MCP
+  `task.reap`, with read-only dry runs, optional PID/boot/host ownership and UTC
+  leases, and automatic recovery before overlapping write claims are checked.
+  Migrate task ledger databases from v1 to v2 transactionally, preserving history.
+- Keep orphan claims while either the runner PID or its worker process group
+  survives. Make CLI/MCP ledger reads non-migrating and read-only, including
+  sidecar-free snapshots of checkpointed WAL stores in read-only directories.
 - Expose the central task ledger through nine MCP stdio tools, with explicit
   approval for writes, CLI-compatible JSON payloads, a server-configured store,
   non-creating reads, and recoverable, redacted tool errors.

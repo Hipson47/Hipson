@@ -20,8 +20,10 @@ TASK_TOOLS = {
     "task.list": (set(), {"project", "status"}),
     "task.board": (set(), set()),
     "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "lead"}),
-    "task.assign": ({"task", "actor", "role", "mode", "approved"}, {"scope"}),
+    "task.assign": ({"task", "actor", "role", "mode", "approved"},
+                    {"scope", "owner_pid", "owner_boot_id", "owner_host", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
+    "task.reap": ({"approved"}, {"task", "dry_run"}),
     "task.event": ({"task", "actor", "type", "summary", "approved"}, {"ref"}),
     "task.status": ({"task", "to", "actor", "approved"}, {"summary"}),
 }
@@ -29,6 +31,7 @@ WRITE_ARGUMENTS = {
     "task.open": {"project": ".", "title": "Ledger", "objective": "Track ownership"},
     "task.assign": {"task": "T-0001", "actor": "codex", "role": "builder", "mode": "rw", "scope": ["src"]},
     "task.finish": {"assignment": "A-0001", "result": "passed", "summary": "Checks pass"},
+    "task.reap": {},
     "task.event": {"task": "T-0001", "actor": "codex", "type": "progress", "summary": "Ready"},
     "task.status": {"task": "T-0001", "to": "review", "actor": "claude"},
 }
@@ -287,9 +290,9 @@ def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):
     opened = _open(tmp_path, db)
     assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == opened
 
-    def remove_before_connect(path, *, create):
+    def remove_before_connect(path, *, create, read_only):
         path.unlink()
-        return Ledger(path, create=create)
+        return Ledger(path, create=create, read_only=read_only)
 
     with patch.object(mcp_server.ledger, "Ledger", side_effect=remove_before_connect):
         _assert_error(_call(tmp_path, "task.board", ledger_db=db), "unable to open database")

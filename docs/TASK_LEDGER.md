@@ -1,4 +1,4 @@
-# Task ledger (S1–S2)
+# Task ledger (S1–S3a)
 
 Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
@@ -23,6 +23,8 @@ hipson task show --task T-0001 --json
 hipson task events --task T-0001 --after 2 --json
 hipson task list --project . --status done --json
 hipson task board
+hipson task reap --dry-run --json
+hipson task reap --task T-0001 --json
 ```
 
 Repeat `--acceptance`, `--scope`, and `--ref` for multiple values. Roles are
@@ -64,13 +66,19 @@ case-sensitive, and does not resolve scope symlinks or coordinate nested project
 roots; claims are coordination records, not filesystem access controls.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 1; artifact schema version `1.0`). Initialization and each
+(database version 2; artifact schema version `1.0`). Existing version 1 stores
+migrate in place in one transaction: four nullable assignment columns are added
+and the version is advanced to 2. All existing rows, claims, and events remain;
+old assignments receive NULL ownership/lease values. Unknown versions are
+refused. Initialization and each
 mutation use `BEGIN IMMEDIATE`. Each mutation commits its state change, event,
 UTC ISO timestamps, and task revision together; an opened task starts at revision
-1. A conflicting assignment commits only a `claim_conflict` event and the
-associated task revision/timestamp update, then fails with the holder assignment
-ID. It leaves status, assignments, and claims unchanged. Other failed mutations
-roll back completely. Events have a database-wide autoincrement sequence;
+1. Before an `rw` conflict check, overlapping orphaned holders in the same project
+are reaped in the assignment's transaction. A remaining conflict commits a
+`claim_conflict` event and any recovery already performed, then fails with the
+live holder assignment ID; no new assignment or claims are created. Without
+orphans, the existing assignments and claims stay unchanged. Other failed
+mutations roll back completely. Events have a database-wide autoincrement sequence;
 `--after N` is exclusive and task events are returned in ascending sequence order.
 Read snapshots do not increment revisions. SQLite triggers reject updates and
 deletes to events; this is append-only history, not tamper-proof storage against
@@ -81,13 +89,109 @@ and all event summaries **before persistence**. Actor labels, project/scope path
 event types, and refs are structural data and are not redacted: put credentials
 in none of these fields. Generic event types (such as `note`, `progress`,
 `blocked`, or `result`) are labels only; events do not change lifecycle state.
-Use `status` for transitions and `assign`/`finish` for assignment state.
+Use `status` for transitions and `assign`/`finish`/`reap` for assignment state.
 
 CLI success returns 0; operation, conflict, and storage errors return 1 with a
 message on stderr; argument errors follow argparse (2). There are no automatic
 retries after a successful commit: inspect the ledger before replaying an
-operation whose response was lost. Later stages can add wrapper integration, recovery
-and idempotency policies, and richer orchestration without making workers writers.
+operation whose response was lost. Later stages can add wrapper integration,
+idempotency policies, and richer orchestration without making workers writers.
+
+## Orphan recovery (S3a)
+
+An optional owner identifies the wrapper process responsible for finishing an
+assignment. The wrapper must call `setsid` to become its process group's leader
+(PID equals PGID), then start the worker as a child in that group. Supply the
+wrapper's positive PID, Linux boot ID, and hostname when assigning:
+
+```sh
+hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src \
+  --owner-pid "$$" --owner-boot-id "$(cat /proc/sys/kernel/random/boot_id)" \
+  --owner-host "$(hostname)" --lease-seconds 3600 --json
+```
+
+`owner_pid`, `owner_boot_id`, `owner_host`, and `lease_until` appear in assignment
+JSON as nullable fields. All inputs are optional and no owner is inferred from
+the CLI or MCP server process. `--lease-seconds` is a nonnegative integer; it
+sets a UTC expiry relative to assignment creation (`0` expires immediately).
+There is no lease renewal operation in S3a.
+
+Only active assignments are considered. Recovery chooses the first applicable
+reason in this order:
+
+| Reason | Condition |
+| --- | --- |
+| `lease_expired` | The lease has expired, regardless of host or process liveness. |
+| `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID. |
+| `pid_gone` | The recorded host equals the current hostname, and both the supplied PID and its process group no longer exist. |
+
+Owner checks use `os.kill(pid, 0)` and, if the PID is absent,
+`os.killpg(pid, 0)`. Only ESRCH from both proves the owner gone; EPERM or any
+other probe error means alive. A surviving worker holds the claim after its
+runner is killed. Zombies also count as present until their parent reaps them.
+Missing boot/PID fields cannot prove
+that condition; an unavailable current boot ID cannot prove a boot change. A
+different or missing host disables liveness checks. An owner-less assignment is
+only recoverable through an expired lease; an assignment on another host with
+no lease remains active.
+
+`hipson task reap [--task T] [--dry-run]` examines all active assignments, including
+those on terminal tasks. Each orphan is rechecked under the writer lock, marked
+`cancelled`, given `ended_at`, and has all claims removed. One `reaped` event
+records its assignment ID and reason, advancing the task revision; this commits
+in one transaction per orphan. Reaping does not change task status. Earlier
+orphans remain committed if a later orphan fails. Repeating a reap is safe.
+
+CLI JSON and MCP return an array of `{"assignment": <assignment>, "reason": <code>}`.
+Dry runs return the existing active assignment rather than a projected cancelled
+row. They write no assignment, claim, event, revision, or migration, and do not
+create missing stores or directories. A dry run on v1 can inspect legacy rows
+without upgrading the database. An unknown task filter fails with `Task not found`.
+
+An `rw` assign automatically recovers only holders with overlapping claims in the
+same resolved project before checking for conflicts, in its existing transaction.
+It releases every claim of each recovered holder and appends `reaped` before
+`assigned`. Disjoint holders, other projects, and readers are left to explicit
+reaping. A live overlapping holder still causes `claim_conflict`.
+
+The Python `Ledger` constructor accepts `hostname`, `boot_id`, and `pid_alive`
+callables so tests can control liveness without depending on free real PIDs.
+The injected `pid_alive` probe represents both PID and process-group liveness.
+PID or process-group ID reuse within one boot cannot be detected with this ownership tuple, so it
+can delay recovery; use a bounded lease when that matters. Lease expiry releases
+claims even if the owner is alive, so wrappers must choose durations accordingly.
+
+## Read-only access
+
+CLI `task show/events/list/board`, `task reap --dry-run`, and MCP task reads open
+the ledger read-only. They never initialize a database, migrate v1 to v2, or set
+WAL journal mode. V1 assignments expose null owner fields without changing the
+file. Writes still initialize and migrate transactionally.
+
+Missing stores return empty arrays for list/board and unfiltered dry runs;
+show/events and task-filtered dry runs return `Task not found`. Plain CLI board
+prints `No active tasks.`. No missing file or parent directory is created.
+
+SQLite's ordinary `mode=ro` can still create WAL/SHM sidecars. To avoid that for
+checkpointed stores, reads copy a journal-free database into an in-memory,
+query-only snapshot. An immutable source connection is used only for this copy;
+the source identity, size, modification/change times, and absence of WAL/journal
+files are rechecked before exposing it. Changes discard the copy and retry up to
+three times. This also works for a closed v2 WAL-mode store in a read-only
+directory, without creating sidecars. Snapshot memory scales with database size.
+
+A live WAL store is opened with `mode=ro&readonly_shm=1`, using existing readable
+WAL and SHM files; committed WAL rows remain visible in read-only directories.
+On Linux/WSL, a temporary shared OFD lock pins those files until SQLite acquires
+its own database read lock, so a writer closing during open cannot remove them
+and cause the reader to recreate them. Systems without Linux OFD locking fail
+safely for live WAL reads; checkpoint and close the store to use a snapshot.
+A WAL without SHM fails with an actionable error instead of creating SHM,
+reopening writable, or ignoring WAL through immutable mode. Have a writable
+owner initialize the sidecars, or checkpoint and close the store before retrying.
+An existing rollback journal also requires its writable owner to finish recovery.
+SQLite recovery/locking errors propagate safely without a writable retry.
+See [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
 
 ## MCP stdio (S2)
 
@@ -107,7 +211,7 @@ detected Hipson home when unset). MCP arguments cannot select a database;
 `db` is rejected. The CLI's `--db` option remains available. Relative paths
 resolve against the server's working directory, as in the CLI.
 
-Read tools never create a missing database or its directory. With no store,
+Read tools use the read-only access rules above. With no store,
 `task.list` and `task.board` return empty arrays; `task.show` and `task.events`
 return `Task not found` errors. Approved write tools may initialize the store.
 
@@ -118,17 +222,20 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
 | `task.open` | `project`, `title`, `objective`, `approved=true` | `acceptance`, `lead` (default `claude`) |
-| `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope` |
+| `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
+| `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
 | `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty) |
 
 `acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
 options. Role, mode, result, and status enums match the CLI. An `rw` assignment
 requires a nonempty `scope`; `ro` may omit it. Unknown arguments are rejected.
-All five write tools require the literal boolean `approved: true`, checked before
+All six write tools require the literal boolean `approved: true`, checked before
 opening the database. Approval is an execution gate, not identity authentication;
-the lead remains responsible for recording worker activity.
+the lead remains responsible for recording worker activity. `task.reap` requires
+approval even when `dry_run` is true. Owner arguments use integers/strings as in
+the CLI, and `dry_run` must be a boolean.
 
 Example `tools/call` request (one JSON object per line on stdio):
 
@@ -139,7 +246,7 @@ Example `tools/call` request (one JSON object per line on stdio):
 Successful results put the same payload as CLI `--json` into
 `result.content[0].text`, with `isError: false`: open/show/status return task
 views, assign/finish return assignments, event returns one event, and
-events/list/board return arrays. Task and event objects conform to
+events/list/board return arrays; reap returns assignment/reason entries. Task and event objects conform to
 `schemas/task.schema.json` and `schemas/task-event.schema.json`; assignments
 use the former's `$defs.assignment` definition.
 
@@ -149,4 +256,4 @@ redacted message in text content. The server continues accepting requests.
 A claim conflict still commits its
 `claim_conflict` event; read `task.events` to inspect it. Inspect committed state
 before retrying a write whose response was lost. `tools/list` and
-`hipson mcp serve --catalog` expose all nine input schemas and write gates.
+`hipson mcp serve --catalog` expose all ten input schemas and write gates.

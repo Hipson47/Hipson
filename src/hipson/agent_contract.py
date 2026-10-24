@@ -163,6 +163,7 @@ def build_agent_contract(project_path: str | Path = ".") -> dict[str, Any]:
                     "gated_task_open",
                     "gated_task_assign",
                     "gated_task_finish",
+                    "gated_task_reap",
                     "gated_task_event",
                     "gated_task_status",
                 ],
