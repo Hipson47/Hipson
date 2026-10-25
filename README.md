@@ -4,10 +4,42 @@
 
 **One lead agent. Many workers. One ledger of who did what, with evidence.**
 
-Hipson is a local-first control plane for AI coding agents. A lead (for example Claude Code) opens tasks,
-hands bounded pieces to workers (Codex, Antigravity, subagents), and every task, assignment, path claim and
-result lands in one transactional ledger on your machine, next to a hash-chained evidence log linked by task id.
-No cloud service, no runtime dependencies.
+[![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
+![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
+![Tests: 404](https://img.shields.io/badge/tests-404-2ea043)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+[Why](#why-it-exists) · [Built with itself](#built-with-itself) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP](#use-it-from-a-lead-agent-mcp) · [Docs](docs/README.md)
+
+</div>
+
+<table>
+<tr>
+<td width="44%" align="center">
+<img src=".github/readme/demo.webp" width="320" alt="28-second demo: the real ledger prints line by line, an overlapping write claim is refused with exit 75, a dead run's claim is reaped, and the counters 7 tasks, 11 assignments, 48 events and 404 tests land">
+</td>
+<td width="56%">
+
+**A control plane for the coordination layer, not another agent.**
+
+A lead (for example Claude Code) opens tasks and hands bounded pieces to workers: Codex, Antigravity,
+subagents. Every task, assignment, path claim and result lands in one transactional SQLite ledger on your
+machine, next to a hash-chained evidence log linked by task id.
+
+- **No silent overlap:** a second writer on the same paths is refused before it starts (`exit 75`).
+- **No zombie locks:** a dead run's claims are reaped automatically.
+- **Evidence, not confidence:** worker results are process results; only the lead says `done`.
+- **Local-first:** no cloud service, zero runtime dependencies, Apache-2.0.
+
+<sub>The film on the left was produced by an agent pipeline (Claude directing and animating, Codex reviewing
+frames and running QA) from facts in this repository only. Silent excerpt, 28 s.</sub>
+
+</td>
+</tr>
+</table>
+
+<div align="center">
 
 <img src=".github/readme/ledger-events.svg" width="100%" alt="Real hipson task events output: a lead opens a task, a Codex builder and a separate reviewer run, the lead verifies and closes it">
 
