@@ -53,7 +53,7 @@ Route one task through the Hermes bus when Codex decides bus/status tracking is
 useful:
 
 ```bash
-hipson hermes intake --project /home/hipson47/code/Hipson --task "review failing CI"
+hipson hermes intake --project /path/to/Hipson --task "review failing CI"
 ```
 
 Inspect bus events:

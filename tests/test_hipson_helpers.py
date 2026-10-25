@@ -1807,7 +1807,7 @@ def test_install_agents_worker_mode_preserves_standalone_workflows(tmp_path: Pat
     required_clauses = (
         "task brief says you are a worker for a lead",
         "contains `Worker rules:`",
-        "names a ledger task (`T-…`) or assignment",
+        "A task or assignment id alone does not make you a worker",
         "`HIPSON_ROLE=worker` is set",
         "the lead is the control surface and owns orchestration and task-ledger updates",
         "`docs/TASK_LEDGER.md`",

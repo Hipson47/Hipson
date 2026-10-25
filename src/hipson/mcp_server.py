@@ -608,7 +608,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
 
 
 def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
-    """Enforce the task tools' bounded schemas before opening a database."""
+    """Enforce task schemas and store-independent semantics before opening a database."""
     schema = MCP_INPUT_SCHEMAS[name]
     for key in schema.get("required", []):
         if key not in arguments:
@@ -630,6 +630,18 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             raise ValueError(f"{name}: {key} must be at most {field['maximum']}")
         if isinstance(value, str) and len(value) < field.get("minLength", 0):
             raise ValueError(f"{name}: {key} must not be empty")
+    text_fields = {
+        "task.open": ("title", "objective", "lead"),
+        "task.assign": ("actor", "owner_boot_id", "owner_host"),
+        "task.finish": ("summary",),
+        "task.event": ("actor", "type", "summary"),
+        "task.status": ("actor",),
+    }
+    for key in text_fields.get(name, ()):
+        if key in arguments:
+            ledger.require_text(arguments[key], key)
+    if name == "task.assign":
+        ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
 
 
 def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:

@@ -5,12 +5,13 @@
 **One lead agent. Many workers. One ledger of who did what, with evidence.**
 
 Hipson is a local-first control plane for AI coding agents. A lead (for example Claude Code) opens tasks,
-hands bounded pieces to workers (Codex, Antigravity, subagents), and every assignment, path claim, result
-and verification lands in one transactional ledger on your machine. No cloud service, no runtime dependencies.
+hands bounded pieces to workers (Codex, Antigravity, subagents), and every task, assignment, path claim and
+result lands in one transactional ledger on your machine, next to a hash-chained evidence log linked by task id.
+No cloud service, no runtime dependencies.
 
 <img src=".github/readme/ledger-events.svg" width="100%" alt="Real hipson task events output: a lead opens a task, a Codex builder and a separate reviewer run, the lead verifies and closes it">
 
-<sub>Unedited `hipson task events` output from building Hipson's own evidence hardening (task T-0003): builder → independent reviewer → builder with fixes → lead verification → done.</sub>
+<sub>Rendered from the real `hipson task events --json` record of building Hipson's own evidence hardening (task T-0003; long summaries shortened): builder → independent reviewer → builder with fixes → lead verification → done.</sub>
 
 </div>
 
@@ -25,26 +26,29 @@ Hipson fixes the coordination layer, not the agents:
 
 - **One source of truth per task.** Status, assignments, path claims and an append-only event log in one SQLite store.
 - **No silent overlap.** A writer must claim its paths; an overlapping live claim is refused before the worker starts.
-- **No zombie locks.** Each assignment records its owner (pid, process group, boot id, host); dead runs are reaped.
+- **No zombie locks.** Runs launched through the wrapper record their owner (process group, boot id, host); when
+  that owner is gone, its claims are reaped. Assignments recorded by hand can carry a lease instead.
 - **Evidence, not confidence.** Worker results are recorded as process results; only the lead moves a task to `done`.
 - **Workers stay workers.** Agents launched by a lead switch to *worker mode*: no own orchestration, no own notes, no commits.
 
 ## Built with itself
 
-The task ledger in this repository was built and reviewed through the ledger, by Claude Code as lead and Codex as
-builder and reviewer. Numbers from branch `feat/task-ledger`, 2026-10-25:
+The task ledger in this repository was built by Claude Code as lead with Codex as builder and reviewer and
+Antigravity as a second reviewer; once the ledger existed, the rest of the work ran through it. Numbers from
+branch `feat/task-ledger`, 2026-10-25:
 
 | What | Result |
 |---|---|
-| Ledger tasks run through the wrappers | 5 tasks, 8 assignments (4 builder, 2 reviewer, 2 explorer), 30 events |
-| Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit; 15 findings, all fixed, plus a final whole-branch review |
-| Test suite | 379 tests, run by both `pytest` and the dependency-free `scripts/run_tests.py` |
+| Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
+| Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
+| Test suite | 391 tests, run by both `pytest` and the dependency-free `scripts/run_tests.py` |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
 
 Failure cases that are covered by tests, not just described: two processes racing for the same claim, a worker
 whose runner is `SIGKILL`ed while the worker survives (claims stay), a dead process group (claims released),
-a worker that ignores `SIGTERM`, twelve concurrent evidence writers keeping one hash chain, and secrets nested
+a worker that ignores `SIGTERM` and its leftover child processes, readers racing writers, twelve concurrent
+evidence writers keeping one hash chain, and secrets nested
 inside evidence payloads.
 
 ## How it works
@@ -75,8 +79,9 @@ Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 ```bash
 git clone https://github.com/Hipson47/Hipson.git && cd Hipson
 uv sync --all-extras
-uv run hipson --help
-uv run hipson doctor
+source .venv/bin/activate      # or prefix every command below with `uv run`
+hipson --help
+hipson doctor
 ```
 
 Run a task by hand to see the model:
@@ -94,9 +99,14 @@ hipson task events --task T-0001
 Wrap real workers so the ledger fills itself:
 
 ```bash
-examples/agent-run.sh --task T-0002 --actor codex --role builder --mode rw --scope src/api --rollout codex \
+TASK=$(hipson task open --project . --title "Add rate limit" --objective "API returns 429 over quota" --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+examples/agent-run.sh --task "$TASK" --actor codex --role builder --mode rw --scope src/api --rollout codex \
   -- codex exec -s workspace-write < brief.md
+hipson task events --task "$TASK"
 ```
+
+The wrapper exits with the worker's code, or 75 when a live writer already holds an overlapping scope.
 
 The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`. Details, recovery rules and limits:
 [docs/TASK_LEDGER.md](docs/TASK_LEDGER.md).
@@ -134,8 +144,8 @@ Full command reference and workflows: [docs/USAGE.md](docs/USAGE.md). All docs: 
 
 - **Provider-free by default.** Core commands make no network calls; provider sidecars are explicit and advisory.
 - **Repository content is data, not instructions.** Packets are bounded; sensitive files are skipped or summarized.
-- **Redaction before persistence.** Credential patterns and any value under credential-named keys are redacted in
-  evidence, work plans, release claims, ledger text and MCP error messages.
+- **Redaction before persistence.** Evidence, work plans and release claims are redacted recursively, including
+  any value under a credential-named key. Ledger text and MCP error messages get pattern-based redaction.
 - **Write gates.** Every MCP write needs `approved=true`; invalid arguments are rejected before a database is opened.
 - **Honest limits.** Actor names are recorded labels, not authenticated identities. Path claims coordinate
   cooperating agents; they are not filesystem permissions. Worker mode is an instruction, not a sandbox.

@@ -354,7 +354,21 @@ def test_ledger_read_only_v2_directory_with_live_and_checkpointed_wal(tmp_path: 
     check_reads()  # WAL-mode header remains, but no sidecars may be created.
 
 
-def test_ledger_read_only_wal_without_shm_fails_without_creating_files(tmp_path: Path):
+def test_ledger_read_only_wal_without_shm_reads_without_touching_store_or_wal(tmp_path: Path):
+    """In a writable directory SQLite may add the -shm index; the store and WAL bytes stay untouched."""
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as store:
+        task = _open(store, tmp_path)
+        copy = tmp_path / "copy.sqlite"
+        copy.write_bytes(db.read_bytes())
+        Path(f"{copy}-wal").write_bytes(Path(f"{db}-wal").read_bytes())
+        before = {name: (tmp_path / name).read_bytes() for name in ("copy.sqlite", "copy.sqlite-wal")}
+        rc, stdout, _ = run_cli_inprocess("task", "board", "--db", str(copy), "--json")
+        assert rc == 0 and task["id"] in stdout
+        assert {name: (tmp_path / name).read_bytes() for name in before} == before
+
+
+def test_ledger_read_only_wal_without_shm_in_readonly_directory_fails_without_creating_files(tmp_path: Path):
     db = tmp_path / "ledger.sqlite"
     with closing(Ledger(db)) as store:
         _open(store, tmp_path)
@@ -362,9 +376,10 @@ def test_ledger_read_only_wal_without_shm_fails_without_creating_files(tmp_path:
         copy.write_bytes(db.read_bytes())
         Path(f"{copy}-wal").write_bytes(Path(f"{db}-wal").read_bytes())
         before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
-        rc, stdout, stderr = run_cli_inprocess("task", "board", "--db", str(copy), "--json")
-        assert rc == 1 and "WAL without a readable -shm file" in stderr
-        _assert_error(_call(tmp_path, "task.board", ledger_db=copy), "WAL without a readable -shm file")
+        with patch.object(ledger.os, "access", return_value=False):
+            rc, stdout, stderr = run_cli_inprocess("task", "board", "--db", str(copy), "--json")
+            assert rc == 1 and "WAL without a readable -shm file" in stderr
+            _assert_error(_call(tmp_path, "task.board", ledger_db=copy), "WAL without a readable -shm file")
         assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
 
@@ -414,9 +429,10 @@ def test_ledger_read_only_snapshot_retries_when_a_writer_changes_the_source(tmp_
             return source
 
         try:
-            with patch.object(ledger.sqlite3, "connect", side_effect=connect_and_write), closing(
-                Ledger(db, read_only=True)
-            ) as reader:
+            # The guarded snapshot path only serves stores in non-writable directories.
+            with patch.object(ledger.os, "access", return_value=False), patch.object(
+                ledger.sqlite3, "connect", side_effect=connect_and_write
+            ), closing(Ledger(db, read_only=True)) as reader:
                 assert written is not None
                 assert reader.show(written["id"])["title"] == "Concurrent commit"
         finally:

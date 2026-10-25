@@ -9,13 +9,19 @@
   - Expose ten MCP `task.*` tools with explicit approval for all six writes,
     CLI-compatible JSON, a server-configured store, non-creating reads, and
     recoverable, redacted errors.
+  - Reject blank task text and invalid assignment scopes in MCP before opening
+    or migrating the store, using the ledger's shared semantic validators.
   - Recover orphaned assignments through CLI/MCP `task reap`/`task.reap`, with
     read-only CLI dry runs, optional PID/boot/host ownership, UTC leases, and
     automatic recovery before overlapping write claims are checked. Preserve
     claims while either the runner PID or its worker process group survives.
+  - Cover the published worker runner with CLI integration tests for process
+    results, stdin, claim conflicts, signal cleanup, leftover descendants, and
+    recovery after the runner is killed.
   - Migrate v1 stores to v2 transactionally, preserving history. Keep CLI/MCP
-    reads non-migrating and read-only, including snapshots of checkpointed WAL
-    stores without creating SQLite sidecars in read-only directories.
+    reads non-migrating and read-only: plain SQLite `mode=ro` connections that
+    cooperate with concurrent writers, with guarded snapshots only for stores in
+    non-writable directories (the guard previously made concurrent writers fail).
 - **Lead and worker instructions**
   - Add worker mode to agent instructions and installer output: lead-assigned
     workers stay within their brief, skip orchestration and progress/handoff
@@ -26,6 +32,8 @@
     credential-key values and strings before hashing. Add optional unauthenticated
     actor/task attribution, task filters, and `hipson evidence verify`, preserving
     existing records and hashes. Redact nested work plans and release claim copies.
+  - Validate finalized, redacted evidence with the reader's rules before append,
+    rejecting malformed records without changing existing ledger bytes.
   - Complete MCP `hipson://latest-audit`; align audit/evidence ledger defaults
     with the work plan's project. Validate candidate shapes, isolate corrupt
     artifacts with diagnostics, and return a schema-valid empty audit bundle.

@@ -159,6 +159,7 @@ def append_record(root: Path, record: dict[str, Any]) -> Path:
         payload = redact_value(record)
         payload["previous_hash"] = latest_hash(root)
         payload["record_hash"] = stable_hash({key: value for key, value in payload.items() if key != "record_hash"})
+        _validate_record(payload)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
         record.clear()

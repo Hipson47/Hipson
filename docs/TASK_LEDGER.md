@@ -203,15 +203,24 @@ Missing stores return empty arrays for list/board and unfiltered dry runs;
 show/events and task-filtered dry runs return `Task not found`. Plain CLI board
 prints `No active tasks.`. No missing file or parent directory is created.
 
-SQLite's ordinary `mode=ro` can still create WAL/SHM sidecars. To avoid that for
-checkpointed stores, reads copy a journal-free database into an in-memory,
-query-only snapshot. An immutable source connection is used only for this copy;
-the source identity, size, modification/change times, and absence of WAL/journal
-files are rechecked before exposing it. Changes discard the copy and retry up to
-three times. This also works for a closed v2 WAL-mode store in a read-only
-directory, without creating sidecars. Snapshot memory scales with database size.
+In the normal case (the store's directory is writable) a read is a plain SQLite
+`mode=ro` connection with `query_only`. It cooperates with concurrent writers
+through SQLite's own WAL locking and never writes the database file; SQLite may
+create or keep its `-wal`/`-shm` sidecars, which is expected WAL behaviour.
 
-A live WAL store is opened with `mode=ro&readonly_shm=1`, using existing readable
+Earlier versions read through a private OFD lock and `readonly_shm` in all cases.
+That guard collided with SQLite's POSIX locks and made concurrent writers fail
+with "attempt to write a readonly database"; it is now confined to stores in
+non-writable directories, described next, where SQLite cannot manage sidecars.
+
+For a store in a non-writable directory, reads copy a journal-free database into
+an in-memory, query-only snapshot. An immutable source connection is used only
+for this copy; the source identity, size, modification/change times, and
+absence of WAL/journal files are rechecked before exposing it. Changes discard
+the copy and retry with a short backoff for up to the busy timeout (10 s).
+Snapshot memory scales with database size.
+
+In a non-writable directory a live WAL store is opened with `mode=ro&readonly_shm=1`, using existing readable
 WAL and SHM files; committed WAL rows remain visible in read-only directories.
 On Linux/WSL, a temporary shared OFD lock pins those files until SQLite acquires
 its own database read lock, so a writer closing during open cannot remove them
@@ -230,7 +239,7 @@ Claude Code can drive the ledger directly through the existing MCP server. From
 Windows, start the WSL-installed CLI with the Linux project path:
 
 ```sh
-wsl.exe -d Ubuntu -- hipson mcp serve --project /home/hipson47/code/Hipson --stdio
+wsl.exe -d Ubuntu -- hipson mcp serve --project /path/to/Hipson --stdio
 ```
 
 Ensure `hipson` is on the WSL process's PATH (or use its absolute installed path).
@@ -271,7 +280,7 @@ the CLI, and `dry_run` must be a boolean.
 Example `tools/call` request (one JSON object per line on stdio):
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task.open","arguments":{"project":"/home/hipson47/code/Hipson","title":"Add MCP tools","objective":"Let the lead drive the ledger","acceptance":["Lifecycle works over stdio"],"approved":true}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task.open","arguments":{"project":"/path/to/Hipson","title":"Add MCP tools","objective":"Let the lead drive the ledger","acceptance":["Lifecycle works over stdio"],"approved":true}}}
 ```
 
 Successful results put the same payload as CLI `--json` into

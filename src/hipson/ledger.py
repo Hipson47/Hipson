@@ -12,6 +12,7 @@ import os
 import socket
 import sqlite3
 import struct
+import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
@@ -194,7 +195,17 @@ def _overlaps(left: str, right: str) -> bool:
     return left == "." or right == "." or left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
-def _required(value: str, field: str) -> str:
+def validate_assignment_scope(scope: Sequence[str], *, mode: str) -> list[str]:
+    """Validate claims before opening a store or starting an assignment transaction."""
+    paths = normalize_scope(scope)
+    if mode == "rw" and not paths:
+        # An rw assignment without claims would let two writers share a tree unnoticed.
+        raise LedgerError("An rw assignment needs at least one scope path; use '.' for the whole project")
+    return paths
+
+
+def require_text(value: str, field: str) -> str:
+    """Require nonblank text at both the ledger and transport boundaries."""
     if not value.strip():
         raise LedgerError(f"{field} must not be empty")
     return value.strip()
@@ -265,16 +276,41 @@ def _wal_read_only_connection(path: Path) -> sqlite3.Connection | None:
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
-    """Avoid creating WAL sidecars when reading a checkpointed database."""
-    if path.exists() and not path.is_file():
+    """Open the store without any possibility of writing it (no migration, no store creation).
+
+    Normal case: a plain SQLite read-only connection, which cooperates with concurrent writers through
+    SQLite's own WAL locking (it may use the -shm/-wal sidecars, never the database file). The guarded
+    snapshot path below is only for stores whose directory is not writable, where SQLite could not
+    manage the sidecars; its private OFD lock must not be used next to live writers.
+    """
+    if not path.is_file():
         raise sqlite3.OperationalError("unable to open database file")
+    if os.access(path.parent, os.W_OK):
+        connection = sqlite3.connect(
+            path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
+        )
+        connection.execute("PRAGMA query_only = ON")
+        return connection
+    return _guarded_read_only_connection(path)
+
+
+def _guarded_read_only_connection(path: Path) -> sqlite3.Connection:
+    """Read a store in a non-writable directory without creating WAL sidecars."""
     wal = Path(f"{path}-wal")
     journal = Path(f"{path}-journal")
-    for _ in range(3):
+    # A concurrent writer can change the file between checks; retry with a short backoff for up to the
+    # same budget a writer gets from busy_timeout instead of surfacing a transient race to the caller.
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
+    delay = 0.005
+    while True:
+        if time.monotonic() > deadline:
+            break
         if wal.exists():
             connection = _wal_read_only_connection(path)
             if connection is not None:
                 return connection
+            time.sleep(delay)
+            delay = min(delay * 2, 0.1)
             continue
         if journal.exists():
             raise LedgerError("Task ledger has a rollback journal; retry after its writable owner completes recovery")
@@ -297,6 +333,8 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
                 snapshot.close()
                 raise
             snapshot.close()
+        time.sleep(delay)
+        delay = min(delay * 2, 0.1)
     raise LedgerError("Task ledger changed while opening a read-only snapshot; retry the read")
 
 
@@ -372,9 +410,9 @@ class Ledger:
         lead: str = "claude",
     ) -> TaskView:
         project_path = str(Path(project).expanduser().resolve())
-        title = redact_text(_required(title, "title"))
-        objective = redact_text(_required(objective, "objective"))
-        lead = _required(lead, "lead")
+        title = redact_text(require_text(title, "title"))
+        objective = redact_text(require_text(objective, "objective"))
+        lead = require_text(lead, "lead")
         accepted = [redact_text(item) for item in acceptance]
         with self._transaction():
             number = self.connection.execute(
@@ -402,17 +440,14 @@ class Ledger:
         owner_host: str | None = None,
         lease_seconds: int | None = None,
     ) -> Assignment:
-        actor = _required(actor, "actor")
+        actor = require_text(actor, "actor")
         if role not in ROLES or mode not in MODES:
             raise LedgerError(f"Assignment requires role in {ROLES} and mode in {MODES}")
-        paths = normalize_scope(scope)
-        if mode == "rw" and not paths:
-            # An rw assignment without claims would let two writers share a tree unnoticed.
-            raise LedgerError("An rw assignment needs at least one scope path; use '.' for the whole project")
+        paths = validate_assignment_scope(scope, mode=mode)
         if owner_pid is not None and (type(owner_pid) is not int or not 1 <= owner_pid <= 2**31 - 1):
             raise LedgerError("owner_pid must be an integer between 1 and 2147483647")
-        owner_boot_id = _required(owner_boot_id, "owner_boot_id") if owner_boot_id is not None else None
-        owner_host = _required(owner_host, "owner_host") if owner_host is not None else None
+        owner_boot_id = require_text(owner_boot_id, "owner_boot_id") if owner_boot_id is not None else None
+        owner_host = require_text(owner_host, "owner_host") if owner_host is not None else None
         if lease_seconds is not None and (type(lease_seconds) is not int or lease_seconds < 0):
             raise LedgerError("lease_seconds must be a nonnegative integer")
         result: Assignment | None = None
@@ -528,7 +563,7 @@ class Ledger:
     def finish(self, assignment: str, *, result: str, summary: str, refs: Sequence[str] = ()) -> Assignment:
         if result not in RESULTS:
             raise LedgerError(f"Assignment result must be one of {RESULTS}")
-        summary = _required(summary, "summary")
+        summary = require_text(summary, "summary")
         with self._transaction():
             current = self._assignment(assignment)
             if current["status"] != "active":
@@ -543,15 +578,15 @@ class Ledger:
             return self._assignment(assignment)
 
     def add_event(self, task: str, *, actor: str, type: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
-        actor = _required(actor, "actor")
-        type = _required(type, "type")
-        summary = _required(summary, "summary")
+        actor = require_text(actor, "actor")
+        type = require_text(type, "type")
+        summary = require_text(summary, "summary")
         with self._transaction():
             self._task(task)
             return self._append_event(task, actor, type, summary, refs)
 
     def set_status(self, task: str, *, to: str, actor: str, summary: str = "") -> TaskView:
-        actor = _required(actor, "actor")
+        actor = require_text(actor, "actor")
         with self._transaction():
             current = self._task(task)
             previous = current["status"]

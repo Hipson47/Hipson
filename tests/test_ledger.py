@@ -604,3 +604,35 @@ def test_ledger_cli_errors_and_board_text(tmp_path: Path):
     assert rc == 1 and stderr
     rc, stdout, _ = run_cli_inprocess("task", "board", "--db", str(tmp_path / "empty.sqlite"))
     assert rc == 0 and stdout.strip() == "No active tasks."
+
+
+def test_ledger_read_only_reads_survive_concurrent_writes(tmp_path: Path):
+    """Reads racing a writer retry internally instead of surfacing 'changed while opening'."""
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as store:
+        task = _open(store, tmp_path)["id"]
+    stop = False
+    errors: list[str] = []
+
+    def writer() -> None:
+        # One connection per write, like separate CLI invocations: WAL sidecars appear and vanish.
+        for index in range(150):
+            with closing(Ledger(db)) as store:
+                store.add_event(task, actor="codex", type="progress", summary=f"step {index}")
+
+    def reader() -> None:
+        while not stop:
+            try:
+                with closing(Ledger(db, read_only=True)) as store:
+                    store.show(task)
+            except LedgerError as exc:
+                errors.append(str(exc))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reading = pool.submit(reader)
+        try:
+            pool.submit(writer).result(timeout=60)
+        finally:
+            stop = True
+        reading.result(timeout=60)
+    assert errors == []

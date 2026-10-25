@@ -267,6 +267,42 @@ def test_ledger_mcp_rejects_caller_db_for_every_task_tool(tmp_path: Path):
         assert list(tmp_path.iterdir()) == []
 
 
+def test_ledger_mcp_semantic_errors_never_open_or_migrate_store(tmp_path: Path):
+    missing = tmp_path / "missing" / "ledger.sqlite"
+    legacy = tmp_path / "legacy.sqlite"
+    with closing(sqlite3.connect(legacy)) as connection:
+        connection.executescript((Path(__file__).parent / "fixtures" / "task-ledger-v1.sql").read_text())
+    before = legacy.read_bytes()
+    cases = [
+        ("task.open", {field: value}, f"{field} must not be empty")
+        for field in ("title", "objective", "lead") for value in ("", " \t\n")
+    ] + [
+        (name, {field: value}, f"{field} must not be empty")
+        for name, fields in (
+            ("task.assign", ("actor", "owner_boot_id", "owner_host")),
+            ("task.finish", ("summary",)),
+            ("task.event", ("actor", "type", "summary")),
+            ("task.status", ("actor",)),
+        ) for field in fields for value in ("", " \t\n")
+    ] + [
+        ("task.assign", {"scope": []}, "at least one scope path"),
+    ] + [
+        ("task.assign", {"mode": mode, "scope": [scope]}, "Scope")
+        for mode in ("ro", "rw")
+        for scope in ("", "/src", "../src", "src/../tests", "C:\\src", "src\x00", "src ", " src", "src/ bad")
+    ]
+    for db in (missing, legacy):
+        for name, changes, message in cases:
+            arguments = {**WRITE_ARGUMENTS[name], "approved": True, **changes}
+            # A constructor spy proves the check precedes all store access, even on v1 stores.
+            with patch.object(mcp_server.ledger, "Ledger", wraps=Ledger) as constructor:
+                _assert_error(_call(tmp_path, name, ledger_db=db, **arguments), message)
+                constructor.assert_not_called()
+            assert not missing.parent.exists()
+            assert legacy.read_bytes() == before
+            assert set(tmp_path.iterdir()) == {legacy}
+
+
 def test_ledger_mcp_missing_store_reads_create_nothing(tmp_path: Path):
     home = tmp_path / "home"
     for db in (tmp_path / "missing" / "ledger.sqlite", tmp_path / "ledger.sqlite", None):
@@ -296,7 +332,9 @@ def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):
 
     with patch.object(mcp_server.ledger, "Ledger", side_effect=remove_before_connect):
         _assert_error(_call(tmp_path, "task.board", ledger_db=db), "unable to open database")
-    assert list(tmp_path.iterdir()) == []
+    # The store is not recreated; SQLite's own -wal/-shm sidecars from the earlier read may remain.
+    assert not db.exists()
+    assert all(path.name.endswith(("-wal", "-shm")) for path in tmp_path.iterdir())
 
 
 def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path):

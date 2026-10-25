@@ -497,6 +497,58 @@ def test_evidence_readers_reject_malformed_decoded_shapes(tmp_path: Path):
         assert checked["ok"] is False and checked["errors"][0]["line"] == 1
 
 
+def test_evidence_append_rejects_unreadable_records_without_changing_bytes(tmp_path: Path):
+    root = tmp_path / "runs"
+    first = _append(tmp_path)
+    path = evidence.ledger_path(root)
+    before = path.read_bytes()
+    for changes, message in (
+        ({"verification": {"status": False}}, "Verification.status must be str"),
+        ({"quality": {"summary": []}}, "Quality.summary must be dict"),
+        ({"work": {}}, "Work.schema_version must be str"),
+        ({"gates": {}}, "Gates.verification_gate must be str"),
+        ({"claims": {}}, "Claims.safe must be list"),
+        ({"artifact_kind": "other"}, "Record.artifact_kind must be hipson.evidence_record"),
+    ):
+        record = evidence.build_evidence_record(work_plan=_plan(tmp_path), ledger_root=root)
+        record.update(changes)
+        original = json.loads(json.dumps(record))
+        try:
+            evidence.append_record(root, record)
+        except ValueError as exc:
+            assert message in str(exc)
+        else:
+            raise AssertionError(f"Append accepted an unreadable record: {changes}")
+        assert path.read_bytes() == before
+        assert record == original
+        assert evidence.read_records(root) == [first]
+    second = _append(tmp_path)
+    assert second["previous_hash"] == first["record_hash"]
+    assert evidence.verify_chain(root)["ok"] is True
+
+
+def test_evidence_cli_rejects_bad_verification_before_creating_ledger(tmp_path: Path):
+    work = _work_file(tmp_path)
+    artifact = tmp_path / "verification.json"
+    artifact.write_text('{"status": false}', encoding="utf-8")
+    rc, stdout, stderr = run_cli_inprocess(
+        "evidence", "append", "--work", str(work), "--verification", str(artifact), "--json",
+    )
+    assert rc != 0
+    assert "Verification.status must be str" in stdout + stderr
+    assert not evidence.ledger_path(tmp_path / "runs").exists()
+
+
+def test_evidence_append_validates_final_redacted_shape(tmp_path: Path):
+    record = evidence.build_evidence_record(work_plan=_plan(tmp_path), ledger_root=tmp_path)
+    record["unknowns"] = ("token=private-value",)  # Redaction converts tuples to JSON arrays.
+    record["record_hash"] = False  # Finalization replaces caller-provided hashes.
+    evidence.append_record(tmp_path, record)
+    assert record["unknowns"] == ["token=[REDACTED]"]
+    assert evidence.read_records(tmp_path) == [record]
+    assert evidence.verify_chain(tmp_path)["ok"] is True
+
+
 def test_mcp_latest_audit_isolates_corrupt_candidates_and_keeps_serving(tmp_path: Path):
     work = _work_file(tmp_path)
     record = _append(tmp_path)

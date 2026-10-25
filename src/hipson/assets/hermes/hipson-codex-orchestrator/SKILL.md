@@ -23,7 +23,7 @@ Never bypass Hipson for non-trivial repository work. When Hermes receives a
 repo task directly, start with:
 
 ```bash
-hipson hermes intake --project /home/hipson47/code/<project> --task "<task>"
+hipson hermes intake --project ~/code/<project> --task "<task>"
 ```
 
 If the current directory is already the target repo, use:
@@ -42,7 +42,7 @@ hipson hermes intake --project . --task "<task>"
 
 ## Mandatory Sequence
 
-1. Resolve the target repo path. Prefer `/home/hipson47/code/<project>`.
+1. Resolve the target repo path. Prefer `~/code/<project>`.
 2. Run `hipson hermes intake --project <repo> --task "<task>"`.
 3. Follow the returned Hipson route and recommended commands.
 4. Generate a Hipson packet before Executor or Reviewer work.
