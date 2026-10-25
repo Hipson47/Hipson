@@ -37,7 +37,8 @@
         "vercel-deploy",
         "yeet"
       ],
-      "why": "Official Codex-oriented catalog with design, Figma, browser, GitHub, security, docs, and deployment workflows."
+      "why": "Official Codex-oriented catalog with design, Figma, browser, GitHub, security, docs, and deployment workflows.",
+      "ref": "49f948faa9258a0c61caceaf225e179651397431"
     },
     {
       "id": "vercel-labs",
@@ -50,7 +51,8 @@
         "react-view-transitions",
         "web-design-guidelines"
       ],
-      "why": "Strong web product guidance for React, composition, transitions, Vercel deployment, and visual design rules."
+      "why": "Strong web product guidance for React, composition, transitions, Vercel deployment, and visual design rules.",
+      "ref": "063bee94c3f4df8453406c830b0a7df0f2860278"
     },
     {
       "id": "anthropic",
@@ -69,7 +71,8 @@
         "webapp-testing",
         "xlsx"
       ],
-      "why": "Useful design, brand, theme, browser-app testing, artifact, MCP, and document workflows."
+      "why": "Useful design, brand, theme, browser-app testing, artifact, MCP, and document workflows.",
+      "ref": "dbd4588f9e1033efb41dad4bef2f7947c8993d44"
     }
   ],
   "skipped_examples": [

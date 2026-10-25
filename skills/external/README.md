@@ -1,59 +1,34 @@
-# External Skill Library
+# External skill library (fetched, not vendored)
 
-This directory vendors selected public agent skills for Hipson workflows.
+Hipson can use a curated set of public agent skills from three upstream catalogs. They are
+third-party content under their own licenses (some are not open source), so this repository
+does **not** redistribute copies. `manifest.json` lists the selected skills and pins each source
+to an upstream commit; `docs/vendored-skills-provenance.json` records a tree hash per skill.
 
-The project copy is useful for:
-- auditability: the exact instructions are versioned with Hipson;
-- packet building: sidecar agents can be given relevant skill excerpts;
-- portability: project agents can use the same source material even before a global Codex install;
-- design quality: UI/UX agents have explicit visual, interaction, and testing standards.
+Fetch them locally when you want them:
 
-Runtime note: Codex discovers active skills from the Codex skills directory, usually
-`~/.codex/skills`. The same selected skills have also been installed there on this
-machine. Restart Codex to load newly installed global skills.
+```bash
+python scripts/fetch_external_skills.py            # all 44 skills into skills/external/
+python scripts/fetch_external_skills.py --list     # what is available
+python scripts/fetch_external_skills.py --only anthropic/frontend-design
+```
+
+The script downloads only the listed directories (sparse checkout) at the pinned commit, refuses
+anything whose tree hash differs from the recorded one, and keeps each skill's upstream `LICENSE`
+file. Fetched directories are git-ignored. Check each skill's license before redistributing it;
+for example, Anthropic's `docx`, `pptx` and `xlsx` skills are "all rights reserved" and governed
+by your agreement with Anthropic.
+
+Maintainers move the pins with `--update-pins`, which re-pins every source to its upstream HEAD
+and rewrites the recorded tree hashes; review the resulting diff before committing it.
 
 ## Sources
 
-- `openai-curated/`: selected skills from <https://github.com/openai/skills>
-- `vercel-labs/`: selected skills from <https://github.com/vercel-labs/agent-skills>
-- `anthropic/`: selected skills from <https://github.com/anthropics/skills>
+| Source | Upstream | Skills |
+|---|---|---|
+| `openai-curated/` | <https://github.com/openai/skills> (`skills/.curated`) | 28: Figma, browser/screenshot testing, GitHub, security, docs, deployment |
+| `vercel-labs/` | <https://github.com/vercel-labs/agent-skills> (`skills`) | 5: React, composition, transitions, web design, Vercel deployment |
+| `anthropic/` | <https://github.com/anthropics/skills> (`skills`) | 11: frontend design, brand, themes, web-app testing, artifacts, MCP, documents |
 
-## Selection Policy
-
-Installed by default:
-- design and UI/UX review skills;
-- Figma and screenshot-driven implementation workflows;
-- frontend testing and browser inspection workflows;
-- React and web composition guidance;
-- deployment helpers for common hosting targets;
-- code review, GitHub PR, Sentry, security, and documentation workflows.
-
-Not installed by default:
-- novelty/demo skills;
-- platform-specific skills unrelated to current Hipson work;
-- skills focused on handling provider tokens directly;
-- duplicate skills when an equivalent safer source was already installed.
-
-## High-Value UI/UX Stack
-
-Use Hipson's project-specific frontend skills first:
-- `skills/hipson-creative-frontend-motion-architect`: creative frontend,
-  motion UI, scroll-driven animation, scrollytelling, and implementation-ready
-  coding-agent prompts.
-- `skills/hipson-visual-experience-director`: art direction, visual experience
-  briefs, and visual QA.
-- `skills/hipson-premium-ui-ux`: screenshot-backed premium UI/UX review.
-
-Use these first for public-facing frontend work:
-- `anthropic/frontend-design`
-- `anthropic/brand-guidelines`
-- `anthropic/theme-factory`
-- `vercel-labs/web-design-guidelines`
-- `openai-curated/screenshot`
-- `openai-curated/playwright-interactive`
-- `openai-curated/figma-implement-design`
-- `openai-curated/figma-generate-design`
-- `openai-curated/figma-create-design-system-rules`
-
-For Hipson sidecars, pair these with the `premium_ui_ux` agent and include screenshots,
-viewport sizes, target user, brand constraints, and the exact files changed.
+Codex and Claude Code load *active* skills from their own skill directories (for example
+`~/.codex/skills`); this folder is a project-local reference for Hipson packets and sidecars.

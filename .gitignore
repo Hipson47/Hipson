@@ -36,3 +36,6 @@ scans/*.json
 !scans/.gitkeep
 memory/*.jsonl
 !memory/.gitkeep
+
+# Optional third-party skills, fetched by scripts/fetch_external_skills.py (not redistributed)
+skills/external/*/

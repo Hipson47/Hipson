@@ -57,7 +57,7 @@ shared file. Hipson home honors `HIPSON_HOME`, then `XDG_CONFIG_HOME/hipson`.
 - Second opinion on a small architecture decision.
 
 For design and frontend packets, use the [skill library](skill-library.md) to
-choose relevant vendored skill excerpts from `skills/external/`. Sidecars do not
+choose relevant skill excerpts from the locally fetched `skills/external/`. Sidecars do not
 read the repository themselves. The current runner sends text only: include
 needed snippets, file context, and visual observations from local screenshot
 review. Screenshot paths alone do not send image contents to the provider.

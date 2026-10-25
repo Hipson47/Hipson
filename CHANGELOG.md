@@ -44,6 +44,12 @@
   - Move historical planning and audit material to `docs/archive/` with an archive index.
   - Index the live docs, document the lead/worker ledger flow, and correct CLI,
     path, provider, and historical-status guidance.
+- **External skills**
+  - Stop redistributing third-party skills (992 files from OpenAI, Anthropic and
+    Vercel Labs catalogs, some under non-open licenses). `skills/external/manifest.json`
+    now pins each source to an upstream commit, provenance records a tree hash per
+    skill, and `scripts/fetch_external_skills.py` fetches and verifies them into the
+    git-ignored `skills/external/` on demand.
 - **CI and tooling**
   - Upgrade setuptools in CI (and require >=84.1.0 to build) and refresh vulnerable
     dev-tool locks so `pip-audit` passes.

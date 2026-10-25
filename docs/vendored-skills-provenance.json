@@ -1,403 +1,403 @@
 {
   "schema": 1,
   "generated_for": "Hipson vendored skill provenance",
-  "note": "sha256_tree hashes each vendored skill directory by relative file path plus file content, sorted lexicographically.",
+  "note": "sha256_tree = sha256 over (relative POSIX path, NUL, content, NUL) for every file, sorted by path; computed by scripts/fetch_external_skills.py at the pinned upstream ref.",
   "skills": [
     {
       "name": "algorithmic-art",
       "provider": "anthropic",
       "path": "skills/external/anthropic/algorithmic-art",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/algorithmic-art",
       "file_count": 4,
       "bytes": 59784,
-      "sha256_tree": "e79ef02baca948f9d41ecbe79a2b67f523516d848952c3c8f3f35c342b1684c3"
+      "sha256_tree": "8c15717769d76330df4387b85402a3754d858b97749ae259d3365ea9ea394f89"
     },
     {
       "name": "brand-guidelines",
       "provider": "anthropic",
       "path": "skills/external/anthropic/brand-guidelines",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/brand-guidelines",
       "file_count": 2,
       "bytes": 13580,
-      "sha256_tree": "b1ddacb3513812bf469fbc1c5ec2977a8d86a009baf5246be16ebcc0b6f345a9"
+      "sha256_tree": "ddf22e788d6aa33e818ec59be85d4fba5aeda23075518dafc412bb90b7cc63ce"
     },
     {
       "name": "canvas-design",
       "provider": "anthropic",
       "path": "skills/external/anthropic/canvas-design",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/canvas-design",
       "file_count": 83,
       "bytes": 5554003,
-      "sha256_tree": "5bff145736ab322f18c4348c2f3f127ad2dd60d2b73d147721b7b6b9df5fa850"
+      "sha256_tree": "b958beb4e89a524215b7a5b5f2aa3e0d8b49ba516b74b5fcd704b1d48addad67"
     },
     {
       "name": "docx",
       "provider": "anthropic",
       "path": "skills/external/anthropic/docx",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/docx",
       "file_count": 61,
-      "bytes": 1121303,
-      "sha256_tree": "0c22a99bba088e453d8fa84572e452a76da6c671faf219fbf2625ae9d9bbb9e0"
+      "bytes": 1128695,
+      "sha256_tree": "7d67716c32e093e685627dca5e7f8622e8865e26ff0db941172406929797d47a"
     },
     {
       "name": "frontend-design",
       "provider": "anthropic",
       "path": "skills/external/anthropic/frontend-design",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/frontend-design",
       "file_count": 2,
-      "bytes": 14614,
-      "sha256_tree": "7ee0004865ab092f79c43d9adc1acf30a9b6893fe2aed448acb7af93900857df"
+      "bytes": 19564,
+      "sha256_tree": "7e9c2af00fd5b3144f49ce6fb1b16037b392ab9c2f049423b0b6114d99381ba2"
     },
     {
       "name": "mcp-builder",
       "provider": "anthropic",
       "path": "skills/external/anthropic/mcp-builder",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/mcp-builder",
       "file_count": 10,
       "bytes": 121756,
-      "sha256_tree": "4f2b8edbd01ebc95459f769a9b056ae0cbb5b985d29493ed27cd0e8cce56c7ec"
+      "sha256_tree": "5a904ea67e691bc7454cc2a631f24a52f3a95f397d76862cdfc6a9370d79363d"
     },
     {
       "name": "pptx",
       "provider": "anthropic",
       "path": "skills/external/anthropic/pptx",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
-      "file_count": 59,
-      "bytes": 1129944,
-      "sha256_tree": "f899ea05d5cdd161214f0b4c38d5cdba735bd4368f2173fa48775b1a08744983"
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/pptx",
+      "file_count": 56,
+      "bytes": 1139175,
+      "sha256_tree": "542c716c50714598b19d12ba977d6c878d650b5798a8588026700d11bcd854bf"
     },
     {
       "name": "theme-factory",
       "provider": "anthropic",
       "path": "skills/external/anthropic/theme-factory",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/theme-factory",
       "file_count": 13,
       "bytes": 144094,
-      "sha256_tree": "d6e45e65e461e89b71ba2702edca3a128759259ca57f54a96431c5eff6b042bd"
+      "sha256_tree": "50bc5c8d91691c22c80aa3a77d437243398121a724531737530f4ed30cddf879"
     },
     {
       "name": "web-artifacts-builder",
       "provider": "anthropic",
       "path": "skills/external/anthropic/web-artifacts-builder",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/web-artifacts-builder",
       "file_count": 5,
       "bytes": 45840,
-      "sha256_tree": "26dd30a42ada19cef28295b92dd0a5db8a9e166c6ebdf684068d03a4cb7dcaa8"
+      "sha256_tree": "0f102ba19f13b4deb19f2248a5014952d2af1521129a5a0e4f3d805f74632b75"
     },
     {
       "name": "webapp-testing",
       "provider": "anthropic",
       "path": "skills/external/anthropic/webapp-testing",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/webapp-testing",
       "file_count": 6,
       "bytes": 22394,
-      "sha256_tree": "8d15307b9de8ff428934683839a4689937957c10050bf8f424ceffdc69903677"
+      "sha256_tree": "abfaf4cc6cf572346e22fed42dc0cfaacd2f64c5d9667f44a94b02ea0d3b1342"
     },
     {
       "name": "xlsx",
       "provider": "anthropic",
       "path": "skills/external/anthropic/xlsx",
-      "source": "Anthropic skills bundle vendored into skills/external/anthropic",
-      "file_count": 54,
-      "bytes": 1093063,
-      "sha256_tree": "35e566c6ee6c5276197edc1255dc05947fce9ef4a4e0b5c2a3f86bdc321a925a"
+      "source": "https://github.com/anthropics/skills/tree/dbd4588f9e1033efb41dad4bef2f7947c8993d44/skills/xlsx",
+      "file_count": 53,
+      "bytes": 1102893,
+      "sha256_tree": "f38e1245e48604aada998d989633de07e4c4fb9a8ddc0872219d2d36e6c538b6"
     },
     {
       "name": "chatgpt-apps",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/chatgpt-apps",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/chatgpt-apps",
       "file_count": 11,
       "bytes": 76684,
-      "sha256_tree": "ab0d642f797a9a3fb2e199914ea6a6356038cd884277b62f68280b095365c2dc"
+      "sha256_tree": "22c222d78e07c731d53ce69676ed9c0b7657bda6d8b8e2f45dab2e8f82791c46"
     },
     {
       "name": "cli-creator",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/cli-creator",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/cli-creator",
       "file_count": 4,
       "bytes": 26802,
-      "sha256_tree": "22031b3dddd206fbdcec8b6d87f9ff278e36839bcef8303931005054b77c5f98"
+      "sha256_tree": "d5aadc749e871b0edf63d60727674585109fa7d500116ecd42125538e4d9f62c"
     },
     {
       "name": "cloudflare-deploy",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/cloudflare-deploy",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/cloudflare-deploy",
       "file_count": 312,
       "bytes": 1349323,
-      "sha256_tree": "087f523b7c9b513adc7b60e425f9b14aa9165edba79c0389e1e3f59e58b09983"
+      "sha256_tree": "52f9eccd529bf830066bffabe072950fbc1549861e32c951e95b0b13cc96aa0f"
     },
     {
       "name": "figma",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma",
       "file_count": 8,
       "bytes": 12720,
-      "sha256_tree": "4d50bb95db71b62c6b2f94623cd2da916e52261e5effa095491c091b5089495d"
+      "sha256_tree": "50e2fddd547a5e76a941443e279593d0257591d148b0c1ca1699ec9fcfa6cd46"
     },
     {
       "name": "figma-code-connect-components",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-code-connect-components",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-code-connect-components",
       "file_count": 8,
       "bytes": 21939,
-      "sha256_tree": "4c2bc3e76b6f465c0a311d4a2fdc1c5a0205d2e86c9db9a616d06f72ecd01088"
+      "sha256_tree": "82ad434bb835cda2a357999142e9bd9e8f8d93865d2d19128e9dff994371336f"
     },
     {
       "name": "figma-create-design-system-rules",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-create-design-system-rules",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-create-design-system-rules",
       "file_count": 8,
       "bytes": 23104,
-      "sha256_tree": "daa39f73ae4c7f856de7222dc1044e0f0af6ad4d3579389d927032c0520e8da6"
+      "sha256_tree": "5ff50f8ff7ab7550b1e8aa3628cf5e7b5c3bbfc8598fe2aeb0e1b064fe026b3c"
     },
     {
       "name": "figma-create-new-file",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-create-new-file",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-create-new-file",
       "file_count": 7,
       "bytes": 7078,
-      "sha256_tree": "a11030af4f9ad52642612ca60c894c4b3af6e641ff3ac5a7770b04d5465b0945"
+      "sha256_tree": "2f7e835603650206c49aa7255ae57e1f4711e19f447f29d82899102355fdd897"
     },
     {
       "name": "figma-generate-design",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-generate-design",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-generate-design",
       "file_count": 7,
       "bytes": 24551,
-      "sha256_tree": "4530261da04300e10594d97388649b14e00822b5494bd6507801c51cbfa09592"
+      "sha256_tree": "386146dd42255ef009c6f33400d396a1ca764f3802131e7967985b1afb24184a"
     },
     {
       "name": "figma-generate-library",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-generate-library",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-generate-library",
       "file_count": 23,
       "bytes": 237283,
-      "sha256_tree": "307bf7c8408810d4ac552b3d47a8d9d435d203b4d4dab44f69f621817527ab84"
+      "sha256_tree": "f84e10f3bbf80e848b3c0f29dfa442aad4ab0ee36f0cd2a341f542ed8915574a"
     },
     {
       "name": "figma-implement-design",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-implement-design",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-implement-design",
       "file_count": 6,
       "bytes": 15974,
-      "sha256_tree": "8bd5de72af09c9654434fe85051f41a98816390f4c9b01c8bf6f36e181edaf15"
+      "sha256_tree": "2b6960dfce48f97d3131593932cb6726f01763c0c210ae00beb5fcec9881b896"
     },
     {
       "name": "figma-use",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/figma-use",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/figma-use",
       "file_count": 29,
       "bytes": 642618,
-      "sha256_tree": "e0d83d600a70826bec15b1b918b1ff8d17c4db40e24fa69a534188a7481f5dba"
+      "sha256_tree": "c63b26343bfa73c3e3968cc8e785be6484a43f32dfc2f6955f89615ed84affec"
     },
     {
       "name": "gh-address-comments",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/gh-address-comments",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/gh-address-comments",
       "file_count": 6,
       "bytes": 22166,
-      "sha256_tree": "81c5c6e73c3a6b4cc4726c2400c831c7b9925a9c4f3487168f34926144379752"
+      "sha256_tree": "cd406b1d6f0e0680817b4b3a5b7c77dc5968694c1d3c0901f5288f128972552d"
     },
     {
       "name": "gh-fix-ci",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/gh-fix-ci",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/gh-fix-ci",
       "file_count": 6,
       "bytes": 32642,
-      "sha256_tree": "c6292ad67628796c82bc5a4182d8892c743f6a32bd2c18480b8dda5c60d8200c"
+      "sha256_tree": "cfd48b5727ca3e6fd4906fa5c472739a73301c99f5b4dc30b1589cfdc6cd1a0e"
     },
     {
       "name": "linear",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/linear",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/linear",
       "file_count": 5,
       "bytes": 24803,
-      "sha256_tree": "297042313ebe8042d9148380b0177d4bf56ea5010520f1aecc9bfed78c1b6a41"
+      "sha256_tree": "48f6eba163811e7f16238439c91c985e73781526ad3ade1fe431bf54d624c4de"
     },
     {
       "name": "netlify-deploy",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/netlify-deploy",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/netlify-deploy",
       "file_count": 8,
       "bytes": 33655,
-      "sha256_tree": "9ae225b1dda8d61c126d69ec7e0a80f1e484cbbe8a27459b01396fd6ab396076"
+      "sha256_tree": "93ae5c66070276650fe18bab65423c044a06d2bb3b8adbcf755a78bb3b8eed68"
     },
     {
       "name": "notion-meeting-intelligence",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/notion-meeting-intelligence",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/notion-meeting-intelligence",
       "file_count": 19,
       "bytes": 70019,
-      "sha256_tree": "5b6460e79770e752723ad5f100f8bf1ea9ce102ead4bee8cbf298b6315aa44f7"
+      "sha256_tree": "999fcfe19a461d16295aa1e5d9f89b5d1f4d0d2a5deeda4af3696d91f29027b6"
     },
     {
       "name": "notion-research-documentation",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/notion-research-documentation",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/notion-research-documentation",
       "file_count": 23,
       "bytes": 77253,
-      "sha256_tree": "3994fad97e3456c1c1b5af6fc0042647989fd77c0b6a98e7fd7a8ac49dc01716"
+      "sha256_tree": "b6fe75b4b1bc66497648f77011f5c19e47e74c9f659844ff99e4fd2bab6fbce4"
     },
     {
       "name": "notion-spec-to-implementation",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/notion-spec-to-implementation",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/notion-spec-to-implementation",
       "file_count": 19,
       "bytes": 85644,
-      "sha256_tree": "798e5896227051de7172572738b5b6b5e0d069ba0118649b35de87b84697d754"
+      "sha256_tree": "bebeac94966be6ee4f8444927948f0cdee2fd2459724eee06dc1d692848d419d"
     },
     {
       "name": "openai-docs",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/openai-docs",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
-      "file_count": 9,
-      "bytes": 51846,
-      "sha256_tree": "e2b2528f347c743d696933efedf9f5a6e330aafa484c6676ebfb799df6f34c02"
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/openai-docs",
+      "file_count": 10,
+      "bytes": 79418,
+      "sha256_tree": "9b37ccead1a6a3f609acac03f9d4429422ef21626ea9f12ee8ce235712a0c693"
     },
     {
       "name": "pdf",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/pdf",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/pdf",
       "file_count": 4,
       "bytes": 14824,
-      "sha256_tree": "6d99fd0cf0a6df8798fa9a737e36585cc0e32d318433ec6bdb5d35c15319af9b"
+      "sha256_tree": "75605de0c36f3ca8ef3de2631a54233721285c5aa3c6f08ddd3380fc4fe9a330"
     },
     {
       "name": "playwright-interactive",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/playwright-interactive",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/playwright-interactive",
       "file_count": 6,
       "bytes": 46714,
-      "sha256_tree": "12091d38cfd1da6a44a5661d1f86c2cbb22f6f18b4f77cb31aca6d1c3ca33a7e"
+      "sha256_tree": "cc0f29907d36161ebd951abcdc196199c8de0cddbbd34031b93090ebc2055767"
     },
     {
       "name": "render-deploy",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/render-deploy",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/render-deploy",
       "file_count": 21,
       "bytes": 100512,
-      "sha256_tree": "a19638c52cf7042e989b138075c2fc30713217fe64c604160c33e020b47613e4"
+      "sha256_tree": "39d995f977cc59d2fe60b814a06788c8577a00c376d6937b5c1f4273c526f860"
     },
     {
       "name": "screenshot",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/screenshot",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/screenshot",
       "file_count": 11,
       "bytes": 51996,
-      "sha256_tree": "997cca9f3517b9aec0455a989da2f83bdb6ac68e4860e00fd7aad4f9f8a3904c"
+      "sha256_tree": "9c5ac885e307dbb85aea5353a04fabc91ad238fae378d5069ba4dfe01eec3339"
     },
     {
       "name": "security-ownership-map",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/security-ownership-map",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/security-ownership-map",
       "file_count": 8,
       "bytes": 98526,
-      "sha256_tree": "e8423bd1cda19ac22968b8c613a74447892e1fcba8036f6541ff0efcbc8d3c7a"
+      "sha256_tree": "accc2056aa2e80424484aa203358b0a841c9a67f86d251e89b410ae541f3a611"
     },
     {
       "name": "security-threat-model",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/security-threat-model",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/security-threat-model",
       "file_count": 5,
       "bytes": 30913,
-      "sha256_tree": "92682df898be8d5700427bfcc745daffc472b4f87e2712741aa042c9a6a71ca9"
+      "sha256_tree": "c3a968004c25b9c7aaf133801adba36962e7ab34a7d073834c084472d7854eee"
     },
     {
       "name": "sentry",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/sentry",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/sentry",
       "file_count": 5,
       "bytes": 17561,
-      "sha256_tree": "9f2ae602d15e6c8eabc864d1600419f56b9805deaeaeb2cebaf7726bb98cffd2"
+      "sha256_tree": "80ba5489686379efa2f0467b55bcb7091d2827a2afc5f5c2e793ba62d7fb46ff"
     },
     {
       "name": "vercel-deploy",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/vercel-deploy",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/vercel-deploy",
       "file_count": 6,
       "bytes": 13930,
-      "sha256_tree": "ca16a1d8ed4fe76fdc0d2cb1ec25ad12cc635dcd6b27bceed32a47e995ed4f11"
+      "sha256_tree": "9198d3275c912c48464370df1e70739cf750dbd951a92b12b3631ee261f9fc56"
     },
     {
       "name": "yeet",
       "provider": "openai-curated",
       "path": "skills/external/openai-curated/yeet",
-      "source": "OpenAI curated skills bundle vendored into skills/external/openai-curated",
+      "source": "https://github.com/openai/skills/tree/49f948faa9258a0c61caceaf225e179651397431/skills/.curated/yeet",
       "file_count": 5,
-      "bytes": 14953,
-      "sha256_tree": "bbd44f8273daee33ee3ca549ef7737ddea952919b93d5d1ae441d0381480608d"
+      "bytes": 20230,
+      "sha256_tree": "cb788c4330860eb5f3d9e77cce6c791c304f86125a89ace0fd004932f04156fa"
     },
     {
       "name": "composition-patterns",
       "provider": "vercel-labs",
       "path": "skills/external/vercel-labs/composition-patterns",
-      "source": "Vercel Labs skills bundle vendored into skills/external/vercel-labs",
+      "source": "https://github.com/vercel-labs/agent-skills/tree/063bee94c3f4df8453406c830b0a7df0f2860278/skills/composition-patterns",
       "file_count": 14,
       "bytes": 50339,
-      "sha256_tree": "8a4b4c34b148b339e3cf50c3d2f442c7e3b5e0ff83be27896e0064319fed49d4"
+      "sha256_tree": "646f870906914c3787efa7403ec4716dfddf78fc17a12ec1f0556caf2143ac66"
     },
     {
       "name": "deploy-to-vercel",
       "provider": "vercel-labs",
       "path": "skills/external/vercel-labs/deploy-to-vercel",
-      "source": "Vercel Labs skills bundle vendored into skills/external/vercel-labs",
+      "source": "https://github.com/vercel-labs/agent-skills/tree/063bee94c3f4df8453406c830b0a7df0f2860278/skills/deploy-to-vercel",
       "file_count": 4,
       "bytes": 40796,
-      "sha256_tree": "dbad825c06044c1e47c087417fd0c7ba6bb3188d49b0a9d8b8e39da4580a1e74"
+      "sha256_tree": "15894f2b4dd7bcc29daf71aa715eb79a188eb193af416d8c58ca0513797a626a"
     },
     {
       "name": "react-best-practices",
       "provider": "vercel-labs",
       "path": "skills/external/vercel-labs/react-best-practices",
-      "source": "Vercel Labs skills bundle vendored into skills/external/vercel-labs",
+      "source": "https://github.com/vercel-labs/agent-skills/tree/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-best-practices",
       "file_count": 76,
       "bytes": 230383,
-      "sha256_tree": "1e83b52a2d5c103b4cb8986787da068ce06e9db2785b431b259806773a4c18ab"
+      "sha256_tree": "e3f2294574b469c7c198373a443a86571012769d0bbeed68854bd55642ec0d7b"
     },
     {
       "name": "react-view-transitions",
       "provider": "vercel-labs",
       "path": "skills/external/vercel-labs/react-view-transitions",
-      "source": "Vercel Labs skills bundle vendored into skills/external/vercel-labs",
-      "file_count": 8,
-      "bytes": 77369,
-      "sha256_tree": "5aa90364015930992f7ce92d5c403146f81beabc414af2ef3d8e49159b308ba8"
+      "source": "https://github.com/vercel-labs/agent-skills/tree/063bee94c3f4df8453406c830b0a7df0f2860278/skills/react-view-transitions",
+      "file_count": 9,
+      "bytes": 121681,
+      "sha256_tree": "4a17116903578657ae3d472e79cfe2785cd0cc84eb440af153f1dcfc6a999b49"
     },
     {
       "name": "web-design-guidelines",
       "provider": "vercel-labs",
       "path": "skills/external/vercel-labs/web-design-guidelines",
-      "source": "Vercel Labs skills bundle vendored into skills/external/vercel-labs",
+      "source": "https://github.com/vercel-labs/agent-skills/tree/063bee94c3f4df8453406c830b0a7df0f2860278/skills/web-design-guidelines",
       "file_count": 1,
       "bytes": 1231,
-      "sha256_tree": "bd62ce7fb7ccc94df5201857dc9dd48b115813df68ca758f6bc4c5e4485d6685"
+      "sha256_tree": "f3bc47f890f42a44db1007ab390709ec368e4b8c089baee6b0007182236ac474"
     }
   ]
 }

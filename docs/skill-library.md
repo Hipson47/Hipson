@@ -1,8 +1,11 @@
 # Hipson Skill Library
 
-Hipson keeps a curated local library of public agent skills in `skills/external/`.
-The first batch focuses on design quality, frontend testing, Figma workflows,
-GitHub review workflows, deployment, documentation, and security planning.
+Hipson curates a library of public agent skills that can be fetched into
+`skills/external/` with `python scripts/fetch_external_skills.py` (see
+[skills/external/README.md](../skills/external/README.md)). The repository holds only
+the manifest and pinned provenance, not copies: the skills are third-party content
+under their own licenses. The selection focuses on design quality, frontend testing,
+Figma workflows, GitHub review workflows, deployment, documentation, and security planning.
 
 Hipson also includes local wrapper skills for Hipson-specific workflows:
 
@@ -35,16 +38,16 @@ Source links:
 
 There are two copies with different jobs:
 
-- `skills/external/`: versioned project reference for Hipson packets, sidecar prompts,
-  audits, and future packaging.
+- `skills/external/`: locally fetched project reference for Hipson packets, sidecar
+  prompts and audits (git-ignored; pinned by `skills/external/manifest.json`).
 - `<Codex home>/skills`: active Codex skill install; `CODEX_HOME` selects the
   home, otherwise it defaults to `~/.codex`.
 
 After installing new global skills, restart Codex so the runtime skill list refreshes.
 
-Vendored source paths and recorded tree hashes are listed in
-[vendored-skills-provenance.json](vendored-skills-provenance.json); these are
-snapshot records, not a live upstream integrity check.
+Upstream source paths at the pinned commit and their tree hashes are listed in
+[vendored-skills-provenance.json](vendored-skills-provenance.json); the fetch
+script refuses any skill whose content does not match its recorded hash.
 
 ## Curation Matrix
 
