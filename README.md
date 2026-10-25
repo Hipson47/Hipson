@@ -206,7 +206,7 @@ src/hipson/      CLI, ledger, evidence, MCP server, runtime, packaged assets
 schemas/         JSON schemas for every artifact kind
 tests/           pytest suite (also runnable without pytest)
 examples/        agent-run.sh worker wrapper
-skills/          agent skill library (vendored skills keep their provenance)
+skills/          Hipson's own agent skills; third-party skills are fetched on demand into skills/external/
 docs/            live documentation; docs/archive/ holds historical plans and audits
 ```
 
