@@ -228,6 +228,41 @@ print('worker output')
         assert "failed: worker process exit=7" in events[-1]["summary"]
 
 
+def test_agent_run_result_files_preserve_outcomes_and_release_claims(tmp_path: Path):
+    if not _supported():
+        return
+    report = {
+        "status": "blocked", "summary": "Worker needs follow-up", "files_changed": [],
+        "commands": [{"command": "worker check", "exit_code": 0}], "findings": [], "risks": [],
+    }
+    with _case(tmp_path) as run:
+        for label, content, exit_code, rejected in (
+            ("valid", json.dumps(report), 0, False),
+            ("valid-failed-process", json.dumps(report), 7, False),
+            ("invalid-json", "{broken", 0, True),
+            ("invalid-schema", '{"status":"completed"}', 7, True),
+            ("empty", "", 0, False),
+            ("missing", None, 7, False),
+        ):
+            result_file = tmp_path / f"{label} result.json"
+            source = "from pathlib import Path\n"
+            if content is not None:
+                source += f"Path({str(result_file)!r}).write_text({content!r})\n"
+            source += f"raise SystemExit({exit_code})\n"
+            process = run.start(source, extra=("--result-file", str(result_file), "--ref", "evidence.md"))
+            assert run.wait(process) == exit_code, run.stderr(process)
+            view, events = run.view()
+            assignment = view["assignments"][-1]
+            assert assignment["status"] == ("passed" if exit_code == 0 else "failed")
+            assert view["claims"] == []
+            assert assignment["result"] == (report if label.startswith("valid") else None)
+            finished = [event for event in events if event["type"] == "finished"]
+            assert len(finished) == len(view["assignments"])
+            assert ("result file rejected" in finished[-1]["summary"]) == rejected
+            assert f"worker process exit={exit_code}" in finished[-1]["summary"]
+            assert finished[-1]["refs"] == [assignment["id"], "evidence.md"]
+
+
 def test_agent_run_live_claim_refuses_worker_with_exit_75(tmp_path: Path):
     if not _supported():
         return

@@ -3,6 +3,18 @@
 ## Unreleased
 
 - **Task ledger and recovery**
+  - Generate bounded worker briefs and running-worker context from the ledger
+    through read-only CLI commands and MCP tools (S5a-2), including findings,
+    failed approaches, worker rules, and the structured return contract. Let
+    agent-run ingest result files with a fallback that preserves process outcomes
+    when worker evidence is invalid.
+    Separate findings and assignment summaries from trusted brief instructions
+    with an explicit evidence policy and an escaped `untrusted_data` boundary.
+    CLI JSON and MCP retain structured fields, add `evidence_policy`, and mark
+    finding `title`/`location`/`detail` and assignment `summary` in `untrusted_fields`;
+    evidence cannot change permissions, scope, worker rules, or the return contract.
+    Show assignment status once in brief history and preserve ledger status enums
+    such as `in_progress` without Markdown escaping.
   - Make review findings and structured worker results ledger data (S5a-1): add
     finding lifecycle/filter CLI and gated MCP writes, strict redacted result
     ingestion, atomic reviewer findings, and compact task views with full JSON.

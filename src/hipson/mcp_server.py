@@ -16,6 +16,7 @@ from hipson import (
     policy,
     quality,
     run_control,
+    task_context,
     verification,
     workflow,
 )
@@ -37,6 +38,8 @@ MCP_TOOL_NAMES = (
     "handoff.create",
     "release.claim",
     "task.show",
+    "task.brief",
+    "task.context",
     "task.events",
     "task.list",
     "task.board",
@@ -166,6 +169,21 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "task.show": {
         "type": "object",
         "required": ["task"],
+        "properties": {"task": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "task.brief": {
+        "type": "object",
+        "required": ["task", "role"],
+        "properties": {
+            "task": {"type": "string"},
+            "role": {"type": "string", "enum": list(ledger.ROLES)},
+            "scope": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": False,
+    },
+    "task.context": {
+        "type": "object",
         "properties": {"task": {"type": "string"}},
         "additionalProperties": False,
     },
@@ -375,6 +393,8 @@ def _description(name: str) -> str:
         "handoff.create": "Write a compact agent handoff artifact for the run bundle.",
         "release.claim": "Evaluate and record a release claim against run evidence.",
         "task.show": "Read a central ledger task with all assignments and current claims.",
+        "task.brief": "Read a bounded worker brief for a task, role and optional scope.",
+        "task.context": "Read worker context; defaults to HIPSON_TASK and marks HIPSON_ASSIGNMENT as you.",
         "task.events": "Read task events after an exclusive sequence cursor (default 0).",
         "task.list": "List central ledger tasks, optionally filtered by project and status.",
         "task.board": "Read non-terminal tasks with active assignments across all projects.",
@@ -406,6 +426,8 @@ def _fallback_command(name: str) -> str:
         "handoff.create": "hipson run handoff --run runs/<work_id> --json",
         "release.claim": "hipson release claim --run runs/<work_id> --claim \"release readiness\" --human-decision approved --json",
         "task.show": "hipson task show --task T-0001 --json",
+        "task.brief": "hipson task brief --task T-0001 --role builder --scope src --json",
+        "task.context": "hipson task context --json",
         "task.events": "hipson task events --task T-0001 --after 0 --json",
         "task.list": "hipson task list --json",
         "task.board": "hipson task board --json",
@@ -608,6 +630,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     if name in MCP_GATED_TOOLS:
         _require_mcp_approval(arguments, name)
     _validate_task_arguments(name, arguments)
+    if name == "task.context":
+        arguments = {**arguments, "task": task_context.context_task(arguments.get("task"))}
     if "project" in arguments:
         arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
     # The ledger is central: never derive its DB or project filters from --project.
@@ -615,7 +639,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     dry_run = name == "task.reap" and arguments.get("dry_run", False)
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
-        if name in ("task.show", "task.events") or (name in ("task.reap", "task.findings") and "task" in arguments):
+        if name in ("task.show", "task.events", "task.brief", "task.context") or (name in ("task.reap", "task.findings") and "task" in arguments):
             raise ledger.LedgerError(f"Task not found: {arguments['task']}")
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
@@ -669,6 +693,10 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
             )
         if name == "task.show":
             return store.show(arguments["task"])
+        if name == "task.brief":
+            return task_context.brief(store, arguments["task"], role=arguments["role"], scope=arguments.get("scope", []))
+        if name == "task.context":
+            return task_context.context(store, arguments["task"])
         if name == "task.events":
             return store.events(arguments["task"], after=arguments.get("after", 0))
         if name == "task.list":
@@ -719,6 +747,8 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments[key], key)
     if name == "task.assign":
         ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
+    if name == "task.brief":
+        ledger.normalize_scope(arguments.get("scope", []))
     if name == "task.finding_update" and arguments["status"] == "open":
         ledger.require_text(arguments.get("resolution_note", ""), "Reopening note")
         if "resolved_by_assignment" in arguments:

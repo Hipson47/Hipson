@@ -28,6 +28,7 @@ from hipson import (
     quality,
     review_kit,
     run_control,
+    task_context,
     verification,
     workflow,
 )
@@ -40,6 +41,8 @@ from hipson import project as project_mod
 from hipson.approvals import ApprovalPolicy
 from hipson.assets import runtime_asset
 from hipson.codex_install import format_install_plan, install_codex
+from hipson.display import bounded_text as _bounded_cli
+from hipson.display import escape_display_controls as _escape_cli_controls
 from hipson.home import detect_codex_home, detect_hipson_home
 from hipson.output_policy import resolve_output_path
 from hipson.paths import package_root
@@ -74,24 +77,8 @@ from hipson.skills import SkillLookupError, format_validation_results, list_skil
 from hipson.tools import ToolContext, ToolRegistryError, ToolSpec, bounded_tool_output, build_default_registry
 
 PACKAGE_ROOT = package_root()
-MAX_CLI_FIELD_CHARS = 220
 MAX_CLI_CONTENT_CHARS = 1200
 MAX_CLI_JSON_CHARS = 4000
-
-
-def _escape_cli_controls(text: str) -> str:
-    """Keep readable Unicode while making terminal controls and format characters visible."""
-    return "".join(char if char.isprintable() else json.dumps(char)[1:-1] for char in text)
-
-
-def _bounded_cli(value: object, *, limit: int = MAX_CLI_FIELD_CHARS, escape_controls: bool = False) -> str:
-    text = redact_text(str(value))
-    if escape_controls:
-        text = _escape_cli_controls(text)
-    if len(text) <= limit:
-        return text
-    marker = f"... [truncated to {limit} chars]"
-    return text[: max(0, limit - len(marker))].rstrip() + marker
 
 
 def _bounded_json(value: object, *, limit: int = MAX_CLI_JSON_CHARS, escape_controls: bool = False) -> str:
@@ -1792,14 +1779,18 @@ def command_task(args: argparse.Namespace) -> int:
     try:
         dry_run = args.task_command == "reap" and args.dry_run
         finding_list = args.task_command == "finding" and args.finding_command == "list"
-        read_only = args.task_command in ("show", "events", "list", "board") or dry_run or finding_list
+        read_only = args.task_command in ("show", "events", "list", "board", "brief", "context") or dry_run or finding_list
+        if args.task_command == "context":
+            args.task = task_context.context_task(args.task)
+        elif args.task_command == "brief":
+            args.scope = ledger.normalize_scope(args.scope)
         report = (
             ledger.load_task_result(args.result_file)
             if args.task_command == "finish" and args.result_file else None
         )
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if read_only and not db.exists():
-            if args.task_command in ("show", "events") or ((dry_run or finding_list) and args.task is not None):
+            if args.task_command in ("show", "events", "brief", "context") or ((dry_run or finding_list) and args.task is not None):
                 raise ledger.LedgerError(f"Task not found: {args.task}")
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
             return 0
@@ -1842,6 +1833,15 @@ def command_task(args: argparse.Namespace) -> int:
                 payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
             elif args.task_command == "status":
                 payload = store.set_status(args.task, to=args.to, actor=args.actor, summary=args.summary)
+            elif args.task_command in ("brief", "context"):
+                worker_view = (
+                    task_context.brief(store, args.task, role=args.role, scope=args.scope)
+                    if args.task_command == "brief" else task_context.context(store, args.task)
+                )
+                if not args.json:
+                    print(task_context.render(worker_view))
+                    return 0
+                payload = worker_view
             elif args.task_command == "show":
                 view = store.show(args.task)
                 if not args.json:
@@ -1910,6 +1910,8 @@ def build_parser() -> argparse.ArgumentParser:
             ("event", "Append a task event"),
             ("status", "Transition a task"),
             ("show", "Show a task with assignments and claims"),
+            ("brief", "Generate a read-only worker brief from a task"),
+            ("context", "Read worker context; defaults to HIPSON_TASK"),
             ("events", "List task events in sequence order"),
             ("list", "List tasks"),
             ("board", "Show non-terminal tasks with active assignments"),
@@ -1920,7 +1922,7 @@ def build_parser() -> argparse.ArgumentParser:
         task_parser.add_argument("--db", default=argparse.SUPPRESS, help="Task ledger SQLite path")
         task_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
         task_parser.set_defaults(func=command_task)
-        if name in ("assign", "event", "status", "show", "events"):
+        if name in ("assign", "event", "status", "show", "events", "brief"):
             task_parser.add_argument("--task", required=True)
         if name in ("assign", "event", "status"):
             task_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
@@ -1939,6 +1941,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["assign"].add_argument("--owner-boot-id", help="Owner's Linux boot ID")
     task_parsers["assign"].add_argument("--owner-host", help="Owner's hostname; required for liveness recovery")
     task_parsers["assign"].add_argument("--lease-seconds", type=int, help="Lease duration; 0 expires immediately")
+    task_parsers["brief"].add_argument("--role", choices=ledger.ROLES, required=True)
+    task_parsers["brief"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")
+    task_parsers["context"].add_argument("--task", help="Task ID; defaults to HIPSON_TASK")
     task_parsers["finish"].add_argument("--assignment", required=True)
     task_parsers["finish"].add_argument("--result", choices=ledger.RESULTS, required=True)
     task_parsers["finish"].add_argument("--result-file", help="Strict worker result JSON; validated before any write")

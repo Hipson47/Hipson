@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # WSL-side runner: record a worker run in the Hipson task ledger around a child command.
 # Usage: agent-run.sh --task T-0001 --actor codex --role builder --mode rw [--scope PATH]...
-#                     [--lease-seconds N] [--ref PATH]... [--rollout codex] -- <command> [args...]
+#                     [--lease-seconds N] [--ref PATH]... [--result-file PATH] [--rollout codex] -- <command> [args...]
 # The runner leads its own process group and runs the worker inside it; the ledger treats the owner as
 # alive while any process of that group exists, so a SIGKILLed runner whose worker survives keeps its
 # claims. INT/TERM/HUP are forwarded to the worker (KILL after a grace period) before the run is finished.
@@ -16,7 +16,7 @@ fi
 
 HIPSON_BIN=${HIPSON_BIN:-hipson}
 GRACE_SECONDS=${AGENT_RUN_GRACE_SECONDS:-15}
-task="" actor="" role="" mode="" lease="" rollout=""
+task="" actor="" role="" mode="" lease="" rollout="" result_file=""
 scope=() refs=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -27,6 +27,7 @@ while [ $# -gt 0 ]; do
     --scope) scope+=("$2"); shift 2;;
     --lease-seconds) lease=$2; shift 2;;
     --ref) refs+=("$2"); shift 2;;
+    --result-file) result_file=$2; shift 2;;
     --rollout) rollout=$2; shift 2;;
     --) shift; break;;
     *) echo "agent-run: unknown option $1" >&2; exit 64;;
@@ -55,13 +56,23 @@ finish() {
   [ $finished = 1 ] && return
   finished=1
   if [ -n "$assignment" ]; then
-    local result=passed
+    local result=passed recorded=0
     if [ -n "$signal" ]; then result=cancelled; elif [ "$rc" != 0 ]; then result=failed; fi
     run_facts
     local summary="worker process exit=${signal:-$rc}${facts}${note}; process result only, not lead verification"
-    local finish_args=(task finish --assignment "$assignment" --result "$result" --summary "$summary")
+    local finish_args=(task finish --assignment "$assignment" --result "$result")
     for r in ${refs[@]+"${refs[@]}"}; do finish_args+=(--ref "$r"); done
-    "$HIPSON_BIN" "${finish_args[@]}" >/dev/null || echo "agent-run: could not finish $assignment; run 'hipson task reap'" >&2
+    if [ -n "$result_file" ] && [ -s "$result_file" ]; then
+      if "$HIPSON_BIN" "${finish_args[@]}" --summary "$summary" --result-file "$result_file" >/dev/null; then
+        recorded=1
+      else
+        # Invalid worker evidence must not leave the process outcome and claims unfinished.
+        summary="$summary; result file rejected"
+      fi
+    fi
+    if [ "$recorded" = 0 ]; then
+      "$HIPSON_BIN" "${finish_args[@]}" --summary "$summary" >/dev/null || echo "agent-run: could not finish $assignment; run 'hipson task reap'" >&2
+    fi
   fi
   rm -rf "$workdir"
 }

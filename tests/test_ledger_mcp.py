@@ -16,6 +16,8 @@ from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
     "task.show": ({"task"}, set()),
+    "task.brief": ({"task", "role"}, {"scope"}),
+    "task.context": (set(), {"task"}),
     "task.events": ({"task"}, {"after"}),
     "task.list": (set(), {"project", "status"}),
     "task.board": (set(), set()),
@@ -267,8 +269,10 @@ def test_ledger_mcp_rejects_caller_db_for_every_task_tool(tmp_path: Path):
     caller_db = tmp_path / "caller" / "ledger.sqlite"
     for name in TASK_TOOLS:
         arguments = dict(WRITE_ARGUMENTS.get(name, {}))
-        if name in ("task.show", "task.events"):
+        if name in ("task.show", "task.events", "task.brief"):
             arguments["task"] = "T-0001"
+        if name == "task.brief":
+            arguments["role"] = "builder"
         if name in WRITE_ARGUMENTS:
             arguments["approved"] = True
         result = _call(tmp_path, name, ledger_db=configured, db=str(caller_db), **arguments)

@@ -145,9 +145,10 @@ The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`. Detail
 
 ## Use it from a lead agent (MCP)
 
-Hipson ships a stdio MCP server. Read tools: `task.show`, `task.events`, `task.list`, `task.board`.
+Hipson ships a stdio MCP server. Read tools: `task.show`, `task.brief`, `task.context`, `task.events`,
+`task.list`, `task.board`, `task.findings`.
 Write tools (each requires `approved=true`): `task.open`, `task.assign`, `task.finish`, `task.event`,
-`task.status`, `task.reap`.
+`task.status`, `task.reap`, `task.finding_add`, `task.finding_update`.
 
 ```bash
 claude mcp add hipson -- hipson mcp serve --project . --stdio
