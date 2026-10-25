@@ -8,6 +8,7 @@ repos.yaml
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.agent-e2e/
 mutants/
 .venv/
 *.egg-info/

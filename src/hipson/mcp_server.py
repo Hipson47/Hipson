@@ -238,7 +238,9 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "status": {"type": "string", "enum": list(ledger.FINDING_STATUSES)},
             "actor": {"type": "string"},
             "resolution_note": {"type": "string"},
-            "resolved_by_assignment": {"type": "string"},
+            "resolved_by_assignment": {
+                "type": "string", "description": "Fixing assignment, including another task's assignment; the resolution event records the fix task.",
+            },
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -268,6 +270,7 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "owner_pid": {"type": "integer", "minimum": 1, "maximum": 2147483647},
             "owner_boot_id": {"type": "string", "minLength": 1},
             "owner_host": {"type": "string", "minLength": 1},
+            "owner_pid_namespace": {"type": "string", "minLength": 1},
             "lease_seconds": {"type": "integer", "minimum": 0},
             "approved": {"type": "boolean"},
         },
@@ -655,6 +658,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
                 scope=arguments.get("scope", []),
                 owner_pid=arguments.get("owner_pid"), owner_boot_id=arguments.get("owner_boot_id"),
                 owner_host=arguments.get("owner_host"), lease_seconds=arguments.get("lease_seconds"),
+                owner_pid_namespace=arguments.get("owner_pid_namespace"),
             )
         if name == "task.finish":
             result = arguments["result"]
@@ -735,7 +739,7 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             raise ValueError(f"{name}: {key} must not be empty")
     text_fields = {
         "task.open": ("title", "objective", "lead"),
-        "task.assign": ("actor", "owner_boot_id", "owner_host"),
+        "task.assign": ("actor", "owner_boot_id", "owner_host", "owner_pid_namespace"),
         "task.finish": ("summary",),
         "task.event": ("actor", "type", "summary"),
         "task.status": ("actor",),

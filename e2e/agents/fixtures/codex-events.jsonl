@@ -1,0 +1,12 @@
+{"type":"thread.started","thread_id":"crafted-offline-sample"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'hipson task --help'","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"bash -lc 'hipson task --help'","aggregated_output":"Usage: hipson task ...\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"hipson task assign --task T-0001 --actor builder --role builder --mode rw --scope src/parser","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"hipson task assign --task T-0001 --actor builder --role builder --mode rw --scope src/parser","aggregated_output":"Starting\nClaim conflicts with src/parser held by assignment A-0001\n","exit_code":1,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"cat docs/TASK_LEDGER.md","aggregated_output":"Task ledger\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Everything passed. This message is not oracle evidence."}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":50,"output_tokens":20}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_5","type":"command_execution","command":"examples/agent-run.sh --task T-0001 --actor other --role builder --mode rw --scope src/parser -- bin/fake-worker build result.json","aggregated_output":"agent-run: ledger refused the assignment; worker not started\n","exit_code":75,"status":"failed"}}
+{"type":"turn.completed","usage":{"input_tokens":60,"cached_input_tokens":40,"output_tokens":10}}

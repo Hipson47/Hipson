@@ -21,7 +21,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -115,6 +115,7 @@ SCHEMA: tuple[str, ...] = (
         owner_host TEXT,
         lease_until TEXT,
         result TEXT,
+        owner_pid_namespace TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -173,6 +174,10 @@ MIGRATION_V2_TO_V3 = (
     "ALTER TABLE assignments ADD COLUMN result TEXT",
     *FINDINGS_DDL,
     "UPDATE schema_version SET version = 3 WHERE singleton = 1",
+)
+MIGRATION_V3_TO_V4 = (
+    "ALTER TABLE assignments ADD COLUMN owner_pid_namespace TEXT",
+    "UPDATE schema_version SET version = 4 WHERE singleton = 1",
 )
 
 
@@ -246,6 +251,7 @@ class Assignment(TypedDict):
     owner_pid: int | None
     owner_boot_id: str | None
     owner_host: str | None
+    owner_pid_namespace: str | None
     lease_until: str | None
     result: TaskResult | None
 
@@ -401,6 +407,13 @@ def _boot_id() -> str | None:
         return None
 
 
+def _pid_namespace() -> str | None:
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+
+
 def _pid_alive(pid: int) -> bool:
     """The owner PID and its worker process group must both be absent to reap."""
     for probe in (os.kill, os.killpg):
@@ -517,11 +530,13 @@ class Ledger:
         read_only: bool = False,
         hostname: Callable[[], str] = socket.gethostname,
         boot_id: Callable[[], str | None] = _boot_id,
+        pid_namespace: Callable[[], str | None] = _pid_namespace,
         pid_alive: Callable[[int], bool] = _pid_alive,
     ) -> None:
         self.path = Path(db).expanduser().resolve() if db is not None else default_ledger_db()
         self._hostname = hostname
         self._boot_id = boot_id
+        self._pid_namespace = pid_namespace
         self._pid_alive = pid_alive
         if create and not read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -544,7 +559,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -553,6 +568,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2):
                         for statement in MIGRATION_V2_TO_V3:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3):
+                        for statement in MIGRATION_V3_TO_V4:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -609,6 +627,7 @@ class Ledger:
         owner_pid: int | None = None,
         owner_boot_id: str | None = None,
         owner_host: str | None = None,
+        owner_pid_namespace: str | None = None,
         lease_seconds: int | None = None,
     ) -> Assignment:
         actor = require_text(actor, "actor")
@@ -619,6 +638,9 @@ class Ledger:
             raise LedgerError("owner_pid must be an integer between 1 and 2147483647")
         owner_boot_id = require_text(owner_boot_id, "owner_boot_id") if owner_boot_id is not None else None
         owner_host = require_text(owner_host, "owner_host") if owner_host is not None else None
+        if owner_pid_namespace is not None and not isinstance(owner_pid_namespace, str):
+            raise LedgerError("owner_pid_namespace must be a string")
+        owner_pid_namespace = require_text(owner_pid_namespace, "owner_pid_namespace") if owner_pid_namespace is not None else None
         if lease_seconds is not None and (type(lease_seconds) is not int or lease_seconds < 0):
             raise LedgerError("lease_seconds must be a nonnegative integer")
         result: Assignment | None = None
@@ -670,10 +692,10 @@ class Ledger:
                 self.connection.execute(
                     """INSERT INTO assignments
                        (id, task, actor, role, mode, scope, status, started_at, ended_at,
-                        owner_pid, owner_boot_id, owner_host, lease_until)
-                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?)""",
+                        owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?)""",
                     (assignment, task, actor, role, mode, json.dumps(paths), now,
-                     owner_pid, owner_boot_id, owner_host, lease_until),
+                     owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace),
                 )
                 if mode == "rw":
                     self.connection.executemany(
@@ -719,6 +741,10 @@ class Ledger:
             boot = self._boot_id()
             if boot is not None and item["owner_boot_id"] != boot:
                 return "boot_id_changed"
+        # PIDs and process groups have meaning only in the owner's namespace.
+        # Unknown local identity also cannot justify releasing namespaced claims.
+        if item["owner_pid_namespace"] is not None and item["owner_pid_namespace"] != self._pid_namespace():
+            return None
         if item["owner_pid"] is not None and not self._pid_alive(item["owner_pid"]):
             return "pid_gone"
         return None
@@ -820,7 +846,9 @@ class Ledger:
                 resolution_note = require_text(resolution_note, "Reopening note")
                 if resolved_by_assignment is not None:
                     raise LedgerError("A reopened finding cannot have a resolved-by assignment")
-            self._check_finding_assignment(current["task"], resolved_by_assignment)
+            # A review task may delegate its fix to a separate task. Keep the FK
+            # validated, and record that task in the immutable resolution event.
+            fix_task = self._assignment(resolved_by_assignment)["task"] if resolved_by_assignment is not None else None
             now = _timestamp()
             self.connection.execute(
                 """UPDATE findings SET status = ?, resolved_by_assignment = ?, resolution_note = ?,
@@ -830,8 +858,10 @@ class Ledger:
             )
             self._append_event(
                 current["task"], actor, "finding_reopened" if status == "open" else "finding_resolved",
-                f"{finding}: {previous} -> {status}" + (f": {resolution_note}" if resolution_note else ""),
-                [finding, *([resolved_by_assignment] if resolved_by_assignment else [])],
+                f"{finding}: {previous} -> {status}" + (f": {resolution_note}" if resolution_note else "")
+                + (f" [fix task={fix_task}]" if fix_task and fix_task != current["task"] else ""),
+                [finding, *([resolved_by_assignment] if resolved_by_assignment else []),
+                 *([fix_task] if fix_task and fix_task != current["task"] else [])],
             )
             return self._finding(finding)
 
@@ -995,6 +1025,7 @@ class Ledger:
             "owner_pid": row["owner_pid"] if "owner_pid" in row.keys() else None,
             "owner_boot_id": row["owner_boot_id"] if "owner_boot_id" in row.keys() else None,
             "owner_host": row["owner_host"] if "owner_host" in row.keys() else None,
+            "owner_pid_namespace": row["owner_pid_namespace"] if "owner_pid_namespace" in row.keys() else None,
             "lease_until": row["lease_until"] if "lease_until" in row.keys() else None,
             "result": json.loads(row["result"]) if "result" in row.keys() and row["result"] is not None else None,
         }

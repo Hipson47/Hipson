@@ -50,6 +50,7 @@
         "owner_pid": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
         "owner_boot_id": { "type": ["string", "null"], "minLength": 1 },
         "owner_host": { "type": ["string", "null"], "minLength": 1 },
+        "owner_pid_namespace": { "type": ["string", "null"], "minLength": 1 },
         "lease_until": { "type": ["string", "null"], "format": "date-time" },
         "result": { "$ref": "#/$defs/result" }
       }

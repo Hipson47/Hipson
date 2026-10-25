@@ -40,13 +40,13 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
     with closing(sqlite3.connect(db)) as connection:
         before = _rows(SimpleNamespace(connection=connection))
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         after = _rows(store)
         assert len(after["tasks"]) == 2 and len(after["assignments"]) == 3 and len(after["events"]) == 6
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
-        assert [row[:-5] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-5:] == (None, None, None, None, None) for row in after["assignments"])
+        assert [row[:-6] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-6:] == (None, None, None, None, None, None) for row in after["assignments"])
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -57,7 +57,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-5] == 42  # Reopening never repeats ALTER TABLE.
+        assert _rows(store)["assignments"][-1][-6] == 42  # Reopening never repeats ALTER TABLE.
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
@@ -124,6 +124,105 @@ def test_ledger_reap_keeps_live_pid_and_unknown_boot(tmp_path: Path):
         task = _open(store, tmp_path)["id"]
         _assign(store, task, **OWNER)
         assert store.reap() == []
+
+
+def _v3_file(db):
+    _v1_file(db)
+    with closing(sqlite3.connect(db)) as connection:
+        for statement in (*ledger.MIGRATION_V1_TO_V2, *ledger.MIGRATION_V2_TO_V3):
+            connection.execute(statement)
+        result = {"status": "completed", "summary": "Legacy result", "files_changed": [], "commands": [],
+                  "findings": [], "risks": []}
+        connection.execute("UPDATE assignments SET result = ?, owner_pid = 42, owner_host = 'remote' WHERE id = 'A-0002'",
+                           (json.dumps(result),))
+        connection.execute("""INSERT INTO findings VALUES
+            ('F-0001', 'T-0001', 'A-0002', 'major', 'Legacy finding', 'Keep evidence', '', 'open',
+             NULL, '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', NULL)""")
+        connection.commit()
+
+
+def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(tmp_path: Path):
+    db = tmp_path / "v3.sqlite"
+    _v3_file(db)
+    original = db.read_bytes()
+    with closing(Ledger(db, read_only=True)) as store:
+        before = _rows(store)
+        findings = store.findings()
+        assert all(a["owner_pid_namespace"] is None for a in store.show("T-0001")["assignments"])
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+    assert db.read_bytes() == original
+    with closing(Ledger(db)) as store:
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        after = _rows(store)
+        for table in ("tasks", "claims", "events"):
+            assert after[table] == before[table]
+        assert [row[:-1] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-1] is None for row in after["assignments"])
+        assert store.findings() == findings
+        assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
+        _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)
+    with closing(Ledger(db)) as store:
+        assert _rows(store) == after and store.findings() == findings
+
+
+def test_ledger_v4_migration_failure_rolls_back_all_steps(tmp_path: Path):
+    for version, seed in ((1, _v1_file), (3, _v3_file)):
+        db = tmp_path / f"v{version}.sqlite"
+        seed(db)
+        with closing(sqlite3.connect(db)) as connection:
+            before = _rows(SimpleNamespace(connection=connection))
+        with patch.object(ledger, "MIGRATION_V3_TO_V4", (*ledger.MIGRATION_V3_TO_V4, "SELECT * FROM missing")):
+            _error(lambda db=db: Ledger(db), "missing", sqlite3.OperationalError)
+        with closing(sqlite3.connect(db)) as connection:
+            assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == version
+            assert _rows(SimpleNamespace(connection=connection)) == before
+            assert "owner_pid_namespace" not in [r[1] for r in connection.execute("PRAGMA table_info(assignments)")]
+        with closing(Ledger(db)) as store:
+            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+
+
+def test_ledger_never_probes_pid_or_group_across_namespaces(tmp_path: Path):
+    # Host owner invisible in sandbox; sandbox PID reused by unrelated host process;
+    # unreadable current namespace. None can justify reaping or assigning over the claim.
+    for index, (owner_ns, local_ns, alive) in enumerate((
+        ("pid:[host]", "pid:[sandbox]", False),
+        ("pid:[sandbox]", "pid:[host]", True),
+        ("pid:[sandbox]", None, False),
+    )):
+        probe = SimpleNamespace(calls=[])
+
+        def pid_alive(pid, probe=probe, alive=alive):
+            probe.calls.append(pid)
+            return alive
+
+        with closing(Ledger(tmp_path / f"ns-{index}.sqlite", hostname=lambda: "local",
+                            boot_id=lambda: "boot-current", pid_namespace=lambda local_ns=local_ns: local_ns,
+                            pid_alive=pid_alive)) as store:
+            task = _open(store, tmp_path)["id"]
+            holder = _assign(store, task, **OWNER, owner_pid_namespace=owner_ns)
+            assert holder["owner_pid_namespace"] == owner_ns
+            assert store.reap(dry_run=True) == [] and store.reap() == []
+            _error(lambda task=task: _assign(store, task), holder["id"], ClaimConflictError)
+            assert store.show(task)["assignments"] == [holder]
+            assert store.show(task)["claims"] and probe.calls == []
+            store.connection.execute("UPDATE assignments SET lease_until = '2000-01-01T00:00:00Z'")
+            assert store.reap()[0]["reason"] == "lease_expired"
+            assert probe.calls == []
+
+
+def test_ledger_same_namespace_reaps_only_dead_owners_and_boot_change_still_recovers(tmp_path: Path):
+    for alive in (False, True):
+        with closing(_store(tmp_path / f"same-{alive}.sqlite", alive=alive, pid_namespace=lambda: "pid:[same]")) as store:
+            task = _open(store, tmp_path)["id"]
+            _assign(store, task, **OWNER, owner_pid_namespace="pid:[same]")
+            result = store.reap()
+            assert [item["reason"] for item in result] == ([] if alive else ["pid_gone"])
+    with closing(_store(tmp_path / "reboot.sqlite", alive=True, pid_namespace=lambda: "pid:[new]")) as store:
+        task = _open(store, tmp_path)["id"]
+        _assign(store, task, **{**OWNER, "owner_boot_id": "boot-old"}, owner_pid_namespace="pid:[old]")
+        assert store.reap()[0]["reason"] == "boot_id_changed"
+    with patch.object(ledger.os, "readlink", side_effect=OSError("unavailable")):
+        assert ledger._pid_namespace() is None
 
 
 def test_ledger_pid_probe_requires_both_pid_and_group_gone():
@@ -220,12 +319,13 @@ def test_ledger_owner_validation_and_strict_schema(tmp_path: Path):
         for arguments in (
             {"owner_pid": 0}, {"owner_pid": -1}, {"owner_pid": True}, {"owner_pid": "42"},
             {"owner_pid": 2**31}, {"owner_host": " "}, {"owner_boot_id": ""},
+            {"owner_pid_namespace": " "}, {"owner_pid_namespace": 123},
             {"lease_seconds": -1}, {"lease_seconds": True}, {"lease_seconds": 0.5}, {"lease_seconds": 2**63},
         ):
             before = _rows(store)
             _error(lambda arguments=arguments: _assign(store, task, **arguments), next(iter(arguments)))
             assert _rows(store) == before
-        item = _assign(store, task, **OWNER, lease_seconds=60)
+        item = _assign(store, task, **OWNER, owner_pid_namespace="pid:[same]", lease_seconds=60)
         assert (datetime.fromisoformat(item["lease_until"]) - datetime.fromisoformat(item["started_at"])).total_seconds() == 60
         view = store.show(task)
         assert_strict_schema("task.schema.json", view)
@@ -234,9 +334,10 @@ def test_ledger_owner_validation_and_strict_schema(tmp_path: Path):
         for field, value in (
             ("owner_pid", True), ("owner_pid", "42"), ("owner_pid", -1), ("owner_pid", 2**31),
             ("owner_boot_id", 1), ("owner_host", []), ("lease_until", "not a timestamp"),
+            ("owner_pid_namespace", []), ("owner_pid_namespace", ""),
         ):
             assert _strict_errors(schema, {**item, field: value}, root), (field, value)
-        legacy = {key: value for key, value in item.items() if key not in (*OWNER, "lease_until")}
+        legacy = {key: value for key, value in item.items() if key not in (*OWNER, "lease_until", "owner_pid_namespace")}
         assert not _strict_errors(schema, legacy, root)  # Owner fields are optional in the artifact contract.
 
 
@@ -248,10 +349,12 @@ def test_ledger_cli_owner_fields_and_reap_dry_run_write_nothing(tmp_path: Path):
         "task", "assign", "--db", str(db), "--json", "--task", task, "--actor", "codex",
         "--role", "builder", "--mode", "rw", "--scope", "src", "--owner-pid", "42",
         "--owner-boot-id", "boot-old", "--owner-host", "remote", "--lease-seconds", "0",
+        "--owner-pid-namespace", "pid:[foreign]",
     )
     assert rc == 0, stderr
     assigned = json.loads(stdout)
     assert assigned["owner_pid"] == 42 and assigned["owner_boot_id"] == "boot-old" and assigned["owner_host"] == "remote"
+    assert assigned["owner_pid_namespace"] == "pid:[foreign]"
     with closing(_store(db)) as store:
         before = _rows(store)
     original = db.read_bytes()
@@ -707,10 +810,12 @@ def test_ledger_mcp_reap_gate_owner_fields_and_strict_payloads(tmp_path: Path):
     assert not db.exists()
     with closing(_store(db)) as store:
         task = _open(store, tmp_path)["id"]
-    arguments = {**WRITE_ARGUMENTS["task.assign"], "task": task, **OWNER, "lease_seconds": 0, "approved": True}
+    arguments = {**WRITE_ARGUMENTS["task.assign"], "task": task, **OWNER, "owner_pid_namespace": "pid:[foreign]",
+                 "lease_seconds": 0, "approved": True}
     assigned = _payload(_call(tmp_path, "task.assign", ledger_db=db, **arguments))
     _assert_assignment(assigned)
     assert all(assigned[key] == value for key, value in OWNER.items())
+    assert assigned["owner_pid_namespace"] == "pid:[foreign]"
     preview = _payload(_call(tmp_path, "task.reap", ledger_db=db, task=task, dry_run=True, approved=True))
     assert preview == [{"assignment": assigned, "reason": "lease_expired"}]
     reaped = _payload(_call(tmp_path, "task.reap", ledger_db=db, task=task, approved=True))
@@ -727,6 +832,7 @@ def test_ledger_mcp_owner_and_reap_argument_types_checked_before_open(tmp_path: 
     for field, value in (
         ("owner_pid", True), ("owner_pid", 0), ("owner_pid", "42"), ("owner_pid", 2**31),
         ("owner_boot_id", None), ("owner_boot_id", ""), ("owner_host", 1),
+        ("owner_pid_namespace", None), ("owner_pid_namespace", ""), ("owner_pid_namespace", 1),
         ("lease_seconds", -1), ("lease_seconds", 1.5), ("lease_seconds", True),
     ):
         _assert_error(_call(tmp_path, "task.assign", ledger_db=db, **{

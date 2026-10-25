@@ -107,12 +107,13 @@ case-sensitive, and does not resolve scope symlinks or coordinate nested project
 roots; claims are coordination records, not filesystem access controls.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 3; artifact schema version `1.0`). Writes migrate existing
+(database version 4; artifact schema version `1.0`). Writes migrate existing
 stores in place in one transaction. The v1→v2 step adds four nullable assignment
 ownership/lease columns; v2→v3 adds a nullable JSON `assignments.result` column,
-the `findings` table, and its task/status/severity index. All existing rows,
+the `findings` table, and its task/status/severity index. The v3→v4 step adds
+nullable `assignments.owner_pid_namespace`. All existing rows,
 claims, and events remain; old assignments receive NULL values for added columns.
-A failure in either step rolls back both DDL and version updates. Unknown
+A failure in any step rolls back both DDL and version updates. Unknown
 versions are refused. Initialization and each
 mutation use `BEGIN IMMEDIATE`. Each mutation commits its state change, event,
 UTC ISO timestamps, and task revision together; an opened task starts at revision
@@ -215,8 +216,9 @@ guidance; the wrapper does not claim success for an unrecorded outcome.
 Findings have database-wide sequential `F-0001` IDs, a task, optional
 `source_assignment`, severity (`blocking|major|minor|info`), title, detail, free-text
 location, status, optional `resolved_by_assignment`, resolution note, and
-`created_at`/`updated_at`/nullable `resolved_at` UTC timestamps. Both assignment
-links must belong to the finding's task. `finding add` requires `--task`,
+`created_at`/`updated_at`/nullable `resolved_at` UTC timestamps. A source assignment
+must belong to the finding's task; a resolving assignment may belong to any task
+in the same ledger. `finding add` requires `--task`,
 `--actor`, `--severity`, and a nonblank `--title`; detail/location default to empty
 strings. Findings do not enforce task completion gates and can be recorded or
 resolved after a task terminates.
@@ -225,7 +227,22 @@ Allowed transitions are `open -> fixed|wontfix|duplicate` and any resolved statu
 back to `open`. Same-status updates and changes between resolved statuses fail.
 `finding update` requires `--finding`, `--actor`, and `--status` (`--to` is an
 alias). `--resolution-note` (`--note`) records context, and
-`--resolved-by-assignment` (`--resolved-by`) links the fix. Reopening requires a
+`--resolved-by-assignment` (`--resolved-by`) links the fix, including a follow-up
+task's assignment. The assignment remains stored on the finding. For a cross-task
+fix, the resolution event records `[finding, assignment, fix_task]` in `refs` and
+names the fix task in its summary. Same-task resolution keeps its existing event
+shape (`[finding, assignment]`). The finding remains on its original task, whose
+revision advances; the fixing task is not changed. CLI and MCP `task.finding_update`
+share this behavior; clients supply only the assignment, and Hipson derives and
+validates its task. For example:
+
+```sh
+hipson task finding update --finding F-0001 --status fixed --actor lead \
+  --resolved-by A-0003 --note "Verified the follow-up task's fix"
+hipson task events --task T-0001 --json  # resolution includes the fixing task ID
+```
+
+Reopening requires a
 nonblank note and clears the resolution timestamp and assignment; supplying a
 resolved-by assignment while reopening is rejected. Creation appends
 `finding_opened`; resolution appends `finding_resolved` with the destination
@@ -271,15 +288,16 @@ a finish fails without duplicating findings.
 An optional owner identifies the wrapper process responsible for finishing an
 assignment. The wrapper must call `setsid` to become its process group's leader
 (PID equals PGID), then start the worker as a child in that group. Supply the
-wrapper's positive PID, Linux boot ID, and hostname when assigning:
+wrapper's positive PID, Linux boot ID, hostname, and PID namespace when assigning:
 
 ```sh
 hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src \
   --owner-pid "$$" --owner-boot-id "$(cat /proc/sys/kernel/random/boot_id)" \
+  --owner-pid-namespace "$(readlink /proc/self/ns/pid)" \
   --owner-host "$(hostname)" --lease-seconds 3600 --json
 ```
 
-`owner_pid`, `owner_boot_id`, `owner_host`, and `lease_until` appear in assignment
+`owner_pid`, `owner_boot_id`, `owner_host`, `owner_pid_namespace`, and `lease_until` appear in assignment
 JSON as nullable fields. All inputs are optional and no owner is inferred from
 the CLI or MCP server process. `--lease-seconds` is a nonnegative integer; it
 sets a UTC expiry relative to assignment creation (`0` expires immediately).
@@ -292,7 +310,7 @@ reason in this order:
 | --- | --- |
 | `lease_expired` | The lease has expired, regardless of host or process liveness. |
 | `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID. |
-| `pid_gone` | The recorded host equals the current hostname, and both the supplied PID and its process group no longer exist. |
+| `pid_gone` | The recorded host equals the current hostname, the recorded PID namespace matches the current namespace (or is absent on a legacy row), and both the supplied PID and its process group no longer exist. |
 
 Owner checks use `os.kill(pid, 0)` and, if the PID is absent,
 `os.killpg(pid, 0)`. Only ESRCH from both proves the owner gone; EPERM or any
@@ -303,6 +321,13 @@ that condition; an unavailable current boot ID cannot prove a boot change. A
 different or missing host disables liveness checks. An owner-less assignment is
 only recoverable through an expired lease; an assignment on another host with
 no lease remains active.
+
+When `owner_pid_namespace` is supplied, an unequal or unreadable current
+`/proc/self/ns/pid` disables PID and process-group probes. A PID invisible in a
+sandbox or reused by an unrelated host process says nothing about that owner.
+Claims then remain held until lease expiry, a proven boot change, or an explicit
+finish. Legacy assignments without a namespace retain the earlier PID behavior.
+The stock launcher records its namespace when available.
 
 `hipson task reap [--task T] [--dry-run]` examines all active assignments, including
 those on terminal tasks. Each orphan is rechecked under the writer lock, marked
@@ -323,7 +348,7 @@ It releases every claim of each recovered holder and appends `reaped` before
 `assigned`. Disjoint holders, other projects, and readers are left to explicit
 reaping. A live overlapping holder still causes `claim_conflict`.
 
-The Python `Ledger` constructor accepts `hostname`, `boot_id`, and `pid_alive`
+The Python `Ledger` constructor accepts `hostname`, `boot_id`, `pid_namespace`, and `pid_alive`
 callables so tests can control liveness without depending on free real PIDs.
 The injected `pid_alive` probe represents both PID and process-group liveness.
 PID or process-group ID reuse within one boot cannot be detected with this ownership tuple, so it
@@ -336,7 +361,8 @@ CLI `task show/brief/context/events/list/board`, `task finding list`, `task reap
 MCP task reads open the ledger read-only. They never initialize a database,
 migrate a legacy version, or set WAL journal mode. V1 assignments expose null
 owner fields; v1/v2 assignments expose null results and empty findings without
-changing the file. Writes still initialize and migrate transactionally.
+changing the file. V1/v2/v3 assignments expose a null PID namespace without
+migrating. Writes still initialize and migrate transactionally.
 
 Missing stores return empty arrays for list/board, unfiltered finding lists,
 and unfiltered dry runs; show/brief/context, events, task-filtered finding lists, and
@@ -404,7 +430,7 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
 | `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |
 | `task.open` | `project`, `title`, `objective`, `approved=true` | `acceptance`, `lead` (default `claude`) |
-| `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `lease_seconds` |
+| `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `owner_pid_namespace`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |

@@ -28,7 +28,7 @@ TASK_TOOLS = {
                             {"resolution_note", "resolved_by_assignment"}),
     "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "lead"}),
     "task.assign": ({"task", "actor", "role", "mode", "approved"},
-                    {"scope", "owner_pid", "owner_boot_id", "owner_host", "lease_seconds"}),
+                    {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
     "task.reap": ({"approved"}, {"task", "dry_run"}),
     "task.event": ({"task", "actor", "type", "summary", "approved"}, {"ref"}),
@@ -292,7 +292,7 @@ def test_ledger_mcp_semantic_errors_never_open_or_migrate_store(tmp_path: Path):
     ] + [
         (name, {field: value}, f"{field} must not be empty")
         for name, fields in (
-            ("task.assign", ("actor", "owner_boot_id", "owner_host")),
+            ("task.assign", ("actor", "owner_boot_id", "owner_host", "owner_pid_namespace")),
             ("task.finish", ("summary",)),
             ("task.event", ("actor", "type", "summary")),
             ("task.status", ("actor",)),

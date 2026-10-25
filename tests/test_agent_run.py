@@ -200,6 +200,16 @@ Path('ready.tmp').rename('ready.json')
 """ + ("" if leave_background else "while True: signal.pause()\n")
 
 
+def test_agent_run_help_succeeds_without_opening_ledger(tmp_path: Path):
+    db = tmp_path / "missing.sqlite"
+    for flag in ("--help", "-h"):
+        proc = subprocess.run(["bash", str(RUNNER), flag], env={**os.environ, "HIPSON_LEDGER": str(db)},
+                              capture_output=True, text=True, timeout=10)
+        assert proc.returncode == 0, proc.stderr
+        assert "Usage:" in proc.stdout and "--result-file" in proc.stdout and "--lease-seconds" in proc.stdout
+        assert not db.exists()
+
+
 def test_agent_run_records_passed_failed_and_forwards_stdin(tmp_path: Path):
     if not _supported():
         return
@@ -217,6 +227,7 @@ print('worker output')
         assert run.wait(process) == 0, run.stderr(process)
         view, events = run.view()
         assignment = view["assignments"][0]
+        assert assignment["owner_pid_namespace"] == os.readlink("/proc/self/ns/pid")
         assert assignment["status"] == "passed" and view["claims"] == []
         assert json.loads((tmp_path / "received.json").read_text()) == {
             "stdin": "A worker brief\nwith a second line\n", "role": "worker",

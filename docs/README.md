@@ -24,6 +24,7 @@ before running examples.
 ## Task ledger & evidence
 
 - [Task ledger](TASK_LEDGER.md) — lead/worker flow, CLI/MCP contracts, path claims, and orphan recovery; for leads and wrapper authors.
+- [Agent e2e harness](AGENT_E2E.md) — local natural-language agent missions, deterministic oracles, and friction reports; for CLI and agent workflow maintainers.
 - [AI quality layer](AI_QUALITY_LAYER.md) — advisory review, evidence locking/redaction, chain verification, and audit reads; for reviewers and evidence consumers.
 
 ## Runtime & providers

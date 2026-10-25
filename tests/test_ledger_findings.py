@@ -65,6 +65,7 @@ def test_finding_lifecycle_filters_reopen_and_atomic_events(tmp_path: Path):
             assert store.show(task)["findings"] == []
             assert store.findings(task=task, status=status, severity="major")[-1] == resolved
             assert store.events(task)[-1]["type"] == "finding_resolved"
+            assert store.events(task)[-1]["refs"] == [finding["id"], source]
             reopened = store.update_finding(finding["id"], actor="lead", status="open", resolution_note="Still fails")
             assert reopened["resolved_at"] is None and reopened["resolved_by_assignment"] is None
             assert reopened["resolution_note"] == "Still fails"
@@ -82,7 +83,35 @@ def test_finding_lifecycle_filters_reopen_and_atomic_events(tmp_path: Path):
         assert store.show(task)["revision"] == len(store.events(task))
 
 
-def test_finding_invalid_transitions_and_cross_task_links_write_nothing(tmp_path: Path):
+def test_finding_cross_task_resolution_cli_mcp_and_events(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as store:
+        review_task = _open(store, tmp_path)["id"]
+        fix_task = _open(store, tmp_path)["id"]
+        fix = _assign(store, fix_task)["id"]
+        finding = store.add_finding(review_task, actor="lead", severity="major", title="Fix elsewhere")
+        fix_revision = store.show(fix_task)["revision"]
+    rc, stdout, stderr = run_cli_inprocess(
+        "task", "finding", "update", "--db", str(db), "--finding", finding["id"], "--status", "fixed",
+        "--actor", "lead", "--resolved-by", fix, "--note", "Verified follow-up", "--json")
+    assert rc == 0, stderr
+    assert json.loads(stdout)["resolved_by_assignment"] == fix
+    events = _payload(_call(tmp_path, "task.events", ledger_db=db, task=review_task))
+    assert events[-1]["refs"] == [finding["id"], fix, fix_task]
+    assert fix_task in events[-1]["summary"]
+    reopened = _payload(_call(tmp_path, "task.finding_update", ledger_db=db, finding=finding["id"],
+                              status="open", actor="lead", resolution_note="Recheck", approved=True))
+    assert reopened["resolved_by_assignment"] is None
+    resolved = _payload(_call(tmp_path, "task.finding_update", ledger_db=db, finding=finding["id"],
+                              status="fixed", actor="lead", resolved_by_assignment=fix, approved=True))
+    assert resolved["task"] == review_task and resolved["resolved_by_assignment"] == fix
+    with closing(Ledger(db, read_only=True)) as store:
+        assert store.findings(task=review_task, status="fixed") == [resolved]
+        assert store.show(fix_task)["revision"] == fix_revision
+        assert store.events(review_task)[-1]["refs"] == [finding["id"], fix, fix_task]
+
+
+def test_finding_invalid_transitions_and_source_links_write_nothing(tmp_path: Path):
     with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
         task = _open(store, tmp_path)["id"]
         other = _open(store, tmp_path)["id"]
@@ -94,7 +123,7 @@ def test_finding_invalid_transitions_and_cross_task_links_write_nothing(tmp_path
             (lambda: store.update_finding(finding["id"], actor="lead", status="bad"), "Finding status"),
             (lambda: store.update_finding("F-9999", actor="lead", status="fixed"), "Finding not found"),
             (lambda: store.update_finding(finding["id"], actor="lead", status="fixed",
-                                          resolved_by_assignment=other_assignment), "does not belong"),
+                                          resolved_by_assignment="A-9999"), "Assignment not found"),
             (lambda: store.add_finding(task, actor="lead", severity="major", title="Wrong",
                                        source_assignment=other_assignment), "does not belong"),
             (lambda: store.add_finding(task, actor="lead", severity="major", title="Wrong",
@@ -132,6 +161,19 @@ def test_finding_event_failure_rolls_back_creation_and_resolution(tmp_path: Path
                    "injected", sqlite3.OperationalError)
             _error(lambda: store.update_finding(finding["id"], actor="lead", status="fixed"),
                    "injected", sqlite3.OperationalError)
+        assert _snapshot(store) == before
+
+
+def test_cross_task_resolution_event_failure_rolls_back(tmp_path: Path):
+    with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
+        task = _open(store, tmp_path)["id"]
+        fix_task = _open(store, tmp_path)["id"]
+        fix = _assign(store, fix_task)["id"]
+        finding = store.add_finding(task, actor="lead", severity="major", title="Follow-up")
+        before = _snapshot(store)
+        with patch.object(store, "_append_event", side_effect=sqlite3.OperationalError("event failure")):
+            _error(lambda: store.update_finding(finding["id"], actor="lead", status="fixed", resolved_by_assignment=fix),
+                   "event failure", sqlite3.OperationalError)
         assert _snapshot(store) == before
 
 
@@ -271,12 +313,12 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'findings'").fetchall() == []
         assert _rows(SimpleNamespace(connection=connection)) == before
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         after = _rows(store)
         for table in ("tasks", "events", "claims"):
             assert after[table] == before[table]
-        assert [row[:-1] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-1] is None for row in after["assignments"])
+        assert [row[:-2] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-2:] == (None, None) for row in after["assignments"])
         assert store.findings() == []
         finding = store.add_finding("T-0001", actor="lead", severity="major", title="Legacy follow-up")
         assert finding["id"] == "F-0001" and store.events("T-0001")[-1]["seq"] == 7

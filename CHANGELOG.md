@@ -2,7 +2,22 @@
 
 ## Unreleased
 
+- Add an opt-in agent e2e harness with Codex and offline fake drivers, parser
+  lead-flow/conflict/recovery missions, state/event oracles, and friction reports.
+  Isolate HOME and login-shell PATH; report recorder bypasses as invalid
+  measurements outside agent pass rates. Make `agent-run.sh --help` exit 0.
+  Clean surviving worker groups after runner exit; avoid bypass errors for skipped
+  shell branches; reject deleted parser files and builders claiming unrelated
+  scopes. Filter inherited credentials, redact retained logs/reports, and support
+  offline replay of saved observations with current oracles.
+
 - **Task ledger and recovery**
+  - Let findings resolve through another task's assignment in CLI and MCP; record
+    the fixing assignment and task together in resolution events while preserving
+    same-task resolution and source-assignment validation.
+  - Record the launcher's PID namespace and skip PID/group liveness probes across
+    namespaces. Add transactional v3→v4 migration and CLI/MCP/schema support;
+    legacy rows keep their prior behavior and leases remain available for recovery.
   - Generate bounded worker briefs and running-worker context from the ledger
     through read-only CLI commands and MCP tools (S5a-2), including findings,
     failed approaches, worker rules, and the structured return contract. Let

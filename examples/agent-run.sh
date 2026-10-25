@@ -9,6 +9,28 @@
 # Exit codes: the child's code; 75 when the ledger refused the assignment (e.g. live claim conflict).
 set -uo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: agent-run.sh --task TASK --actor ACTOR --role ROLE --mode MODE [OPTIONS] -- COMMAND [ARGS...]
+
+Record a worker assignment, run COMMAND, then finish it with the process outcome.
+
+Options:
+  --task TASK          Task ID (required)
+  --actor ACTOR        Worker label (required)
+  --role ROLE          builder, reviewer, explorer, or researcher (required)
+  --mode MODE          ro or rw (required)
+  --scope PATH         Claimed path; repeatable (required for rw)
+  --lease-seconds N    Optional assignment lease
+  --ref PATH           Evidence reference; repeatable
+  --result-file PATH   Ingest structured worker result on finish
+  --rollout codex      Attach this run's Codex rollout facts
+  -h, --help          Print this help and exit
+
+Exit: child status; 75 for refused assignment; 64 for invalid arguments.
+EOF
+}
+
 # Become a process-group leader (pid == pgid) so the ledger can check the whole worker group.
 if [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" != "$$" ] && [ -z "${AGENT_RUN_SETSID:-}" ]; then
   AGENT_RUN_SETSID=1 exec setsid bash "$0" "$@"
@@ -20,6 +42,7 @@ task="" actor="" role="" mode="" lease="" rollout="" result_file=""
 scope=() refs=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    -h|--help) usage; exit 0;;
     --task) task=$2; shift 2;;
     --actor) actor=$2; shift 2;;
     --role) role=$2; shift 2;;
@@ -131,6 +154,8 @@ assign_args=(task assign --task "$task" --actor "$actor" --role "$role" --mode "
   --owner-pid "$$" --owner-host "$(hostname)" --json)
 boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
 [ -n "$boot_id" ] && assign_args+=(--owner-boot-id "$boot_id")
+pid_namespace=$(readlink /proc/self/ns/pid 2>/dev/null || true)
+[ -n "$pid_namespace" ] && assign_args+=(--owner-pid-namespace "$pid_namespace")
 for s in ${scope[@]+"${scope[@]}"}; do assign_args+=(--scope "$s"); done
 [ -n "$lease" ] && assign_args+=(--lease-seconds "$lease")
 if ! assignment_json=$("$HIPSON_BIN" "${assign_args[@]}"); then

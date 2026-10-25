@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Deterministic fixture worker: MODE RESULT.json [TARGET.py]; never writes the ledger."""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+mode, result_path, *targets = sys.argv[1:]
+if os.environ.get("HIPSON_ROLE") != "worker":
+    raise SystemExit("Launch this worker through examples/agent-run.sh")
+if mode not in ("build", "review", "fix", "hold"):
+    raise SystemExit("Usage: bin/fake-worker build|review|fix|hold RESULT.json")
+source = Path(targets[0] if targets else "src/parser/pairs.py")
+report = {"status": "completed", "summary": f"Fixture worker: {mode}", "files_changed": [],
+          "commands": [], "findings": [], "risks": []}
+if mode == "hold":
+    Path(".holder-ready").touch()
+    while not Path(".release-holder").exists():
+        time.sleep(0.05)
+if mode in ("build", "hold", "fix"):
+    body = 'tuple(part.strip() for part in text.split(":"))' if mode == "fix" else 'tuple(text.split(":"))'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f"def parse_pair(text):\n    return {body}\n", encoding="utf-8")
+    report["files_changed"] = [{"path": str(source), "change": f"Apply {mode} parser implementation"}]
+if mode == "review":
+    report["findings"] = [{"severity": "major", "title": "Pair elements retain surrounding whitespace",
+                           "detail": "Trim each element: parsing ' a : b ' must return ('a', 'b').",
+                           "location": "src/parser/pairs.py:2"}]
+Path(result_path).write_text(json.dumps(report) + "\n", encoding="utf-8")

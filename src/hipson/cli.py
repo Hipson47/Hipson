@@ -1808,6 +1808,7 @@ def command_task(args: argparse.Namespace) -> int:
                 payload = store.assign(
                     args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
                     owner_pid=args.owner_pid, owner_boot_id=args.owner_boot_id, owner_host=args.owner_host,
+                    owner_pid_namespace=args.owner_pid_namespace,
                     lease_seconds=args.lease_seconds,
                 )
             elif args.task_command == "finish":
@@ -1940,6 +1941,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["assign"].add_argument("--owner-pid", type=int, help="PID of the owner on owner-host")
     task_parsers["assign"].add_argument("--owner-boot-id", help="Owner's Linux boot ID")
     task_parsers["assign"].add_argument("--owner-host", help="Owner's hostname; required for liveness recovery")
+    task_parsers["assign"].add_argument("--owner-pid-namespace", help="Owner's PID namespace identity from /proc/self/ns/pid")
     task_parsers["assign"].add_argument("--lease-seconds", type=int, help="Lease duration; 0 expires immediately")
     task_parsers["brief"].add_argument("--role", choices=ledger.ROLES, required=True)
     task_parsers["brief"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")
@@ -1966,7 +1968,8 @@ def build_parser() -> argparse.ArgumentParser:
             finding_parser.add_argument("--finding", required=True)
             finding_parser.add_argument("--status", "--to", choices=ledger.FINDING_STATUSES, required=True)
             finding_parser.add_argument("--resolution-note", "--note", default="")
-            finding_parser.add_argument("--resolved-by-assignment", "--resolved-by")
+            finding_parser.add_argument("--resolved-by-assignment", "--resolved-by",
+                                        help="Fixing assignment (may belong to another task); its task is recorded in the resolution event")
         else:
             finding_parser.add_argument("--status", choices=ledger.FINDING_STATUSES)
     task_parsers["reap"].add_argument("--task", help="Only inspect assignments for this task")
