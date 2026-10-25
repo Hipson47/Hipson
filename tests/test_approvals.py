@@ -42,7 +42,7 @@ def test_sandbox_refuses_sensitive_paths_traversal_and_broad_profiles(tmp_path: 
     sensitive = check_read_path(".env", tmp_path)
     traversal = check_read_path("../outside", tmp_path)
     broad_home = check_read_path(str(Path.home()), tmp_path)
-    windows_profile = check_read_path("/mnt/c/Users/marci", tmp_path)
+    windows_profile = check_read_path("/mnt/c/Users/example", tmp_path)
     generated_write = check_write_path("runs/packet.md", tmp_path)
     source_write = check_write_path("src/app.py", tmp_path)
 

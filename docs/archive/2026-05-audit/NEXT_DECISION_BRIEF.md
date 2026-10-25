@@ -2,7 +2,7 @@
 
 ## Context
 
-Hipson is functional as a local-first CLI and runtime preview in `/home/hipson47/code/Hipson`. The current codebase has strong local verification results, but it should not yet be marketed as broadly production-stable or fully Hermes-style real-agent complete.
+Hipson is functional as a local-first CLI and runtime preview in `/home/user/code/Hipson`. The current codebase has strong local verification results, but it should not yet be marketed as broadly production-stable or fully Hermes-style real-agent complete.
 
 ## Option A: Polish And Release Local-First CLI
 

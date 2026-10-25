@@ -480,7 +480,7 @@ Local repo state, git diff, docs, templates, generated runs/scans/memory
   - `scripts/run_tests.py` runs the same test functions with simple `tmp_path` support and no pytest dependency.
   - `pyproject.toml` configures pytest, ruff, mypy, Bandit, and mutmut.
 - Verification commands run during this audit:
-  - `pwd`: `/home/hipson47/code/Hipson`.
+  - `pwd`: `/home/user/code/Hipson`.
   - `git status --short`: clean before writing this plan.
   - `git ls-files`: 1084 tracked files.
   - `uv run ruff check .`: passed.

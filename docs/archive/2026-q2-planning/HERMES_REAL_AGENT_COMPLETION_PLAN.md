@@ -2,7 +2,7 @@
 
 ## 1. Verified Current State
 
-Verified on 2026-05-27 from `/home/hipson47/code/Hipson` on branch `main`.
+Verified on 2026-05-27 from `/home/user/code/Hipson` on branch `main`.
 
 - Working tree was clean before this plan.
 - `uv run pytest -q` passed with 216 tests.

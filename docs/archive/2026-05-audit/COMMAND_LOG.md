@@ -1,6 +1,6 @@
 # Command Log
 
-Working directory for this rerun: `/home/hipson47/code/Hipson`.
+Working directory for this rerun: `/home/user/code/Hipson`.
 
 Secrets and credential-like fixture values are redacted or summarized. No live provider calls were made.
 
@@ -8,12 +8,12 @@ Secrets and credential-like fixture values are redacted or summarized. No live p
 
 | Command | Result | Summary |
 |---|---:|---|
-| `pwd` | PASS | `/home/hipson47/code/Hipson` |
+| `pwd` | PASS | `/home/user/code/Hipson` |
 | `ls -la` | PASS | Python project with `src/`, `tests/`, `docs/`, `.github/`, `pyproject.toml`, `uv.lock` |
 | `git status --short` | PASS | `?? audit-output/` |
 | `git branch --show-current` | PASS | `main` |
 | `git remote -v` | PASS | `origin git@github.com:Hipson47/Hipson.git` |
-| `command -v hipson || true` | PASS | `/home/hipson47/.local/bin/hipson` |
+| `command -v hipson || true` | PASS | `/home/user/.local/bin/hipson` |
 | `find . -maxdepth 2 ... config files` | PASS | Found Python packaging, docs, runs, templates, skills, audit-output |
 | `find src/hipson -maxdepth 3 -type f` | PASS | Runtime, providers, tools, gateway, sessions, learning modules present |
 | `find tests -maxdepth 2 -type f` | PASS | 12 test files present |

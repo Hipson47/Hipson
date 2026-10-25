@@ -4,7 +4,7 @@
 
 ### 2026-05-27 — Iteration 1
 
-- Started from a clean `main` working tree in `/home/hipson47/code/Hipson`.
+- Started from a clean `main` working tree in `/home/user/code/Hipson`.
 - Verified Hipson CLI availability with `uv run hipson doctor`, `uv run hipson skill validate`, and `uv run hipson --help`.
 - Verified current runtime surface: fail-closed default `chat`, explicit fake/offline chat, `session list`, `tool list`, safe `tool run`, and `learn --help`.
 - Used `hipson route` and `hipson scan` as advisory context; scan reported a clean repository.
@@ -59,7 +59,7 @@
 ### 2026-05-27 — Iteration 3
 
 - Selected package: `feat(runtime): complete provider/tool-loop approval/search/learning hardening`.
-- Verified the canonical tree gate in `/home/hipson47/code/Hipson`; branch `main`, required runtime/session/provider/tool-registry files present.
+- Verified the canonical tree gate in `/home/user/code/Hipson`; branch `main`, required runtime/session/provider/tool-registry files present.
 - Baseline verification before edits passed: `uv run pytest -q` reported 233 passed; ruff, mypy, configured Bandit, compileall, `scripts/run_tests.py`, doctor, and skill validation passed.
 - Confirmed provider-free chat local/router mode executes `repo.scan`; safe `tool run repo.changed_files` works; `session list` and `learn --help` work.
 - Reviewed current source and confirmed the OpenAI-compatible primary provider adapter and provider-backed tool-call loop already exist with stubbed tests and fail-closed explicit configuration.

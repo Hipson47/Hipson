@@ -14,7 +14,7 @@ Later update: the local runtime-router pass superseded the earlier fail-closed d
 
 ## 2. Current Verified Runtime State
 
-- `uv run hipson doctor` passed and reported Hipson `1.1.0`, Python `3.12.3`, WSL repo cwd `/home/hipson47/code/Hipson`, configured Hipson home `/home/hipson47/.config/hipson`, and 50 valid skills.
+- `uv run hipson doctor` passed and reported Hipson `1.1.0`, Python `3.12.3`, WSL repo cwd `/home/user/code/Hipson`, configured Hipson home `/home/user/.config/hipson`, and 50 valid skills.
 - `uv run hipson skill validate` passed for all observed project and packaged skills.
 - `uv run hipson scan . --include-diff` succeeded and reported a clean git status.
 - `uv run hipson route --task "audit Hipson Hermes-style runtime gaps, observability, memory, and learning loop" --json` classified the task as `memory` and recommended memory commands, which is advisory but not sufficient for this implementation task.

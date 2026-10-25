@@ -6,7 +6,7 @@
 - Branch: `main`
 - Working tree at loop start: clean
 - Untracked files at loop start: none
-- Canonical workspace: `/home/hipson47/code/Hipson`
+- Canonical workspace: `/home/user/code/Hipson`
 
 ## Last Verified Commands
 

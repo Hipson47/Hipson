@@ -2,7 +2,7 @@
 
 ## 1. Current Verified State
 
-The repository is on branch `main` at `/home/hipson47/code/Hipson`. The real-agent completion pass started from a clean git scan after the local/provider-free runtime MVP.
+The repository is on branch `main` at `/home/user/code/Hipson`. The real-agent completion pass started from a clean git scan after the local/provider-free runtime MVP.
 
 Verified local checks:
 

@@ -6,7 +6,7 @@ Hipson is best understood as a **local engineering control plane**. It is not an
 
 ## Current Status
 
-This README proposal describes verified behavior in the WSL checkout at `/home/hipson47/code/Hipson`.
+This README proposal describes verified behavior in the WSL checkout at `/home/user/code/Hipson`.
 
 | Capability | Status | Notes |
 |---|---:|---|
@@ -283,7 +283,7 @@ Later:
 Canonical WSL working tree:
 
 ```text
-/home/hipson47/code/Hipson
+/home/user/code/Hipson
 ```
 
 Avoid stale duplicate Windows-mounted checkouts for active development.

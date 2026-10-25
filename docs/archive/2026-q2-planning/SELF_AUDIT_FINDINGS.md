@@ -8,9 +8,9 @@ The highest-value remaining repair package is focused mutation/fault-injection s
 
 ## 2. Current Verified State
 
-- Repository: `/home/hipson47/code/Hipson` on branch `main`.
+- Repository: `/home/user/code/Hipson` on branch `main`.
 - Working tree: existing unstaged runtime/provider/tool/scheduler/test/docs changes plus untracked `tests/test_session.py`; this self-audit preserves those changes as the current baseline.
-- `uv run hipson doctor`: passed; reported Python 3.12.3, Hipson 1.1.0, git ok, Codex home `/home/hipson47/.codex-app`, Hipson home `/home/hipson47/.config/hipson`, optional sidecar env found, assets ok, 50 skills checked and 0 failed.
+- `uv run hipson doctor`: passed; reported Python 3.12.3, Hipson 1.1.0, git ok, Codex home `/home/user/.codex-app`, Hipson home `/home/user/.config/hipson`, optional sidecar env found, assets ok, 50 skills checked and 0 failed.
 - `uv run hipson skill validate`: passed; 50 `SKILL.md` files checked, 0 failed.
 - Original pre-router smoke: `uv run hipson chat -q "scan this repo"` failed closed with `No chat provider is configured...`. Later local-router smoke now executes supported safe repo-scan requests locally.
 - `HIPSON_HOME=<temp> uv run hipson chat --fake -q "offline runtime smoke"`: succeeded with `Fake/offline mode: Fake provider response`.

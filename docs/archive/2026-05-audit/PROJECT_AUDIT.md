@@ -1,6 +1,6 @@
 # Hipson Project Audit
 
-Audit root: `/home/hipson47/code/Hipson`  
+Audit root: `/home/user/code/Hipson`  
 Branch: `main`  
 Remote: `origin git@github.com:Hipson47/Hipson.git`  
 Audit date: 2026-05-29  
@@ -104,7 +104,7 @@ Main modules:
 
 | Evidence | Result | Notes |
 |---|---:|---|
-| `pwd` | VERIFIED | `/home/hipson47/code/Hipson` |
+| `pwd` | VERIFIED | `/home/user/code/Hipson` |
 | Git state | VERIFIED | Branch `main`; remote `origin git@github.com:Hipson47/Hipson.git`; only `audit-output/` untracked after audit |
 | `uv run pytest -q` | PASS | `234 passed in 53.06s` |
 | `uv run ruff check .` | PASS | All checks passed |

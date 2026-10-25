@@ -14,7 +14,7 @@ This audit inspected the source of truth documents, current source, tests, and C
 
 Commands used for baseline:
 
-- `pwd`: `/home/hipson47/code/Hipson`
+- `pwd`: `/home/user/code/Hipson`
 - `git branch --show-current`: `main`
 - `git status --short`: existing dirty source/test changes plus untracked runtime/docs/test files.
 - `git diff --stat`: only tracked modifications, 4 files and 424 insertions; this excludes the many untracked runtime files.
@@ -50,7 +50,7 @@ Passed:
 - `uv run bandit -q -r src/hipson -c pyproject.toml`: passed
 - `python -m compileall src/hipson`: passed
 - `uv run python scripts/run_tests.py`: `167/167 tests passed`
-- `uv run hipson doctor`: passed; reported `hipson_home: /home/hipson47/.config/hipson` and sidecar env found
+- `uv run hipson doctor`: passed; reported `hipson_home: /home/user/.config/hipson` and sidecar env found
 - `uv run hipson skill validate`: passed; 50 skills checked
 
 Failed or intentionally skipped:
