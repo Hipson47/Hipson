@@ -526,6 +526,8 @@ def owned_worker_groups(workdir: Path, candidates: set[int]) -> set[int]:
                     owned.add(group)
                 else:
                     unsafe.add(group)
+            except FileNotFoundError:
+                continue  # The member exited mid-scan; it must not veto cleanup of its group.
             except OSError:
                 unsafe.add(group)
         except (OSError, ValueError, IndexError):
@@ -561,11 +563,23 @@ def cleanup_workers(fixture: Fixture) -> None:
             if helper.pid in owned_worker_groups(fixture.workdir, {helper.pid}):
                 os.killpg(helper.pid, signal.SIGKILL)
             helper.wait(timeout=2)
-    for group in owned_worker_groups(fixture.workdir, groups):
-        try:
-            os.killpg(group, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+    # A helper is often only the parent of the setsid'd runner group, so its exit proves nothing:
+    # wait for the groups themselves (zombies count as gone) before and after escalating.
+    if not wait_groups_gone(fixture.workdir, groups, deadline):
+        for group in owned_worker_groups(fixture.workdir, groups):
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        wait_groups_gone(fixture.workdir, groups, time.monotonic() + 2)
+
+
+def wait_groups_gone(workdir: Path, groups: set[int], deadline: float) -> bool:
+    while owned_worker_groups(workdir, groups):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
 
 
 def run_scenario(name: str, output: Path, *, driver: str = "fake", solution: Path | None = None,

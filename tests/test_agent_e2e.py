@@ -20,6 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 BROKEN = ROOT / "e2e/agents/broken"
 
 
+def _dead(pid):
+    # A zombie has exited; only its parent's reap is pending.
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[-1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
 def test_agent_e2e_reference_solutions(tmp_path):
     # The invoking Codex itself may be a worker; measured agents must still be leads.
     sentinel = tmp_path / "owner-ledger"
@@ -164,7 +172,7 @@ def test_agent_e2e_timeout_cleans_live_fixture(tmp_path):
     assert any("timed out" in f for f in run["failures"])
     initial = json.loads((tmp_path / "run/initial.json").read_text())
     pid = initial["tasks"][0]["assignments"][0]["owner_pid"]
-    assert not Path(f"/proc/{pid}").exists(), "Harness left its fixture writer alive"
+    assert _dead(pid), "Harness left its fixture writer alive"
 
 
 def test_agent_e2e_cleanup_surviving_group_after_leader_exits(tmp_path):
@@ -239,7 +247,7 @@ def test_agent_e2e_conflict_false_scope_and_deleted_store_fail(tmp_path):
     assert not run["passed"] and any("Ledger file was replaced or deleted" in f for f in run["failures"])
     initial = json.loads((tmp_path / "deleted/initial.json").read_text())
     pid = initial["tasks"][0]["assignments"][0]["owner_pid"]
-    assert not Path(f"/proc/{pid}").exists(), "Corrupted ledger must not prevent helper cleanup"
+    assert _dead(pid), "Corrupted ledger must not prevent helper cleanup"
 
 
 def test_agent_e2e_codex_sample_parser_and_metrics():
