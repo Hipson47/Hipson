@@ -70,13 +70,19 @@ group_members() {
   # Other processes of this runner's process group: the worker and all its descendants. Transient
   # helpers of this script (command substitutions) are children of $$ and skipped; the direct
   # worker child is reported via kill -0 instead.
-  [ -n "$child" ] && kill -0 "$child" 2>/dev/null && echo "$child"
-  local pid ppid comm out
-  out=$(ps -o pid=,ppid=,comm= -g "$$" 2>/dev/null)
-  while read -r pid ppid comm; do
-    [ -n "$pid" ] || continue
+  # Select by real process-group id (numeric `ps -g` means session on procps) and skip zombies:
+  # an exited process cannot write and cannot be killed again.
+  local pid ppid pgid stat comm out
+  if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+    stat=$(ps -o stat= -p "$child" 2>/dev/null)
+    case "$stat" in Z*|"") ;; *) echo "$child";; esac
+  fi
+  out=$(ps -e -o pid=,ppid=,pgid=,stat=,comm= 2>/dev/null)
+  while read -r pid ppid pgid stat comm; do
+    [ "$pgid" = "$$" ] || continue
     case "$pid" in "$$"|"$BASHPID") continue;; esac
     case "$ppid" in "$$"|"$BASHPID") continue;; esac
+    case "$stat" in Z*) continue;; esac
     [ "$comm" = ps ] && continue
     echo "$pid"
   done <<<"$out"

@@ -6,12 +6,10 @@ lexical coordination records; they do not enforce filesystem access.
 
 from __future__ import annotations
 
-import errno
 import json
 import os
 import socket
 import sqlite3
-import struct
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -236,106 +234,95 @@ def _pid_alive(pid: int) -> bool:
     return False
 
 
-def _wal_read_only_connection(path: Path) -> sqlite3.Connection | None:
-    """Pin existing WAL sidecars until SQLite holds its own database read lock."""
-    try:
-        import fcntl
+def _sidecar_access_error(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", 0) & 0xFF
+    return code in (sqlite3.SQLITE_PERM, sqlite3.SQLITE_READONLY, sqlite3.SQLITE_CANTOPEN)
 
-        lock_command = fcntl.F_OFD_SETLK
-    except (ImportError, AttributeError) as exc:
-        raise LedgerError("Reading live task ledger WAL without creating files requires Linux OFD locks") from exc
-    # SQLite's SHARED lock range prevents last-writer cleanup of WAL/SHM.
-    # OFD locks are independent of SQLite's process locks: closing this guard
-    # cannot release locks held by another Ledger connection in this process.
-    with path.open("rb") as guard:
-        lock = struct.pack("hhqqi4x", fcntl.F_RDLCK, os.SEEK_SET, 0x40000002, 510, 0)
-        try:
-            fcntl.fcntl(guard.fileno(), lock_command, lock)
-        except OSError as exc:
-            if exc.errno in (errno.EAGAIN, errno.EACCES):
-                return None
-            raise LedgerError("Cannot guard read-only task ledger WAL; Linux OFD locking is required") from exc
-        if not Path(f"{path}-wal").exists():
-            return None  # A writer closed before the guard; retry as a snapshot.
-        if not Path(f"{path}-shm").exists():
-            raise LedgerError(
-                "Cannot read task ledger WAL without a readable -shm file; "
-                "have a writable owner initialize the WAL sidecars, or checkpoint and close the store. "
-                "The read was not retried writable."
-            )
-        connection = sqlite3.connect(
-            path.as_uri() + "?mode=ro&readonly_shm=1", uri=True,
-            timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
-        )
-        try:
-            connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()
-        except BaseException:
-            connection.close()
-            raise
-        return connection
+
+def _open_read_only(path: Path, options: str, deadline: float) -> sqlite3.Connection:
+    connection = sqlite3.connect(
+        path.as_uri() + "?mode=ro" + options, uri=True,
+        timeout=max(0, deadline - time.monotonic()), isolation_level=None,
+    )
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        # Opening the connection and probing its first read share the caller's retry budget.
+        remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+        connection.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+        connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()
+    except BaseException:
+        connection.close()
+        raise
+    return connection
 
 
 def _read_only_connection(path: Path) -> sqlite3.Connection:
     """Open the store without any possibility of writing it (no migration, no store creation).
 
-    Normal case: a plain SQLite read-only connection, which cooperates with concurrent writers through
-    SQLite's own WAL locking (it may use the -shm/-wal sidecars, never the database file). The guarded
-    snapshot path below is only for stores whose directory is not writable, where SQLite could not
-    manage the sidecars; its private OFD lock must not be used next to live writers.
+    SQLite owns all locking. Prefer its native WAL handling, falling back when directory or sidecar
+    permissions prevent that. Every source connection is mode=ro; snapshots are private to memory.
     """
     if not path.is_file():
         raise sqlite3.OperationalError("unable to open database file")
+    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
     if os.access(path.parent, os.W_OK):
-        connection = sqlite3.connect(
-            path.as_uri() + "?mode=ro", uri=True, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
-        )
-        connection.execute("PRAGMA query_only = ON")
-        return connection
-    return _guarded_read_only_connection(path)
+        try:
+            return _open_read_only(path, "", deadline)
+        except sqlite3.OperationalError as exc:
+            if not _sidecar_access_error(exc):
+                raise
+    return _sidecar_read_only_connection(path, deadline)
 
 
-def _guarded_read_only_connection(path: Path) -> sqlite3.Connection:
+def _sidecar_read_only_connection(path: Path, deadline: float) -> sqlite3.Connection:
     """Read a store in a non-writable directory without creating WAL sidecars."""
     wal = Path(f"{path}-wal")
     journal = Path(f"{path}-journal")
     # A concurrent writer can change the file between checks; retry with a short backoff for up to the
     # same budget a writer gets from busy_timeout instead of surfacing a transient race to the caller.
-    deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
     delay = 0.005
-    while True:
-        if time.monotonic() > deadline:
-            break
-        if wal.exists():
-            connection = _wal_read_only_connection(path)
-            if connection is not None:
-                return connection
-            time.sleep(delay)
-            delay = min(delay * 2, 0.1)
-            continue
+    message = "Task ledger changed while opening a read-only snapshot; retry the read"
+
+    def check_budget(status: int, remaining: int, total: int) -> None:
+        if time.monotonic() >= deadline:
+            raise LedgerError(message)
+
+    while time.monotonic() < deadline:
         if journal.exists():
             raise LedgerError("Task ledger has a rollback journal; retry after its writable owner completes recovery")
-        # immutable is confined to copying a journal-free file into memory, never
-        # a live WAL view. Validate the source again before exposing the snapshot.
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as source:
-            before = path.stat()
-            snapshot = sqlite3.connect(":memory:", isolation_level=None)
+        if wal.exists():
             try:
-                source.backup(snapshot)
-                after = path.stat()
-                identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-                if (
-                    all(getattr(before, key) == getattr(after, key) for key in identity)
-                    and not wal.exists() and not journal.exists()
-                ):
-                    snapshot.execute("PRAGMA query_only = ON")
-                    return snapshot
-            except BaseException:
+                return _open_read_only(path, "&readonly_shm=1", deadline)
+            except sqlite3.OperationalError as exc:
+                # Last-writer cleanup can remove sidecars between the existence check and open.
+                # Retry as a snapshot only if the WAL disappeared; otherwise expose SQLite's error.
+                if wal.exists() or not _sidecar_access_error(exc):
+                    raise
+        else:
+            # immutable is confined to copying a journal-free file into memory, never a live WAL view.
+            before = path.stat()
+            with closing(sqlite3.connect(
+                path.as_uri() + "?mode=ro&immutable=1", uri=True,
+                timeout=max(0, deadline - time.monotonic()),
+            )) as source:
+                snapshot = sqlite3.connect(":memory:", isolation_level=None)
+                try:
+                    source.backup(snapshot, pages=256, progress=check_budget, sleep=0.005)
+                    after = path.stat()
+                    identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                    if (
+                        all(getattr(before, key) == getattr(after, key) for key in identity)
+                        and not wal.exists() and not journal.exists()
+                    ):
+                        snapshot.execute("PRAGMA query_only = ON")
+                        return snapshot
+                except BaseException:
+                    snapshot.close()
+                    raise
                 snapshot.close()
-                raise
-            snapshot.close()
-        time.sleep(delay)
+        time.sleep(min(delay, max(0, deadline - time.monotonic())))
         delay = min(delay * 2, 0.1)
-    raise LedgerError("Task ledger changed while opening a read-only snapshot; retry the read")
+    raise LedgerError(message)
 
 
 class Ledger:

@@ -206,31 +206,28 @@ prints `No active tasks.`. No missing file or parent directory is created.
 In the normal case (the store's directory is writable) a read is a plain SQLite
 `mode=ro` connection with `query_only`. It cooperates with concurrent writers
 through SQLite's own WAL locking and never writes the database file; SQLite may
-create or keep its `-wal`/`-shm` sidecars, which is expected WAL behaviour.
-
-Earlier versions read through a private OFD lock and `readonly_shm` in all cases.
-That guard collided with SQLite's POSIX locks and made concurrent writers fail
-with "attempt to write a readonly database"; it is now confined to stores in
-non-writable directories, described next, where SQLite cannot manage sidecars.
+create or keep its `-wal`/`-shm` sidecars, which is expected WAL behaviour. If
+opening or the first read fails with a sidecar permission, read-only, or
+cannot-open error, it falls back to the non-writable-directory logic below.
+SQLite owns all locks: no separate descriptor or OFD guard is used, since
+closing such a descriptor releases SQLite's POSIX locks on the same inode.
 
 For a store in a non-writable directory, reads copy a journal-free database into
 an in-memory, query-only snapshot. An immutable source connection is used only
 for this copy; the source identity, size, modification/change times, and
 absence of WAL/journal files are rechecked before exposing it. Changes discard
-the copy and retry with a short backoff for up to the busy timeout (10 s).
-Snapshot memory scales with database size.
+the copy and retry with a short backoff. Opening, fallback, busy waits, snapshot
+copying, and retries share one 10 s budget; each SQLite busy timeout and backoff
+is capped by the remaining time. Snapshot memory scales with database size.
 
-In a non-writable directory a live WAL store is opened with `mode=ro&readonly_shm=1`, using existing readable
-WAL and SHM files; committed WAL rows remain visible in read-only directories.
-On Linux/WSL, a temporary shared OFD lock pins those files until SQLite acquires
-its own database read lock, so a writer closing during open cannot remove them
-and cause the reader to recreate them. Systems without Linux OFD locking fail
-safely for live WAL reads; checkpoint and close the store to use a snapshot.
-A WAL without SHM fails with an actionable error instead of creating SHM,
-reopening writable, or ignoring WAL through immutable mode. Have a writable
-owner initialize the sidecars, or checkpoint and close the store before retrying.
-An existing rollback journal also requires its writable owner to finish recovery.
-SQLite recovery/locking errors propagate safely without a writable retry.
+When a WAL exists, the fallback opens `mode=ro&readonly_shm=1` directly, using
+existing readable WAL and SHM files. Committed WAL rows remain visible. SQLite
+reports unavailable sidecars and recovery/locking errors without a writable
+retry or immutable WAL read. If last-writer cleanup removes the WAL during open,
+the reader retries through the snapshot path within the same budget. A WAL
+without usable SHM requires a writable owner to initialize the sidecars, or
+checkpoint and close the store before retrying. An existing rollback journal
+also requires its writable owner to finish recovery.
 See [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_only_databases).
 
 ## MCP stdio (S2)

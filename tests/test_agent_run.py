@@ -31,6 +31,12 @@ def _supported():
         return _skip("requires Linux process groups, setsid, ps and bash")
     if not HIPSON.is_file():
         return _skip("requires this checkout's .venv/bin/hipson CLI")
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if not hasattr(libc, "prctl") or libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+        return _skip("requires prctl child-subreaper support")
+    if libc.prctl(36, previous.value, 0, 0, 0) != 0:
+        return _skip("child-subreaper configuration is unavailable")
     return True
 
 
@@ -96,7 +102,7 @@ class _Run:
         self.workers = []
         self.handles = []
 
-    def start(self, source, *, stdin="", extra=()):
+    def start(self, source, *, stdin="", extra=(), group_leader=False):
         index = len(self.processes)
         worker = self.root / f"worker-{index}.py"
         worker.write_text(source, encoding="utf-8")
@@ -109,6 +115,7 @@ class _Run:
             ["bash", str(RUNNER), "--task", self.task, "--actor", "codex", "--role", "builder",
              "--mode", "rw", "--scope", "src", *extra, "--", sys.executable, str(worker)],
             cwd=self.root, env=self.env, stdin=handles[0], stdout=handles[1], stderr=handles[2],
+            process_group=0 if group_leader else None,
         )
         self.processes.append(process)
         return process
@@ -267,6 +274,69 @@ def test_agent_run_stops_leftover_background_process_and_records_it(tmp_path: Pa
         assert "worker left processes running" in run.stderr(process)
         view, _ = run.view()
         assert view["claims"] == [] and view["assignments"][0]["status"] == "passed"
+
+
+def test_agent_run_group_leader_without_own_session_stops_live_descendant(tmp_path: Path):
+    if not _supported():
+        return
+    with _case(tmp_path) as run:
+        process = run.start("""
+import json, os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', '''
+import signal
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path('child-ready').touch()
+while True: signal.pause()
+'''])
+while not Path('child-ready').exists(): time.sleep(0.01)
+Path('ready.tmp').write_text(json.dumps([os.getpid(), child.pid]))
+Path('ready.tmp').rename('ready.json')
+while not Path('exit-worker').exists(): time.sleep(0.01)
+""", group_leader=True)
+        pids = run.ready(process)
+        assert os.getpgid(process.pid) == process.pid
+        assert os.getsid(process.pid) != process.pid, "Runner must lead a group within another session"
+        (tmp_path / "exit-worker").touch()
+        ending = run.finished_after_stopping(pids)
+        assert run.wait(process) == 0, run.stderr(process)
+        assert "leftover processes stopped" in ending["summary"]
+        assert "worker left processes running" in run.stderr(process)
+        assert "survived KILL" not in run.stderr(process)
+        view, _ = run.view()
+        assert view["claims"] == [] and view["assignments"][0]["status"] == "passed"
+
+
+def test_agent_run_unreaped_zombie_grandchild_does_not_prevent_finish(tmp_path: Path):
+    if not _supported():
+        return
+    if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
+        _skip("requires waitid WNOWAIT to leave a known exited child unreaped")
+        return
+    with _case(tmp_path) as run:
+        process = run.start("""
+import json, os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'pass'])
+os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+Path('ready.tmp').write_text(json.dumps([os.getpid(), child.pid]))
+Path('ready.tmp').rename('ready.json')
+while not Path('exit-worker').exists(): time.sleep(0.01)
+os._exit(0)  # Preserve the zombie for adoption by the test's subreaper.
+""")
+        _, grandchild = run.ready(process)
+        status = Path(f"/proc/{grandchild}/status")
+        assert "\nState:\tZ" in status.read_text()
+        (tmp_path / "exit-worker").touch()
+        # Deliberately bypass run.wait/finished_after_stopping: both reap adopted children.
+        assert process.wait(timeout=15) == 0, run.stderr(process)
+        info = status.read_text()
+        assert "\nState:\tZ" in info and f"\nPPid:\t{os.getpid()}\n" in info
+        assert "survived KILL" not in run.stderr(process)
+        view, events = run.view()
+        assert view["claims"] == [] and view["assignments"][0]["status"] == "passed"
+        assert events[-1]["type"] == "finished" and "passed: worker process exit=0" in events[-1]["summary"]
 
 
 def test_agent_run_sigkill_retains_claim_until_surviving_worker_dies_then_reaps(tmp_path: Path):

@@ -17,11 +17,13 @@
     claims while either the runner PID or its worker process group survives.
   - Cover the published worker runner with CLI integration tests for process
     results, stdin, claim conflicts, signal cleanup, leftover descendants, and
-    recovery after the runner is killed.
+    recovery after the runner is killed. Verify cleanup when the runner leads a
+    process group within another session and when an unreaped zombie remains.
   - Migrate v1 stores to v2 transactionally, preserving history. Keep CLI/MCP
     reads non-migrating and read-only: plain SQLite `mode=ro` connections that
-    cooperate with concurrent writers, with guarded snapshots only for stores in
-    non-writable directories (the guard previously made concurrent writers fail).
+    cooperate with concurrent writers. Remove the separate OFD guard, fall back
+    on sidecar permission errors, and use direct read-only WAL access or validated
+    in-memory snapshots in non-writable directories, sharing a 10 s retry budget.
 - **Lead and worker instructions**
   - Add worker mode to agent instructions and installer output: lead-assigned
     workers stay within their brief, skip orchestration and progress/handoff

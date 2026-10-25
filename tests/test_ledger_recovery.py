@@ -378,31 +378,287 @@ def test_ledger_read_only_wal_without_shm_in_readonly_directory_fails_without_cr
         before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
         with patch.object(ledger.os, "access", return_value=False):
             rc, stdout, stderr = run_cli_inprocess("task", "board", "--db", str(copy), "--json")
-            assert rc == 1 and "WAL without a readable -shm file" in stderr
-            _assert_error(_call(tmp_path, "task.board", ledger_db=copy), "WAL without a readable -shm file")
+            assert rc == 1 and "unable to open database file" in stderr
+            _assert_error(_call(tmp_path, "task.board", ledger_db=copy), "unable to open database file")
         assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
 
 
 def test_ledger_read_only_wal_survives_last_writer_closing_during_open(tmp_path: Path):
+    connect = sqlite3.connect
+
+    def check(writable):
+        parent = tmp_path / str(writable)
+        db = parent / "ledger.sqlite"
+        writer = Ledger(db)
+        task = _open(writer, tmp_path)
+        calls = []
+        target = "?mode=ro" if writable else "?mode=ro&readonly_shm=1"
+
+        def close_writer_before_connect(*args, suffix=target, **kwargs):
+            if isinstance(args[0], str) and args[0].endswith(suffix):
+                assert Path(f"{db}-wal").exists()
+                calls.append(args[0])
+                writer.close()
+                assert not Path(f"{db}-wal").exists()
+                if not writable:
+                    parent.chmod(0o555)  # Enforce the sidecar restriction after cleanup too.
+            return connect(*args, **kwargs)
+
+        try:
+            with patch.object(ledger.os, "access", return_value=writable), patch.object(
+                ledger.sqlite3, "connect", side_effect=close_writer_before_connect
+            ), closing(Ledger(db, read_only=True)) as reader:
+                assert reader.show(task["id"]) == task
+            assert len(calls) == 1, "The last-writer cleanup hook was not exercised"
+            if not writable:
+                assert list(parent.iterdir()) == [db]  # No sidecars recreated after cleanup.
+        finally:
+            parent.chmod(0o755)
+            writer.close()
+
+    for writable in (True, False):
+        check(writable)
+
+
+def test_ledger_read_only_native_sidecar_errors_fall_back_on_open_and_first_read(tmp_path: Path):
+    connect = sqlite3.connect
+
+    def check(db, task, live_wal, stage, code, message):
+        calls, closed = [], []
+        failure = sqlite3.OperationalError(message)
+        failure.sqlite_errorcode = code
+
+        class NativeConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql.startswith("SELECT"):
+                    raise failure
+                return super().execute(sql, *args)
+
+            def close(self):
+                closed.append(True)
+                super().close()
+
+        def fail_native(target, *args, **kwargs):
+            calls.append(target)
+            if isinstance(target, str) and target.endswith("?mode=ro"):
+                if stage == "open":
+                    raise failure
+                kwargs["factory"] = NativeConnection
+            return connect(target, *args, **kwargs)
+
+        with patch.object(ledger.os, "access", return_value=True), patch.object(
+            ledger.sqlite3, "connect", side_effect=fail_native
+        ), closing(Ledger(db, read_only=True)) as reader:
+            assert reader.show(task["id"]) == task
+            _error(lambda: reader.connection.execute("DELETE FROM claims"), "readonly", sqlite3.OperationalError)
+        assert closed == ([True] if stage == "read" else [])
+        suffix = "&readonly_shm=1" if live_wal else "&immutable=1"
+        assert any(target.endswith(suffix) for target in calls)
+        assert all(target == ":memory:" or "?mode=ro" in target for target in calls)
+
+    for live_wal in (False, True):
+        db = tmp_path / f"fallback-{live_wal}.sqlite"
+        writer = Ledger(db)
+        task = _open(writer, tmp_path)
+        if not live_wal:
+            writer.close()
+        try:
+            for stage in ("open", "read"):
+                for code, message in (
+                    (sqlite3.SQLITE_PERM, "permission denied"),
+                    (sqlite3.SQLITE_READONLY_CANTINIT, "attempt to write a readonly database"),
+                    (sqlite3.SQLITE_CANTOPEN, "unable to open database file"),
+                ):
+                    check(db, task, live_wal, stage, code, message)
+        finally:
+            writer.close()
+
+
+def test_ledger_read_only_native_directory_permission_mismatch_uses_snapshot(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as writer:
+        task = _open(writer, tmp_path)
+    original = db.read_bytes()
+    tmp_path.chmod(0o555)
+    try:
+        # Emulate an ACL/capability probe that reports writable even though sidecar creation fails.
+        with patch.object(ledger.os, "access", return_value=True), patch.object(
+            ledger, "_sidecar_read_only_connection", wraps=ledger._sidecar_read_only_connection
+        ) as fallback, closing(Ledger(db, read_only=True)) as reader:
+            assert reader.show(task["id"]) == task
+            if os.geteuid() != 0:  # Root may create sidecars despite the directory mode bits.
+                assert fallback.call_count == 1
+        assert db.read_bytes() == original
+        if os.geteuid() != 0:
+            assert list(tmp_path.iterdir()) == [db]
+    finally:
+        tmp_path.chmod(0o755)
+
+
+def test_ledger_read_only_native_other_errors_do_not_fall_back(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as writer:
+        _open(writer, tmp_path)
+    for code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_CORRUPT):
+        failure = sqlite3.OperationalError("unrelated read failure")
+        failure.sqlite_errorcode = code
+        with patch.object(ledger.os, "access", return_value=True), patch.object(
+            ledger.sqlite3, "connect", side_effect=failure
+        ) as connect:
+            _error(lambda: Ledger(db, read_only=True), str(failure), sqlite3.OperationalError)
+            assert connect.call_count == 1
+
+
+def test_ledger_read_only_fallback_refuses_hot_rollback_journal(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    with closing(sqlite3.connect(db)) as connection:
+        connection.execute("CREATE TABLE padding (value BLOB)")
+        connection.execute("INSERT INTO padding VALUES (zeroblob(1024000))")
+        connection.commit()
+    result = subprocess.run([sys.executable, "-c", """
+import os, sqlite3, sys
+connection = sqlite3.connect(sys.argv[1])
+connection.execute('PRAGMA cache_size = 1')
+connection.execute('BEGIN IMMEDIATE')
+connection.execute('UPDATE padding SET value = zeroblob(2048000)')
+os._exit(0)
+""", str(db)], capture_output=True, text=True, timeout=15, check=True)
+    assert result.returncode == 0
+    journal = Path(f"{db}-journal")
+    assert journal.read_bytes()[:8] == bytes.fromhex("d9d505f920a163d7"), "Journal must need recovery"
+    before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
+    for writable in (True, False):
+        with patch.object(ledger.os, "access", return_value=writable):
+            _error(lambda: Ledger(db, read_only=True), "rollback journal")
+        assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def test_ledger_read_only_retries_share_busy_timeout_budget(tmp_path: Path):
     db = tmp_path / "ledger.sqlite"
     writer = Ledger(db)
-    task = _open(writer, tmp_path)
-    connect = sqlite3.connect
-    original_names = sorted(path.name for path in tmp_path.iterdir())
+    _open(writer, tmp_path)
+    clock, attempts = [0.0], []
+    budget = ledger.BUSY_TIMEOUT_MS / 1000
+    failure = sqlite3.OperationalError("unable to open database file")
+    failure.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
 
-    def close_writer_before_connect(*args, **kwargs):
-        if isinstance(args[0], str) and args[0].endswith("&readonly_shm=1"):
-            writer.close()
-        return connect(*args, **kwargs)
+    def connect(target, **kwargs):
+        attempts.append((target, kwargs["timeout"]))
+        if target.endswith("?mode=ro"):
+            clock[0] += budget * 0.4
+        else:
+            assert target.endswith("&readonly_shm=1")
+            writer.close()  # Last writer removes the WAL, so the next attempt would be a snapshot.
+            clock[0] += kwargs["timeout"]
+        raise failure
+
+    def sleep(seconds):
+        clock[0] += seconds
 
     try:
-        with patch.object(ledger.sqlite3, "connect", side_effect=close_writer_before_connect), closing(
-            Ledger(db, read_only=True)
-        ) as reader:
-            assert reader.show(task["id"]) == task
-        assert sorted(path.name for path in tmp_path.iterdir()) == original_names
+        with patch.object(ledger.os, "access", return_value=True), patch.object(
+            ledger.time, "monotonic", side_effect=lambda: clock[0]
+        ), patch.object(ledger.time, "sleep", side_effect=sleep), patch.object(
+            ledger.sqlite3, "connect", side_effect=connect
+        ):
+            _error(lambda: Ledger(db, read_only=True), "changed while opening")
+        assert len(attempts) == 2
+        assert attempts[0][1] == budget and attempts[1][1] == budget * 0.6
+        assert clock[0] <= budget
     finally:
         writer.close()
+
+
+def test_ledger_read_only_first_read_uses_remaining_open_budget(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as writer:
+        _open(writer, tmp_path)
+    connect = sqlite3.connect
+    clock, timeouts, closed = [0.0], [], []
+    budget = ledger.BUSY_TIMEOUT_MS / 1000
+    failure = sqlite3.OperationalError("database is locked")
+    failure.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    class SlowConnection(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.startswith("SELECT"):
+                timeout = super().execute("PRAGMA busy_timeout").fetchone()[0] / 1000
+                timeouts.append(timeout)
+                clock[0] += timeout
+                raise failure
+            return super().execute(sql, *args)
+
+        def close(self):
+            closed.append(True)
+            super().close()
+
+    def slow_open(*args, **kwargs):
+        clock[0] += budget * 0.4
+        return connect(*args, factory=SlowConnection, **kwargs)
+
+    with patch.object(ledger.os, "access", return_value=True), patch.object(
+        ledger.time, "monotonic", side_effect=lambda: clock[0]
+    ), patch.object(ledger.sqlite3, "connect", side_effect=slow_open):
+        _error(lambda: Ledger(db, read_only=True), str(failure), sqlite3.OperationalError)
+    assert timeouts == [budget * 0.6] and closed == [True]
+    assert clock[0] <= budget
+
+
+def test_ledger_read_only_snapshot_copy_obeys_deadline_and_closes_on_timeout(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as writer:
+        _open(writer, tmp_path)
+    connect = sqlite3.connect
+    clock, snapshots, steps, closed = [0.0], [], [], []
+    budget = ledger.BUSY_TIMEOUT_MS / 1000
+
+    def slow_copy(snapshot, *, progress, **options):
+        snapshots.append(snapshot)
+        while True:
+            clock[0] += budget / 4
+            steps.append(clock[0])
+            progress(sqlite3.SQLITE_BUSY, 1, 2)
+
+    def open_source(target, **kwargs):
+        connection = connect(target, **kwargs)
+        if target.endswith("&immutable=1"):
+            def close():
+                closed.append(True)
+                connection.close()
+            return SimpleNamespace(backup=slow_copy, close=close)
+        return connection
+
+    with patch.object(ledger.os, "access", return_value=False), patch.object(
+        ledger.time, "monotonic", side_effect=lambda: clock[0]
+    ), patch.object(ledger.sqlite3, "connect", side_effect=open_source):
+        _error(lambda: Ledger(db, read_only=True), "changed while opening")
+    assert len(steps) == 4 and clock[0] == budget and closed == [True]
+    assert len(snapshots) == 1
+    _error(lambda: snapshots[0].execute("SELECT 1"), "closed database", sqlite3.ProgrammingError)
+
+
+def test_ledger_read_only_wal_keeps_same_process_writer_lock(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as writer:
+        task = _open(writer, tmp_path)
+        writer.connection.execute("BEGIN IMMEDIATE")
+        writer.connection.execute("UPDATE tasks SET title = 'Uncommitted'")
+        with patch.object(ledger.os, "access", return_value=False), closing(Ledger(db, read_only=True)) as reader:
+            assert reader.show(task["id"])["title"] == task["title"]
+            # An unrelated descriptor close must not release this process's SQLite writer locks.
+            result = subprocess.run([sys.executable, "-c", """
+import sqlite3, sys
+connection = sqlite3.connect(sys.argv[1], timeout=0)
+try:
+    connection.execute('BEGIN IMMEDIATE')
+except sqlite3.OperationalError as exc:
+    assert exc.sqlite_errorcode == sqlite3.SQLITE_BUSY
+else:
+    raise AssertionError("Reader released another connection's writer lock")
+""", str(db)], capture_output=True, text=True, timeout=15)
+            assert result.returncode == 0, result.stderr
+        writer.connection.rollback()
 
 
 def test_ledger_read_only_snapshot_retries_when_a_writer_changes_the_source(tmp_path: Path):
@@ -417,9 +673,9 @@ def test_ledger_read_only_snapshot_retries_when_a_writer_changes_the_source(tmp_
         def connect_and_write(*args, active_db=db, retain_wal=keep_wal, **kwargs):
             source = connect(*args, **kwargs)
             if isinstance(args[0], str) and args[0].endswith("&immutable=1") and written is None:
-                def backup(snapshot):
+                def backup(snapshot, **options):
                     nonlocal writer, written
-                    source.backup(snapshot)
+                    source.backup(snapshot, **options)
                     writer = Ledger(active_db)
                     written = _open(writer, tmp_path, title="Concurrent commit")
                     if not retain_wal:
@@ -429,7 +685,7 @@ def test_ledger_read_only_snapshot_retries_when_a_writer_changes_the_source(tmp_
             return source
 
         try:
-            # The guarded snapshot path only serves stores in non-writable directories.
+            # Force the snapshot path, independent of the test user's directory permissions.
             with patch.object(ledger.os, "access", return_value=False), patch.object(
                 ledger.sqlite3, "connect", side_effect=connect_and_write
             ), closing(Ledger(db, read_only=True)) as reader:
