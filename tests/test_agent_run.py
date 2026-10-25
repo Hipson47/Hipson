@@ -14,15 +14,14 @@ from unittest import SkipTest
 from unittest.mock import patch
 
 from hipson.ledger import Ledger
+from tests.support import hipson_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "examples" / "agent-run.sh"
 
 
 def _hipson_bin():
-    # An explicit override is authoritative; do not hide a broken override with a fallback.
-    candidate = os.environ.get("HIPSON_BIN") or shutil.which("hipson") or str(ROOT / ".venv" / "bin" / "hipson")
-    return shutil.which(candidate)
+    return hipson_cli()
 
 
 def _skip(reason):

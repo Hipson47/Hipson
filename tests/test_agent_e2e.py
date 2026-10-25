@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from scripts import agent_e2e as harness
+from tests.support import hipson_cli
 
 ROOT = Path(__file__).resolve().parents[1]
 BROKEN = ROOT / "e2e/agents/broken"
@@ -364,7 +365,9 @@ def test_agent_e2e_login_shell_proxy_wins_and_calls_are_recorded(tmp_path):
 def test_agent_e2e_unrecorded_read_is_invalid_measurement(tmp_path):
     script = tmp_path / "bypass.sh"
     # Same real CLI, deliberately omitting the proxy; read-only bypass has no state delta.
-    script.write_text(f"{shlex.quote(str(ROOT / '.venv/bin/hipson'))} task list --json\n"
+    cli = hipson_cli()
+    assert cli, "requires an installed hipson CLI (HIPSON_BIN, PATH, or checkout .venv)"
+    script.write_text(f"{shlex.quote(cli)} task list --json\n"
                       f"source {shlex.quote(str(harness.SCENARIOS / 'recovery/solution.sh'))}\n")
     run = harness.run_scenario("recovery", tmp_path / "run", solution=script)
     assert not run["passed"] and not run["measurement_valid"], run
