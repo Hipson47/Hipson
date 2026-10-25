@@ -79,16 +79,26 @@ MAX_CLI_CONTENT_CHARS = 1200
 MAX_CLI_JSON_CHARS = 4000
 
 
-def _bounded_cli(value: object, *, limit: int = MAX_CLI_FIELD_CHARS) -> str:
+def _escape_cli_controls(text: str) -> str:
+    """Keep readable Unicode while making terminal controls and format characters visible."""
+    return "".join(char if char.isprintable() else json.dumps(char)[1:-1] for char in text)
+
+
+def _bounded_cli(value: object, *, limit: int = MAX_CLI_FIELD_CHARS, escape_controls: bool = False) -> str:
     text = redact_text(str(value))
+    if escape_controls:
+        text = _escape_cli_controls(text)
     if len(text) <= limit:
         return text
     marker = f"... [truncated to {limit} chars]"
     return text[: max(0, limit - len(marker))].rstrip() + marker
 
 
-def _bounded_json(value: object, *, limit: int = MAX_CLI_JSON_CHARS) -> str:
+def _bounded_json(value: object, *, limit: int = MAX_CLI_JSON_CHARS, escape_controls: bool = False) -> str:
     text = redact_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True))
+    if escape_controls:
+        # JSON already escapes embedded newlines; preserve only its layout newlines.
+        text = "\n".join(_escape_cli_controls(line) for line in text.split("\n"))
     if len(text) <= limit:
         return text
     marker = f"\n... [truncated to {limit} chars]"
@@ -1781,10 +1791,15 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
 def command_task(args: argparse.Namespace) -> int:
     try:
         dry_run = args.task_command == "reap" and args.dry_run
-        read_only = args.task_command in ("show", "events", "list", "board") or dry_run
+        finding_list = args.task_command == "finding" and args.finding_command == "list"
+        read_only = args.task_command in ("show", "events", "list", "board") or dry_run or finding_list
+        report = (
+            ledger.load_task_result(args.result_file)
+            if args.task_command == "finish" and args.result_file else None
+        )
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if read_only and not db.exists():
-            if args.task_command in ("show", "events") or (dry_run and args.task is not None):
+            if args.task_command in ("show", "events") or ((dry_run or finding_list) and args.task is not None):
                 raise ledger.LedgerError(f"Task not found: {args.task}")
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
             return 0
@@ -1805,7 +1820,22 @@ def command_task(args: argparse.Namespace) -> int:
                     lease_seconds=args.lease_seconds,
                 )
             elif args.task_command == "finish":
-                payload = store.finish(args.assignment, result=args.result, summary=args.summary, refs=args.ref)
+                payload = store.finish(
+                    args.assignment, result=args.result, summary=args.summary, refs=args.ref, worker_result=report,
+                )
+            elif args.task_command == "finding":
+                if args.finding_command == "add":
+                    payload = store.add_finding(
+                        args.task, actor=args.actor, severity=args.severity, title=args.title, detail=args.detail,
+                        location=args.location, source_assignment=args.source_assignment,
+                    )
+                elif args.finding_command == "update":
+                    payload = store.update_finding(
+                        args.finding, actor=args.actor, status=args.status, resolution_note=args.resolution_note,
+                        resolved_by_assignment=args.resolved_by_assignment,
+                    )
+                else:
+                    payload = store.findings(task=args.task, status=args.status, severity=args.severity)
             elif args.task_command == "reap":
                 payload = store.reap(task=args.task, dry_run=args.dry_run)
             elif args.task_command == "event":
@@ -1813,7 +1843,29 @@ def command_task(args: argparse.Namespace) -> int:
             elif args.task_command == "status":
                 payload = store.set_status(args.task, to=args.to, actor=args.actor, summary=args.summary)
             elif args.task_command == "show":
-                payload = store.show(args.task)
+                view = store.show(args.task)
+                if not args.json:
+                    print(f"{view['id']} [{view['status']}] {_bounded_cli(view['title'], limit=120, escape_controls=True)}")
+                    print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
+                    for item in view["assignments"]:
+                        actor = _bounded_cli(item["actor"], escape_controls=True)
+                        print(f"  {item['id']} {actor}:{item['role']}/{item['mode']} [{item['status']}]")
+                        result = item["result"]
+                        if result is not None:
+                            print(
+                                f"    Result [{result['status']}]: {_bounded_cli(result['summary'], limit=180, escape_controls=True)} "
+                                f"({len(result['files_changed'])} files, {len(result['commands'])} commands, "
+                                f"{len(result['findings'])} findings, {len(result['risks'])} risks)"
+                            )
+                    print(f"Open findings: {len(view['findings'])}")
+                    for finding in view["findings"]:
+                        print(f"  {finding['id']} [{finding['severity']}] {_bounded_cli(finding['title'], limit=120, escape_controls=True)}")
+                        if finding["location"]:
+                            print(f"    {_bounded_cli(finding['location'], limit=120, escape_controls=True)}")
+                    if view["claims"]:
+                        print(f"Claims: {_bounded_json(view['claims'], escape_controls=True)}")
+                    return 0
+                payload = view
             elif args.task_command == "events":
                 payload = store.events(args.task, after=args.after)
             elif args.task_command == "list":
@@ -1823,10 +1875,10 @@ def command_task(args: argparse.Namespace) -> int:
                 if not args.json:
                     for task in tasks:
                         active = ", ".join(
-                            f"{item['id']} {item['actor']}:{item['role']}/{item['mode']}"
+                            f"{item['id']} {_bounded_cli(item['actor'], escape_controls=True)}:{item['role']}/{item['mode']}"
                             for item in task["assignments"]
                         ) or "unassigned"
-                        title = _bounded_cli(" ".join(task["title"].split()), limit=60)
+                        title = _bounded_cli(task["title"], limit=60, escape_controls=True)
                         print(f"{task['id']} [{task['status']}] {title} | {' '.join(active.split())}")
                     if not tasks:
                         print("No active tasks.")
@@ -1835,7 +1887,7 @@ def command_task(args: argparse.Namespace) -> int:
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         print(redact_text(str(exc)), file=sys.stderr)
         return 1
-    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
+    print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload, escape_controls=True))
     return 0
 
 
@@ -1861,6 +1913,7 @@ def build_parser() -> argparse.ArgumentParser:
             ("events", "List task events in sequence order"),
             ("list", "List tasks"),
             ("board", "Show non-terminal tasks with active assignments"),
+            ("finding", "Record and track review findings"),
         )
     }
     for name, task_parser in task_parsers.items():
@@ -1888,6 +1941,29 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["assign"].add_argument("--lease-seconds", type=int, help="Lease duration; 0 expires immediately")
     task_parsers["finish"].add_argument("--assignment", required=True)
     task_parsers["finish"].add_argument("--result", choices=ledger.RESULTS, required=True)
+    task_parsers["finish"].add_argument("--result-file", help="Strict worker result JSON; validated before any write")
+    finding_sub = task_parsers["finding"].add_subparsers(dest="finding_command", required=True)
+    for action in ("add", "update", "list"):
+        finding_parser = finding_sub.add_parser(action)
+        finding_parser.add_argument("--db", default=argparse.SUPPRESS, help="Task ledger SQLite path")
+        finding_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+        if action in ("add", "list"):
+            finding_parser.add_argument("--task", required=action == "add")
+            finding_parser.add_argument("--severity", choices=ledger.FINDING_SEVERITIES, required=action == "add")
+        if action in ("add", "update"):
+            finding_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        if action == "add":
+            finding_parser.add_argument("--title", required=True)
+            finding_parser.add_argument("--detail", default="")
+            finding_parser.add_argument("--location", default="")
+            finding_parser.add_argument("--source-assignment")
+        elif action == "update":
+            finding_parser.add_argument("--finding", required=True)
+            finding_parser.add_argument("--status", "--to", choices=ledger.FINDING_STATUSES, required=True)
+            finding_parser.add_argument("--resolution-note", "--note", default="")
+            finding_parser.add_argument("--resolved-by-assignment", "--resolved-by")
+        else:
+            finding_parser.add_argument("--status", choices=ledger.FINDING_STATUSES)
     task_parsers["reap"].add_argument("--task", help="Only inspect assignments for this task")
     task_parsers["reap"].add_argument("--dry-run", action="store_true", help="Report orphans without writing")
     task_parsers["event"].add_argument("--type", required=True)

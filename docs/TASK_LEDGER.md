@@ -23,8 +23,9 @@ use the same central ledger; no provider, Hermes, or worker execution is involve
 3. The worker runs its bounded brief and returns changes and verification
    evidence. It does not spawn agents, write the ledger, commit/push, or create
    progress/handoff notes. The wrapper or lead records any progress events.
-4. The wrapper calls `hipson task finish` with the assignment ID, result,
-   summary, and evidence refs. This ends the assignment and releases its claims;
+4. The wrapper calls `hipson task finish` with the assignment ID, outcome,
+   summary, evidence refs, and optionally a structured `--result-file`. This ends
+   the assignment and releases its claims;
    it does not complete the task or independently verify the worker's report.
 5. The lead inspects the diff and verifies acceptance criteria, then uses
    `hipson task status` to move the task to `review` and, once accepted, `done`.
@@ -48,6 +49,11 @@ hipson task assign --task T-0001 --actor codex --role builder --mode rw \
   --scope src/hipson --scope tests/test_ledger.py --json
 hipson task event --task T-0001 --actor codex --type progress --summary "Implementation ready"
 hipson task finish --assignment A-0001 --result passed --summary "Checks pass" --ref tests/test_ledger.py
+hipson task finding add --task T-0001 --actor claude --severity major --title "Missing guard" \
+  --detail "Validate before writing" --location src/hipson/ledger.py:1 --source-assignment A-0001
+hipson task finding update --finding F-0001 --status fixed --actor claude \
+  --resolved-by-assignment A-0001 --resolution-note "Added validation"
+hipson task finding list --task T-0001 --status open --severity major --json
 hipson task status --task T-0001 --to review --actor claude
 hipson task status --task T-0001 --to done --actor claude --summary "Review accepted"
 hipson task show --task T-0001 --json
@@ -97,11 +103,13 @@ case-sensitive, and does not resolve scope symlinks or coordinate nested project
 roots; claims are coordination records, not filesystem access controls.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 2; artifact schema version `1.0`). Existing version 1 stores
-migrate in place in one transaction: four nullable assignment columns are added
-and the version is advanced to 2. All existing rows, claims, and events remain;
-old assignments receive NULL ownership/lease values. Unknown versions are
-refused. Initialization and each
+(database version 3; artifact schema version `1.0`). Writes migrate existing
+stores in place in one transaction. The v1→v2 step adds four nullable assignment
+ownership/lease columns; v2→v3 adds a nullable JSON `assignments.result` column,
+the `findings` table, and its task/status/severity index. All existing rows,
+claims, and events remain; old assignments receive NULL values for added columns.
+A failure in either step rolls back both DDL and version updates. Unknown
+versions are refused. Initialization and each
 mutation use `BEGIN IMMEDIATE`. Each mutation commits its state change, event,
 UTC ISO timestamps, and task revision together; an opened task starts at revision
 1. Before an `rw` conflict check, overlapping orphaned holders in the same project
@@ -116,7 +124,9 @@ deletes to events; this is append-only history, not tamper-proof storage against
 someone who controls the database file.
 
 The existing `redaction.redact_text` runs on titles, objectives, acceptance items,
-and all event summaries **before persistence**. Actor labels, project/scope paths,
+all event summaries, finding titles/details/locations/resolution notes, and every
+worker-result string (including paths, commands, and risks) **before persistence**.
+Actor labels, project/scope paths,
 event types, and refs are structural data and are not redacted: put credentials
 in none of these fields. Generic event types (such as `note`, `progress`,
 `blocked`, or `result`) are labels only; events do not change lifecycle state.
@@ -127,6 +137,62 @@ message on stderr; argument errors follow argparse (2). There are no automatic
 retries after a successful commit: inspect the ledger before replaying an
 operation whose response was lost. Later stages can add built-in worker wrappers,
 idempotency policies, and richer orchestration without making workers writers.
+
+## Findings and worker results (S5a-1)
+
+Findings have database-wide sequential `F-0001` IDs, a task, optional
+`source_assignment`, severity (`blocking|major|minor|info`), title, detail, free-text
+location, status, optional `resolved_by_assignment`, resolution note, and
+`created_at`/`updated_at`/nullable `resolved_at` UTC timestamps. Both assignment
+links must belong to the finding's task. `finding add` requires `--task`,
+`--actor`, `--severity`, and a nonblank `--title`; detail/location default to empty
+strings. Findings do not enforce task completion gates and can be recorded or
+resolved after a task terminates.
+
+Allowed transitions are `open -> fixed|wontfix|duplicate` and any resolved status
+back to `open`. Same-status updates and changes between resolved statuses fail.
+`finding update` requires `--finding`, `--actor`, and `--status` (`--to` is an
+alias). `--resolution-note` (`--note`) records context, and
+`--resolved-by-assignment` (`--resolved-by`) links the fix. Reopening requires a
+nonblank note and clears the resolution timestamp and assignment; supplying a
+resolved-by assignment while reopening is rejected. Creation appends
+`finding_opened`; resolution appends `finding_resolved` with the destination
+status; reopening appends `finding_reopened`. Each change and its event/revision
+commit in the same transaction. Historical notes remain in events.
+
+`finding list` supports independent `--task`, `--status`, and `--severity`
+filters. It includes all statuses by default. Plain `task show` displays open
+findings and a compact result summary per assignment. Its JSON includes the
+full stored assignment results and open findings under `findings`; use
+`finding list` for resolved findings.
+
+The checked-in [worker result schema](../schemas/task-result.schema.json) can be
+passed directly to Codex `--output-schema`. Every object is closed and every
+property is required. A report contains `status` (`completed|partial|blocked`),
+`summary`, `files_changed` (`path`, `change`), `commands` (`command`, nullable
+integer `exit_code`), `findings` (`severity`, nonblank `title`, `detail`, nullable
+`location`), and string `risks`. Use null for an unknown exit code or location,
+and empty arrays when there are no entries. The report is recorded evidence;
+its commands are never executed by the ledger.
+
+```sh
+hipson task finish --assignment A-0001 --result passed --summary "Review complete" \
+  --result-file /tmp/result.json --json
+```
+
+`--result-file` is optional; the existing `--result passed|failed|cancelled` and
+`--summary` remain required. The report's status and the lead's assignment
+outcome are separate recorded values. The file must be UTF-8 strict JSON:
+missing/extra fields, wrong types/enums, duplicate keys, non-finite numbers, and
+malformed JSON fail before opening, initializing, or migrating the store. CLI
+and MCP share the same schema validator. Valid reports are redacted and stored
+under the assignment's nullable `result`. The `finished` event summary records
+the worker status and counts of files changed, commands, findings, and risks.
+Only a `reviewer` assignment creates open ledger findings from its report,
+linked by `source_assignment`. Other roles retain the full report without
+creating findings. Result storage, generated findings and their events, claim
+release, and the finish event commit together or roll back together. Repeating
+a finish fails without duplicating findings.
 
 ## Orphan recovery (S3a)
 
@@ -194,13 +260,15 @@ claims even if the owner is alive, so wrappers must choose durations accordingly
 
 ## Read-only access
 
-CLI `task show/events/list/board`, `task reap --dry-run`, and MCP task reads open
-the ledger read-only. They never initialize a database, migrate v1 to v2, or set
-WAL journal mode. V1 assignments expose null owner fields without changing the
-file. Writes still initialize and migrate transactionally.
+CLI `task show/events/list/board`, `task finding list`, `task reap --dry-run`, and
+MCP task reads open the ledger read-only. They never initialize a database,
+migrate a legacy version, or set WAL journal mode. V1 assignments expose null
+owner fields; v1/v2 assignments expose null results and empty findings without
+changing the file. Writes still initialize and migrate transactionally.
 
-Missing stores return empty arrays for list/board and unfiltered dry runs;
-show/events and task-filtered dry runs return `Task not found`. Plain CLI board
+Missing stores return empty arrays for list/board, unfiltered finding lists,
+and unfiltered dry runs; show/events, task-filtered finding lists, and
+task-filtered dry runs return `Task not found`. Plain CLI board
 prints `No active tasks.`. No missing file or parent directory is created.
 
 In the normal case (the store's directory is writable) a read is a plain SQLite
@@ -258,6 +326,9 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.events` | `task` | `after` (exclusive, default `0`) |
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
+| `task.findings` | none | `task`, `status`, `severity` |
+| `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
+| `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |
 | `task.open` | `project`, `title`, `objective`, `approved=true` | `acceptance`, `lead` (default `claude`) |
 | `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
@@ -268,11 +339,20 @@ return `Task not found` errors. Approved write tools may initialize the store.
 `acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
 options. Role, mode, result, and status enums match the CLI. An `rw` assignment
 requires a nonempty `scope`; `ro` may omit it. Unknown arguments are rejected.
-All six write tools require the literal boolean `approved: true`, checked before
+All eight write tools require the literal boolean `approved: true`, checked before
 opening the database. Approval is an execution gate, not identity authentication;
 the lead remains responsible for recording worker activity. `task.reap` requires
 approval even when `dry_run` is true. Owner arguments use integers/strings as in
 the CLI, and `dry_run` must be a boolean.
+
+For backward compatibility, `task.finish.result` accepts the existing
+`passed|failed|cancelled` string. It also accepts a structured worker result
+object conforming to the schema above: `completed` maps to assignment outcome
+`passed`, and `partial|blocked` map to `failed`. `summary` remains required.
+Omitting the structured report retains the original finish behavior and stores
+null. Result validation and store-independent finding validation run before
+opening or migrating the database. Finding writes use the same lifecycle and
+transaction rules as the CLI.
 
 Example `tools/call` request (one JSON object per line on stdio):
 
@@ -283,9 +363,10 @@ Example `tools/call` request (one JSON object per line on stdio):
 Successful results put the same payload as CLI `--json` into
 `result.content[0].text`, with `isError: false`: open/show/status return task
 views, assign/finish return assignments, event returns one event, and
-events/list/board return arrays; reap returns assignment/reason entries. Task and event objects conform to
+events/list/board/findings return arrays; finding_add/finding_update return a
+finding; reap returns assignment/reason entries. Task and event objects conform to
 `schemas/task.schema.json` and `schemas/task-event.schema.json`; assignments
-use the former's `$defs.assignment` definition.
+use the former's `$defs.assignment` definition, and findings use `$defs.finding`.
 
 Ledger validation, missing IDs, invalid transitions/scopes, claim conflicts,
 path-resolution errors, and storage failures return `isError: true` with a
@@ -293,4 +374,4 @@ redacted message in text content. The server continues accepting requests.
 A claim conflict still commits its
 `claim_conflict` event; read `task.events` to inspect it. Inspect committed state
 before retrying a write whose response was lost. `tools/list` and
-`hipson mcp serve --catalog` expose all ten input schemas and write gates.
+`hipson mcp serve --catalog` expose all thirteen task input schemas and write gates.

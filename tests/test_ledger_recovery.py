@@ -40,13 +40,13 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
     with closing(sqlite3.connect(db)) as connection:
         before = _rows(SimpleNamespace(connection=connection))
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         after = _rows(store)
         assert len(after["tasks"]) == 2 and len(after["assignments"]) == 3 and len(after["events"]) == 6
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
-        assert [row[:-4] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-4:] == (None, None, None, None) for row in after["assignments"])
+        assert [row[:-5] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-5:] == (None, None, None, None, None) for row in after["assignments"])
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -57,7 +57,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-4] == 42  # Reopening never repeats ALTER TABLE.
+        assert _rows(store)["assignments"][-1][-5] == 42  # Reopening never repeats ALTER TABLE.
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):

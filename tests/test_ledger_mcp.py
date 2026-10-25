@@ -19,6 +19,11 @@ TASK_TOOLS = {
     "task.events": ({"task"}, {"after"}),
     "task.list": (set(), {"project", "status"}),
     "task.board": (set(), set()),
+    "task.findings": (set(), {"task", "status", "severity"}),
+    "task.finding_add": ({"task", "actor", "severity", "title", "approved"},
+                         {"detail", "location", "source_assignment"}),
+    "task.finding_update": ({"finding", "status", "actor", "approved"},
+                            {"resolution_note", "resolved_by_assignment"}),
     "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "lead"}),
     "task.assign": ({"task", "actor", "role", "mode", "approved"},
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "lease_seconds"}),
@@ -34,6 +39,8 @@ WRITE_ARGUMENTS = {
     "task.reap": {},
     "task.event": {"task": "T-0001", "actor": "codex", "type": "progress", "summary": "Ready"},
     "task.status": {"task": "T-0001", "to": "review", "actor": "claude"},
+    "task.finding_add": {"task": "T-0001", "actor": "claude", "severity": "major", "title": "Missing guard"},
+    "task.finding_update": {"finding": "F-0001", "status": "fixed", "actor": "claude"},
 }
 
 
@@ -102,11 +109,13 @@ def test_ledger_mcp_catalog_schemas_and_contract(tmp_path: Path):
     for name, field, values in (
         ("task.assign", "role", ["builder", "reviewer", "explorer", "researcher"]),
         ("task.assign", "mode", ["ro", "rw"]),
-        ("task.finish", "result", ["passed", "failed", "cancelled"]),
         ("task.status", "to", ["open", "in_progress", "blocked", "review", "done", "cancelled"]),
         ("task.list", "status", ["open", "in_progress", "blocked", "review", "done", "cancelled"]),
     ):
         assert descriptors[name]["inputSchema"]["properties"][field] == {"type": "string", "enum": values}
+    result_choices = descriptors["task.finish"]["inputSchema"]["properties"]["result"]["anyOf"]
+    assert result_choices[0] == {"type": "string", "enum": ["passed", "failed", "cancelled"]}
+    assert result_choices[1] == json.loads((SCHEMAS / "task-result.schema.json").read_text())
     for name, field in (("task.open", "acceptance"), ("task.assign", "scope"),
                         ("task.finish", "ref"), ("task.event", "ref")):
         assert descriptors[name]["inputSchema"]["properties"][field] == {
@@ -352,7 +361,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
         assert not home.exists()
         assert _payload(_call(server_project, "task.show", task=env_task["id"])) == env_task
         assert _payload(_call(server_project, "task.list")) == [
-            {key: value for key, value in env_task.items() if key not in ("claims", "assignments")}
+            {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings")}
         ]
         assert _payload(_call(server_project, "task.board")) == [env_task]
         assert _payload(_call(server_project, "task.list", project=str(server_project))) == []

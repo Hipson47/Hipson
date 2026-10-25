@@ -18,6 +18,7 @@
     "updated_at": { "type": "string", "format": "date-time" },
     "revision": { "type": "integer", "minimum": 1 },
     "assignments": { "type": "array", "items": { "$ref": "#/$defs/assignment" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Open findings only; use task.findings for resolved history." },
     "claims": {
       "type": "array",
       "items": {
@@ -49,7 +50,41 @@
         "owner_pid": { "type": ["integer", "null"], "minimum": 1, "maximum": 2147483647 },
         "owner_boot_id": { "type": ["string", "null"], "minLength": 1 },
         "owner_host": { "type": ["string", "null"], "minLength": 1 },
-        "lease_until": { "type": ["string", "null"], "format": "date-time" }
+        "lease_until": { "type": ["string", "null"], "format": "date-time" },
+        "result": { "$ref": "#/$defs/result" }
+      }
+    },
+    "result": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["status", "summary", "files_changed", "commands", "findings", "risks"],
+      "properties": {
+        "status": {"type": "string", "enum": ["completed", "partial", "blocked"]},
+        "summary": {"type": "string"},
+        "files_changed": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "change"], "properties": {"path": {"type": "string"}, "change": {"type": "string"}}}},
+        "commands": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["command", "exit_code"], "properties": {"command": {"type": "string"}, "exit_code": {"type": ["integer", "null"]}}}},
+        "findings": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["severity", "title", "detail", "location"], "properties": {"severity": {"type": "string", "enum": ["blocking", "major", "minor", "info"]}, "title": {"type": "string", "pattern": "\\S"}, "detail": {"type": "string"}, "location": {"type": ["string", "null"]}}}},
+        "risks": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "task", "source_assignment", "severity", "title", "detail", "location", "status", "resolved_by_assignment", "resolution_note", "created_at", "updated_at", "resolved_at"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^F-[0-9]{4,}$"},
+        "task": {"type": "string", "pattern": "^T-[0-9]{4,}$"},
+        "source_assignment": {"type": ["string", "null"], "pattern": "^A-[0-9]{4,}$"},
+        "severity": {"enum": ["blocking", "major", "minor", "info"]},
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "location": {"type": "string"},
+        "status": {"enum": ["open", "fixed", "wontfix", "duplicate"]},
+        "resolved_by_assignment": {"type": ["string", "null"], "pattern": "^A-[0-9]{4,}$"},
+        "resolution_note": {"type": "string"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "resolved_at": {"type": ["string", "null"], "format": "date-time"}
       }
     }
   }

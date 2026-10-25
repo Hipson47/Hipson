@@ -3,6 +3,13 @@
 ## Unreleased
 
 - **Task ledger and recovery**
+  - Make review findings and structured worker results ledger data (S5a-1): add
+    finding lifecycle/filter CLI and gated MCP writes, strict redacted result
+    ingestion, atomic reviewer findings, and compact task views with full JSON.
+    Add a Codex-compatible strict result schema and transactional v2→v3 migration;
+    keep legacy reads non-migrating and existing finish calls compatible.
+  - Redact and bound actor labels and escape terminal controls in plain ledger
+    views, preserving full JSON output.
   - Add a transactional SQLite ledger and `hipson task` CLI for lead-recorded
     tasks, assignments, overlapping path claims, lifecycle transitions, and
     append-only events.

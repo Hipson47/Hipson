@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sqlite3
 import time
@@ -15,18 +16,62 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
 ROLES = ("builder", "reviewer", "explorer", "researcher")
 MODES = ("ro", "rw")
 RESULTS = ("passed", "failed", "cancelled")
+FINDING_SEVERITIES = ("blocking", "major", "minor", "info")
+FINDING_STATUSES = ("open", "fixed", "wontfix", "duplicate")
+
+# Kept here so installed CLI/MCP builds do not depend on a repository checkout.
+# Tests require exact parity with schemas/task-result.schema.json.
+TASK_RESULT_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "Hipson Worker Result",
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "summary", "files_changed", "commands", "findings", "risks"],
+    "properties": {
+        "status": {"type": "string", "enum": ["completed", "partial", "blocked"]},
+        "summary": {"type": "string"},
+        "files_changed": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False, "required": ["path", "change"],
+                "properties": {"path": {"type": "string"}, "change": {"type": "string"}},
+            },
+        },
+        "commands": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False, "required": ["command", "exit_code"],
+                "properties": {"command": {"type": "string"}, "exit_code": {"type": ["integer", "null"]}},
+            },
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": ["severity", "title", "detail", "location"],
+                "properties": {
+                    "severity": {"type": "string", "enum": list(FINDING_SEVERITIES)},
+                    "title": {"type": "string", "pattern": r"\S"},
+                    "detail": {"type": "string"},
+                    "location": {"type": ["string", "null"]},
+                },
+            },
+        },
+        "risks": {"type": "array", "items": {"type": "string"}},
+    },
+}
 TRANSITIONS = {
     "open": {"in_progress", "cancelled"},
     "in_progress": {"blocked", "review", "cancelled"},
@@ -38,7 +83,7 @@ TRANSITIONS = {
 
 # Execute statements individually: executescript would implicitly commit an
 # existing transaction. Initialization, including the version, must be atomic.
-SCHEMA = (
+SCHEMA: tuple[str, ...] = (
     """CREATE TABLE IF NOT EXISTS schema_version (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         version INTEGER NOT NULL
@@ -69,6 +114,7 @@ SCHEMA = (
         owner_boot_id TEXT,
         owner_host TEXT,
         lease_until TEXT,
+        result TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -102,6 +148,33 @@ MIGRATION_V1_TO_V2 = (
     "UPDATE schema_version SET version = 2 WHERE singleton = 1",
 )
 
+FINDINGS_DDL = (
+    """CREATE TABLE findings (
+        id TEXT PRIMARY KEY,
+        task TEXT NOT NULL REFERENCES tasks(id),
+        source_assignment TEXT REFERENCES assignments(id),
+        severity TEXT NOT NULL CHECK (severity IN ('blocking', 'major', 'minor', 'info')),
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        location TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('open', 'fixed', 'wontfix', 'duplicate')),
+        resolved_by_assignment TEXT REFERENCES assignments(id),
+        resolution_note TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        CHECK ((status = 'open' AND resolved_at IS NULL AND resolved_by_assignment IS NULL)
+            OR (status <> 'open' AND resolved_at IS NOT NULL))
+    )""",
+    "CREATE INDEX idx_findings_task_status_severity ON findings(task, status, severity)",
+)
+SCHEMA = (*SCHEMA, *FINDINGS_DDL)
+MIGRATION_V2_TO_V3 = (
+    "ALTER TABLE assignments ADD COLUMN result TEXT",
+    *FINDINGS_DDL,
+    "UPDATE schema_version SET version = 3 WHERE singleton = 1",
+)
+
 
 class Task(TypedDict):
     artifact_kind: str
@@ -118,6 +191,48 @@ class Task(TypedDict):
     revision: int
 
 
+class FileChange(TypedDict):
+    path: str
+    change: str
+
+
+class ResultCommand(TypedDict):
+    command: str
+    exit_code: int | None
+
+
+class ResultFinding(TypedDict):
+    severity: str
+    title: str
+    detail: str
+    location: str | None
+
+
+class TaskResult(TypedDict):
+    status: str
+    summary: str
+    files_changed: list[FileChange]
+    commands: list[ResultCommand]
+    findings: list[ResultFinding]
+    risks: list[str]
+
+
+class Finding(TypedDict):
+    id: str
+    task: str
+    source_assignment: str | None
+    severity: str
+    title: str
+    detail: str
+    location: str
+    status: str
+    resolved_by_assignment: str | None
+    resolution_note: str
+    created_at: str
+    updated_at: str
+    resolved_at: str | None
+
+
 class Assignment(TypedDict):
     id: str
     task: str
@@ -132,6 +247,7 @@ class Assignment(TypedDict):
     owner_boot_id: str | None
     owner_host: str | None
     lease_until: str | None
+    result: TaskResult | None
 
 
 class ReapedAssignment(TypedDict):
@@ -147,6 +263,7 @@ class Claim(TypedDict):
 class TaskView(Task):
     assignments: list[Assignment]
     claims: list[Claim]
+    findings: list[Finding]
 
 
 class TaskEvent(TypedDict):
@@ -207,6 +324,70 @@ def require_text(value: str, field: str) -> str:
     if not value.strip():
         raise LedgerError(f"{field} must not be empty")
     return value.strip()
+
+
+def _validate_result_value(value: Any, schema: dict[str, Any], path: str) -> None:
+    """Validate the fixed result contract's keywords, without a runtime dependency."""
+    types = {"object": dict, "array": list, "string": str, "integer": int, "null": type(None)}
+    names = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
+    if not any(type(value) is types[name] for name in names):
+        raise LedgerError(f"Invalid worker result at {path}: expected {' or '.join(names)}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise LedgerError(f"Invalid worker result at {path}: expected one of {schema['enum']}")
+    if isinstance(value, str) and "pattern" in schema and re.search(schema["pattern"], value) is None:
+        raise LedgerError(f"Invalid worker result at {path}: must not be empty or blank")
+    if isinstance(value, dict):
+        properties = schema["properties"]
+        if set(value) - properties.keys():
+            raise LedgerError(f"Invalid worker result at {path}: unknown properties")
+        for key in schema["required"]:
+            if key not in value:
+                raise LedgerError(f"Invalid worker result at {path}.{key}: required property missing")
+            _validate_result_value(value[key], properties[key], f"{path}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_result_value(item, schema["items"], f"{path}[{index}]")
+
+
+def validate_task_result(value: object) -> TaskResult:
+    """Reject malformed results and return a detached, redacted copy."""
+    _validate_result_value(value, TASK_RESULT_SCHEMA, "result")
+
+    def redact(item: Any) -> Any:
+        if isinstance(item, str):
+            return redact_text(item)
+        if isinstance(item, list):
+            return [redact(child) for child in item]
+        if isinstance(item, dict):
+            return {key: redact(child) for key, child in item.items()}
+        return item
+
+    return cast(TaskResult, redact(value))
+
+
+def load_task_result(path: str | Path) -> TaskResult:
+    """Validate before opening a ledger, including duplicate keys and non-JSON numbers."""
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise LedgerError("Invalid worker result JSON: duplicate object property")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise LedgerError("Invalid worker result JSON: non-finite number")
+
+    try:
+        value = json.loads(
+            Path(path).expanduser().read_text(encoding="utf-8"),
+            object_pairs_hook=unique_object, parse_constant=invalid_constant,
+        )
+    except json.JSONDecodeError as exc:
+        raise LedgerError(f"Invalid worker result JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})") from exc
+    except UnicodeError as exc:
+        raise LedgerError("Invalid worker result JSON: expected UTF-8") from exc
+    return validate_task_result(value)
 
 
 def _timestamp() -> str:
@@ -363,13 +544,16 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is not None and version[0] == 1:
-                    if not read_only:
-                        for statement in MIGRATION_V1_TO_V2:
-                            self.connection.execute(statement)
-                elif version is None or version[0] != SCHEMA_VERSION:
+                elif version is None or version[0] not in (1, 2, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
+                elif not read_only:
+                    if version[0] == 1:
+                        for statement in MIGRATION_V1_TO_V2:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2):
+                        for statement in MIGRATION_V2_TO_V3:
+                            self.connection.execute(statement)
         except BaseException:
             self.close()
             raise
@@ -547,22 +731,139 @@ class Ledger:
         self._append_event(item["task"], item["actor"], "reaped", f"{item['id']}: {reason}", [item["id"]])
         return self._assignment(item["id"])
 
-    def finish(self, assignment: str, *, result: str, summary: str, refs: Sequence[str] = ()) -> Assignment:
+    def finish(
+        self, assignment: str, *, result: str, summary: str, refs: Sequence[str] = (),
+        worker_result: object = None,
+    ) -> Assignment:
         if result not in RESULTS:
             raise LedgerError(f"Assignment result must be one of {RESULTS}")
         summary = require_text(summary, "summary")
+        report = validate_task_result(worker_result) if worker_result is not None else None
         with self._transaction():
             current = self._assignment(assignment)
             if current["status"] != "active":
                 raise LedgerError(f"Assignment {assignment} is already finished ({current['status']})")
             self.connection.execute(
-                "UPDATE assignments SET status = ?, ended_at = ? WHERE id = ?", (result, _timestamp(), assignment)
+                "UPDATE assignments SET status = ?, ended_at = ?, result = ? WHERE id = ?",
+                (result, _timestamp(), json.dumps(report) if report is not None else None, assignment),
             )
             self.connection.execute("DELETE FROM claims WHERE assignment = ?", (assignment,))
+            counts = ""
+            if report is not None:
+                if current["role"] == "reviewer":
+                    for finding in report["findings"]:
+                        self._insert_finding(
+                            current["task"], actor=current["actor"], source_assignment=assignment,
+                            severity=finding["severity"], title=finding["title"], detail=finding["detail"],
+                            location=finding["location"] or "",
+                        )
+                counts = (
+                    f" [worker_status={report['status']}; files_changed={len(report['files_changed'])}; "
+                    f"commands={len(report['commands'])}; findings={len(report['findings'])}; risks={len(report['risks'])}]"
+                )
             self._append_event(
-                current["task"], current["actor"], "finished", f"{result}: {summary}", [assignment, *refs]
+                current["task"], current["actor"], "finished", f"{result}: {summary}{counts}", [assignment, *refs]
             )
             return self._assignment(assignment)
+
+    def add_finding(
+        self, task: str, *, actor: str, severity: str, title: str, detail: str = "", location: str = "",
+        source_assignment: str | None = None,
+    ) -> Finding:
+        actor = require_text(actor, "actor")
+        title = require_text(title, "title")
+        if severity not in FINDING_SEVERITIES:
+            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}")
+        with self._transaction():
+            self._task(task)
+            self._check_finding_assignment(task, source_assignment)
+            return self._insert_finding(
+                task, actor=actor, severity=severity, title=title, detail=detail, location=location,
+                source_assignment=source_assignment,
+            )
+
+    def _check_finding_assignment(self, task: str, assignment: str | None) -> None:
+        if assignment is not None and self._assignment(assignment)["task"] != task:
+            raise LedgerError(f"Assignment {assignment} does not belong to task {task}")
+
+    def _insert_finding(
+        self, task: str, *, actor: str, severity: str, title: str, detail: str, location: str,
+        source_assignment: str | None,
+    ) -> Finding:
+        """Caller owns the write transaction and validates the inputs."""
+        number = self.connection.execute(
+            "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1 FROM findings"
+        ).fetchone()[0]
+        finding = f"F-{number:04d}"
+        now = _timestamp()
+        self.connection.execute(
+            """INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, '', ?, ?, NULL)""",
+            (finding, task, source_assignment, severity, redact_text(title), redact_text(detail),
+             redact_text(location), now, now),
+        )
+        self._append_event(task, actor, "finding_opened", f"{finding} [{severity}]: {title}", [finding])
+        return self._finding(finding)
+
+    def update_finding(
+        self, finding: str, *, status: str, actor: str, resolution_note: str = "",
+        resolved_by_assignment: str | None = None,
+    ) -> Finding:
+        actor = require_text(actor, "actor")
+        if status not in FINDING_STATUSES:
+            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}")
+        with self._transaction():
+            current = self._finding(finding)
+            previous = current["status"]
+            if previous == status or (previous != "open" and status != "open"):
+                raise LedgerError(f"Invalid finding transition for {finding}: {previous} -> {status}")
+            if status == "open":
+                resolution_note = require_text(resolution_note, "Reopening note")
+                if resolved_by_assignment is not None:
+                    raise LedgerError("A reopened finding cannot have a resolved-by assignment")
+            self._check_finding_assignment(current["task"], resolved_by_assignment)
+            now = _timestamp()
+            self.connection.execute(
+                """UPDATE findings SET status = ?, resolved_by_assignment = ?, resolution_note = ?,
+                   updated_at = ?, resolved_at = ? WHERE id = ?""",
+                (status, resolved_by_assignment, redact_text(resolution_note), now,
+                 None if status == "open" else now, finding),
+            )
+            self._append_event(
+                current["task"], actor, "finding_reopened" if status == "open" else "finding_resolved",
+                f"{finding}: {previous} -> {status}" + (f": {resolution_note}" if resolution_note else ""),
+                [finding, *([resolved_by_assignment] if resolved_by_assignment else [])],
+            )
+            return self._finding(finding)
+
+    def findings(
+        self, *, task: str | None = None, status: str | None = None, severity: str | None = None,
+    ) -> list[Finding]:
+        if status is not None and status not in FINDING_STATUSES:
+            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}")
+        if severity is not None and severity not in FINDING_SEVERITIES:
+            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}")
+        with self._transaction(write=False):
+            if task is not None:
+                self._task(task)
+            return self._findings(task=task, status=status, severity=severity)
+
+    def _findings(
+        self, *, task: str | None = None, status: str | None = None, severity: str | None = None,
+    ) -> list[Finding]:
+        # A long-lived legacy reader can observe a later writer's migration.
+        if self.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0] < 3:
+            return []
+        return [cast(Finding, dict(row)) for row in self.connection.execute(
+            """SELECT * FROM findings WHERE (? IS NULL OR task = ?) AND (? IS NULL OR status = ?)
+               AND (? IS NULL OR severity = ?) ORDER BY created_at, id""",
+            (task, task, status, status, severity, severity),
+        )]
+
+    def _finding(self, finding: str) -> Finding:
+        row = self.connection.execute("SELECT * FROM findings WHERE id = ?", (finding,)).fetchone()
+        if row is None:
+            raise LedgerError(f"Finding not found: {finding}")
+        return cast(Finding, dict(row))
 
     def add_event(self, task: str, *, actor: str, type: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
         actor = require_text(actor, "actor")
@@ -648,7 +949,8 @@ class Ledger:
                 (task,),
             )
         ]
-        return {**current, "assignments": assignments, "claims": claims}
+        return {**current, "assignments": assignments, "claims": claims,
+                "findings": self._findings(task=task, status="open")}
 
     def _append_event(self, task: str, actor: str, type: str, summary: str, refs: Sequence[str]) -> TaskEvent:
         now = _timestamp()
@@ -694,6 +996,7 @@ class Ledger:
             "owner_boot_id": row["owner_boot_id"] if "owner_boot_id" in row.keys() else None,
             "owner_host": row["owner_host"] if "owner_host" in row.keys() else None,
             "lease_until": row["lease_until"] if "lease_until" in row.keys() else None,
+            "result": json.loads(row["result"]) if "result" in row.keys() and row["result"] is not None else None,
         }
 
     @staticmethod
