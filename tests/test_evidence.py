@@ -419,6 +419,9 @@ def test_mcp_latest_audit_reads_saved_bundles_and_ignores_other_projects(tmp_pat
     foreign_root = tmp_path / "runs" / "foreign"
     foreign = evidence.build_evidence_record(work_plan=_plan(tmp_path / "other", "work_foreign"), ledger_root=foreign_root)
     evidence.append_record(foreign_root, foreign)
+    # The foreign candidate must be newer, even when rapid writes share a filesystem timestamp.
+    stamp = evidence.ledger_path(tmp_path / "runs").stat().st_mtime_ns + 1_000_000_000
+    os.utime(evidence.ledger_path(foreign_root), ns=(stamp, stamp))
     assert _resource(tmp_path)["evidence_records"] == [record]
 
 

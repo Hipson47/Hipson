@@ -89,16 +89,18 @@ exclude_dirs = ["tests", "skills/external", ".venv", "build", "dist"]
 skips = ["B404", "B603", "B607"]
 
 [tool.mutmut]
-also_copy = ["src/hipson"]
+also_copy = ["src/hipson", "schemas"]
 # Keep the CI mutation gate bounded to security/path-policy core code.
 # A full mutation sweep is too slow for the push/pull_request workflow.
 source_paths = [
     "src/hipson/approvals.py",
+    "src/hipson/evidence.py",
     "src/hipson/redaction.py",
     "src/hipson/sandbox.py",
 ]
 pytest_add_cli_args_test_selection = [
     "tests/test_approvals.py",
+    "tests/test_evidence.py",
     "tests/test_mcp.py",
     "tests/test_prompt.py",
     "tests/test_scheduler.py",
@@ -178,3 +180,16 @@ pytest_add_cli_args_test_selection = [
 ]
 pytest_add_cli_args = ["-q"]
 mutate_only_covered_lines = true
+
+[tool.hipson.mutation-gate]
+# Fresh full run: 1129 killed / 1856 total, 727 surviving; all other counters zero.
+# See README Development for the reviewed baseline update procedure.
+measured_on = "2026-10-25"
+mutmut_version = "3.8.0"
+python_version = "3.12.3"
+elapsed_seconds = 443.31
+min_killed_percent = 60.82
+min_total = 1856
+max_survived = 727
+max_no_tests = 0
+max_timeout = 0

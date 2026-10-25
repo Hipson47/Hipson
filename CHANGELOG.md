@@ -70,6 +70,18 @@
     skill, and `scripts/fetch_external_skills.py` fetches and verifies them into the
     git-ignored `skills/external/` on demand.
 - **CI and tooling**
+  - Resolve worker-wrapper tests through the installed CLI as well as a checkout
+    virtualenv, execute the missing-boot-id case, and fail Linux CI on skips.
+    Report passed, skipped and failed outcomes honestly in the stdlib runner.
+  - Validate every artifact schema keyword in the shared stdlib test validator,
+    including nested items, additional properties, references, nullable types,
+    patterns, bounds and formats. Fail on unknown keywords and add malformed-payload
+    controls to prevent silent validation gaps.
+  - Enforce exported mutmut results against an explicit dated score/population
+    baseline and survivor/no-test/timeout caps. Include evidence code and tests
+    in the bounded mutation selection; reject incomplete and abnormal runs.
+    Set candidate timestamps explicitly in the foreign-project evidence control
+    so project-filter mutations cannot survive filesystem timestamp ties.
   - Upgrade setuptools in CI (and require >=84.1.0 to build) and refresh vulnerable
     dev-tool locks so `pip-audit` passes.
   - Move the mutation gate to mutmut 3.8 and drop the `tests/conftest.py` stats

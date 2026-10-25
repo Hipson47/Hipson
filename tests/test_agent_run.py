@@ -10,27 +10,33 @@ import sys
 import time
 from contextlib import closing, contextmanager
 from pathlib import Path
+from unittest import SkipTest
+from unittest.mock import patch
 
 from hipson.ledger import Ledger
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "examples" / "agent-run.sh"
-HIPSON = ROOT / ".venv" / "bin" / "hipson"
+
+
+def _hipson_bin():
+    # An explicit override is authoritative; do not hide a broken override with a fallback.
+    candidate = os.environ.get("HIPSON_BIN") or shutil.which("hipson") or str(ROOT / ".venv" / "bin" / "hipson")
+    return shutil.which(candidate)
 
 
 def _skip(reason):
-    # Keep the dependency-free runner usable while giving pytest a real skip result.
-    if "pytest" in sys.modules:
-        sys.modules["pytest"].skip(reason)
-    print(f"SKIP agent-run: {reason}")
-    return False
+    if sys.platform == "linux" and os.environ.get("CI"):
+        raise AssertionError(f"Required Linux CI integration prerequisite missing: {reason}")
+    # Both pytest and the dependency-free runner understand this stdlib signal.
+    raise SkipTest(reason)
 
 
 def _supported():
     if sys.platform != "linux" or any(shutil.which(tool) is None for tool in ("bash", "setsid", "ps")):
         return _skip("requires Linux process groups, setsid, ps and bash")
-    if not HIPSON.is_file():
-        return _skip("requires this checkout's .venv/bin/hipson CLI")
+    if _hipson_bin() is None:
+        return _skip("requires an executable hipson CLI (HIPSON_BIN, PATH, or checkout .venv)")
     libc = ctypes.CDLL(None, use_errno=True)
     previous = ctypes.c_int()
     if not hasattr(libc, "prctl") or libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
@@ -86,14 +92,13 @@ class _Run:
         self.db = root / "ledger.sqlite"
         self.env = {
             **os.environ,
-            "PATH": str(ROOT / ".venv" / "bin") + os.pathsep + os.environ.get("PATH", ""),
             "PYTHONPATH": str(ROOT / "src"),
             "HIPSON_LEDGER": str(self.db),
-            "HIPSON_BIN": str(HIPSON),
+            "HIPSON_BIN": _hipson_bin(),
             "AGENT_RUN_GRACE_SECONDS": "1",
         }
         opened = subprocess.run(
-            [str(HIPSON), "task", "open", "--project", str(root), "--title", "Runner test",
+            [self.env["HIPSON_BIN"], "task", "open", "--project", str(root), "--title", "Runner test",
              "--objective", "Verify the published runner", "--json"],
             env=self.env, cwd=root, text=True, capture_output=True, timeout=15, check=True,
         )
@@ -404,5 +409,55 @@ def test_agent_run_sigkill_retains_claim_until_surviving_worker_dies_then_reaps(
         assert view["claims"] == []
 
 
-def test_agent_run_missing_boot_id_file():
-    _skip("agent-run.sh has no boot-id path override; cannot simulate a missing file without replacing cat")
+def test_agent_run_missing_boot_id_file(tmp_path: Path):
+    if not _supported():
+        return
+    # Intercept only the unavailable procfs read; leave the published wrapper unchanged.
+    # This also proves that an omitted boot id still permits a real CLI assignment/finish.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_cat = shutil.which("cat")
+    assert real_cat is not None
+    cat = bin_dir / "cat"
+    cat.write_text(
+        '#!/usr/bin/env bash\n'
+        'if [ "${1:-}" = /proc/sys/kernel/random/boot_id ]; then exit 1; fi\n'
+        'exec "$AGENT_TEST_REAL_CAT" "$@"\n',
+        encoding="utf-8",
+    )
+    cat.chmod(0o755)
+    with _case(tmp_path) as run:
+        run.env.update(PATH=str(bin_dir) + os.pathsep + os.environ.get("PATH", ""), AGENT_TEST_REAL_CAT=real_cat)
+        process = run.start("print('worker ran without boot id')\n")
+        assert run.wait(process) == 0, run.stderr(process)
+        view, events = run.view()
+        assignment = view["assignments"][0]
+        assert assignment["owner_boot_id"] is None
+        assert assignment["owner_pid"] == process.pid
+        assert assignment["status"] == "passed" and view["claims"] == []
+        assert events[-1]["type"] == "finished"
+        assert (tmp_path / "stdout-0").read_text() == "worker ran without boot id\n"
+
+
+def test_agent_run_cli_resolution():
+    with patch.dict(os.environ, {"HIPSON_BIN": "/explicit/hipson"}), patch.object(shutil, "which") as which:
+        which.return_value = "/explicit/hipson"
+        assert _hipson_bin() == "/explicit/hipson"
+        which.assert_called_once_with("/explicit/hipson")
+    with patch.dict(os.environ, {"HIPSON_BIN": ""}), patch.object(shutil, "which") as which:
+        which.side_effect = ["/installed/hipson", "/installed/hipson"]
+        assert _hipson_bin() == "/installed/hipson"
+    with patch.dict(os.environ, {"HIPSON_BIN": ""}), patch.object(shutil, "which") as which:
+        which.side_effect = [None, str(ROOT / ".venv" / "bin" / "hipson")]
+        assert _hipson_bin() == str(ROOT / ".venv" / "bin" / "hipson")
+        which.assert_called_with(str(ROOT / ".venv" / "bin" / "hipson"))
+
+
+def test_agent_run_missing_prerequisites_fail_in_linux_ci():
+    with patch.dict(os.environ, {"CI": "true"}), patch.object(sys, "platform", "linux"):
+        try:
+            _skip("missing prerequisite")
+        except AssertionError as exc:
+            assert "Required Linux CI" in str(exc)
+        else:
+            raise AssertionError("Missing Linux CI prerequisites must fail")

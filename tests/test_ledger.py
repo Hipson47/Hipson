@@ -2,7 +2,6 @@
 
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import sys
@@ -15,6 +14,7 @@ from unittest.mock import patch
 from hipson import contracts
 from hipson.ledger import BUSY_TIMEOUT_MS, ClaimConflictError, Ledger, LedgerError, default_ledger_db, normalize_scope
 from hipson.redaction import REDACTION
+from tests.json_schema import schema_errors
 from tests.test_hipson_helpers import assert_schema_valid, run_cli, run_cli_inprocess
 
 
@@ -45,55 +45,11 @@ def _rows(store):
 
 
 SCHEMAS = Path(__file__).resolve().parents[1] / "schemas"
-_TYPES = {
-    "object": dict, "array": list, "string": str, "boolean": bool, "integer": int, "null": type(None),
-}
 
 
 def _strict_errors(schema, payload, root, path="$"):
-    """Validate the keywords the ledger schemas use; the shared test helper checks a looser subset."""
-    if "$ref" in schema:
-        name = schema["$ref"].removeprefix("#/$defs/")
-        return _strict_errors(root["$defs"][name], payload, root, path)
-    errors = []
-    if "const" in schema and payload != schema["const"]:
-        errors.append(f"{path}: const")
-    if "enum" in schema and payload not in schema["enum"]:
-        errors.append(f"{path}: enum")
-    if "type" in schema:
-        names = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
-        if not any(isinstance(payload, _TYPES[n]) and not (n == "integer" and isinstance(payload, bool)) for n in names):
-            return [*errors, f"{path}: type"]
-    if isinstance(payload, str):
-        if len(payload) < schema.get("minLength", 0):
-            errors.append(f"{path}: minLength")
-        if "pattern" in schema and re.search(schema["pattern"], payload) is None:
-            errors.append(f"{path}: pattern")
-        if schema.get("format") == "date-time":
-            try:
-                parsed = datetime.fromisoformat(payload)
-                if "T" not in payload or parsed.utcoffset() is None:
-                    raise ValueError("Expected a timestamp with timezone")
-            except ValueError:
-                errors.append(f"{path}: format")
-    if isinstance(payload, int) and "minimum" in schema and payload < schema["minimum"]:
-        errors.append(f"{path}: minimum")
-    if isinstance(payload, int) and "maximum" in schema and payload > schema["maximum"]:
-        errors.append(f"{path}: maximum")
-    if isinstance(payload, list):
-        if schema.get("uniqueItems") and len(set(map(json.dumps, payload))) != len(payload):
-            errors.append(f"{path}: uniqueItems")
-        for index, item in enumerate(payload):
-            errors += _strict_errors(schema.get("items", {}), item, root, f"{path}[{index}]")
-    if isinstance(payload, dict):
-        properties = schema.get("properties", {})
-        errors += [f"{path}.{key}: required" for key in schema.get("required", []) if key not in payload]
-        if schema.get("additionalProperties") is False:
-            errors += [f"{path}.{key}: additional" for key in payload if key not in properties]
-        for key, value in payload.items():
-            if key in properties:
-                errors += _strict_errors(properties[key], value, root, f"{path}.{key}")
-    return errors
+    """Compatibility alias for ledger controls using the shared strict validator."""
+    return schema_errors(schema, payload, root, path)
 
 
 def assert_strict_schema(name, payload):

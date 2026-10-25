@@ -7,7 +7,8 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 432](https://img.shields.io/badge/tests-432-2ea043)
+![Tests: 446, zero CI skips](https://img.shields.io/badge/tests-446%20%7C%200%20CI%20skips-2ea043)
+![Bounded mutation score: 60.83%](https://img.shields.io/badge/bounded%20mutation-60.83%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [Why](#why-it-exists) · [Built with itself](#built-with-itself) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP](#use-it-from-a-lead-agent-mcp) · [Docs](docs/README.md)
@@ -73,7 +74,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 432 tests today (404 when the ledger landed), run by both `pytest` and the dependency-free `scripts/run_tests.py` |
+| Test suite | 446 tests, 0 skipped on Linux CI, run by both `pytest` and the dependency-free `scripts/run_tests.py` (2026-10-25; 404 tests when the ledger landed) |
+| Mutation gate | 60.83%: 1,129 / 1,856 mutants killed across four modules; baseline minimum 60.82%, caps 727 existing survivors, 0 mutants without tests, 0 timeouts (2026-10-25) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
 
@@ -197,8 +199,37 @@ uv run python -m pytest -q
 uv build
 ```
 
-CI runs the same gates on Python 3.11 and 3.12, plus `pip-audit`, a bounded mutation run and an installed-wheel
-smoke test. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+CI runs the same gates on Python 3.11 and 3.12, plus `pip-audit` and an installed-wheel smoke test.
+On Linux with `CI` set, both test runners fail on any skip, including pytest collection skips.
+The standalone runner reports passed, skipped and failed counts separately. Outside CI,
+missing prerequisites produce explicit skips, including the pytest-policy probe when pytest is unavailable.
+Wrapper tests resolve the installed CLI
+through `HIPSON_BIN`, then `PATH`, then the checkout's `.venv/bin/hipson`; missing prerequisites fail CI.
+Artifact tests validate every keyword currently used in `schemas/`, including nested array items,
+additional properties, references, nullable types, patterns and bounds. Unsupported schema keywords
+fail even in unused branches.
+
+Python 3.12 CI also enforces a bounded mutation baseline within a 20-minute step:
+
+```bash
+uv run mutmut run --max-children 2
+uv run mutmut export-cicd-stats
+uv run python scripts/mutation_gate.py
+```
+
+The fresh Linux baseline took 443.31 seconds (7m 23s) with Python 3.12.3 and mutmut 3.8.0 on 2026-10-25.
+
+The mutated paths are `approvals.py`, `evidence.py`, `redaction.py` and `sandbox.py`; the test selection,
+including `tests/test_evidence.py`, is in `pyproject.toml`. The score is **killed / total**, counting only
+test-killed mutants as kills. The gate enforces the committed minimum score and population and caps
+survivors, mutants without tests and timeouts. It rejects missing, malformed or incomplete results,
+skipped mutants, suspicious outcomes, interruptions and segfaults.
+
+To update `[tool.hipson.mutation-gate]` in `pyproject.toml`, start from a fresh checkout or move `mutants/`
+aside, run the three commands above with the recorded mutmut/Python versions, inspect `uv run mutmut results`,
+and review changed survivors before editing the baseline counts, minimum score (rounded down to two decimals), date,
+versions and elapsed time. Baseline updates require a reviewed diff; the gate never learns a new threshold automatically.
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Project layout
 

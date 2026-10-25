@@ -34,7 +34,10 @@ jobs:
         run: python -m pytest -q
       - name: Mutation testing
         if: matrix.python-version == '3.12'
-        run: mutmut run --max-children 2
+        run: |
+          mutmut run --max-children 2
+          mutmut export-cicd-stats
+          python scripts/mutation_gate.py
         timeout-minutes: 20
       - name: Compile Python
         run: python -m compileall src scripts tests

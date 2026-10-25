@@ -36,6 +36,7 @@ from hipson.packets import (
 from hipson.paths import package_root
 from hipson.redaction import REDACTION, SKIPPED, is_sensitive_path, redact_sensitive_paths, redact_text, sanitize_path
 from hipson.skills import find_skill_files, parse_frontmatter, validate_skill_file, validate_skills
+from tests.json_schema import schema_errors
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_ROOT = REPO_ROOT / "schemas"
@@ -69,10 +70,20 @@ def run_cli(
     if env:
         merged_env.update(env)
     command = [sys.executable, "-m", "hipson.cli", *args]
+    process_cwd = cwd
+    if merged_env.get("MUTANT_UNDER_TEST") == "stats":
+        # A fresh subprocess must resolve mutmut's configuration before entering
+        # the temporary project, just as the parent stats runner does at startup.
+        command = [sys.executable, "-c",
+                   "from mutmut.configuration import config; config(); "
+                   "import os, sys; os.chdir(sys.argv[1]); "
+                   "from hipson.cli import main; raise SystemExit(main(sys.argv[2:]))",
+                   str(cwd), *args]
+        process_cwd = REPO_ROOT
     try:
         return subprocess.run(
             command,
-            cwd=cwd,
+            cwd=process_cwd,
             env=merged_env,
             text=True,
             capture_output=True,
@@ -99,40 +110,8 @@ def run_cli_inprocess(*args: str) -> tuple[int, str, str]:
 
 def assert_schema_valid(schema_name: str, payload: object) -> None:
     schema = json.loads((SCHEMA_ROOT / schema_name).read_text(encoding="utf-8"))
-    _assert_json_schema_subset(schema, payload, path="$")
-
-
-def _assert_json_schema_subset(schema: dict[str, object], payload: object, *, path: str) -> None:
-    if "const" in schema:
-        assert payload == schema["const"], f"{path}: expected const {schema['const']!r}, got {payload!r}"
-    if "enum" in schema:
-        assert payload in schema["enum"], f"{path}: expected one of {schema['enum']!r}, got {payload!r}"
-    schema_type = schema.get("type")
-    if schema_type:
-        _assert_json_type(schema_type, payload, path=path)
-    if schema_type == "object" or isinstance(payload, dict):
-        assert isinstance(payload, dict), f"{path}: expected object"
-        for key in schema.get("required", []):
-            assert isinstance(key, str)
-            assert key in payload, f"{path}: missing required key {key}"
-        properties = schema.get("properties", {})
-        assert isinstance(properties, dict)
-        for key, property_schema in properties.items():
-            if key in payload and isinstance(property_schema, dict):
-                _assert_json_schema_subset(property_schema, payload[key], path=f"{path}.{key}")
-
-
-def _assert_json_type(schema_type: object, payload: object, *, path: str) -> None:
-    if schema_type == "object":
-        assert isinstance(payload, dict), f"{path}: expected object"
-    elif schema_type == "array":
-        assert isinstance(payload, list), f"{path}: expected array"
-    elif schema_type == "string":
-        assert isinstance(payload, str), f"{path}: expected string"
-    elif schema_type == "boolean":
-        assert isinstance(payload, bool), f"{path}: expected boolean"
-    elif schema_type == "integer":
-        assert isinstance(payload, int) and not isinstance(payload, bool), f"{path}: expected integer"
+    errors = schema_errors(schema, payload)
+    assert not errors, errors
 
 
 def with_provider_env_defaults(root_env: Path, fallback_env: Path, fn) -> None:
