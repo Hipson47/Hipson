@@ -44,6 +44,14 @@
   - Move historical planning and audit material to `docs/archive/` with an archive index.
   - Index the live docs, document the lead/worker ledger flow, and correct CLI,
     path, provider, and historical-status guidance.
+- **CI and tooling**
+  - Upgrade setuptools in CI (and require >=84.1.0 to build) and refresh vulnerable
+    dev-tool locks so `pip-audit` passes.
+  - Move the mutation gate to mutmut 3.8 and drop the `tests/conftest.py` stats
+    workaround: 3.8 resolves source paths at startup, so cwd-changing tests no
+    longer break stats collection.
+  - Run CI on Node 24 actions: `actions/checkout@v7`, `actions/setup-python@v7`,
+    `astral-sh/setup-uv@v10.3.2` (pinned; setup-uv no longer publishes major tags).
 
 ## 1.1.0
 

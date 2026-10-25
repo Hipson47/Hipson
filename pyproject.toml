@@ -30,7 +30,7 @@ Issues = "https://github.com/Hipson47/hipson/issues"
 [project.optional-dependencies]
 dev = [
     "bandit>=1.9.4",
-    "mutmut>=3.6.0,<3.7",  # tests/conftest.py patches mutmut 3.6 internals; 3.8 moved them
+    "mutmut>=3.8.0",
     "mypy>=2.1.0",
     "pip-audit>=2.10.0",
     "pytest>=8.0.0",
@@ -40,7 +40,7 @@ dev = [
 [dependency-groups]
 dev = [
     "bandit>=1.9.4",
-    "mutmut>=3.6.0,<3.7",  # tests/conftest.py patches mutmut 3.6 internals; 3.8 moved them
+    "mutmut>=3.8.0",
     "mypy>=2.1.0",
     "pip-audit>=2.10.0",
     "pytest>=8.0.0",
