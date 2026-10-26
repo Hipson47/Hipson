@@ -19,15 +19,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
-hipson --help
-hipson doctor
-```
-
-In the project you want Claude Code to manage, register the installed stdio server:
-
-```bash
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
-claude mcp get hipson
+cd /path/to/your/project
+hipson init
 ```
 
 ## macOS
@@ -40,10 +33,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
-claude mcp get hipson
+cd /path/to/your/project
+hipson init
 ```
 
 `hipson task run` needs no Bash. The optional Bash wrapper supports stock macOS Bash 3.2 and BSD `ps`.
@@ -66,10 +57,8 @@ Reopen PowerShell so the installer PATH change takes effect, then:
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
 $env:Path = "$(uv tool dir --bin);$env:Path"
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$($PWD.Path)" --stdio
-claude mcp get hipson
+Set-Location C:\path\to\your\project
+hipson init
 ```
 
 `hipson.exe` runs directly; it needs no `cmd /c` or Bash wrapper. Use the Windows Claude Code
@@ -119,10 +108,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
-claude mcp get hipson
+cd ~/code/your-project
+hipson init
 ```
 
 Install/run Claude Code, Hipson and workers in the same WSL distro. Keep active repositories under
@@ -136,28 +123,85 @@ After the OS-specific uv setup, these commands work in Bash, zsh and PowerShell:
 git clone https://github.com/Hipson47/Hipson.git
 cd Hipson
 uv sync --python 3.12 --no-dev
-uv run --no-dev hipson --help
-uv run --no-dev hipson doctor
+uv run --no-dev hipson init --project /path/to/your/project
 ```
 
 For Linux/macOS/WSL2, activate the environment so the wrapper can find `hipson` and `python3`:
 
 ```bash
 source .venv/bin/activate
-claude mcp add --transport stdio hipson -- "$PWD/.venv/bin/hipson" mcp serve --project "$PWD" --stdio
+hipson init --project /path/to/your/project
 ```
 
 For native Windows, use the executable directly, with no activation script policy changes:
 
 ```powershell
-.\.venv\Scripts\hipson.exe --help
-claude mcp add --transport stdio hipson -- "$($PWD.Path)\.venv\Scripts\hipson.exe" mcp serve --project "$($PWD.Path)" --stdio
+.\.venv\Scripts\hipson.exe init --project C:\path\to\your\project
 ```
 
 `hipson task run --help` is available in global installs and clones on every OS.
 The optional legacy Bash wrapper is available in a source clone. Launch it with
 `bash examples/agent-run.sh --help`; `hipson` and `python3` must be on PATH.
 For development, use `uv sync --all-extras` to install the test/static-analysis tools too.
+
+## One-command lead setup
+
+```text
+hipson init [--project PATH] [--client auto|claude|codex|none] [--scope project|user] [--dry-run] [--yes] [--json]
+```
+
+Run from your target project, or pass `--project`. Setup checks Python, Git, the Hipson version,
+platform support and the configured ledger location. It creates or migrates the ledger and registers
+the absolute installed Hipson executable and project path. No provider credentials are required.
+
+- `--client auto` (default) selects both Claude Code and Codex when their CLIs are on PATH.
+  With neither available it fails without applying changes. `--client codex` can configure Codex
+  even without its CLI; `--client none` sets up only the ledger.
+- Claude uses `claude mcp get hipson` for discovery and `claude mcp add --transport stdio --scope ...`
+  for registration. Default project scope writes `<project>/.mcp.json`; `--scope user` writes
+  `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`). Windows `claude.cmd` is supported.
+  See [Claude Code MCP scopes](https://code.claude.com/docs/en/mcp#mcp-installation-scopes).
+- Codex always uses user config: `$CODEX_HOME/config.toml`, default `~/.codex/config.toml`.
+  Setup appends `[mcp_servers.hipson]` while preserving every existing byte. `--scope` controls
+  Claude only. See [Codex MCP configuration](https://developers.openai.com/codex/mcp/).
+- An existing `hipson` registration reports **already configured** only when its scope, resolved
+  executable, arguments (including the resolved `--project` path), and enabled stdio transport match
+  the requested setup. A different command, project, extra argument or disabled entry is a **conflict**.
+  If a Claude user entry conflicts with the default project scope, setup plans a project-scoped
+  override and preserves the user entry. This still requires confirmation and a backup before edits.
+  Claude local entries take precedence over project entries; project entries take precedence over user
+  entries. A conflicting entry at the target scope or a higher scope stops setup before any writes.
+  Remove or rename that entry explicitly and rerun, or select its scope when it already has the desired
+  command and project. Codex conflicts also stop setup; use a separate `CODEX_HOME` for another project
+  or explicitly remove/rename its conflicting table. `--yes` never authorizes replacing a conflict.
+  A project-scoped Claude entry may need approval on the client's first use.
+- Before config edits, setup creates an exclusive `*.backup-YYYYMMDD-HHMMSS` backup, adding `-N`
+  on collision. Ledger migrations also get a SQLite snapshot backup, including committed WAL data.
+  Invalid/incompatible TOML, discovery failures and backup errors stop setup with a nonzero exit.
+
+`hipson init --dry-run` prints the planned commands, their working directory, backup policy and exact
+UTF-8 TOML addition. It performs read-only discovery; it creates no ledger, config or backups and does
+not start MCP verification. Non-interactive setup without `--yes` prints the plan and exits nonzero
+before applying changes. On a TTY, only `y`/`yes` confirms; `--json` keeps prompts on stderr.
+Already configured setups need no further consent when no edits are planned.
+
+For unattended setup: `hipson init --yes --json`. The JSON report contains checks, planned/applied/skipped
+actions (or a conflict/failed action), backup paths, verification and next steps. Setup is resumable: if an action
+fails, earlier successful actions remain recorded in the report and a rerun skips matching registrations.
+After applying setup, Hipson starts the registered executable for an MCP initialize + tools/list handshake.
+This verifies the local server; the client's trust settings may still require approval.
+
+Restart the lead client to load its MCP config, then open your first real task:
+
+```text
+hipson task open --project . --title "My first task" --objective "Describe the change" --json
+hipson task run --task T-0001 --actor worker --role builder --mode rw --scope . -- python -c "print('worker check')"
+hipson task board
+```
+
+Use the returned task id in place of `T-0001`. The setup report prints these next steps using your project
+path; setup itself does not add a placeholder task. `hipson init` replaces the old progress-template command;
+existing progress files are untouched.
 
 ## Storage and recovery
 
@@ -183,14 +227,14 @@ PID namespaces are Linux-only. See [TASK_LEDGER.md](TASK_LEDGER.md) for the owne
 
 ## Verify the installation
 
-Run `hipson --help`, `hipson doctor`, then `hipson task open`, `hipson task assign` and
-`hipson task board` as in the Windows example (the same task command syntax works on every OS).
-Run `claude mcp get hipson`, then `/mcp` in Claude Code and check that `task.board` is available.
+Run `hipson init --dry-run`, then `hipson init` and check that MCP verification passed.
+Run `hipson doctor`, then open your first task as above (the syntax works on every OS).
+For Claude Code, run `claude mcp get hipson`, then `/mcp` and check that `task.board` is available.
+For Codex, use `codex mcp list` after restarting the client.
 Task write tools require `approved=true`.
 
 If Claude Code cannot find the global CLI, run `uv tool update-shell`, restart its terminal,
-or register an absolute executable path: `"$(command -v hipson)"` on POSIX,
-`"$((Get-Command hipson).Source)"` in PowerShell. Register from the target project directory.
+or rerun `hipson init --dry-run` to inspect the absolute executable path it will register.
 
 CI runs both test runners, static checks, builds and a real installed CLI/MCP stdio smoke on
 Ubuntu (Python 3.11/3.12), macOS and Windows (Python 3.12). Windows CI runs the real process-query

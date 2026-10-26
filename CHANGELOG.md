@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Replace the progress-template `hipson init` with consent-gated lead setup on Linux, macOS and
+  Windows: check prerequisites, initialize/migrate the task ledger, register Claude Code and/or Codex
+  MCP idempotently, verify initialize/tools-list, and print first-task commands. Add exact dry-run
+  plans, JSON reports, unique backups, byte-preserving Codex config appends and Windows `.cmd`
+  handling. Offline fake-client tests run in both test runners on every CI OS; platform smoke
+  previews setup without editing client config.
+- Match existing init MCP registrations by scope, resolved executable and full project-bound arguments.
+  Plan consent-gated Claude project overrides for conflicting user entries; stop before writes for
+  conflicting target/higher-scope Claude entries and Codex tables, including disabled entries.
 - Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
   project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
   and Codex rollout facts. POSIX process groups preserve orphan claims; Windows inherits guardian

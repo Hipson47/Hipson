@@ -63,6 +63,7 @@ log ""
 
 check "hipson --help" "$H" --help
 check "hipson doctor" "$H" doctor
+check "hipson init --dry-run (no client config edits)" "$H" init --project "$ROOT" --client none --dry-run --json
 
 # Platform identity the ledger relies on for crash recovery.
 boot=$(python3 -c 'from hipson.ledger import _boot_id; print(_boot_id() or "")' 2>&1)

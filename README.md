@@ -110,7 +110,7 @@ flowchart LR
 ## Quick start
 
 Requires Git and Python 3.11+; [uv](https://docs.astral.sh/uv/getting-started/installation/)
-can install Python for you. Choose your OS below, then run the task example.
+can install Python for you. Install for your OS, then run `hipson init` from your project.
 
 | OS | Support |
 |---|---|
@@ -126,9 +126,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
+cd /path/to/your/project
+hipson init
 ```
 
 ### macOS
@@ -140,9 +139,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
+cd /path/to/your/project
+hipson init
 ```
 
 The native runner uses Python for process containment; no Bash or GNU utilities are required.
@@ -161,9 +159,8 @@ Reopen PowerShell, then:
 uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
 uv tool update-shell
 $env:Path = "$(uv tool dir --bin);$env:Path"
-hipson --help
-hipson doctor
-claude mcp add --transport stdio hipson -- hipson mcp serve --project "$($PWD.Path)" --stdio
+Set-Location C:\path\to\your\project
+hipson init
 ```
 
 Run workers directly with `hipson task run` (example below). It records the assignment and
@@ -173,8 +170,16 @@ The Bash example and Linux agent e2e harness still require WSL2.
 ### Windows WSL2
 
 In an administrator PowerShell, install Ubuntu with `wsl --install -d Ubuntu` and restart if prompted.
-Open Ubuntu and follow the **Linux** commands above, including MCP registration from the Linux
-Claude Code installation. Keep projects in `~/code`, with Hipson and workers in that same WSL distro.
+Open Ubuntu and follow the **Linux** commands above. Keep projects in `~/code`, with the lead client,
+Hipson and workers in that same WSL distro.
+
+`hipson init` checks prerequisites, creates or migrates the ledger, registers MCP with Claude Code
+and/or Codex found on PATH, and verifies MCP with an initialize/tools-list handshake. It shows the
+plan and asks before making changes. Use `--dry-run` to preview, `--yes` for unattended setup,
+`--client claude|codex` to select a client, or `--client none` for the ledger only.
+Claude defaults to project scope (`.mcp.json`); `--scope user` selects its user config. Codex uses
+`$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Existing registrations are left alone;
+config edits get unique backups first. Restart the lead client after setup, then open your first task below.
 
 ### Run from a clone instead
 
@@ -184,15 +189,16 @@ On any OS, after installing uv and Git:
 git clone https://github.com/Hipson47/Hipson.git
 cd Hipson
 uv sync --python 3.12 --no-dev
-uv run --no-dev hipson --help
+uv run --no-dev hipson init --project /path/to/your/project
 ```
 
 Use `uv run --no-dev hipson` in place of `hipson` below. For the wrapper, virtualenv activation,
 MCP registration from a clone, PATH troubleshooting and verification commands, see
-[docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md). The MCP commands follow
-[Claude Code's stdio registration syntax](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
+[docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md).
 
 Run a task (the same command syntax works in PowerShell):
+
+Use the task id printed by `task open` in place of `T-0001` when your ledger already has tasks.
 
 ```bash
 hipson task open --project . --title "Fix parser" --objective "Parser accepts trailing commas" --acceptance "tests pass"
@@ -230,7 +236,8 @@ Write tools (each requires `approved=true`): `task.open`, `task.assign`, `task.f
 `task.status`, `task.reap`, `task.finding_add`, `task.finding_update`.
 
 ```bash
-claude mcp add hipson -- hipson mcp serve --project . --stdio
+hipson init --client claude
+# Or: hipson init --client codex
 ```
 
 The server only uses the configured ledger, never a caller-supplied database path, and read tools never create

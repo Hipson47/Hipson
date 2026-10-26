@@ -1,0 +1,34 @@
+Hipson platform smoke test - 2026-10-26T19:45:35Z
+system:  Linux 6.6.87.2-microsoft-standard-WSL2 x86_64
+bash:    5.2.21(1)-release
+git rev: 05dd4c6 (feat/init)
+uv:      uv 0.10.0
+
+PASS  uv sync --all-extras (install from this checkout)
+python:  3.13.12 sqlite 3.50.4
+
+PASS  hipson --help
+PASS  hipson doctor
+PASS  hipson init --dry-run (no client config edits)
+PASS  boot identity available (08cd8b98-0e14-4b22-a5ed-7da5917c30a3)
+PASS  task open
+PASS  task assign (rw claim)
+PASS  task board
+PASS  task finish
+PASS  task status -> review
+PASS  task status -> done
+PASS  task brief
+PASS  second writer on the same scope refused (exit 75)
+PASS  reap keeps a live worker
+PASS  reap releases a killed worker's claim
+PASS  scope reusable after reap
+PASS  agent-run.sh --help
+PASS  hipson task run --help
+PASS  native runner refuses overlapping writer (exit 75)
+PASS  native runner forwards TERM (exit 143)
+PASS  native runner scope reusable, stdin and refs
+PASS  native runner preserves failed child code (exit 9)
+PASS  native runner binds project (exit 76)
+PASS  MCP stdio initialize, tools/list, task.board
+
+RESULT: 24 passed, 0 failed

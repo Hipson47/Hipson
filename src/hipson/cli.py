@@ -18,6 +18,7 @@ from hipson import (
     agent_install,
     agents,
     evals,
+    init_setup,
     learning,
     ledger,
     mcp_server,
@@ -231,11 +232,22 @@ def command_scan_many(args: argparse.Namespace) -> int:
 
 
 def command_init(args: argparse.Namespace) -> int:
-    try:
-        project_mod.command_init(args)
-        return 0
-    except SystemExit as exc:
-        return int(exc.code or 0) if isinstance(exc.code, int) else 1
+    plan = init_setup.build_plan(project_path=args.project, client=args.client, scope=args.scope, dry_run=args.dry_run)
+    report = plan.report
+    needs_consent = any(action["status"] == "planned" for action in report["actions"])
+    if report["ok"] and not args.dry_run:
+        consent = args.yes
+        if needs_consent and not consent and sys.stdin.isatty():
+            print(init_setup.format_report(report), file=sys.stderr)
+            print("Apply this setup? [y/N] ", end="", file=sys.stderr, flush=True)
+            consent = sys.stdin.readline().strip().lower() in ("y", "yes")
+        if needs_consent and not consent:
+            report["ok"] = False
+            report["errors"].append("Setup not applied. Confirm interactively on a TTY or rerun with --yes; use --dry-run to preview.")
+        else:
+            init_setup.apply_plan(plan)
+    print(json.dumps(report, indent=2, ensure_ascii=False) if args.json else init_setup.format_report(report))
+    return 0 if report["ok"] else 1
 
 
 def command_check_setup(args: argparse.Namespace) -> int:
@@ -2406,9 +2418,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chat.set_defaults(func=command_chat)
 
-    init = subparsers.add_parser("init", help="Create docs/hipson-progress.md in a project")
-    init.add_argument("project", help="Project directory")
-    init.add_argument("--force", action="store_true", help="Overwrite existing progress file")
+    init = subparsers.add_parser("init", help="Set up the task ledger and lead MCP clients with confirmation")
+    init.add_argument("--project", default=".", help="Project directory; defaults to current directory")
+    init.add_argument("--client", choices=init_setup.CLIENTS, default="auto", help="Auto detects both clients on PATH; none sets up only the ledger")
+    init.add_argument("--scope", choices=("project", "user"), default="project", help="Claude registration scope; Codex uses CODEX_HOME/config.toml")
+    init.add_argument("--dry-run", action="store_true", help="Print exact commands and config additions without applying setup")
+    init.add_argument("--yes", action="store_true", help="Approve the displayed setup without an interactive prompt")
+    init.add_argument("--json", action="store_true", help="Print checks, actions and MCP verification as JSON")
     init.set_defaults(func=command_init)
 
     check = subparsers.add_parser("check-setup", help="Check local Hipson orchestrator setup")
