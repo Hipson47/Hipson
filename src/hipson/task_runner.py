@@ -178,7 +178,7 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
     windows = sys.platform == "win32"
     # A separate runner session/group isolates the worker tree from the invoking shell.
     # Its PGID must equal the recorded owner PID for the ledger's orphan recovery.
-    if not windows and os.getpgrp() != os.getpid():
+    if sys.platform != "win32" and os.getpgrp() != os.getpid():
         os.setsid()
     signum = 0
 
@@ -297,7 +297,7 @@ def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: f
             # Console-less workers cannot receive a break. Still enforce the grace
             # period and Job cleanup before releasing their claims.
             _message(f"could not forward Ctrl+Break: {exc}; enforcing Job cleanup after grace")
-    else:
+    elif sys.platform != "win32":  # job is None only off Windows; mypy needs the platform check
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)
         os.killpg(os.getpid(), number)
@@ -308,7 +308,7 @@ def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: f
     if _active(job):
         if job:
             job.terminate()
-        else:
+        elif sys.platform != "win32":
             # SIGKILLing the group would also kill this runner before finish. Enumerate
             # members and kill them individually, just like the Bash wrapper.
             result = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="], capture_output=True,
