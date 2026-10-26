@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.2.0 - 2026-10-26
+
+Release notes: [docs/release-1.2.md](docs/release-1.2.md).
+
 - **External audit 2026-10-26**
   - Refuse `done` with active assignments, claims, or open blocking/major findings
     in CLI and MCP. Require a reason for an audited force override and record

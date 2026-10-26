@@ -7,8 +7,8 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 480, zero CI skips](https://img.shields.io/badge/tests-480%20%7C%200%20CI%20skips-2ea043)
-![Bounded mutation score: 60.83%](https://img.shields.io/badge/bounded%20mutation-60.83%25-yellow)
+![Tests: 521, zero CI skips](https://img.shields.io/badge/tests-521%20%7C%200%20CI%20skips-2ea043)
+![Bounded mutation score: 65.12%](https://img.shields.io/badge/bounded%20mutation-65.12%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [Why](#why-it-exists) · [Built with itself](#built-with-itself) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP](#use-it-from-a-lead-agent-mcp) · [Docs](docs/README.md)
@@ -74,8 +74,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 480 tests, 0 skipped on Linux CI, run by both `pytest` and the dependency-free `scripts/run_tests.py` (2026-10-25; 404 tests when the ledger landed) |
-| Mutation gate | 60.83%: 1,129 / 1,856 mutants killed across four modules; baseline minimum 60.82%, caps 727 existing survivors, 0 mutants without tests, 0 timeouts (2026-10-25) |
+| Test suite | 521 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.2.0, 2026-10-26; 404 tests when the ledger landed) |
+| Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
 | Agent e2e | A real Codex agent (gpt-6.1-sol) is given a natural-language mission and must reach it with Hipson alone; oracles check the resulting ledger, not the agent's report. 3 scenarios (lead flow, claim conflict, crash recovery). Latest live run 3/3; the first run found a real bug (claims reaped across PID namespaces), now fixed. Local and on demand: [docs/AGENT_E2E.md](docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
