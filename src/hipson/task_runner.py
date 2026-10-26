@@ -23,6 +23,7 @@ from typing import NoReturn
 
 from hipson import ledger
 from hipson.redaction import redact_text
+from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job
 
 
@@ -73,19 +74,6 @@ def _project_check(project: str) -> dict[str, object]:
     return {"expected": str(expected), "actual": str(actual), "matches": matches}
 
 
-def _group_active() -> bool:
-    # The runner leads the worker group, preserving ledger PID/group recovery even if
-    # the runner is SIGKILLed. Exited zombies cannot write and do not block finishing.
-    result = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="], capture_output=True,
-                            text=True, check=True, timeout=2, start_new_session=True)
-    for line in result.stdout.splitlines():
-        pid, group, state = line.split()
-        if int(group) == os.getpid() and int(pid) != os.getpid():
-            if not state.startswith("Z"):
-                return True
-    return False
-
-
 def _rollout_facts(nonce: str, started: float, refs: list[str]) -> str:
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     for path in (home / "sessions").rglob("*.jsonl"):
@@ -120,14 +108,14 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
             path = Path(args.result_file).expanduser()
             if path.exists() and path.stat().st_size:
                 report = ledger.load_task_result(path)
-        except (ledger.LedgerError, OSError) as exc:
-            _message(f"result file rejected: {exc}")
+        except Exception as exc:  # Evidence must never override the process result, even on parser/resource limits.
+            _message(f"result file rejected ({type(exc).__name__})")
             summary += "; result file rejected"
     try:
         with closing(ledger.Ledger(db)) as store:
             try:
                 store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report)
-            except (ledger.LedgerError, OSError, sqlite3.Error):
+            except Exception:
                 if report is None:
                     raise
                 _message("result file rejected; recording process outcome without worker evidence")
@@ -175,11 +163,46 @@ def run(args: argparse.Namespace) -> int:
 
 def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: bool,
              check: dict[str, object], grace: float) -> int:
-    windows = sys.platform == "win32"
-    # A separate runner session/group isolates the worker tree from the invoking shell.
-    # Its PGID must equal the recorded owner PID for the ledger's orphan recovery.
-    if sys.platform != "win32" and os.getpgrp() != os.getpid():
+    if sys.platform != "win32":
+        if os.getpgrp() == os.getpid():
+            # A group leader cannot setsid; keep it as a signal/exit proxy and let
+            # a new owner establish a private session before taking any claims.
+            signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+            previous = {}
+            try:
+                owner = os.fork()
+                if owner == 0:
+                    try:
+                        os.setsid()
+                        code = _execute_owned(db, args, command, mismatch, check, grace, mask)
+                    except BaseException as exc:
+                        _message(f"private supervisor failed: {exc}; run 'hipson task reap'")
+                        code = 75
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(code)
+                def forward(number: int, frame: object) -> None:
+                    try:
+                        os.kill(owner, number)
+                    except ProcessLookupError:
+                        pass
+                previous = {number: signal.signal(number, forward) for number in signals}
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+                _, status = os.waitpid(owner, 0)
+                outcome = os.waitstatus_to_exitcode(status)
+                return outcome if outcome >= 0 else 128 - outcome
+            finally:
+                for number, handler in previous.items():
+                    signal.signal(number, handler)
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         os.setsid()
+    return _execute_owned(db, args, command, mismatch, check, grace)
+
+
+def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], mismatch: bool,
+                   check: dict[str, object], grace: float, mask: set[int | signal.Signals] | None = None) -> int:
+    windows = sys.platform == "win32"
     signum = 0
 
     def interrupted(number: int, frame: object) -> None:
@@ -190,13 +213,18 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
     signals = [signal.SIGINT, signal.SIGTERM]
     signals.append(signal.SIGBREAK if windows else signal.SIGHUP)  # type: ignore[attr-defined]
     previous = {number: signal.signal(number, interrupted) for number in signals}
+    if sys.platform != "win32" and mask is not None:
+        signal.pthread_sigmask(signal.SIG_SETMASK, mask)
     child: subprocess.Popen[bytes] | None = None
     job: Job | None = None
+    tree: ProcessTree | None = None
     assignment = ""
     launching = False
     code, note, safe = 75, "", True
     nonce, started = f"ledger-run-{uuid.uuid4()}", time.time()
     try:
+        if not windows:
+            tree = ProcessTree()
         with closing(ledger.Ledger(db)) as store:
             assignment = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
                                       owner_pid=os.getpid(), owner_host=socket.gethostname(),
@@ -206,7 +234,8 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
         _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
-        env = {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment}
+        env = {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
+               "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db)}
         with tempfile.TemporaryFile() as brief:
             if args.rollout:
                 # Reading stdin in a daemon keeps cancellation responsive even with an open pipe.
@@ -230,11 +259,14 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
             if not signum:
                 if windows:
                     job = Job()
+                    job.protect_runner()
                 launching = True
                 child = subprocess.Popen(command, env=env, stdin=brief if args.rollout else None,
                                          creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]  # CREATE_SUSPENDED
                 launching = False
                 safe = False
+                if tree:
+                    tree.child = child
                 if job:
                     try:
                         job.attach(child)
@@ -243,16 +275,18 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
                         child.wait()
                         raise
                 while child.poll() is None and not signum:
+                    if tree:
+                        tree.members()
                     time.sleep(0.05)
                 outcome = child.poll()
                 code = outcome if outcome is not None else 0
                 if code < 0:
                     code = 128 - code  # Shell-compatible status for a child killed by a signal.
-                if signum or _active(job):
+                if signum or _active(job, tree):
                     if not signum:
                         note = "; leftover processes stopped"
                         _message("worker left processes running; stopping them before finishing")
-                    safe = _stop(child, job, signum or signal.SIGTERM, grace)
+                    safe = _stop(child, job, signum or signal.SIGTERM, grace, tree)
                 else:
                     safe = True
             if signum:
@@ -261,7 +295,7 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
         _message(f"{exc}; worker not started" if child is None else str(exc))
         if child is not None:
             try:
-                safe = _stop(child, job, signal.SIGTERM, grace)
+                safe = _stop(child, job, signal.SIGTERM, grace, tree)
             except (OSError, subprocess.SubprocessError) as cleanup_error:
                 safe = False
                 _message(f"could not confirm worker cleanup: {cleanup_error}")
@@ -282,14 +316,21 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
             _message(f"worker processes survived KILL; leaving {assignment} active (run 'hipson task reap' later)")
         for number, handler in previous.items():
             signal.signal(number, handler)
+        if tree:
+            tree.close()
     return code
 
 
-def _active(job: Job | None) -> bool:
-    return job.active() if job else _group_active()
+def _active(job: Job | None, tree: ProcessTree | None = None) -> bool:
+    if job:
+        return job.active()
+    if tree is None:
+        raise OSError("worker process tracking is unavailable")
+    return tree.active()
 
 
-def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: float) -> bool:
+def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: float,
+          tree: ProcessTree | None = None) -> bool:
     if job:
         try:
             job.interrupt(child.pid)
@@ -300,28 +341,22 @@ def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: f
     elif sys.platform != "win32":  # job is None only off Windows; mypy needs the platform check
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)
-        os.killpg(os.getpid(), number)
+        if tree is None:
+            raise OSError("worker process tracking is unavailable")
+        tree.send(number)  # Includes group members and detached descendants; excludes the owner.
     deadline = time.monotonic() + grace
-    while _active(job) and time.monotonic() < deadline:
+    while _active(job, tree) and time.monotonic() < deadline:
         child.poll()
         time.sleep(0.05)
-    if _active(job):
+    if _active(job, tree):
         if job:
             job.terminate()
-        elif sys.platform != "win32":
-            # SIGKILLing the group would also kill this runner before finish. Enumerate
-            # members and kill them individually, just like the Bash wrapper.
-            result = subprocess.run(["ps", "-e", "-o", "pid=,pgid=,stat="], capture_output=True,
-                                    text=True, check=True, timeout=2, start_new_session=True)
-            for line in result.stdout.splitlines():
-                pid, group, state = line.split()
-                if int(group) == os.getpid() and int(pid) != os.getpid() and not state.startswith("Z"):
-                    try:
-                        os.kill(int(pid), signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+        elif sys.platform != "win32" and tree:
+            tree.send(signal.SIGKILL)
     deadline = time.monotonic() + 5
-    while _active(job) and time.monotonic() < deadline:
+    while _active(job, tree) and time.monotonic() < deadline:
         child.poll()
+        if sys.platform != "win32" and tree:
+            tree.send(signal.SIGKILL)  # Also catch children spawned during escalation.
         time.sleep(0.05)
-    return not _active(job)
+    return not _active(job, tree)

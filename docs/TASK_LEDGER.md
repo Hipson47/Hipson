@@ -247,8 +247,10 @@ only when it exists and is non-empty after the worker exits. If finish rejects t
 retries without the file and appends `result file rejected` to the summary.
 Missing/empty files use the ordinary finish path. Valid reports are attached to
 the assignment; the child's exit code still determines the process outcome and
-wrapper exit code. A finish storage failure is reported using the existing reap
-guidance; the wrapper does not claim success for an unrecorded outcome.
+wrapper exit code. Result files are limited to 1 MiB. Invalid UTF-8, JSON parser
+limits (including excessive integers or nesting), and evidence validation failures
+use the same fallback; they cannot replace the process outcome. A finish storage failure
+is reported using the existing reap guidance; the wrapper does not claim success for an unrecorded outcome.
 
 ## Findings and worker results (S5a-1)
 
@@ -336,17 +338,31 @@ runner options from the child command. `--db` works before or after `run`; `HIPS
 Exit codes: child's status (128 + signal on POSIX), **75** for assignment refusal, **76** for
 project mismatch, **64** for invalid arguments. A missing executable returns **127**; an unusable executable returns **126**.
 
-The runner records its own PID, hostname, boot identity and Linux PID namespace where available.
+The runner records its owner PID, hostname, boot identity and Linux PID namespace where available.
 The child receives `HIPSON_ROLE=worker`, `HIPSON_TASK`, and `HIPSON_ASSIGNMENT`, with inherited
-stdin/stdout/stderr. POSIX runners establish an isolated session/process group (or retain their
-existing group when already its leader); the worker shares that group so surviving descendants
-retain claims after runner SIGKILL. INT/TERM/HUP are forwarded, then remaining processes are
+stdin/stdout/stderr. POSIX runners always establish a private session/process group before
+assignment. When the invoking runner already leads a group, it forks a private supervisor and
+proxies signals and the exit code; the supervisor's PID is the recorded owner. Existing members
+of the caller's group are excluded from cleanup. The worker shares the owner's group so
+surviving descendants retain claims after runner SIGKILL. INT/TERM/HUP are forwarded, then remaining processes are
 killed after a grace period. The runner stops leftover descendants even after a successful child exit,
 then records finish. `AGENT_RUN_GRACE_SECONDS` controls the grace period (default 15 seconds).
 
-Windows workers start suspended with `CREATE_NEW_PROCESS_GROUP`, attach to a non-inheritable,
-non-breakaway Job Object, then resume. `KILL_ON_JOB_CLOSE` contains and kills the whole descendant
-tree on runner death. Ctrl+C/Ctrl+Break are forwarded as Ctrl+Break; after grace the job is terminated.
+On Linux the owner enables `PR_SET_CHILD_SUBREAPER` before assignment. Orphans are adopted by
+the owner even after a descendant calls `setsid`; all living descendants retain claims through
+grace and escalation, and adopted zombies are reaped. Kernel child-state checks prevent an
+empty process snapshot from releasing claims during reparenting. On macOS process-tree snapshots track
+observed descendants by PID and start time. This is best effort: a descendant that detaches and
+loses its ancestry between snapshots may escape tracking. macOS has no Linux subreaper support.
+
+Before Windows worker creation, the runner joins a non-inheritable, non-breakaway guardian Job
+with `KILL_ON_JOB_CLOSE`. The child inherits membership atomically during creation, including
+the interval before `Popen` returns. It starts suspended with `CREATE_NEW_PROCESS_GROUP`, joins
+a nested worker Job, then resumes. The worker Job permits cleanup before ledger finish without
+terminating the runner. The guardian handle stays open until the interpreter exits; Windows
+closes it on runner death and kills the whole tree, including a child still in startup.
+This uses [Windows Job inheritance and nesting](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
+Ctrl+C/Ctrl+Break are forwarded as Ctrl+Break; after grace the worker job is terminated.
 Job process counts confirm cleanup before finish. PID liveness checks use query-only handles,
 never `os.kill` probes. If containment cannot be established the worker does not execute.
 After a hard-killed runner, use `hipson task reap` to release the orphaned assignment.
@@ -386,13 +402,21 @@ owner-less or unverifiable owners. Recovery uses these conditions:
 | Reason | Condition |
 | --- | --- |
 | `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID or macOS boot-session UUID. |
-| `pid_gone` | The recorded host equals the current hostname, any recorded PID namespace matches the current namespace, and the supplied PID (plus its POSIX process group on Linux/macOS) no longer exists. |
+| `pid_gone` | The recorded host equals the current hostname, any recorded PID namespace matches the current namespace, and the supplied PID (plus its POSIX group) no longer exists, with no identifiable detached Linux worker remaining. |
 | `lease_expired` | No verified live owner protects the assignment, and its lease has expired. |
 
 On Linux/macOS, owner checks use `os.kill(pid, 0)` and, if the PID is absent,
 `os.killpg(pid, 0)`. Only ESRCH from both proves the owner gone; EPERM or any
 other probe error means alive. A surviving worker holds the claim after its
 runner is killed. Zombies also count as present until their parent reaps them.
+Linux `task run` also supplies inherited `HIPSON_RUN_OWNER` and `HIPSON_RUN_DB` markers.
+After the owner and original group disappear, recovery checks bounded `/proc/*/environ` reads
+for those markers plus `HIPSON_ASSIGNMENT`. A matching detached process retains the claim.
+Host, boot and PID-namespace checks still apply before probing. This is best effort after owner
+SIGKILL: descendants with removed markers, unreadable environments or markers beyond the 1 MiB
+read limit cannot be identified from the existing ledger owner fields. On macOS, detached descendants cannot be
+rediscovered after owner death; only the original group remains recoverable. Use explicit
+finish only after checking such descendants. The legacy Bash wrapper has only group tracking.
 On native Windows, a query-only process handle checks `GetExitCodeProcess == STILL_ACTIVE`;
 no signal is sent and no process group is probed. Access denied and unknown query errors
 keep claims active. Windows has no boot identity here, so PID reuse after reboot is guarded

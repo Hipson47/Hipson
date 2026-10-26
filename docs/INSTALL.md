@@ -84,8 +84,10 @@ hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src
 hipson task board
 ```
 
-The runner attaches a suspended child to a Job Object before allowing it to execute.
-Descendants stay in that job; `KILL_ON_JOB_CLOSE` terminates the tree if the runner is killed.
+Before creating a worker, the runner joins a guardian Job Object. The child inherits its
+membership during process creation, so runner death also cleans up a suspended child still
+in startup. A nested worker Job supports cleanup before finish; the guardian handle remains
+open until interpreter exit. `KILL_ON_JOB_CLOSE` terminates the tree if the runner is killed.
 Ctrl+C and Ctrl+Break forward Ctrl+Break to the worker's process group, followed by bounded
 Job termination when needed. Leftovers stop before the runner records finish and releases claims.
 The Linux agent e2e harness still needs WSL2.

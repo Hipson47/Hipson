@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 from contextlib import closing, contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 from hipson import ledger, task_runner
@@ -16,7 +17,7 @@ from tests.support import ROOT, hipson_cli
 
 
 class _NativeRun(bash._Run):
-    def start(self, source, *, extra=(), stdin="", cwd=None, group_leader=False):
+    def start(self, source, *, extra=(), stdin="", cwd=None, group_leader=False, before_main=""):
         worker = self.root / f"worker-{len(self.processes)}.py"
         worker.write_text(source, encoding="utf-8")
         input_path = self.root / f"stdin-{len(self.processes)}"
@@ -29,7 +30,7 @@ class _NativeRun(bash._Run):
         # Windows venv python.exe can be a launcher. Report the PID from the actual
         # runner interpreter, which owns the assignment and the Job handle.
         runner_pid = self.root / f"runner-{len(self.processes)}.pid"
-        bootstrap = ("import os; from pathlib import Path; from hipson.cli import main; "
+        bootstrap = before_main + "\n" + ("import os; from pathlib import Path; from hipson.cli import main; "
                      f"Path({str(runner_pid)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
                      "raise SystemExit(main())")
         process = subprocess.Popen(
@@ -42,12 +43,41 @@ class _NativeRun(bash._Run):
     def wait(self, process):
         return process.wait(timeout=20)
 
+    def ready(self, process):
+        pids = _ready(self, process)
+        owner = self.view()[0]["assignments"][0]["owner_pid"]
+        assert all(os.getpgid(pid) == owner for pid in pids)
+        return pids
+
+    def kill(self, process):
+        if sys.platform != "win32":
+            process.kill()
+            return
+        from hipson.task_windows import Job
+        # venv launchers can have a different PID from the interpreter owning
+        # the Job. Terminate that owner, which is also the ledger's identity.
+        path = self.root / f"runner-{self.processes.index(process)}.pid"
+        if not path.exists():
+            process.kill()
+            return
+        probe = Job()
+        probe.kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        probe.kernel.TerminateProcess.restype = ctypes.c_int
+        handle = probe.kernel.OpenProcess(1, False, int(path.read_text()))
+        try:
+            if handle:
+                assert probe.kernel.TerminateProcess(handle, 1)
+        finally:
+            if handle:
+                probe.kernel.CloseHandle(handle)
+            probe.close()
+
     def cleanup(self):
         if sys.platform != "win32":
             return super().cleanup()
         for process in self.processes:
             if process.poll() is None:
-                process.kill()
+                self.kill(process)
             process.wait(timeout=10)
         for handle in self.handles:
             handle.close()
@@ -244,7 +274,7 @@ def test_task_run_live_claim_and_tree_cleanup_before_finish(tmp_path):
         if sys.platform == "win32":
             # CI may have no console. Allocate one before creating a new runner below;
             # hard-killing this holder exercises KILL_ON_JOB_CLOSE instead.
-            holder.kill()
+            run.kill(holder)
             run.wait(holder)
             bash._wait_for(lambda: _stopped(pids), "Job did not kill descendants after runner death")
             with closing(ledger.Ledger(run.db)) as store:
@@ -358,11 +388,34 @@ def test_task_run_posix_recovery_and_zombies(tmp_path):
         tests = [bash.test_agent_run_sigkill_retains_claim_until_surviving_worker_dies_then_reaps,
                  bash.test_agent_run_group_leader_without_own_session_stops_live_descendant]
         if sys.platform == "linux":
-            tests.append(bash.test_agent_run_unreaped_zombie_grandchild_does_not_prevent_finish)
+            tests.append(_native_zombie_check)
         for index, test in enumerate(tests):
             root = tmp_path / str(index)
             root.mkdir()
             test(root)
+
+
+def _native_zombie_check(root):
+    with _case(root) as run:
+        process = run.start("""
+import json, os, subprocess, sys, time
+from pathlib import Path
+child = subprocess.Popen([sys.executable, '-c', 'pass'])
+os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+Path('ready.tmp').write_text(json.dumps([os.getpid(), child.pid]))
+Path('ready.tmp').rename('ready.json')
+while not Path('exit-worker').exists(): time.sleep(0.01)
+os._exit(0)
+""")
+        _, grandchild = run.ready(process)
+        status = Path(f"/proc/{grandchild}/status")
+        assert "\nState:\tZ" in status.read_text()
+        (root / "exit-worker").touch()
+        assert run.wait(process) == 0, run.stderr(process)
+        assert not status.exists(), "The Linux runner should reap its adopted zombie"
+        view, events = run.view()
+        assert view["claims"] == [] and view["assignments"][0]["status"] == "passed"
+        assert events[-1]["type"] == "finished"
 
 
 def test_task_run_missing_boot_identity_and_project_probe_failure(tmp_path):
@@ -411,7 +464,7 @@ def test_task_run_windows_job_api_containment_and_fail_closed():
 
     kernel = SimpleNamespace(**{name: Mock(return_value=True) for name in (
         "CreateJobObjectW", "SetInformationJobObject", "QueryInformationJobObject", "AssignProcessToJobObject",
-        "TerminateJobObject", "GenerateConsoleCtrlEvent", "OpenProcess", "CloseHandle", "CreateToolhelp32Snapshot", "Thread32First",
+        "TerminateJobObject", "GenerateConsoleCtrlEvent", "OpenProcess", "GetCurrentProcess", "CloseHandle", "CreateToolhelp32Snapshot", "Thread32First",
         "Thread32Next", "OpenThread", "ResumeThread")})
     kernel.CreateJobObjectW.return_value = 0x123456789
     kernel.SetInformationJobObject.side_effect = configure

@@ -402,15 +402,24 @@ def load_task_result(path: str | Path) -> TaskResult:
         raise LedgerError("Invalid worker result JSON: non-finite number")
 
     try:
+        # Bound the allocation even if a worker grows/replaces the file while read.
+        with Path(path).expanduser().open("rb") as stream:
+            data = stream.read(2**20 + 1)
+        if len(data) > 2**20:
+            raise LedgerError("Invalid worker result JSON: exceeds 1 MiB limit")
         value = json.loads(
-            Path(path).expanduser().read_text(encoding="utf-8"),
+            data.decode("utf-8"),
             object_pairs_hook=unique_object, parse_constant=invalid_constant,
         )
+        return validate_task_result(value)
+    except LedgerError:
+        raise
     except json.JSONDecodeError as exc:
         raise LedgerError(f"Invalid worker result JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})") from exc
     except UnicodeError as exc:
         raise LedgerError("Invalid worker result JSON: expected UTF-8") from exc
-    return validate_task_result(value)
+    except (ValueError, RecursionError, MemoryError) as exc:
+        raise LedgerError("Invalid worker result JSON: parser resource limit") from exc
 
 
 def _timestamp() -> str:
@@ -807,6 +816,9 @@ class Ledger:
             return "lease_expired" if expired else None
         if item["owner_pid"] is not None:
             if not self._pid_alive(item["owner_pid"]):
+                from hipson.task_posix import marked_descendant_alive
+                if marked_descendant_alive(item["owner_pid"], str(self.path), item["id"]):
+                    return None
                 return "pid_gone"
             if boot is not None and item["owner_boot_id"] == boot and item["owner_pid_namespace"] == namespace:
                 # A verified live PID or process group retains ownership beyond its lease.

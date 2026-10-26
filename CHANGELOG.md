@@ -4,12 +4,16 @@
 
 - Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
   project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
-  and Codex rollout facts. POSIX process groups preserve orphan claims; Windows suspends workers
-  until Job Object attachment and kills their entire tree on runner death. Native runner tests
+  and Codex rollout facts. POSIX process groups preserve orphan claims; Windows inherits guardian
+  Job membership during worker creation and kills the entire tree on runner death. Native runner tests
   run in the existing Ubuntu/macOS/Windows CI matrix; platform smoke includes runner checks.
 - Report Windows console signal delivery errors while preserving Job cleanup. Correct native
   runner tests for JSON path escaping, venv launcher PIDs and CPython's deferred SIGBREAK
   dispatch during long sleeps; require the worker to record the exact forwarded signal.
+- Isolate group-leading POSIX runners through a private supervisor, preserving caller-group
+  siblings. Track detached descendants with Linux subreaping and macOS process snapshots;
+  Linux orphan recovery also checks inherited worker identity markers. Reject oversized or
+  parser-limit result files while recording the worker's original process outcome.
 
 ## 1.2.1 - 2026-10-26
 

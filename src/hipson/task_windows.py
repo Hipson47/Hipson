@@ -6,6 +6,8 @@ import ctypes
 import subprocess
 from ctypes import wintypes
 
+_guardian: Job | None = None
+
 
 class _BasicLimits(ctypes.Structure):
     _fields_ = [
@@ -48,6 +50,7 @@ class Job:
             "SetInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD], wintypes.BOOL),
             "QueryInformationJobObject": ([wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p], wintypes.BOOL),
             "AssignProcessToJobObject": ([wintypes.HANDLE, wintypes.HANDLE], wintypes.BOOL),
+            "GetCurrentProcess": ([], wintypes.HANDLE),
             "GenerateConsoleCtrlEvent": ([wintypes.DWORD, wintypes.DWORD], wintypes.BOOL),
             "TerminateJobObject": ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
             "OpenProcess": ([wintypes.DWORD, wintypes.BOOL, wintypes.DWORD], wintypes.HANDLE),
@@ -74,6 +77,23 @@ class Job:
     @staticmethod
     def _error() -> None:
         raise ctypes.WinError()  # type: ignore[attr-defined]
+
+    def protect_runner(self) -> None:
+        """Establish inherited containment BEFORE CreateProcess, including its startup gap.
+
+        A separate guardian contains the runner itself. Keep its non-inheritable
+        handle for the interpreter's entire lifetime: closing it would kill us.
+        The worker's nested Job can still be terminated/closed before ledger finish.
+        Windows closes the guardian on runner exit (including TerminateProcess).
+        """
+        global _guardian
+        if _guardian is None:
+            guardian = Job()
+            if not guardian.kernel.AssignProcessToJobObject(guardian.handle, guardian.kernel.GetCurrentProcess()):
+                error = ctypes.WinError()  # type: ignore[attr-defined]
+                guardian.close()
+                raise error
+            _guardian = guardian
 
     def attach(self, child: subprocess.Popen[bytes]) -> None:
         # The process was created suspended; it cannot execute/spawn before assignment.
