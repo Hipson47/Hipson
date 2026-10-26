@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
 
-from hipson.ledger import Ledger
+from hipson.ledger import Ledger, _boot_id, _pid_namespace
 from tests.support import hipson_cli
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,11 +31,17 @@ def _skip(reason):
     raise SkipTest(reason)
 
 
-def _supported():
-    if sys.platform != "linux" or any(shutil.which(tool) is None for tool in ("bash", "setsid", "ps")):
-        return _skip("requires Linux process groups, setsid, ps and bash")
+def _supported(*, linux_only=False):
+    if linux_only and sys.platform != "linux":
+        return _skip("requires Linux prctl subreaper and /proc zombie inspection")
+    if sys.platform not in ("linux", "darwin"):
+        return _skip("agent-run.sh requires Linux/WSL2 or macOS POSIX process groups; native Windows is unsupported")
+    if any(shutil.which(tool) is None for tool in ("bash", "python3", "ps")):
+        return _skip("requires bash, python3 and ps")
     if _hipson_bin() is None:
         return _skip("requires an executable hipson CLI (HIPSON_BIN, PATH, or checkout .venv)")
+    if sys.platform == "darwin":
+        return True
     libc = ctypes.CDLL(None, use_errno=True)
     previous = ctypes.c_int()
     if not hasattr(libc, "prctl") or libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
@@ -75,6 +81,9 @@ def _reap_adopted(pids):
 def _subreaper():
     # Reap adopted descendants like an init would; container PID 1 may leave zombies forever.
     # Only reap known worker PIDs, never subprocess.Popen's direct children.
+    if sys.platform != "linux":
+        yield  # macOS init reaps orphaned descendants; Linux containers may not.
+        return
     libc = ctypes.CDLL(None, use_errno=True)
     previous = ctypes.c_int()
     assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0  # PR_GET_CHILD_SUBREAPER
@@ -200,6 +209,7 @@ Path('ready.tmp').rename('ready.json')
 
 
 def test_agent_run_help_succeeds_without_opening_ledger(tmp_path: Path):
+    _supported()
     db = tmp_path / "missing.sqlite"
     for flag in ("--help", "-h"):
         proc = subprocess.run(["bash", str(RUNNER), flag], env={**os.environ, "HIPSON_LEDGER": str(db)},
@@ -226,7 +236,8 @@ print('worker output')
         assert run.wait(process) == 0, run.stderr(process)
         view, events = run.view()
         assignment = view["assignments"][0]
-        assert assignment["owner_pid_namespace"] == os.readlink("/proc/self/ns/pid")
+        assert assignment["owner_pid_namespace"] == _pid_namespace()
+        assert assignment["owner_boot_id"] == _boot_id()
         assert assignment["status"] == "passed" and view["claims"] == []
         assert json.loads((tmp_path / "received.json").read_text()) == {
             "stdin": "A worker brief\nwith a second line\n", "role": "worker",
@@ -359,7 +370,7 @@ while not Path('exit-worker').exists(): time.sleep(0.01)
 
 
 def test_agent_run_unreaped_zombie_grandchild_does_not_prevent_finish(tmp_path: Path):
-    if not _supported():
+    if not _supported(linux_only=True):
         return
     if not hasattr(os, "waitid") or not hasattr(os, "WNOWAIT"):
         _skip("requires waitid WNOWAIT to leave a known exited child unreaped")
@@ -442,11 +453,58 @@ def test_agent_run_missing_boot_id_file(tmp_path: Path):
         assert run.wait(process) == 0, run.stderr(process)
         view, events = run.view()
         assignment = view["assignments"][0]
-        assert assignment["owner_boot_id"] is None
+        assert assignment["owner_boot_id"] == (_boot_id() if sys.platform == "darwin" else None)
         assert assignment["owner_pid"] == process.pid
         assert assignment["status"] == "passed" and view["claims"] == []
         assert events[-1]["type"] == "finished"
         assert (tmp_path / "stdout-0").read_text() == "worker ran without boot id\n"
+
+
+def test_agent_run_python_session_and_uuid_fallbacks(tmp_path: Path):
+    _supported()
+    # Exercise the macOS fallbacks on Linux too, with no setsid, uuidgen or /proc UUID.
+    bin_dir = tmp_path / "portable-bin"
+    bin_dir.mkdir()
+    for tool in ("bash", "ps", "tr", "mktemp", "touch", "hostname", "readlink", "rm", "sleep", "uname", "sysctl",
+                 "find", "grep", "head", "cut"):
+        resolved = shutil.which(tool)
+        if resolved:
+            (bin_dir / tool).symlink_to(resolved)
+    (bin_dir / "python3").symlink_to(sys.executable)
+    cat = bin_dir / "cat"
+    cat.write_text('#!/bin/bash\ncase "${1:-}" in /proc/*) exit 1;; esac\nexec "$AGENT_TEST_REAL_CAT" "$@"\n',
+                   encoding="utf-8")
+    cat.chmod(0o755)
+    bash_env = tmp_path / "bash-env"
+    bash_env.write_text("unset BASHPID\n", encoding="utf-8")  # Stock macOS Bash 3.2 has no BASHPID.
+    with _case(tmp_path) as run:
+        run.env.update(PATH=str(bin_dir), AGENT_TEST_REAL_CAT=shutil.which("cat"), BASH_ENV=str(bash_env),
+                       CODEX_HOME=str(tmp_path / "codex home"))
+        process = run.start("""
+import json, os, re, sys, uuid
+from pathlib import Path
+brief = sys.stdin.read()
+uuid.UUID(re.search(r'ledger-run-([^ ]+) -->', brief)[1])
+sessions = Path(os.environ['CODEX_HOME']) / 'sessions'
+sessions.mkdir(parents=True)
+(sessions / 'run.jsonl').write_text(json.dumps({'brief': brief, 'model': 'offline', 'reasoning_effort': 'high'},
+                                             separators=(',', ':')), encoding='utf-8')
+print('worker in session', os.getsid(0))
+""", stdin="Worker brief", extra=("--rollout", "codex"))
+        assert run.wait(process) == 0, run.stderr(process)
+        assert (tmp_path / "stdout-0").read_text().strip() == f"worker in session {process.pid}"
+        view, events = run.view()
+        assert view["assignments"][0]["status"] == "passed" and view["claims"] == []
+        assert "model=offline effort=high" in events[-1]["summary"]
+    signal_root = tmp_path / "signal"
+    signal_root.mkdir()
+    with _case(signal_root) as run:
+        run.env.update(PATH=str(bin_dir), AGENT_TEST_REAL_CAT=shutil.which("cat"), BASH_ENV=str(bash_env))
+        process = run.start(_tree_worker())
+        pids = run.ready(process)
+        process.terminate()
+        run.finished_after_stopping(pids)
+        assert run.wait(process) == 143, run.stderr(process)
 
 
 def test_agent_run_cli_resolution():
@@ -458,9 +516,10 @@ def test_agent_run_cli_resolution():
         which.side_effect = ["/installed/hipson", "/installed/hipson"]
         assert _hipson_bin() == "/installed/hipson"
     with patch.dict(os.environ, {"HIPSON_BIN": ""}), patch.object(shutil, "which") as which:
-        which.side_effect = [None, str(ROOT / ".venv" / "bin" / "hipson")]
-        assert _hipson_bin() == str(ROOT / ".venv" / "bin" / "hipson")
-        which.assert_called_with(str(ROOT / ".venv" / "bin" / "hipson"))
+        expected = str(ROOT / ".venv" / ("Scripts/hipson.exe" if sys.platform == "win32" else "bin/hipson"))
+        which.side_effect = [None, expected]
+        assert _hipson_bin() == expected
+        which.assert_called_with(expected)
 
 
 def test_agent_run_missing_prerequisites_fail_in_linux_ci():

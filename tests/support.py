@@ -15,5 +15,6 @@ def require_no_skips() -> bool:
 def hipson_cli() -> str | None:
     """The installed CLI: HIPSON_BIN, then PATH, then this checkout's .venv (CI installs without one)."""
     # An explicit override is authoritative; do not hide a broken override with a fallback.
-    candidate = os.environ.get("HIPSON_BIN") or shutil.which("hipson") or str(ROOT / ".venv" / "bin" / "hipson")
+    venv_cli = ROOT / ".venv" / ("Scripts/hipson.exe" if sys.platform == "win32" else "bin/hipson")
+    candidate = os.environ.get("HIPSON_BIN") or shutil.which("hipson") or str(venv_cli)
     return shutil.which(candidate)

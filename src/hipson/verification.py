@@ -113,6 +113,8 @@ def _run_one(*, command: str, cwd: Path, timeout: int) -> VerificationResult:
             argv,
             cwd=str(cwd),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             check=False,

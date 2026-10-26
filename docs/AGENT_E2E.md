@@ -11,6 +11,9 @@ runs are deliberately absent from CI.
 Use Linux/WSL with this checkout's development environment installed, Git, Bash,
 `setsid`, and `ps`. The harness uses the Python standard library and the local
 Hipson package; it adds no runtime dependency.
+The harness requires Linux `/proc` and `prctl` process supervision; its tests
+explicitly skip on macOS and native Windows. This limit does not apply to the
+macOS CLI or worker wrapper. Linux CI continues to require zero skipped tests.
 
 ```sh
 # Offline: execute all three reference solutions, without invoking Codex.

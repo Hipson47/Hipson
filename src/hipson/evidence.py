@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -18,10 +19,13 @@ LEDGER_FILE = "evidence.jsonl"
 # Absolute end-of-string in Python and JSON Schema; '$' alone admits a final newline.
 TASK_ID_PATTERN = r"^T-[0-9]{4,}(?![\s\S])"
 
-try:
-    import fcntl
-except ImportError:  # Windows and other platforms without flock.
-    fcntl = None  # type: ignore[assignment]
+if sys.platform == "win32":
+    fcntl = None
+else:
+    try:
+        import fcntl
+    except ImportError:  # Other platforms without flock.
+        fcntl = None  # type: ignore[assignment]
 
 
 def validate_task_id(task_id: str | None) -> str | None:

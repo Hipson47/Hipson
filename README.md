@@ -109,15 +109,87 @@ flowchart LR
 
 ## Quick start
 
-Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
+Requires Git and Python 3.11+; [uv](https://docs.astral.sh/uv/getting-started/installation/)
+can install Python for you. Choose your OS below, then run the task example.
+
+| OS | Support |
+|---|---|
+| Linux | Full CLI, ledger, MCP, evidence and worker wrapper |
+| macOS | Full CLI, ledger, MCP, evidence and worker wrapper (Bash + `python3`) |
+| Windows native | CLI, ledger, MCP and evidence; use leases and explicit finish for workers |
+| Windows WSL2 | Full Linux support; recommended Windows route for running workers |
+
+### Linux
 
 ```bash
-git clone https://github.com/Hipson47/Hipson.git && cd Hipson
-uv sync --all-extras
-source .venv/bin/activate      # or prefix every command below with `uv run`
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool update-shell
 hipson --help
 hipson doctor
+claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
 ```
+
+### macOS
+
+Install Git first (`xcode-select --install` if missing). In Terminal:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool update-shell
+hipson --help
+hipson doctor
+claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
+```
+
+The wrapper uses Python's `os.setsid()` when `setsid` is absent. No GNU utilities are required.
+
+### Windows native (PowerShell)
+
+Install Git for Windows, then install uv:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+Reopen PowerShell, then:
+
+```powershell
+uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool update-shell
+$env:Path = "$(uv tool dir --bin);$env:Path"
+hipson --help
+hipson doctor
+claude mcp add --transport stdio hipson -- hipson mcp serve --project "$($PWD.Path)" --stdio
+```
+
+Use `--lease-seconds 3600` on `hipson task assign` and finish assignments explicitly.
+`examples/agent-run.sh` and the agent e2e harness do not run natively on Windows.
+
+### Windows WSL2
+
+In an administrator PowerShell, install Ubuntu with `wsl --install -d Ubuntu` and restart if prompted.
+Open Ubuntu and follow the **Linux** commands above, including MCP registration from the Linux
+Claude Code installation. Keep projects in `~/code`, with Hipson and workers in that same WSL distro.
+
+### Run from a clone instead
+
+On any OS, after installing uv and Git:
+
+```text
+git clone https://github.com/Hipson47/Hipson.git
+cd Hipson
+uv sync --python 3.12 --no-dev
+uv run --no-dev hipson --help
+```
+
+Use `uv run --no-dev hipson` in place of `hipson` below. For the wrapper, virtualenv activation,
+MCP registration from a clone, PATH troubleshooting and verification commands, see
+[docs/INSTALL.md](docs/INSTALL.md). The MCP commands follow
+[Claude Code's stdio registration syntax](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
 
 Run a task by hand to see the model:
 
@@ -143,7 +215,9 @@ hipson task events --task "$TASK"
 
 The wrapper exits with the worker's code, or 75 when a live writer already holds an overlapping scope.
 
-The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`. Details, recovery rules and limits:
+The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`
+(`$env:USERPROFILE\.config\hipson\ledger.sqlite` on native Windows).
+`HIPSON_HOME` and `XDG_CONFIG_HOME` can change its config directory. Details, recovery rules and limits:
 [docs/TASK_LEDGER.md](docs/TASK_LEDGER.md).
 
 ## Use it from a lead agent (MCP)
@@ -200,12 +274,15 @@ uv run python -m pytest -q
 uv build
 ```
 
-CI runs the same gates on Python 3.11 and 3.12, plus `pip-audit` and an installed-wheel smoke test.
+CI runs Linux on Python 3.11/3.12 and macOS/Windows on Python 3.12, including installed CLI ledger
+commands and MCP initialize/tools-list over stdio. Mutation testing and `pip-audit` run on Linux.
 On Linux with `CI` set, both test runners fail on any skip, including pytest collection skips.
 The standalone runner reports passed, skipped and failed counts separately. Outside CI,
 missing prerequisites produce explicit skips, including the pytest-policy probe when pytest is unavailable.
 Wrapper tests resolve the installed CLI
-through `HIPSON_BIN`, then `PATH`, then the checkout's `.venv/bin/hipson`; missing prerequisites fail CI.
+through `HIPSON_BIN`, then `PATH`, then the checkout's `.venv/bin/hipson`
+(`.venv\Scripts\hipson.exe` on Windows); missing prerequisites fail Linux CI.
+The agent e2e harness stays Linux/WSL2-only; other platforms report explicit skips.
 Artifact tests validate every keyword currently used in `schemas/`, including nested array items,
 additional properties, references, nullable types, patterns and bounds. Unsupported schema keywords
 fail even in unused branches.

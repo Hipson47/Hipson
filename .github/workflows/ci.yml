@@ -6,10 +6,19 @@ on:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+    env:
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -27,13 +36,16 @@ jobs:
       - name: Bandit
         run: bandit -q -r src -c pyproject.toml
       - name: Dependency audit
+        if: runner.os == 'Linux'
         run: pip-audit
       - name: Run tests
         run: python scripts/run_tests.py
       - name: Pytest
         run: python -m pytest -q
+      - name: Installed CLI ledger and MCP stdio smoke
+        run: python -m pytest -q tests/test_cross_platform.py::test_installed_cli_and_mcp_smoke
       - name: Mutation testing
-        if: matrix.python-version == '3.12'
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
           mutmut run --max-children 2
           mutmut export-cicd-stats
@@ -44,6 +56,7 @@ jobs:
       - name: Build wheel and sdist
         run: uv build
       - name: Wheel smoke
+        if: runner.os == 'Linux'
         run: |
           tmp="$(mktemp -d)"
           python -m venv "$tmp/venv"
@@ -63,6 +76,7 @@ jobs:
       - name: Validate skills
         run: hipson skill validate
       - name: CLI smoke
+        if: runner.os == 'Linux'
         run: |
           hipson --help
           hipson doctor
@@ -76,10 +90,12 @@ jobs:
           hipson packet exec --help
           hipson sidecar list
       - name: Doctor
+        if: runner.os == 'Linux'
         run: |
           cp repos.example.yaml repos.yaml
           hipson doctor
       - name: Scan temporary git repo
+        if: runner.os == 'Linux'
         run: |
           tmp="$(mktemp -d)"
           git -C "$tmp" init -b main

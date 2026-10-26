@@ -8,6 +8,7 @@ before running examples.
 
 ## Getting started
 
+- [Install on each OS](INSTALL.md) — Linux, macOS, native Windows and WSL2 quick starts, Claude Code MCP registration, support limits and storage paths.
 - [Usage reference](USAGE.md) — every command group, workflows, runtime, configuration, safety model and development commands; for all users.
 - [AI full-stack dev workflow](AI_FULL_STACK_DEV_WORKFLOW.md) — first-run review kits, manual steps, and verification; for developers adopting Hipson.
 - [Skill library](skill-library.md) — local skill sources, task-fit curation, and provenance; for agents and skill maintainers.

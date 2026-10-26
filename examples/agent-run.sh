@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WSL-side runner: record a worker run in the Hipson task ledger around a child command.
+# Linux/WSL2/macOS runner: record a worker run in the Hipson task ledger around a child command.
 # Usage: agent-run.sh --task T-0001 --actor codex --role builder --mode rw [--scope PATH]...
 #                     [--lease-seconds N] [--ref PATH]... [--result-file PATH] [--rollout codex] -- <command> [args...]
 # The runner leads its own process group and runs the worker inside it; the ledger treats the owner as
@@ -33,7 +33,11 @@ EOF
 
 # Become a process-group leader (pid == pgid) so the ledger can check the whole worker group.
 if [ "$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')" != "$$" ] && [ -z "${AGENT_RUN_SETSID:-}" ]; then
-  AGENT_RUN_SETSID=1 exec setsid bash "$0" "$@"
+  if command -v setsid >/dev/null 2>&1; then
+    AGENT_RUN_SETSID=1 exec setsid bash "$0" "$@"
+  else
+    AGENT_RUN_SETSID=1 exec python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' bash "$0" "$@"
+  fi
 fi
 
 HIPSON_BIN=${HIPSON_BIN:-hipson}
@@ -61,13 +65,13 @@ done
 
 assignment="" child="" finished=0 rc=0 signal="" facts="" note=""
 workdir=$(mktemp -d); marker="$workdir/start"; touch "$marker"
-nonce="ledger-run-$(cat /proc/sys/kernel/random/uuid)"
+nonce="ledger-run-$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || python3 -c 'import uuid; print(uuid.uuid4())')"
 
 run_facts() {
   # Model/effort from the Codex rollout of THIS run: the one containing our nonce (sets globals).
   [ "$rollout" = codex ] || return 0
-  local home=${CODEX_HOME:-$HOME/.codex} file model effort
-  file=$(find "$home/sessions" -name '*.jsonl' -newer "$marker" -print0 2>/dev/null | xargs -0 -r grep -l -F "$nonce" 2>/dev/null | head -1)
+  local rollout_home=${CODEX_HOME:-$HOME/.codex} file model effort
+  file=$(find "$rollout_home/sessions" -name '*.jsonl' -newer "$marker" -exec grep -l -F "$nonce" {} + 2>/dev/null | head -1)
   [ -n "$file" ] || { facts=" model=? effort=? (rollout not found)"; return 0; }
   model=$(grep -o '"model":"[^"]*"' "$file" | head -1 | cut -d'"' -f4)
   effort=$(grep -o '"reasoning_effort":"[^"]*"' "$file" | head -1 | cut -d'"' -f4)
@@ -106,7 +110,10 @@ group_members() {
   # worker child is reported via kill -0 instead.
   # Select by real process-group id (numeric `ps -g` means session on procps) and skip zombies:
   # an exited process cannot write and cannot be killed again.
-  local pid ppid pgid stat comm out
+  local pid ppid pgid stat comm out probe_pid
+  # Bash 3.2 has no BASHPID. An exec'd helper's PPID identifies this subshell
+  # before ps runs, so the probe never mistakes its own transient helpers for workers.
+  probe_pid=${BASHPID:-$(exec bash -c 'echo "$PPID"')}
   if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
     stat=$(ps -o stat= -p "$child" 2>/dev/null)
     case "$stat" in Z*|"") ;; *) echo "$child";; esac
@@ -114,10 +121,10 @@ group_members() {
   out=$(ps -e -o pid=,ppid=,pgid=,stat=,comm= 2>/dev/null)
   while read -r pid ppid pgid stat comm; do
     [ "$pgid" = "$$" ] || continue
-    case "$pid" in "$$"|"$BASHPID") continue;; esac
-    case "$ppid" in "$$"|"$BASHPID") continue;; esac
+    case "$pid" in "$$"|"$probe_pid") continue;; esac
+    case "$ppid" in "$$"|"$probe_pid") continue;; esac
     case "$stat" in Z*) continue;; esac
-    [ "$comm" = ps ] && continue
+    [ "${comm##*/}" = ps ] && continue  # BSD ps may report the executable's full path.
     echo "$pid"
   done <<<"$out"
 }
@@ -152,7 +159,7 @@ trap finish EXIT
 
 assign_args=(task assign --task "$task" --actor "$actor" --role "$role" --mode "$mode"
   --owner-pid "$$" --owner-host "$(hostname)" --json)
-boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)
+boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || { [ "$(uname -s)" = Darwin ] && sysctl -n kern.bootsessionuuid 2>/dev/null; } || true)
 [ -n "$boot_id" ] && assign_args+=(--owner-boot-id "$boot_id")
 pid_namespace=$(readlink /proc/self/ns/pid 2>/dev/null || true)
 [ -n "$pid_namespace" ] && assign_args+=(--owner-pid-namespace "$pid_namespace")

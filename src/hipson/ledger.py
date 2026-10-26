@@ -6,11 +6,14 @@ lexical coordination records; they do not enforce filesystem access.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import re
 import socket
 import sqlite3
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -402,12 +405,23 @@ def _timestamp() -> str:
 
 def _boot_id() -> str | None:
     try:
-        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
-    except OSError:
+        if sys.platform == "linux":
+            return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip() or None
+        if sys.platform == "darwin":
+            result = subprocess.run(
+                ["sysctl", "-n", "kern.bootsessionuuid"], capture_output=True,
+                text=True, encoding="ascii", timeout=2, check=False,
+            )
+            return (result.stdout.strip() or None) if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, UnicodeError):
         return None
+    # Windows has no boot identity here: use leases or explicit finish to guard PID reuse.
+    return None
 
 
 def _pid_namespace() -> str | None:
+    if sys.platform != "linux":
+        return None
     try:
         return os.readlink("/proc/self/ns/pid")
     except OSError:
@@ -416,6 +430,9 @@ def _pid_namespace() -> str | None:
 
 def _pid_alive(pid: int) -> bool:
     """The owner PID and its worker process group must both be absent to reap."""
+    if sys.platform == "win32":
+        # os.kill(pid, 0) calls TerminateProcess on Windows. Never signal a probe target.
+        return _windows_pid_alive(pid)
     for probe in (os.kill, os.killpg):
         try:
             probe(pid, 0)
@@ -426,6 +443,33 @@ def _pid_alive(pid: int) -> bool:
             return True
         return True
     return False
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Query a Windows process without acquiring any right to terminate it."""
+    from ctypes import wintypes
+
+    if not 0 < pid <= 0xFFFFFFFF:
+        return False
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]  # Windows-only API.
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION only.
+    if not handle:
+        # ERROR_INVALID_PARAMETER means the PID is gone. Access denied (5) and
+        # unknown errors cannot justify releasing a potentially live worker's claims.
+        return ctypes.get_last_error() != 87  # type: ignore[attr-defined]  # Windows-only API.
+    try:
+        exit_code = wintypes.DWORD()
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return True
+        return exit_code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel.CloseHandle(handle)
 
 
 def _sidecar_access_error(exc: sqlite3.OperationalError) -> bool:

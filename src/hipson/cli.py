@@ -2675,6 +2675,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # CLI JSON and MCP stdio are UTF-8 on every OS, with physical LF-delimited
+    # responses even when Windows would otherwise translate LF to CRLF.
+    from io import TextIOWrapper
+
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if isinstance(stream, TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", newline=None if stream is sys.stdin else "\n")
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

@@ -286,9 +286,10 @@ a finish fails without duplicating findings.
 ## Orphan recovery (S3a)
 
 An optional owner identifies the wrapper process responsible for finishing an
-assignment. The wrapper must call `setsid` to become its process group's leader
+assignment. The wrapper must call `setsid` (the binary or Python's `os.setsid()`) to become its process group's leader
 (PID equals PGID), then start the worker as a child in that group. Supply the
-wrapper's positive PID, Linux boot ID, hostname, and PID namespace when assigning:
+wrapper's positive PID, boot ID, hostname, and Linux PID namespace when assigning.
+On Linux/WSL2:
 
 ```sh
 hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src \
@@ -309,13 +310,19 @@ reason in this order:
 | Reason | Condition |
 | --- | --- |
 | `lease_expired` | The lease has expired, regardless of host or process liveness. |
-| `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID. |
-| `pid_gone` | The recorded host equals the current hostname, the recorded PID namespace matches the current namespace (or is absent on a legacy row), and both the supplied PID and its process group no longer exist. |
+| `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID or macOS boot-session UUID. |
+| `pid_gone` | The recorded host equals the current hostname, any recorded PID namespace matches the current namespace, and the supplied PID (plus its POSIX process group on Linux/macOS) no longer exists. |
 
-Owner checks use `os.kill(pid, 0)` and, if the PID is absent,
+On Linux/macOS, owner checks use `os.kill(pid, 0)` and, if the PID is absent,
 `os.killpg(pid, 0)`. Only ESRCH from both proves the owner gone; EPERM or any
 other probe error means alive. A surviving worker holds the claim after its
 runner is killed. Zombies also count as present until their parent reaps them.
+On native Windows, a query-only process handle checks `GetExitCodeProcess == STILL_ACTIVE`;
+no signal is sent and no process group is probed. Access denied and unknown query errors
+keep claims active. Windows has no boot identity here, so PID reuse after reboot is guarded
+only by lease expiry or explicit finish. Use leases for native Windows workers; use WSL2
+for the Bash wrapper and worker-group recovery. macOS boot identity is obtained through
+a bounded `sysctl -n kern.bootsessionuuid` call, returning unknown on failure.
 Missing boot/PID fields cannot prove
 that condition; an unavailable current boot ID cannot prove a boot change. A
 different or missing host disables liveness checks. An owner-less assignment is
@@ -327,7 +334,7 @@ When `owner_pid_namespace` is supplied, an unequal or unreadable current
 sandbox or reused by an unrelated host process says nothing about that owner.
 Claims then remain held until lease expiry, a proven boot change, or an explicit
 finish. Legacy assignments without a namespace retain the earlier PID behavior.
-The stock launcher records its namespace when available.
+The stock launcher records its namespace when available; namespaces are Linux-only.
 
 `hipson task reap [--task T] [--dry-run]` examines all active assignments, including
 those on terminal tasks. Each orphan is rechecked under the writer lock, marked
@@ -398,8 +405,10 @@ See [SQLite's read-only WAL requirements](https://www.sqlite.org/wal.html#read_o
 
 ## MCP stdio (S2)
 
-Claude Code can drive the ledger directly through the existing MCP server. From
-Windows, start the WSL-installed CLI with the Linux project path:
+Claude Code can drive the ledger directly through the existing MCP server on Linux,
+macOS, native Windows or WSL2. See [INSTALL.md](INSTALL.md) for per-OS
+`claude mcp add --transport stdio` commands. To start the WSL-installed server
+from Windows, use its Linux project path:
 
 ```sh
 wsl.exe -d Ubuntu -- hipson mcp serve --project /path/to/Hipson --stdio

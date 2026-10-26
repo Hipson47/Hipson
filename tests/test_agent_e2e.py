@@ -1,6 +1,7 @@
 """Offline agent harness contracts; also run by the dependency-free test runner."""
 
 import copy
+import functools
 import json
 import os
 import shlex
@@ -11,13 +12,26 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import SkipTest
 from unittest.mock import patch
 
-from scripts import agent_e2e as harness
 from tests.support import hipson_cli
+
+if sys.platform == "linux":
+    # The Linux-only harness imports fcntl; keep Windows test collection portable.
+    from scripts import agent_e2e as harness
 
 ROOT = Path(__file__).resolve().parents[1]
 BROKEN = ROOT / "e2e/agents/broken"
+
+
+def _linux_harness(test):
+    @functools.wraps(test)
+    def supported(*args, **kwargs):
+        if sys.platform != "linux":
+            raise SkipTest("agent e2e harness is Linux/WSL2-only: requires /proc, prctl and Linux process groups")
+        return test(*args, **kwargs)
+    return supported
 
 
 def _dead(pid):
@@ -28,6 +42,7 @@ def _dead(pid):
         return True
 
 
+@_linux_harness
 def test_agent_e2e_reference_solutions(tmp_path):
     # The invoking Codex itself may be a worker; measured agents must still be leads.
     sentinel = tmp_path / "owner-ledger"
@@ -57,6 +72,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
     assert "lead-flow" in (tmp_path / "report.md").read_text()
 
 
+@_linux_harness
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
         ("lead-flow", "lead-no-review.sh", "separate structured reviewer"),
@@ -75,18 +91,21 @@ def test_agent_e2e_broken_solutions(tmp_path):
             assert any("set to done before scenario acceptance" in f for f in run["failures"]), run
 
 
+@_linux_harness
 def test_agent_e2e_deleted_parser_is_rejected_while_holder_active(tmp_path):
     run = harness.run_scenario("conflict", tmp_path / "run", solution=BROKEN / "conflict-delete-parser.sh")
     assert run["measurement_valid"] and not run["passed"], run
     assert "conflict: parser was edited while the fixture holder was still live" in run["failures"]
 
 
+@_linux_harness
 def test_agent_e2e_lead_builders_require_parser_claims(tmp_path):
     run = harness.run_scenario("lead-flow", tmp_path / "run", solution=BROKEN / "lead-wrong-scope.sh")
     assert run["measurement_valid"] and not run["passed"], run
     assert "lead-flow: builders must hold claims covering src/parser/pairs.py" in run["failures"]
 
 
+@_linux_harness
 def test_agent_e2e_noop_raw_access_and_delete_restore_fail(tmp_path):
     reference = harness.SCENARIOS / "recovery/solution.sh"
     for name, prelude, message in (
@@ -101,6 +120,7 @@ def test_agent_e2e_noop_raw_access_and_delete_restore_fail(tmp_path):
         assert not run["passed"] and any(message in f for f in run["failures"]), run
 
 
+@_linux_harness
 def test_agent_e2e_premature_done_cannot_be_repaired_afterwards(tmp_path):
     reference = (harness.SCENARIOS / "lead-flow/solution.sh").read_text()
     close = "hipson task status --task T-0001 --to done --actor lead"
@@ -114,6 +134,7 @@ def test_agent_e2e_premature_done_cannot_be_repaired_afterwards(tmp_path):
     assert not any(f.startswith("lead-flow: parser acceptance failed") for f in run["failures"])
 
 
+@_linux_harness
 def test_agent_e2e_recovery_requires_reap_not_manual_finish(tmp_path):
     script = tmp_path / "manual-finish.sh"
     reference = (harness.SCENARIOS / "recovery/solution.sh").read_text()
@@ -124,6 +145,7 @@ def test_agent_e2e_recovery_requires_reap_not_manual_finish(tmp_path):
     assert any("stale claim must be released by ledger reap" in f for f in run["failures"]), run
 
 
+@_linux_harness
 def test_agent_e2e_conflict_waiting_is_allowed(tmp_path):
     script = tmp_path / "wait.sh"
     script.write_text((harness.SCENARIOS / "conflict/solution.sh").read_text() +
@@ -139,6 +161,7 @@ def test_agent_e2e_conflict_waiting_is_allowed(tmp_path):
     assert run["passed"], run
 
 
+@_linux_harness
 def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
     wait = (harness.SCENARIOS / "conflict/solution.sh").read_text() + (
         "\ntouch .release-holder\n"
@@ -164,6 +187,7 @@ def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
     assert any("closed while the parser work was pending or unreviewed" in f for f in run["failures"]), run
 
 
+@_linux_harness
 def test_agent_e2e_timeout_cleans_live_fixture(tmp_path):
     script = tmp_path / "hang.sh"
     script.write_text("sleep 30\n")
@@ -175,6 +199,7 @@ def test_agent_e2e_timeout_cleans_live_fixture(tmp_path):
     assert _dead(pid), "Harness left its fixture writer alive"
 
 
+@_linux_harness
 def test_agent_e2e_cleanup_surviving_group_after_leader_exits(tmp_path):
     fixture = harness.prepare_fixture(tmp_path / "workspace")
     child_file = fixture.workdir / "child.pid"
@@ -211,6 +236,7 @@ def test_agent_e2e_cleanup_surviving_group_after_leader_exits(tmp_path):
         leader.wait(timeout=5)
 
 
+@_linux_harness
 def test_agent_e2e_cleanup_rejects_groups_outside_fixture(tmp_path):
     fixture = harness.prepare_fixture(tmp_path / "workspace")
     outside = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path, start_new_session=True)
@@ -223,6 +249,7 @@ def test_agent_e2e_cleanup_rejects_groups_outside_fixture(tmp_path):
         outside.wait(timeout=5)
 
 
+@_linux_harness
 def test_agent_e2e_conflict_redirected_scope_is_allowed(tmp_path):
     script = tmp_path / "redirect.sh"
     script.write_text((harness.SCENARIOS / "conflict/solution.sh").read_text() +
@@ -234,6 +261,7 @@ def test_agent_e2e_conflict_redirected_scope_is_allowed(tmp_path):
     assert run["passed"], run
 
 
+@_linux_harness
 def test_agent_e2e_conflict_false_scope_and_deleted_store_fail(tmp_path):
     script = tmp_path / "wrong-scope.sh"
     script.write_text((harness.SCENARIOS / "conflict/solution.sh").read_text() +
@@ -250,6 +278,7 @@ def test_agent_e2e_conflict_false_scope_and_deleted_store_fail(tmp_path):
     assert _dead(pid), "Corrupted ledger must not prevent helper cleanup"
 
 
+@_linux_harness
 def test_agent_e2e_codex_sample_parser_and_metrics():
     sample = (ROOT / "e2e/agents/fixtures/codex-events.jsonl").read_text()
     transcript = harness.parse_transcript(sample)
@@ -265,6 +294,7 @@ def test_agent_e2e_codex_sample_parser_and_metrics():
     assert transcript.commands[-1]["exit_code"] == 75
 
 
+@_linux_harness
 def test_agent_e2e_parser_errors_and_hidden_cli_failure():
     transcript = harness.parse_transcript('not-json\n[]\n{"type":"turn.failed","error":{"message":"quota"}}\n')
     assert len(transcript.errors) == 3
@@ -277,6 +307,7 @@ def test_agent_e2e_parser_errors_and_hidden_cli_failure():
     assert metrics["token_usage"] is None
 
 
+@_linux_harness
 def test_agent_e2e_codex_isolation_command(tmp_path):
     command = harness.codex_command("codex", tmp_path, "gpt-6.1-sol", "high", " ".join(harness.ISOLATION_FLAGS))
     assert "workspace-write" in command and command[-1] == "-"
@@ -292,6 +323,7 @@ def test_agent_e2e_codex_isolation_command(tmp_path):
         raise AssertionError("Must fail closed when isolation is unavailable")
 
 
+@_linux_harness
 def test_agent_e2e_codex_adapter_with_offline_stub(tmp_path):
     # Never invoke real/nested Codex. This executable exercises the subprocess adapter contract.
     owner_home = tmp_path / "owner-home"
@@ -344,6 +376,7 @@ raise SystemExit(proc.returncode)
     assert (owner_home / "auth.json").read_text() == '{"offline": true}'
 
 
+@_linux_harness
 def test_agent_e2e_fake_conflict_preserves_foreign_namespace_owner(tmp_path):
     def foreign_holder(fixture, task):
         return fixture.cli("task", "assign", "--task", task, "--actor", "holder", "--role", "builder",
@@ -359,6 +392,7 @@ def test_agent_e2e_fake_conflict_preserves_foreign_namespace_owner(tmp_path):
     assert not any(event["type"] == "reaped" for event in state["events"])
 
 
+@_linux_harness
 def test_agent_e2e_login_shell_proxy_wins_and_calls_are_recorded(tmp_path):
     fixture = harness.prepare_fixture(tmp_path / "workspace")
     # BASH_ENV also restores the proxy for non-login shells with an overridden PATH.
@@ -370,6 +404,7 @@ def test_agent_e2e_login_shell_proxy_wins_and_calls_are_recorded(tmp_path):
     assert len(harness.read_jsonl(fixture.workdir / ".harness/cli.jsonl")) == 2
 
 
+@_linux_harness
 def test_agent_e2e_unrecorded_read_is_invalid_measurement(tmp_path):
     script = tmp_path / "bypass.sh"
     # Same real CLI, deliberately omitting the proxy; read-only bypass has no state delta.
@@ -387,6 +422,7 @@ def test_agent_e2e_unrecorded_read_is_invalid_measurement(tmp_path):
     assert "INVALID" in (tmp_path / "report.md").read_text()
 
 
+@_linux_harness
 def test_agent_e2e_visible_calls_handle_shell_wrappers_and_command_positions():
     command = "hipson --help > help.txt && /real/hipson task show --task T-1; command -v hipson"
     assert harness.visible_hipson_calls("bash -lc " + shlex.quote(command)) == [("--help",), ("task", "show")]
@@ -396,6 +432,7 @@ def test_agent_e2e_visible_calls_handle_shell_wrappers_and_command_positions():
     assert harness.visible_hipson_calls("cat docs/hipson; printf 'hipson task show'; echo hipson") == []
 
 
+@_linux_harness
 def test_agent_e2e_skipped_shell_branches_are_valid_measurements(tmp_path):
     state = {"tasks": [], "events": [], "findings": []}
     for command, audited, exit_code in (
@@ -414,6 +451,7 @@ def test_agent_e2e_skipped_shell_branches_are_valid_measurements(tmp_path):
             assert harness.measurement_errors(ctx) == [], wrapped
 
 
+@_linux_harness
 def test_agent_e2e_credentials_are_scrubbed_from_artifacts_and_reports(tmp_path):
     canary = "e2e-private-canary-123456789"
     script = tmp_path / "diagnostic.sh"
@@ -438,6 +476,7 @@ def test_agent_e2e_credentials_are_scrubbed_from_artifacts_and_reports(tmp_path)
         assert canary.encode() not in path.read_bytes(), path
 
 
+@_linux_harness
 def test_agent_e2e_proxy_logs_and_startup_errors_are_redacted(tmp_path):
     canary = "e2e-proxy-secret-987654321"
     with patch.dict(os.environ, OPENAI_API_KEY=canary):
@@ -462,6 +501,7 @@ def test_agent_e2e_proxy_logs_and_startup_errors_are_redacted(tmp_path):
         assert not run["measurement_valid"] and canary not in json.dumps(run)
 
 
+@_linux_harness
 def test_agent_e2e_overlap_oracle_checks_history_across_tasks(tmp_path):
     assignments = [dict(id=f"A-{i}", mode="rw", scope=[scope]) for i, scope in ((1, "src"), (2, "src/parser"))]
     state = {"tasks": [{"id": "T-1", "project": "/fixture", "assignments": [assignments[0]]},
@@ -477,6 +517,7 @@ def test_agent_e2e_overlap_oracle_checks_history_across_tasks(tmp_path):
     assert harness.universal_checks(ctx, SimpleNamespace(check=lambda ctx: [])) == []
 
 
+@_linux_harness
 def test_agent_e2e_cli_report_exit_code_and_runs(tmp_path):
     good = {"scenario": "recovery", "passed": True, "failures": [], "metrics": harness.metrics(harness.Transcript(), 0)}
     with patch.object(harness, "ROOT", tmp_path), patch.object(harness, "run_scenario", return_value=good) as run:

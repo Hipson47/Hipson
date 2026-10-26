@@ -48,6 +48,8 @@ def run(command: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT) -> Comman
             command,
             cwd=str(cwd),
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             check=False,
@@ -113,7 +115,7 @@ def git_scope_args(project: Path, root: Path) -> list[str]:
 
 def rel(path: Path, root: Path) -> str:
     try:
-        return str(path.resolve().relative_to(root.resolve()))
+        return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return str(path)
 

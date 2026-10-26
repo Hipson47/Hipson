@@ -130,6 +130,15 @@ def test_evidence_concurrent_processes_keep_chain(tmp_path: Path):
     _concurrent_appends(tmp_path, fallback=False)
 
 
+def test_evidence_lock_backend_matches_platform():
+    if sys.platform == "win32":
+        assert evidence.fcntl is None
+    else:
+        import fcntl
+
+        assert evidence.fcntl is fcntl
+
+
 def test_evidence_portable_lock_serializes_processes(tmp_path: Path):
     _concurrent_appends(tmp_path, fallback=True)
     assert not (tmp_path / ".evidence.lock.d").exists()

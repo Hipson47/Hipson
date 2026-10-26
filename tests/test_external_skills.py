@@ -38,8 +38,8 @@ def test_external_skills_are_not_vendored():
 
 def test_tree_hash_is_deterministic_and_content_sensitive(tmp_path: Path):
     (tmp_path / "a").mkdir()
-    (tmp_path / "a" / "SKILL.md").write_text("one\n", encoding="utf-8")
-    (tmp_path / "LICENSE.txt").write_text("license\n", encoding="utf-8")
+    (tmp_path / "a" / "SKILL.md").write_text("one\n", encoding="utf-8", newline="\n")
+    (tmp_path / "LICENSE.txt").write_text("license\n", encoding="utf-8", newline="\n")
     first = tree_hash(tmp_path)
     assert first == tree_hash(tmp_path) and first[1:] == (2, 12)
     (tmp_path / "a" / "SKILL.md").write_text("two\n", encoding="utf-8")

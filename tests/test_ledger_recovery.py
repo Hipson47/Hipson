@@ -12,6 +12,7 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import SkipTest
 from unittest.mock import patch
 
 from hipson import ledger
@@ -230,8 +231,9 @@ def test_ledger_pid_probe_requires_both_pid_and_group_gone():
     for pid_outcome in (None, gone, PermissionError(errno.EPERM, "denied"), OSError(errno.EIO, "unknown")):
         for group_outcome in (None, gone, PermissionError(errno.EPERM, "denied"), OSError(errno.EIO, "unknown")):
             with (
+                patch.object(ledger.sys, "platform", "linux"),
                 patch.object(ledger.os, "kill", side_effect=pid_outcome) as kill,
-                patch.object(ledger.os, "killpg", side_effect=group_outcome) as killpg,
+                patch.object(ledger.os, "killpg", side_effect=group_outcome, create=True) as killpg,
             ):
                 assert ledger._pid_alive(42) is not (pid_outcome is gone and group_outcome is gone)
                 kill.assert_called_once_with(42, 0)
@@ -416,6 +418,8 @@ def test_ledger_cli_missing_store_reads_create_nothing(tmp_path: Path):
 
 
 def test_ledger_read_only_v2_directory_with_live_and_checkpointed_wal(tmp_path: Path):
+    if sys.platform == "win32":
+        raise SkipTest("Windows chmod cannot enforce POSIX directory/sidecar permissions; ACL errors are mocked separately")
     parent = tmp_path / "readonly"
     db = parent / "ledger.sqlite"
 
@@ -578,6 +582,8 @@ def test_ledger_read_only_native_sidecar_errors_fall_back_on_open_and_first_read
 
 
 def test_ledger_read_only_native_directory_permission_mismatch_uses_snapshot(tmp_path: Path):
+    if sys.platform == "win32":
+        raise SkipTest("requires POSIX directory mode bits and geteuid; Windows ACL errors are mocked separately")
     db = tmp_path / "ledger.sqlite"
     with closing(Ledger(db)) as writer:
         task = _open(writer, tmp_path)
@@ -845,6 +851,8 @@ def test_ledger_mcp_owner_and_reap_argument_types_checked_before_open(tmp_path: 
 
 
 def test_ledger_real_sigkill_holder_keeps_claims_until_worker_group_is_gone(tmp_path: Path):
+    if sys.platform != "linux":
+        raise SkipTest("requires Linux prctl child subreaping, /proc boot identity and SIGKILL process groups")
     db = tmp_path / "ledger.sqlite"
     with closing(Ledger(db)) as store:
         task = _open(store, tmp_path)["id"]

@@ -1,4 +1,6 @@
+import sys
 from pathlib import Path
+from unittest import SkipTest
 
 from hipson.approvals import ApprovalPolicy
 from hipson.sandbox import check_read_path, check_skill_root_path, check_write_path, is_allowlisted_read_only_command
@@ -55,7 +57,7 @@ def test_sandbox_refuses_sensitive_paths_traversal_and_broad_profiles(tmp_path: 
     assert source_write.allowed is False
 
 
-def test_sandbox_blocks_symlink_escapes_sensitive_names_and_precise_write_roots(tmp_path: Path):
+def test_sandbox_blocks_symlink_escapes(tmp_path: Path):
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -63,12 +65,21 @@ def test_sandbox_blocks_symlink_escapes_sensitive_names_and_precise_write_roots(
     outside_secret = outside / "secret.txt"
     outside_secret.write_text("outside", encoding="utf-8")
     (workspace / "runs").mkdir()
-    (workspace / "runs" / "linked-secret").symlink_to(outside_secret)
+    try:
+        (workspace / "runs" / "linked-secret").symlink_to(outside_secret)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            raise SkipTest("Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege") from exc
+        raise
 
     symlink_escape = check_read_path("runs/linked-secret", workspace)
     assert symlink_escape.allowed is False
     assert "active workspace" in symlink_escape.reason
 
+
+def test_sandbox_blocks_sensitive_names_and_precise_write_roots(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
     for sensitive_path in [
         ".env",
         ".env.local",

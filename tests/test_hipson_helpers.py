@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -86,6 +87,7 @@ def run_cli(
             cwd=process_cwd,
             env=merged_env,
             text=True,
+            encoding="utf-8",
             capture_output=True,
             check=False,
             timeout=timeout,
@@ -4674,7 +4676,7 @@ def test_core_artifact_commands_do_not_call_provider_or_network(tmp_path: Path):
                 "--work",
                 str(work_json),
                 "--command",
-                f"{sys.executable} -c \"print('ok')\"",
+                f"{shlex.quote(sys.executable)} -c \"print('ok')\"",
                 "-o",
                 str(verify_json),
                 "--json",

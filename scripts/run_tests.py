@@ -55,6 +55,9 @@ def run_tests(tests) -> int:
 
 
 def main() -> int:
+    # Keep diagnostics readable on native Windows consoles and redirected CI logs.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     return run_tests(discover_tests())
 
 

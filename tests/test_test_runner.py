@@ -69,5 +69,6 @@ def test_pytest_rejects_runtime_and_collection_skips_in_linux_ci(tmp_path: Path)
                 [sys.executable, "-m", "pytest", "-q", "-p", "tests.conftest", str(probe), str(passing)],
                 cwd=REPO_ROOT, env=env, text=True, capture_output=True, timeout=30, check=False,
             )
-            assert result.returncode == (1 if ci else 0), result.stdout + result.stderr
-            assert ("Linux CI requires zero skipped tests" in result.stdout) == bool(ci), result.stdout + result.stderr
+            enforce = bool(ci) and sys.platform == "linux"
+            assert result.returncode == (1 if enforce else 0), result.stdout + result.stderr
+            assert ("Linux CI requires zero skipped tests" in result.stdout) == enforce, result.stdout + result.stderr

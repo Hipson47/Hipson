@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Cross-platform installation**
+  - Support macOS CLI, ledger, MCP, evidence and the Bash worker wrapper, including
+    Python session/UUID fallbacks, BSD utilities and boot-session identity.
+  - Support native Windows CLI, ledger, MCP and evidence with lease-based worker
+    recovery. Query PID liveness through read-only Windows process handles; never
+    call `os.kill(pid, 0)` on Windows. Keep PID namespaces Linux-only.
+  - Use UTF-8 CLI/MCP stdio with LF responses and portable relative paths.
+    Add macOS/Windows Python 3.12 CI, real CLI/ledger/MCP smoke and platform regressions;
+    retain Ubuntu mutation/audit gates and Linux CI's zero-skip policy.
+  - Add per-OS global/clone quick starts and Claude Code MCP registration in
+    README and `docs/INSTALL.md`; recommend WSL2 for Windows worker execution.
+
 - Add an opt-in agent e2e harness with Codex and offline fake drivers, parser
   lead-flow/conflict/recovery missions, state/event oracles, and friction reports.
   Isolate HOME and login-shell PATH; report recorder bypasses as invalid
