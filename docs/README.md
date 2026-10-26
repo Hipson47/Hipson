@@ -39,6 +39,7 @@ before running examples.
 
 - [1.0 readiness](release-1.0.md) — historical 1.0 gates and packaging decisions; for release maintainers.
 - [Releasing](RELEASING.md) — how versions reach PyPI through Trusted Publishing, and the one-time maintainer setup.
+- [Roadmap](ROADMAP.md) — what comes next and the evidence behind the order.
 - [Release notes 1.3.0](release-1.3.md) — `hipson init` and `hipson task run`, review fixes and limits.
 - [Release notes 1.2.0](release-1.2.md) — ledger, agent workflow, cross-platform support, external audit fixes and limits.
 - [1.1 release notes](release-1.1.md) — agent playbook/router changes and suggested checks; for users and release maintainers.
