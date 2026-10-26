@@ -146,7 +146,8 @@ def _registration_description(scope: str, existing: Any) -> str:
     project = _project_arg(args) if isinstance(args, list) and all(isinstance(arg, str) for arg in args) else None
     # Config can contain credentials in env or unrelated arguments. Only identify
     # the command and project; do not copy the entire server entry into reports.
-    return redact_text(f"{scope} scope (command={entry.get('command')!r}, project={project!r})")
+    # Keep paths literal so Windows backslashes remain readable and copyable.
+    return redact_text(f"{scope} scope (command={entry.get('command')}, project={project})")
 
 
 def _claude_registrations(plan: InitPlan, project: Path, user_config: Path) -> list[tuple[str, Any]]:
@@ -191,6 +192,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
         if client not in CLIENTS or scope not in ("project", "user"):
             raise ValueError("Invalid client or scope.")
         project = resolve_project(project_path)
+        if sys.platform not in ("linux", "darwin", "win32"):
+            raise ValueError(f"Unsupported platform: {sys.platform}")
         command = executable()
         db = ledger.default_ledger_db()
         version = _ledger_version(db)
@@ -300,8 +303,6 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
         ]
         if report["checks"]["git"] != "ok":
             raise ValueError("Git is missing from PATH; install Git before setup.")
-        if not report["checks"]["platform_supported"]:
-            raise ValueError(f"Unsupported platform: {sys.platform}")
         report["ok"] = not report["errors"]
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError, SystemExit) as exc:
         report["errors"].append(redact_text(str(exc)))

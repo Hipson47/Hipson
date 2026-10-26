@@ -276,6 +276,28 @@ def test_init_existing_hipson_quoted_toml_is_never_overwritten(tmp_path):
     assert not list(setup.codex_home.glob("*.backup-*"))
 
 
+def test_init_conflict_reports_preserve_literal_windows_paths(tmp_path):
+    command = r"C:\Program Files\Hipson\hipson.exe"
+    project = r"C:\Users\O'Neil\project with spaces-é"
+    entry = {"command": command, "args": ["mcp", "serve", "--project", project, "--stdio"]}
+    for client in ("claude", "codex"):
+        setup = _Setup(tmp_path / client)
+        if client == "claude":
+            setup.register_claude("project", entry)
+        else:
+            setup.codex_home.mkdir()
+            setup.codex_config.write_text(
+                f'[mcp_servers.hipson]\ncommand = {json.dumps(command)}\nargs = {json.dumps(entry["args"])}\n',
+                encoding="utf-8",
+            )
+        before = setup.snapshots()
+        report = setup.run("--client", client, "--yes", "--json", expected=1)
+        text = setup.run("--client", client, "--dry-run", expected=1)
+        for message in (report["errors"][0], report["actions"][1]["detail"], text):
+            assert command in message and project in message and str(setup.project) in message
+        assert setup.snapshots() == before
+
+
 def test_init_identical_claude_registrations_match_scope_and_resolved_paths(tmp_path):
     for scope in ("project", "user"):
         setup = _Setup(tmp_path / scope)
@@ -487,9 +509,11 @@ def test_init_prerequisite_failures_and_missing_clients_are_read_only(tmp_path):
         with patch.object(init_setup.shutil, "which", side_effect=lambda name: None if name == "git" else which(name)):
             plan = init_setup.build_plan(project_path=str(setup.project), client="none", scope="project", dry_run=False)
         assert not plan.report["ok"] and "Git" in plan.report["errors"][0]
-        with patch.object(init_setup.sys, "platform", "unsupported"):
+        with (patch.object(init_setup.sys, "platform", "unsupported"),
+              patch.object(init_setup, "executable", side_effect=ValueError("Cannot locate the installed hipson executable")) as executable):
             plan = init_setup.build_plan(project_path=str(setup.project), client="none", scope="project", dry_run=False)
         assert not plan.report["ok"] and "Unsupported platform" in plan.report["errors"][0]
+        executable.assert_not_called()
         plan = init_setup.build_plan(project_path=str(setup.root / "missing"), client="none", scope="project", dry_run=False)
         assert not plan.report["ok"] and "does not exist" in plan.report["errors"][0]
     assert setup.snapshots() == before
