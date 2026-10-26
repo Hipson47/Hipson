@@ -598,7 +598,8 @@ def run_scenario(name: str, output: Path, *, driver: str = "fake", solution: Pat
     audit: list[dict[str, Any]] = []
     transcript = Transcript()
     with tempfile.TemporaryDirectory(prefix="hipson-agent-e2e-") as temporary:
-        workdir = Path(temporary) / "workspace"
+        # Resolved: process ownership is checked against /proc/<pid>/cwd, which is always resolved.
+        workdir = Path(temporary).resolve() / "workspace"
         try:
             fixture = prepare_fixture(workdir)
             # Exercise the exact login-shell form used by sandbox command execution.

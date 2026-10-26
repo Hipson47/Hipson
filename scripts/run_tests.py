@@ -37,7 +37,9 @@ def run_tests(tests) -> int:
             params = inspect.signature(fn).parameters
             if "tmp_path" in params:
                 with tempfile.TemporaryDirectory() as temp_dir:
-                    fn(tmp_path=Path(temp_dir))
+                    # Like pytest's tmp_path: resolved, so macOS /var -> /private/var symlinks and
+                    # Windows 8.3 short names (RUNNER~1) do not make path comparisons diverge.
+                    fn(tmp_path=Path(temp_dir).resolve())
             else:
                 fn()
             passed += 1
