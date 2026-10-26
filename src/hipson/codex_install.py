@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from dataclasses import dataclass
@@ -52,14 +53,20 @@ def backup_file(path: Path) -> Path:
         suffix = f"-{counter}" if counter else ""
         backup = path.with_name(f"{path.name}.backup-{stamp}{suffix}")
         try:
-            destination = backup.open("xb")
+            descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             counter += 1
             continue
         break
-    with destination, path.open("rb") as source:
-        shutil.copyfileobj(source, destination)
-    shutil.copystat(path, backup)
+    try:
+        with os.fdopen(descriptor, "wb") as destination, path.open("rb") as source:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        # Backups may contain credentials: keep 0600 even if the source is public.
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
     return backup
 
 

@@ -19,6 +19,8 @@ from typing import Any
 from hipson import __version__, ledger
 from hipson.codex_install import backup_file
 from hipson.home import detect_codex_home
+from hipson.init_config import Snapshot, atomic_write, config_locks, restore, snapshot, unchanged
+from hipson.init_process import run_contained
 from hipson.project import resolve_project
 from hipson.redaction import redact_text
 
@@ -29,7 +31,8 @@ TIMEOUT = 15
 @dataclass
 class InitPlan:
     report: dict[str, Any]
-    snapshots: dict[Path, bytes | None] = field(default_factory=dict)
+    snapshots: dict[Path, Snapshot] = field(default_factory=dict)
+    verifications: list[dict[str, Any]] = field(default_factory=list)
 
 
 def executable() -> str:
@@ -58,15 +61,16 @@ def format_command(argv: list[str]) -> str:
     return shlex.join(argv)
 
 
-def _run(argv: list[str], project: Path, *, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str], project: Path, *, input_text: str | None = None, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     command: str | list[str] = argv
-    env = None
     if sys.platform == "win32" and Path(argv[0]).suffix.lower() in (".cmd", ".bat"):
         # cmd.exe expands each environment reference once. Quoting every argument and
         # disabling delayed expansion preserves spaces, %, ! and shell metacharacters.
         if any('"' in arg or "\n" in arg or "\r" in arg for arg in argv):
             raise ValueError("Cannot pass quotes or newlines to a Windows batch client.")
-        env = dict(os.environ)
+        env = dict(os.environ if env is None else env)
         for index, arg in enumerate(argv):
             # Batch launchers conventionally forward %* to an executable. Escape
             # trailing backslashes before the closing quote for that argv parser.
@@ -75,16 +79,13 @@ def _run(argv: list[str], project: Path, *, input_text: str | None = None) -> su
         arguments = " ".join(f'"%HIPSON_INIT_ARG_{index}%"' for index in range(len(argv)))
         cmd = os.environ.get("COMSPEC", "cmd.exe")
         command = f'"{cmd}" /d /v:off /s /c "{arguments}"'
-    return subprocess.run(
-        command, cwd=project, env=env, input=input_text, stdin=subprocess.DEVNULL if input_text is None else None,
-        capture_output=True, text=True, encoding="utf-8", timeout=TIMEOUT, check=False,
-    )
+    return run_contained(command, project, env=env, input_text=input_text, timeout=TIMEOUT)
 
 
 def _snapshot(plan: InitPlan, path: Path) -> bytes | None:
-    content = path.read_bytes() if path.exists() else None
-    plan.snapshots[path] = content
-    return content
+    state = snapshot(path)
+    plan.snapshots[path] = state
+    return state.content
 
 
 def _ledger_version(path: Path) -> int | None:
@@ -115,6 +116,19 @@ def _resolved_path(value: str, project: Path) -> Path:
 def _registration_matches(existing: Any, command: str, args: list[str], project: Path) -> bool:
     if not isinstance(existing, dict) or existing.get("type", "stdio") != "stdio" or existing.get("enabled", True) is not True:
         return False
+    environment = existing.get("env", {})
+    forwarded = existing.get("env_vars", [])
+    allowed, disabled = existing.get("enabled_tools"), existing.get("disabled_tools", [])
+    required = {"task.open", "task.board"}
+    if (
+        not isinstance(environment, dict)
+        or any(not isinstance(key, str) or not isinstance(value, str) or os.environ.get(key) != value for key, value in environment.items())
+        or not isinstance(forwarded, list) or any(not isinstance(key, str) or key not in os.environ for key in forwarded)
+        or not isinstance(disabled, list) or any(not isinstance(name, str) for name in disabled)
+        or required.intersection(disabled)
+        or (allowed is not None and (not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed) or not required <= set(allowed)))
+    ):
+        return False
     current_command, current_args = existing.get("command"), existing.get("args", [])
     if not isinstance(current_command, str) or not isinstance(current_args, list) or not all(isinstance(arg, str) for arg in current_args):
         return False
@@ -138,6 +152,42 @@ def _registration_matches(existing: Any, command: str, args: list[str], project:
         return result
 
     return normalized(current_args) == normalized(args)
+
+
+def _verification(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "command": [entry["command"], *entry.get("args", [])],
+        "env": {**os.environ, **entry.get("env", {})},
+        "enabled_tools": entry.get("enabled_tools"), "disabled_tools": entry.get("disabled_tools", []),
+    }
+
+
+def _codex_config(plan: InitPlan, path: Path) -> dict[str, Any]:
+    original = _snapshot(plan, path)
+    try:
+        parsed = tomllib.loads((original or b"").decode("utf-8"))
+        if not isinstance(parsed.get("mcp_servers", {}), dict):
+            raise ValueError("mcp_servers must be a TOML table")
+        return parsed
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(f"Cannot safely inspect Codex config at {path}: invalid or incompatible TOML.") from exc
+
+
+def _codex_project_paths(project: Path) -> list[Path]:
+    # Codex layers project files from the repository root down to its working directory.
+    root = next((parent for parent in (project, *project.parents) if (parent / ".git").exists()), project)
+    directories = [project]
+    while directories[-1] != root:
+        directories.append(directories[-1].parent)
+    return [directory / ".codex" / "config.toml" for directory in reversed(directories)]
+
+
+def _merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = dict(base)
+    for key, value in override.items():
+        prior = result.get(key)
+        result[key] = _merge_config(prior, value) if isinstance(prior, dict) and isinstance(value, dict) else value
+    return result
 
 
 def _registration_description(scope: str, existing: Any) -> str:
@@ -221,15 +271,10 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 claude = clients[name]
                 if claude is None:
                     raise ValueError("Claude Code is not on PATH (including claude.cmd on Windows).")
-                probe = _run([claude, "mcp", "get", "hipson"], project)
-                if probe.returncode != 0 and "no mcp server found" not in (probe.stdout + probe.stderr).lower():
-                    raise ValueError(f"Claude MCP discovery failed (exit {probe.returncode}); run claude mcp get hipson to diagnose.")
                 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
                 user_config = (Path(config_dir).expanduser().resolve() if config_dir else Path.home()) / ".claude.json"
                 path = project / ".mcp.json" if scope == "project" else user_config
                 registrations = _claude_registrations(plan, project, user_config)
-                if probe.returncode == 0 and not registrations:
-                    raise ValueError("Claude reports a hipson registration outside the inspected local/project/user config; resolve it with claude mcp get hipson before setup.")
                 action: dict[str, Any] = {
                     "kind": "claude", "scope": scope, "path": str(path),
                     "command": [claude, "mcp", "add", "--transport", "stdio", "--scope", scope, "hipson", "--", command, *server_args],
@@ -251,16 +296,17 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                             action.update(status="conflict", detail=conflict + " Remove or rename the conflicting registration explicitly before rerunning; setup never replaces it.")
                             report["errors"].append(action["detail"])
                 actions.append(action)
+                effective = registrations[0][1] if action["status"] == "skipped" else {"command": command, "args": server_args}
+                if action["status"] != "conflict":
+                    plan.verifications.append(_verification(effective))
             elif name == "codex":
                 home, warnings = detect_codex_home()
                 report["checks"]["warnings"] = warnings
                 path = home / "config.toml"
-                original = _snapshot(plan, path)
+                parsed = _codex_config(plan, path)
+                original = plan.snapshots[path].content
                 try:
-                    parsed = tomllib.loads((original or b"").decode("utf-8"))
                     servers = parsed.get("mcp_servers", {})
-                    if not isinstance(servers, dict):
-                        raise ValueError("mcp_servers must be a TOML table")
                     configured = "hipson" in servers
                     matches = configured and _registration_matches(servers["hipson"], command, server_args, project)
                     addition = ("\n" if original else "") + (
@@ -268,6 +314,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                         f"command = {json.dumps(command, ensure_ascii=False)}\n"
                         f"args = {json.dumps(server_args, ensure_ascii=False)}\n"
                     )
+                    if original and b"\r\n" in original:
+                        addition = addition.replace("\n", "\r\n")
                     if not configured:
                         tomllib.loads(((original or b"") + addition.encode("utf-8")).decode("utf-8"))
                 except (ValueError, UnicodeError) as exc:
@@ -278,14 +326,30 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                     "detail": "already configured" if matches else "append TOML (existing bytes preserved)",
                     "append": addition if not configured else "",
                 }
+                effective_config = parsed if configured else _merge_config(parsed, {"mcp_servers": {"hipson": {"command": command, "args": server_args}}})
+                project_layers = []
+                for layer_path in _codex_project_paths(project):
+                    layer = _codex_config(plan, layer_path)
+                    if "hipson" in layer.get("mcp_servers", {}):
+                        project_layers.append(str(layer_path))
+                    effective_config = _merge_config(effective_config, layer)
+                effective = effective_config["mcp_servers"]["hipson"]
                 if configured and not matches:
                     desired = {"command": command, "args": server_args}
                     action["detail"] = (
                         f"Codex hipson registration conflict at {path}: existing {_registration_description('user', servers['hipson'])}; "
-                        f"desired {_registration_description('user', desired)}. Command, args and enabled state must match. "
+                        f"desired {_registration_description('user', desired)}. Command, args, environment, tool filters and enabled state must match. "
                         "Remove or rename the conflicting table explicitly before rerunning, or select a separate CODEX_HOME; setup never replaces it."
                     )
                     report["errors"].append(action["detail"])
+                elif not _registration_matches(effective, command, server_args, project):
+                    action.update(status="conflict", detail=(
+                        f"Codex effective hipson registration conflict in project config: {', '.join(project_layers)}. "
+                        "Command, args, environment, tool filters and enabled state must match; setup never replaces project overrides."
+                    ))
+                    report["errors"].append(action["detail"])
+                if action["status"] != "conflict":
+                    plan.verifications.append(_verification(effective))
                 actions.append(action)
         for action in actions:
             path = Path(action["path"])
@@ -295,6 +359,10 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
             "status": "planned", "command": [command, *server_args],
             "methods": ["initialize", "notifications/initialized", "tools/list"],
         }
+        if not plan.verifications:
+            plan.verifications.append(_verification({"command": command, "args": server_args}))
+        if plan.snapshots:
+            report["checks"]["config_lock_directory"] = str(Path.home() / ".hipson" / "init-locks")
         report["next_steps"] = [
             format_command(["hipson", "task", "open", "--project", str(project), "--title", "My first task", "--objective", "Describe the change", "--json"]),
             f"cd {shlex.quote(str(project))}" if sys.platform != "win32" else "Set-Location -LiteralPath '" + str(project).replace("'", "''") + "'",
@@ -309,6 +377,61 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
     return plan
 
 
+def _check_sources(plan: InitPlan) -> None:
+    for path, original in plan.snapshots.items():
+        unchanged(path, original)
+
+
+def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None:
+    path = Path(action["path"])
+    original = plan.snapshots[path]
+    backup = None
+    written = None
+    started = False
+    desired = (original.content or b"") + action.get("append", "").encode("utf-8")
+    try:
+        _check_sources(plan)
+        if original.content is not None:
+            backup = backup_file(path)
+            action["backup"] = str(backup)
+        # An editor does not take our lock. Check identity and hash again after copying.
+        _check_sources(plan)
+        started = True
+        if action["kind"] == "codex":
+            written = atomic_write(path, desired, original)
+            parsed = tomllib.loads(path.read_bytes().decode("utf-8"))
+            entry = parsed.get("mcp_servers", {}).get("hipson")
+            if path.read_bytes() != desired:
+                raise ValueError("Codex config did not retain the planned bytes")
+        else:
+            result = _run(action["command"], project)
+            written = snapshot(path)
+            if result.returncode:
+                raise ValueError(f"Claude MCP registration failed (exit {result.returncode}); restoring the failing action.")
+            parsed = json.loads(path.read_bytes())
+            entry = parsed.get("mcpServers", {}).get("hipson")
+        command = plan.report["checks"]["hipson_executable"]
+        args = ["mcp", "serve", "--project", str(project), "--stdio"]
+        if not _registration_matches(entry, command, args, project):
+            raise ValueError(f"Invalid {action['kind']} registration after update")
+        if written is not None:
+            unchanged(path, written)
+        plan.snapshots[path] = snapshot(path)
+        _check_sources(plan)
+    except BaseException:
+        if started:
+            current = snapshot(path)
+            if (
+                (written is not None and current != written)
+                or (action["kind"] == "codex" and written is None and current.content not in (original.content, desired))
+            ):
+                action["recovery"] = "Concurrent edit retained; inspect the backup before restoring manually."
+            else:
+                restore(path, original, backup)
+                action["recovery"] = "restored" if original.content is not None else "removed new config"
+        raise
+
+
 def apply_plan(plan: InitPlan) -> None:
     report = plan.report
     if not report["ok"] or report["mode"] == "dry-run":
@@ -316,54 +439,47 @@ def apply_plan(plan: InitPlan) -> None:
     project = Path(report["project"])
     action = None
     try:
-        # Include discovery sources, not just edit targets: a new higher-priority
-        # Claude entry could otherwise shadow the registration we are about to add.
-        for path, original in plan.snapshots.items():
-            if (path.read_bytes() if path.exists() else None) != original:
-                raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.")
-        for action in report["actions"]:
-            if action["status"] != "planned":
-                continue
-            path = Path(action["path"])
-            if action["kind"] == "ledger":
-                if path.exists():
-                    # A SQLite backup also includes committed frames in a live WAL.
-                    backup = backup_file(path)
-                    action["backup"] = str(backup)
-                    with (
-                        closing(ledger._sidecar_read_only_connection(path, time.monotonic() + TIMEOUT)) as source,
-                        closing(sqlite3.connect(backup)) as destination,
-                    ):
-                        source.backup(destination)
-                with closing(ledger.Ledger(path)):
-                    pass
-            else:
-                current = path.read_bytes() if path.exists() else None
-                if current != plan.snapshots[path]:
-                    raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.")
-                if current is not None:
-                    action["backup"] = str(backup_file(path))
-                if action["kind"] == "codex":
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    with path.open("ab" if current is not None else "xb") as destination_file:
-                        destination_file.write(action["append"].encode("utf-8"))
+        # Reject stale plans before creating even the lock directory. Recheck under
+        # all locks before backups, and hold them through validation and verification.
+        _check_sources(plan)
+        with config_locks(list(plan.snapshots)):
+            _check_sources(plan)
+            for action in report["actions"]:
+                if action["status"] != "planned":
+                    continue
+                path = Path(action["path"])
+                if action["kind"] == "ledger":
+                    if path.exists():
+                        # A SQLite backup also includes committed frames in a live WAL.
+                        backup = backup_file(path)
+                        action["backup"] = str(backup)
+                        with (
+                            closing(ledger._sidecar_read_only_connection(path, time.monotonic() + TIMEOUT)) as source,
+                            closing(sqlite3.connect(backup)) as destination,
+                        ):
+                            source.backup(destination)
+                    with closing(ledger.Ledger(path)):
+                        pass
                 else:
-                    result = _run(action["command"], project)
-                    if result.returncode:
-                        raise ValueError(f"Claude MCP registration failed (exit {result.returncode}); any backup is listed in actions.")
-            action["status"] = "applied"
-        report["verification"] = verify_mcp(report["verification"]["command"], project)
-        report["ok"] = report["verification"]["status"] == "passed"
-        if not report["ok"]:
-            report["errors"].append(report["verification"]["detail"])
-    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        if action is not None:
+                    _apply_config(plan, action, project)
+                action["status"] = "applied"
+            checks = [verify_mcp(**context, project=project) for context in plan.verifications]
+            report["verification"] = next((check for check in checks if check["status"] != "passed"), checks[0])
+            _check_sources(plan)
+            report["ok"] = report["verification"]["status"] == "passed"
+            if not report["ok"]:
+                report["errors"].append(report["verification"]["detail"])
+    except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError, KeyboardInterrupt) as exc:
+        if action is not None and action["status"] == "planned":
             action["status"] = "failed"
         report["ok"] = False
-        report["errors"].append(redact_text(str(exc)))
+        report["errors"].append(redact_text(str(exc) or "Setup interrupted"))
 
 
-def verify_mcp(command: list[str], project: Path) -> dict[str, Any]:
+def verify_mcp(
+    command: list[str], project: Path, *, env: dict[str, str] | None = None,
+    enabled_tools: list[str] | None = None, disabled_tools: list[str] | None = None,
+) -> dict[str, Any]:
     verification: dict[str, Any] = {"status": "failed", "command": command}
     requests = [
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
@@ -373,13 +489,16 @@ def verify_mcp(command: list[str], project: Path) -> dict[str, Any]:
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
     try:
-        result = _run(command, project, input_text="".join(json.dumps(item) + "\n" for item in requests))
+        result = _run(command, project, input_text="".join(json.dumps(item) + "\n" for item in requests), env=env)
         verification["exit_code"] = result.returncode
         responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         by_id = {item.get("id"): item for item in responses if isinstance(item, dict)}
         initialized = by_id.get(1, {}).get("result", {})
         tools = by_id.get(2, {}).get("result", {}).get("tools", [])
         names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+        if enabled_tools is not None:
+            names.intersection_update(enabled_tools)
+        names.difference_update(disabled_tools or [])
         if (
             result.returncode or any("error" in item for item in responses)
             or initialized.get("serverInfo", {}).get("name") != "hipson"
@@ -408,7 +527,8 @@ def format_report(report: dict[str, Any]) -> str:
         if action.get("command"):
             lines.append(f"  cwd: {action['cwd']}\n  {format_command(action['command'])}")
         if action.get("append"):
-            lines.append("  Append exactly (UTF-8):\n" + action["append"])
+            newline = "CRLF" if "\r\n" in action["append"] else "LF"
+            lines.append(f"  Append exactly (UTF-8, {newline} line endings):\n" + action["append"])
     verification = report["verification"]
     lines.append(f"MCP verification: {verification['status']} (initialize + tools/list)")
     if verification.get("command"):

@@ -23,29 +23,21 @@ if name != "claude":
     raise SystemExit("Codex setup should edit config directly, never launch a worker")
 project_config = Path.cwd() / ".mcp.json"
 user_config = Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
-if args == ["mcp", "get", "hipson"]:
-    if os.environ.get("INIT_GET_ERROR"):
-        raise SystemExit("configuration is unreadable")
-    if os.environ.get("INIT_GET_UNKNOWN"):
-        print("hipson: managed registration")
-        raise SystemExit(0)
-    user = json.loads(user_config.read_text(encoding="utf-8")) if user_config.exists() else {}
-    shared = json.loads(project_config.read_text(encoding="utf-8")) if project_config.exists() else {}
-    local = user.get("projects", {}).get(str(Path.cwd()), {})
-    for scope, config in (("Local", local), ("Project", shared), ("User", user)):
-        if "hipson" in config.get("mcpServers", {}):
-            print("hipson\\n  Scope: " + scope)
-            raise SystemExit(0)
-    raise SystemExit("No MCP server found with name: hipson")
+if args[:2] in (["mcp", "get"], ["mcp", "list"]):
+    # A real get/list can connect to stdio servers. Planning must never call it.
+    raise SystemExit(os.environ.get("INIT_MISSING_RESPONSE", 'No MCP server named "hipson". Run `claude mcp add` to add one.'))
 if args[:2] == ["mcp", "add"]:
-    if os.environ.get("INIT_ADD_ERROR"):
-        raise SystemExit("add failed")
     scope = args[args.index("--scope") + 1]
     path = project_config if scope == "project" else user_config
     config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     command, *server_args = args[args.index("--") + 1:]
     config.setdefault("mcpServers", {})["hipson"] = {"command": command, "args": server_args}
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("INIT_ADD_PARTIAL"):
+        path.write_bytes(b'{"partial":')
+        raise SystemExit("add failed after writing")
+    if os.environ.get("INIT_ADD_ERROR"):
+        raise SystemExit("add failed")
     path.write_text(json.dumps(config), encoding="utf-8")
     raise SystemExit(0)
 raise SystemExit("unexpected client arguments")
@@ -74,7 +66,7 @@ class _Setup:
             "CODEX_HOME": str(self.codex_home), "CODEX_USER_HOME": "", "HIPSON_HOME": str(self.db.parent),
             "HIPSON_LEDGER": str(self.db), "XDG_CONFIG_HOME": str(root / "xdg"),
             "CLAUDE_CONFIG_DIR": str(self.claude_config.parent), "INIT_CLIENT_LOG": str(self.log),
-            "INIT_GET_ERROR": "", "INIT_GET_UNKNOWN": "", "INIT_ADD_ERROR": "", "PYTHONDONTWRITEBYTECODE": "1",
+            "INIT_MISSING_RESPONSE": "", "INIT_ADD_PARTIAL": "", "INIT_ADD_ERROR": "", "PYTHONDONTWRITEBYTECODE": "1",
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
         }
         source = self.bin / "client.py"
@@ -133,7 +125,7 @@ def test_init_dry_run_exact_plan_without_setup_writes(tmp_path):
     assert report["verification"]["status"] == "planned"
     assert report["checks"]["ledger"] == str(setup.db)
     assert setup.snapshots() == before
-    assert [call["args"] for call in setup.calls()] == [["mcp", "get", "hipson"]]
+    assert setup.calls() == []
     actions = {action["kind"]: action for action in report["actions"]}
     assert all(action["status"] == "planned" for action in actions.values())
     assert "exclusive" in actions["codex"]["backup_before_edit"]
@@ -145,7 +137,7 @@ def test_init_dry_run_exact_plan_without_setup_writes(tmp_path):
     assert appended["command"] == report["checks"]["hipson_executable"]
     assert appended["args"] == claude["command"][10:]
     text = setup.run("--client", "codex", "--dry-run")
-    assert "Append exactly" in text and actions["codex"]["append"] in text
+    assert "Append exactly" in text and actions["codex"]["append"].replace("\r\n", "\n") in text
     assert str(setup.codex_config) in text and "backup-" in text
 
 
@@ -157,7 +149,7 @@ def test_init_noninteractive_refuses_without_yes_and_preserves_everything(tmp_pa
     assert not report["ok"] and "--yes" in report["errors"][0]
     assert setup.snapshots() == before
     assert all(action["status"] == "planned" for action in report["actions"])
-    assert all(call["args"] == ["mcp", "get", "hipson"] for call in setup.calls())
+    assert setup.calls() == []
 
 
 def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_path):
@@ -354,7 +346,7 @@ def test_init_claude_target_or_higher_scope_conflicts_never_apply(tmp_path):
             assert f"{existing_scope} scope" in report["errors"][0]
             assert "never replaces" in report["errors"][0]
             assert setup.snapshots() == before
-        assert all(call["args"] == ["mcp", "get", "hipson"] for call in setup.calls())
+        assert setup.calls() == []
 
 
 def test_init_codex_compares_the_complete_command_and_args_before_skipping(tmp_path):
@@ -403,12 +395,14 @@ def test_init_claude_matching_project_still_rejects_changed_command_or_args(tmp_
         assert report["actions"][1]["status"] == "conflict" and setup.snapshots() == before
 
 
-def test_init_unknown_claude_discovery_is_not_mistaken_for_identical_config(tmp_path):
-    setup = _Setup(tmp_path)
-    setup.env["INIT_GET_UNKNOWN"] = "1"
-    before = setup.snapshots()
-    report = setup.run("--client", "claude", "--yes", "--json", expected=1)
-    assert "outside the inspected" in report["errors"][0] and setup.snapshots() == before
+def test_init_current_claude_missing_server_wording_cannot_block_fresh_setup(tmp_path):
+    for index, message in enumerate(('No MCP server named "hipson". Run `claude mcp add` to add one.',
+                                     'No MCP server found with name: hipson')):
+        setup = _Setup(tmp_path / str(index))
+        setup.env["INIT_MISSING_RESPONSE"] = message
+        report = setup.run("--client", "claude", "--yes", "--json")
+        assert report["ok"] and report["actions"][1]["status"] == "applied"
+        assert [call["args"][:2] for call in setup.calls()] == [["mcp", "add"]]
 
 
 def test_init_changed_claude_discovery_source_refuses_stale_project_override(tmp_path):
@@ -433,11 +427,13 @@ def test_init_invalid_config_and_discovery_failures_never_apply(tmp_path):
         report = setup.run("--client", "codex", "--yes", "--json", expected=1)
         assert not report["ok"] and "TOML" in report["errors"][0]
         assert setup.snapshots() == before
-    setup = _Setup(tmp_path / "failed-get")
-    setup.env["INIT_GET_ERROR"] = "1"
+    setup = _Setup(tmp_path / "failed-discovery")
+    setup.claude_config.parent.mkdir()
+    setup.claude_config.write_bytes(b'{"broken":')
     before = setup.snapshots()
     report = setup.run("--yes", "--json", expected=1)
-    assert "discovery failed" in report["errors"][0] and setup.snapshots() == before
+    assert "invalid JSON" in report["errors"][0] and setup.snapshots() == before
+    assert setup.calls() == []
 
 
 def test_init_registration_failure_retains_backup_and_reports_partial_actions(tmp_path):
@@ -477,7 +473,7 @@ def test_init_windows_cmd_resolution_and_safe_argument_transport(tmp_path):
     assert [call.args for call in which.call_args_list] == [("claude",), ("claude.cmd",)]
     argv = ["C:/tools/claude.cmd", "mcp", "add", "--", "C:/repo %PATH% ! &/hipson.exe"]
     with (patch.object(init_setup.sys, "platform", "win32"),
-          patch.object(init_setup.subprocess, "run", return_value=subprocess.CompletedProcess(argv, 0, "", "")) as run):
+          patch.object(init_setup, "run_contained", return_value=subprocess.CompletedProcess(argv, 0, "", "")) as run):
         init_setup._run(argv, tmp_path)
     assert "/d /v:off /s /c" in run.call_args.args[0]
     assert run.call_args.kwargs["env"]["HIPSON_INIT_ARG_4"] == argv[4]

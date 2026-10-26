@@ -13,6 +13,12 @@
   conflicting target/higher-scope Claude entries and Codex tables, including disabled entries.
 - Keep init conflict paths readable with literal Windows backslashes, and reject unsupported
   platforms before platform-dependent executable discovery.
+- Make init planning file-only, independent of Claude's human-readable discovery responses.
+  Serialize config transactions with OS locks, identity/hash checks, private exclusive backups,
+  atomic Codex replacement and recovery of failing actions. Inspect Codex project layers and
+  effective environment/tool filters before success; contain client/MCP subprocess trees on
+  timeout or interruption with POSIX process groups and Windows Jobs. Add offline regressions
+  for concurrency, partial writes, backup permissions, overrides and descendant cleanup.
 - Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
   project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
   and Codex rollout facts. POSIX process groups preserve orphan claims; Windows inherits guardian
