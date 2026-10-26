@@ -186,7 +186,18 @@ or register an absolute executable path: `"$(command -v hipson)"` on POSIX,
 CI runs both test runners, static checks, builds and a real installed CLI/MCP stdio smoke on
 Ubuntu (Python 3.11/3.12), macOS and Windows (Python 3.12). Windows CI runs the real process-query
 regression; all platforms also test its error paths with mocked ctypes. The agent e2e harness
-explicitly skips outside Linux/WSL2; Linux CI still requires zero skipped tests.
+explicitly skips outside Linux/WSL2; Linux CI still requires zero skipped tests. Both test runners
+fail macOS/Windows CI on any skip outside the exact reason allowlist in `tests/support.py`:
+
+- macOS and Windows: Linux-only e2e, subreaper/zombie inspection and process-group recovery controls.
+- Windows only: Bash/POSIX worker wrapper, directory-mode permission controls, and symlink creation
+  when Developer Mode or the symlink privilege is unavailable.
+
+Missing test tools or other unexpected prerequisites fail CI on every supported OS. Windows
+read-only WAL tests emulate ACL denial where needed: `chmod` cannot deny directory creation, and
+SQLite's [Win32 shared-memory open](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/os_win.c#L4004)
+uses `OPEN_ALWAYS` even with `readonly_shm=1`. POSIX uses native directory permissions; both retain
+assertions that denied reads create no files and preserve database/WAL bytes.
 Actual native execution results come from those CI jobs; a Linux run alone cannot verify macOS or Windows.
 
 Install commands follow the official [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/)

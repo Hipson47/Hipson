@@ -713,7 +713,14 @@ class SessionStore:
 def open_session_store(path: str | Path) -> SessionStore:
     db_path = Path(path).expanduser().resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return SessionStore(path=db_path, connection=sqlite3.connect(db_path))
+    connection = sqlite3.connect(db_path)
+    try:
+        return SessionStore(path=db_path, connection=connection)
+    except BaseException:
+        # SQLite's transaction context manager does not close a connection.
+        # Failed schema/FTS setup must release the file handle too (notably on Windows).
+        connection.close()
+        raise
 
 
 def timestamp() -> str:

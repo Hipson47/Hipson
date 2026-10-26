@@ -58,7 +58,7 @@ def packet_review_create(input_data: dict[str, object], context: ToolContext) ->
         selected_skills=[],
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(redact_text(text), encoding="utf-8")
+    output_path.write_text(redact_text(text), encoding="utf-8", newline="\n")
     summary = f"Created review packet at {output_path}"
     return ToolResult(ok=True, output={"path": str(output_path), "summary": summary}, summary=summary, artifacts=(str(output_path),))
 

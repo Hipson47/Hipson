@@ -3,6 +3,7 @@
 import ctypes
 import json
 import os
+import socket
 import subprocess
 import sys
 from contextlib import closing
@@ -52,16 +53,32 @@ def test_windows_pid_probe_only_queries_and_closes_handles():
             assert not ledger._windows_pid_alive(pid)
 
 
-def test_real_liveness_probe_preserves_running_process_and_detects_exit():
+def test_real_liveness_probe_preserves_running_process_and_detects_exit(tmp_path):
     # Runs the real ctypes branch on Windows CI; never use a signal as a liveness check.
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
-        for _ in range(5):
-            assert ledger._pid_alive(child.pid)
-            assert child.poll() is None, "Liveness probe terminated its target"
-        child.terminate()  # Explicit teardown, after every probe confirmed the process survived.
-        child.wait(timeout=10)
-        assert not ledger._pid_alive(child.pid)
+        with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+            task = store.open_task(project=tmp_path, title="Live owner", objective="Safe PID queries")
+            assignment = store.assign(task["id"], actor="test", role="builder", mode="rw", scope=["src"],
+                                      owner_pid=child.pid, owner_host=socket.gethostname())
+            for _ in range(5):
+                assert ledger._pid_alive(child.pid)
+                assert store.reap() == []
+                assert child.poll() is None, "Liveness probe terminated its target"
+            try:
+                store.assign(task["id"], actor="overlap", role="builder", mode="rw", scope=["src/parser.py"])
+            except ledger.ClaimConflictError:
+                pass
+            else:
+                raise AssertionError("A running owner's overlapping claim must be refused")
+            assert child.poll() is None, "Conflict handling terminated the live owner"
+            child.terminate()  # Explicit teardown, after every probe confirmed the process survived.
+            child.wait(timeout=10)
+            assert not ledger._pid_alive(child.pid)
+            reaped = store.reap()
+            assert len(reaped) == 1 and reaped[0]["assignment"]["id"] == assignment["id"]
+            assert reaped[0]["reason"] == "pid_gone"
+            assert store.connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0] == 0
     finally:
         if child.poll() is None:
             child.kill()

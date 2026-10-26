@@ -581,7 +581,7 @@ def _write_packet(
         description="packet output",
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(packet_text, encoding="utf-8")
+    path.write_text(packet_text, encoding="utf-8", newline="\n")
 
 
 def _command(*parts: str) -> str:

@@ -3,6 +3,7 @@ import io
 import json
 import sqlite3
 from pathlib import Path
+from unittest.mock import patch
 
 from hipson import cli
 from hipson import session as hipson_session
@@ -19,6 +20,36 @@ def run_cli(*args: str) -> tuple[int, str, str]:
     except SystemExit as exc:
         rc = int(exc.code or 0) if isinstance(exc.code, int) else 1
     return rc, stdout.getvalue(), stderr.getvalue()
+
+
+def test_session_setup_failures_close_connection_before_returning(tmp_path: Path):
+    connect = sqlite3.connect
+    for stage in ("_migrate", "_setup_fts"):
+        db = tmp_path / f"{stage}.sqlite"
+        connections = []
+
+        def track_connection(*args, connections=connections, **kwargs):
+            connection = connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+
+        with patch.object(hipson_session.sqlite3, "connect", side_effect=track_connection), patch.object(
+            hipson_session.SessionStore, stage, side_effect=sqlite3.OperationalError("setup failed")
+        ):
+            try:
+                open_session_store(db)
+            except sqlite3.OperationalError as exc:
+                assert str(exc) == "setup failed"
+            else:
+                raise AssertionError("Expected session setup failure")
+        assert len(connections) == 1
+        try:
+            connections[0].execute("SELECT 1")
+        except sqlite3.ProgrammingError as exc:
+            assert "closed database" in str(exc)
+        else:
+            raise AssertionError("Failed session setup leaked a connection")
+        db.unlink()  # Windows rejects deletion if the failed store still holds the file open.
 
 
 def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Path):
@@ -78,7 +109,7 @@ def test_session_store_bounds_and_redacts_direct_tool_call_payloads(tmp_path: Pa
 
 def test_approval_record_migration_adds_expires_at_to_existing_db(tmp_path: Path):
     db_path = tmp_path / "runtime.sqlite"
-    with sqlite3.connect(db_path) as connection:
+    with contextlib.closing(sqlite3.connect(db_path)) as connection, connection:
         connection.executescript(hipson_session.INITIAL_SCHEMA)
         connection.execute(
             """

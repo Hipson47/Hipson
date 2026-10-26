@@ -28,9 +28,10 @@ def discover_tests():
 
 
 def run_tests(tests) -> int:
-    from tests.support import require_no_skips
+    from tests.support import skip_failure
 
     passed = skipped = failed = 0
+    skip_errors = []
     for name, fn in tests:
         try:
             params = inspect.signature(fn).parameters
@@ -44,14 +45,17 @@ def run_tests(tests) -> int:
         except SkipTest as exc:
             skipped += 1
             print(f"SKIP {name}: {exc}")
+            failure = skip_failure(str(exc))
+            if failure:
+                skip_errors.append(f"{name}: {failure}")
         except Exception as exc:
             failed += 1
             print(f"FAIL {name}: {exc}")
 
     print(f"{passed} passed, {skipped} skipped, {failed} failed of {len(tests)}")
-    if skipped and require_no_skips():
-        print("FAIL: Linux CI requires zero skipped tests")
-    return 1 if failed or (skipped and require_no_skips()) else 0
+    for failure in skip_errors:
+        print(f"FAIL: {failure}")
+    return 1 if failed or skip_errors else 0
 
 
 def main() -> int:

@@ -525,7 +525,7 @@ def write_report(agent_name: str, model: str, packet_path: str, content: str, ou
             "",
         ]
     )
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding="utf-8", newline="\n")
     return path
 
 

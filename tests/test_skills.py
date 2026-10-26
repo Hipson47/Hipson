@@ -66,7 +66,7 @@ def test_packaged_workflow_skill_is_accessible():
 
     assert any(item["name"] == "hipson-workflow" for item in skills)
     assert str(skill["content"]).startswith('<untrusted_data name="skill:hipson-workflow">')
-    assert skill["path"].endswith("hipson-workflow/SKILL.md")
+    assert Path(skill["path"]).parts[-2:] == ("hipson-workflow", "SKILL.md")
 
 
 def test_skill_tools_list_view_and_reject_missing_or_unsafe_roots(tmp_path: Path):

@@ -1520,7 +1520,7 @@ def test_session_store_creates_schema_idempotently(tmp_path: Path):
     fts_enabled = second.fts_enabled
     second.close()
 
-    with sqlite3.connect(db) as connection:
+    with contextlib.closing(sqlite3.connect(db)) as connection:
         tables = {
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'virtual table')")
@@ -1547,7 +1547,7 @@ def test_session_store_creates_schema_idempotently(tmp_path: Path):
     assert migrations == [1]
     if fts_enabled:
         assert {"messages_fts", "memories_fts"}.issubset(tables)
-    with sqlite3.connect(db) as connection:
+    with contextlib.closing(sqlite3.connect(db)) as connection:
         approval_columns = {row[1] for row in connection.execute("PRAGMA table_info(approval_records)")}
     assert "expires_at" in approval_columns
 
@@ -2235,6 +2235,7 @@ def test_packet_generation_uses_compiled_sections(tmp_path: Path):
 
     assert result.returncode == 0, result.stderr
     text = output.read_text(encoding="utf-8")
+    assert output.read_bytes() == text.encode("utf-8")
     assert "## Selected skills/reference material" in text
     assert "`skill_system-prompt-architect`" in text
     assert "## Evidence bundle" in text
@@ -2605,6 +2606,7 @@ def test_work_plan_writes_review_packet_locally(tmp_path: Path):
 
     text = output.read_text(encoding="utf-8")
     assert plan["packet"]["written"] is True
+    assert output.read_bytes() == text.encode("utf-8")  # Byte counts/hashes must match on Windows too.
     assert plan["packet"]["path"] == str(output)
     assert "# Agent Review Packet" in text
     assert "review release claims" in text
@@ -2644,6 +2646,7 @@ def test_work_plan_writes_executor_packet_with_explicit_scope(tmp_path: Path):
 
     text = output.read_text(encoding="utf-8")
     assert plan["packet"]["mode"] == "exec"
+    assert output.read_bytes() == text.encode("utf-8")
     assert plan["packet"]["written"] is True
     assert "# Agent Executor Packet" in text
     assert "`src`" in text
@@ -2839,7 +2842,7 @@ def test_read_packet_reports_exact_size_limit_and_replaces_invalid_utf8(tmp_path
 
 def test_read_packet_allows_size_boundary_and_truncates_redacted_content(tmp_path: Path):
     packet = tmp_path / "packet.md"
-    packet.write_text("OPENROUTER_API_KEY=sk-test-secret1234567890\nabcdef", encoding="utf-8")
+    packet.write_bytes(b"OPENROUTER_API_KEY=sk-test-secret1234567890\nabcdef")
 
     text = hipson_agents.read_packet(str(packet), max_chars=20)
 
@@ -2958,6 +2961,7 @@ def test_write_report_renders_exact_markdown_and_creates_parent_dirs(tmp_path: P
         hipson_agents.time.strftime = old_strftime
 
     assert path == output.resolve()
+    assert output.read_bytes() == output.read_text(encoding="utf-8").encode("utf-8")
     assert output.read_text(encoding="utf-8") == (
         "# Sidecar Report: reviewer\n\n"
         "- Model: `openai/gpt-test`\n"

@@ -476,6 +476,13 @@ def test_ledger_read_only_wal_without_shm_reads_without_touching_store_or_wal(tm
 
 
 def test_ledger_read_only_wal_without_shm_in_readonly_directory_fails_without_creating_files(tmp_path: Path):
+    connect = sqlite3.connect
+
+    def enforce_directory_acl(*args, **kwargs):
+        if isinstance(args[0], str) and args[0].endswith("?mode=ro&readonly_shm=1"):
+            _deny_windows_shm_creation(copy)
+        return connect(*args, **kwargs)
+
     db = tmp_path / "ledger.sqlite"
     with closing(Ledger(db)) as store:
         _open(store, tmp_path)
@@ -483,11 +490,23 @@ def test_ledger_read_only_wal_without_shm_in_readonly_directory_fails_without_cr
         copy.write_bytes(db.read_bytes())
         Path(f"{copy}-wal").write_bytes(Path(f"{db}-wal").read_bytes())
         before = {path.name: path.read_bytes() for path in tmp_path.iterdir()}
-        with patch.object(ledger.os, "access", return_value=False):
+        with patch.object(ledger.os, "access", return_value=False), patch.object(
+            ledger.sqlite3, "connect", side_effect=enforce_directory_acl
+        ):
             rc, stdout, stderr = run_cli_inprocess("task", "board", "--db", str(copy), "--json")
             assert rc == 1 and "unable to open database file" in stderr
             _assert_error(_call(tmp_path, "task.board", ledger_db=copy), "unable to open database file")
         assert {path.name: path.read_bytes() for path in tmp_path.iterdir()} == before
+
+
+def _deny_windows_shm_creation(path):
+    # Windows chmod cannot deny directory creation. SQLite's Win32 VFS uses OPEN_ALWAYS
+    # even for readonly_shm=1 (unlike Unix O_RDONLY), so emulate the actual ACL denial,
+    # not just os.access(). Keep native SQLite opens and the no-new-files assertions.
+    if sys.platform == "win32" and not Path(f"{path}-shm").exists():
+        failure = sqlite3.OperationalError("unable to open database file")
+        failure.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+        raise failure
 
 
 def test_ledger_read_only_wal_survives_last_writer_closing_during_open(tmp_path: Path):
@@ -509,6 +528,7 @@ def test_ledger_read_only_wal_survives_last_writer_closing_during_open(tmp_path:
                 assert not Path(f"{db}-wal").exists()
                 if not writable:
                     parent.chmod(0o555)  # Enforce the sidecar restriction after cleanup too.
+                    _deny_windows_shm_creation(db)
             return connect(*args, **kwargs)
 
         try:

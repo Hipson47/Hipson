@@ -11,6 +11,9 @@
   - Use UTF-8 CLI/MCP stdio with LF responses and portable relative paths.
     Add macOS/Windows Python 3.12 CI, real CLI/ledger/MCP smoke and platform regressions;
     retain Ubuntu mutation/audit gates and Linux CI's zero-skip policy.
+  - Write generated packets/reports with UTF-8 LF bytes, close session connections after
+    failed initialization and test-created SQLite connections deterministically, and resolve
+    native CLI executables for MCP tests. Enforce exact macOS/Windows CI skip allowlists.
   - Add per-OS global/clone quick starts and Claude Code MCP registration in
     README and `docs/INSTALL.md`; recommend WSL2 for Windows worker execution.
 

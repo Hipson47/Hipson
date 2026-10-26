@@ -543,7 +543,7 @@ def write_output(text: str, output: str | None) -> None:
     if output:
         path = Path(output).expanduser().resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        path.write_text(text, encoding="utf-8", newline="\n")
         print(f"Wrote {path}")
     else:
         print(text)

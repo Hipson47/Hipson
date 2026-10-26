@@ -5,12 +5,14 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 from hipson import mcp_server
 from hipson.ledger import Ledger
+from tests.support import hipson_cli
 from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
@@ -334,8 +336,8 @@ def test_ledger_mcp_missing_store_reads_create_nothing(tmp_path: Path):
 
 
 def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):
-    # Special URI characters must also work when opening an existing store.
-    db = tmp_path / "ledger?#.sqlite"
+    # '#' and '%' exercise URI escaping on every OS; '?' is not a legal Windows filename.
+    db = tmp_path / ("ledger%#.sqlite" if sys.platform == "win32" else "ledger?%#.sqlite")
     opened = _open(tmp_path, db)
     assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == opened
 
@@ -410,10 +412,17 @@ def test_ledger_mcp_redacts_ledger_validation_and_storage_errors(tmp_path: Path)
 
 
 def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
+    cli = hipson_cli()
+    assert cli, "requires installed hipson CLI (HIPSON_BIN, PATH, or checkout .venv)"
     project = tmp_path / "server"
     project.mkdir()
     env = {**os.environ, "HIPSON_LEDGER": str(tmp_path / "central.sqlite"),
            "HIPSON_HOME": str(tmp_path / "home")}
+    if sys.platform == "win32":
+        # Windows expands unknown ~users to sibling directories without a user lookup.
+        # Force unavailable home expansion so this real stdio error/recovery control is portable.
+        env.pop("USERPROFILE", None)
+        env.pop("HOMEPATH", None)
     requests = [
         _request(1, "task.open", {**WRITE_ARGUMENTS["task.open"], "project": str(tmp_path), "approved": True}),
         _request(2, "task.show", {"task": "T-0001"}),
@@ -425,9 +434,9 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
         {"jsonrpc": "2.0", "id": 6, "method": "tools/list"},
     ]
     result = subprocess.run(
-        ["hipson", "mcp", "serve", "--project", str(project), "--stdio"],
+        [cli, "mcp", "serve", "--project", str(project), "--stdio"],
         cwd=tmp_path, env=env, input="".join(json.dumps(request) + "\n" for request in requests),
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, encoding="utf-8", timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr == ""

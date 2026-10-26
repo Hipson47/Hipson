@@ -496,5 +496,6 @@ def test_review_packet_tool_writes_only_allowed_workspace_paths(tmp_path: Path):
     assert packet_path == tmp_path / "runs" / "review-packet.md"
     assert packet_path.exists()
     assert "Agent Review Packet" in packet_path.read_text(encoding="utf-8")
+    assert packet_path.read_bytes() == packet_path.read_text(encoding="utf-8").encode("utf-8")
     assert blocked.ok is False
     assert not (tmp_path.parent / "outside.md").exists()
