@@ -22,10 +22,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log() { printf '%s\n' "$*" | tee -a "$REPORT"; }
+# The report is sent to other people: replace the home directory and login name before writing it.
+LOGIN=$(id -un 2>/dev/null || echo "")
+private() { HOME_DIR="$HOME" LOGIN_NAME="$LOGIN" python3 -c '
+import os, sys
+text = sys.stdin.read()
+for value, mask in ((os.environ["HOME_DIR"], "~"), (os.environ["LOGIN_NAME"], "<user>")):
+    if len(value) > 1:
+        text = text.replace(value, mask)
+sys.stdout.write(text)' 2>/dev/null || sed "s#$HOME#~#g"; }
+log() { printf '%s\n' "$*" | private | tee -a "$REPORT"; }
 ok() { PASS=$((PASS + 1)); log "PASS  $1"; }
 bad() { FAIL=$((FAIL + 1)); FAILED="$FAILED
-  - $1"; log "FAIL  $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/      /' | tail -n 15 | tee -a "$REPORT"; }
+  - $1"; log "FAIL  $1"; [ -n "${2:-}" ] && printf '%s\n' "$2" | sed 's/^/      /' | tail -n 15 | private | tee -a "$REPORT"; }
 check() {  # check NAME COMMAND...  -> PASS when the command exits 0
   name=$1; shift
   if out=$("$@" 2>&1); then ok "$name"; else bad "$name (exit $?)" "$out"; fi
@@ -88,8 +97,14 @@ if "$H" task show --task T-0002 --json | grep -q '"status": "active"'; then ok "
 
 # Kill the runner and its worker group hard: reap must release the claim (owner gone).
 owner=$("$H" task show --task T-0002 --json | json_field '["assignments"][0]["owner_pid"]')
-kill -9 "-$owner" 2>/dev/null || kill -9 "$owner" 2>/dev/null
+if [ "$owner" = "$holder" ]; then  # Only ever signal the runner this script started itself.
+  kill -9 "-$holder" 2>/dev/null || kill -9 "$holder" 2>/dev/null
+else
+  bad "recorded owner is the runner this script started" "owner_pid=$owner, started=$holder"
+  kill -9 "$holder" 2>/dev/null
+fi
 wait "$holder" 2>/dev/null
+BG=""  # Reaped: its PID may be reused later, so the EXIT trap must not signal it again.
 sleep 0.5
 "$H" task reap --json >"$WORK/reap2.json" 2>&1
 if grep -q '"pid_gone"\|"cancelled"' "$WORK/reap2.json"; then ok "reap releases a killed worker's claim"; else bad "reap releases a killed worker's claim" "$(cat "$WORK/reap2.json")"; fi
@@ -127,5 +142,5 @@ fi
 log ""
 log "RESULT: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then log "Failed checks:$FAILED"; fi
-log "Report: $REPORT"
+printf 'Report: %s\n' "$REPORT"  # Terminal only: the absolute path names the user's home.
 [ "$FAIL" -eq 0 ]

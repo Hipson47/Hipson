@@ -42,9 +42,9 @@ It ends with `RESULT: N passed, M failed`.
 
 ## 3. Send back the report
 
-Send the file `Hipson/platform-smoke-report.txt` (it contains the macOS, Python, bash and uv
-versions plus the result of each check, no personal data beyond your macOS version).
-If something failed, the report includes the last lines of output for that check.
+Send the file `Hipson/platform-smoke-report.txt`. It contains the macOS, Python, bash and uv
+versions and the result of each check; for a failed check, the last lines of its output. Your home
+folder is written as `~` and your login name as `<user>`; still glance over it before sending.
 
 ## 4. Optional: try it as a real tool
 
@@ -65,6 +65,7 @@ claude mcp get hipson
 ## Cleanup
 
 ```bash
+cd ..                                 # leave the clone first
 rm -rf Hipson                         # the clone and its .venv
 uv tool uninstall hipson              # only if you did step 4
 ```
