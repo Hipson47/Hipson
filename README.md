@@ -9,16 +9,16 @@
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
 ![Tests: 521, zero CI skips](https://img.shields.io/badge/tests-521%20%7C%200%20CI%20skips-2ea043)
 ![Bounded mutation score: 65.12%](https://img.shields.io/badge/bounded%20mutation-65.12%25-yellow)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
-[Why](#why-it-exists) · [Built with itself](#built-with-itself) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP](#use-it-from-a-lead-agent-mcp) · [Docs](docs/README.md)
+[Why](#why-it-exists) · [Built with itself](#built-with-itself) · [How it works](#how-it-works) · [Quick start](#quick-start) · [MCP](#use-it-from-a-lead-agent-mcp) · [Docs](https://github.com/Hipson47/Hipson/blob/main/docs/README.md)
 
 </div>
 
 <table>
 <tr>
 <td width="44%" align="center">
-<img src=".github/readme/demo.webp" width="320" alt="28-second demo: the real ledger prints line by line, an overlapping write claim is refused with exit 75, a dead run's claim is reaped, and the counters 7 tasks, 11 assignments, 48 events and 404 tests land">
+<img src="https://raw.githubusercontent.com/Hipson47/Hipson/main/.github/readme/demo.webp" width="320" alt="28-second demo: the real ledger prints line by line, an overlapping write claim is refused with exit 75, a dead run's claim is reaped, and the counters 7 tasks, 11 assignments, 48 events and 404 tests land">
 </td>
 <td width="56%">
 
@@ -42,7 +42,7 @@ frames and running QA) from facts in this repository only. Silent excerpt, 28 s.
 
 <div align="center">
 
-<img src=".github/readme/ledger-events.svg" width="100%" alt="Real hipson task events output: a lead opens a task, a Codex builder and a separate reviewer run, the lead verifies and closes it">
+<img src="https://raw.githubusercontent.com/Hipson47/Hipson/main/.github/readme/ledger-events.svg" width="100%" alt="Real hipson task events output: a lead opens a task, a Codex builder and a separate reviewer run, the lead verifies and closes it">
 
 <sub>Rendered from the real `hipson task events --json` record of building Hipson's own evidence hardening (task T-0003; long summaries shortened): builder → independent reviewer → builder with fixes → lead verification → done.</sub>
 
@@ -76,7 +76,7 @@ branch `feat/task-ledger`, 2026-10-25:
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
 | Test suite | 521 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.2.0, 2026-10-26; 404 tests when the ledger landed) |
 | Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
-| Agent e2e | A real Codex agent (gpt-6.1-sol) is given a natural-language mission and must reach it with Hipson alone; oracles check the resulting ledger, not the agent's report. 3 scenarios (lead flow, claim conflict, crash recovery). Latest live run 3/3; the first run found a real bug (claims reaped across PID namespaces), now fixed. Local and on demand: [docs/AGENT_E2E.md](docs/AGENT_E2E.md) |
+| Agent e2e | A real Codex agent (gpt-6.1-sol) is given a natural-language mission and must reach it with Hipson alone; oracles check the resulting ledger, not the agent's report. 3 scenarios (lead flow, claim conflict, crash recovery). Latest live run 3/3; the first run found a real bug (claims reaped across PID namespaces), now fixed. Local and on demand: [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
 
@@ -188,7 +188,7 @@ uv run --no-dev hipson --help
 
 Use `uv run --no-dev hipson` in place of `hipson` below. For the wrapper, virtualenv activation,
 MCP registration from a clone, PATH troubleshooting and verification commands, see
-[docs/INSTALL.md](docs/INSTALL.md). The MCP commands follow
+[docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md). The MCP commands follow
 [Claude Code's stdio registration syntax](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
 
 Run a task by hand to see the model:
@@ -218,7 +218,7 @@ The wrapper exits with the worker's code, or 75 when a live writer already holds
 The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`
 (`$env:USERPROFILE\.config\hipson\ledger.sqlite` on native Windows).
 `HIPSON_HOME` and `XDG_CONFIG_HOME` can change its config directory. Details, recovery rules and limits:
-[docs/TASK_LEDGER.md](docs/TASK_LEDGER.md).
+[docs/TASK_LEDGER.md](https://github.com/Hipson47/Hipson/blob/main/docs/TASK_LEDGER.md).
 
 ## Use it from a lead agent (MCP)
 
@@ -248,7 +248,7 @@ The ledger sits on top of Hipson's existing local workflow layer:
 | Agent integration | `hipson install agents`, `hipson agent bootstrap`, `hipson mcp serve` |
 | Optional AI second opinions | `hipson sidecar route / run`, `hipson quality report / eval` (explicit, advisory) |
 
-Full command reference and workflows: [docs/USAGE.md](docs/USAGE.md). All docs: [docs/README.md](docs/README.md).
+Full command reference and workflows: [docs/USAGE.md](https://github.com/Hipson47/Hipson/blob/main/docs/USAGE.md). All docs: [docs/README.md](https://github.com/Hipson47/Hipson/blob/main/docs/README.md).
 
 ## Safety in short
 
@@ -310,7 +310,7 @@ To update `[tool.hipson.mutation-gate]` in `pyproject.toml`, start from a fresh 
 aside, run the three commands above with the recorded mutmut/Python versions, inspect `uv run mutmut results`,
 and review changed survivors before editing the baseline counts, minimum score (rounded down to two decimals), date,
 versions and elapsed time. Baseline updates require a reviewed diff; the gate never learns a new threshold automatically.
-Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Changes are listed in [CHANGELOG.md](https://github.com/Hipson47/Hipson/blob/main/CHANGELOG.md).
 
 ## Project layout
 
@@ -325,4 +325,4 @@ docs/            live documentation; docs/archive/ holds historical plans and au
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](https://github.com/Hipson47/Hipson/blob/main/LICENSE).

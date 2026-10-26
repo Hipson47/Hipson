@@ -38,6 +38,7 @@ before running examples.
 ## Release & maintenance
 
 - [1.0 readiness](release-1.0.md) — historical 1.0 gates and packaging decisions; for release maintainers.
+- [Releasing](RELEASING.md) — how versions reach PyPI through Trusted Publishing, and the one-time maintainer setup.
 - [Release notes 1.2.0](release-1.2.md) — ledger, agent workflow, cross-platform support, external audit fixes and limits.
 - [1.1 release notes](release-1.1.md) — agent playbook/router changes and suggested checks; for users and release maintainers.
 - [Mutation triage notes](MUTATION_TRIAGE_NOTES.md) — historical partial mutation results and follow-up strategy; for test maintainers.

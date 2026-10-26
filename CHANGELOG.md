@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 1.2.1 - 2026-10-26
+
+- **PyPI release workflow**: `.github/workflows/release.yml` publishes version tags through PyPI
+  Trusted Publishing (no stored token) after checking that the tag matches the package version,
+  `twine check --strict` and a wheel smoke test; maintainer setup in `docs/RELEASING.md`.
+- **Package metadata**: current description, keywords and project URLs; README links and images are
+  absolute so the PyPI page renders them.
+
 ## 1.2.0 - 2026-10-26
 
 Release notes: [docs/release-1.2.md](docs/release-1.2.md).

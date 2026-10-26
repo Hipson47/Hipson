@@ -746,9 +746,15 @@ def test_packaged_assets_are_available_outside_repo_cwd(tmp_path: Path):
 
 
 def test_package_metadata_positions_hipson_as_control_plane():
-    assert 'description = "Local-first AI Development Control Plane for coding agents."' in Path(
-        "pyproject.toml"
-    ).read_text(encoding="utf-8")
+    import re
+
+    pyproject = Path("pyproject.toml").read_text(encoding="utf-8")
+    assert ('description = "Local-first control plane for AI coding agents: one lead, many workers, '
+            'one ledger of who did what, with evidence."') in pyproject
+    assert 'Repository = "https://github.com/Hipson47/Hipson"' in pyproject
+    # PyPI renders README.md without the repository: relative links and images would break there.
+    readme = Path("README.md").read_text(encoding="utf-8")
+    assert not re.findall(r'\]\((?!https?://|#|mailto:)[^)\s]+\)|src="(?!https?://)', readme)
 
 
 def test_runtime_asset_finds_default_agent_config():
