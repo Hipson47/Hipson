@@ -303,7 +303,7 @@ def stopped(sig, frame):
     raise SystemExit(0)
 signal.signal(signal.SIGINT, stopped)
 signal.signal(signal.SIGHUP, stopped)
-Path('ready.json').write_text('[]')
+Path('ready.tmp').write_text('[]'); Path('ready.tmp').rename('ready.json')  # atomic: the test polls for this file
 time.sleep(120)
 """)
                 _ready(run, process)
@@ -325,7 +325,7 @@ def stopped(sig, frame):
     Path('forwarded').write_text(str(sig), encoding='utf-8')
     raise SystemExit(0)
 signal.signal(signal.SIGBREAK, stopped)
-Path('ready.json').write_text('[]')
+Path('ready.tmp').write_text('[]'); Path('ready.tmp').rename('ready.json')  # atomic: the test polls for this file
 # CPython only wakes a Windows sleep for SIGINT, not SIGBREAK. Return to Python
 # regularly to dispatch the break handler within the runner's grace period.
 while True: time.sleep(0.05)
