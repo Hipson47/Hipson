@@ -7,6 +7,9 @@
   and Codex rollout facts. POSIX process groups preserve orphan claims; Windows suspends workers
   until Job Object attachment and kills their entire tree on runner death. Native runner tests
   run in the existing Ubuntu/macOS/Windows CI matrix; platform smoke includes runner checks.
+- Report Windows console signal delivery errors while preserving Job cleanup. Correct native
+  runner tests for JSON path escaping, venv launcher PIDs and CPython's deferred SIGBREAK
+  dispatch during long sleeps; require the worker to record the exact forwarded signal.
 
 ## 1.2.1 - 2026-10-26
 

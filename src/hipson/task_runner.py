@@ -291,7 +291,12 @@ def _active(job: Job | None) -> bool:
 
 def _stop(child: subprocess.Popen[bytes], job: Job | None, number: int, grace: float) -> bool:
     if job:
-        job.interrupt(child.pid)  # A console may be absent; Job termination is authoritative.
+        try:
+            job.interrupt(child.pid)
+        except OSError as exc:
+            # Console-less workers cannot receive a break. Still enforce the grace
+            # period and Job cleanup before releasing their claims.
+            _message(f"could not forward Ctrl+Break: {exc}; enforcing Job cleanup after grace")
     else:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)

@@ -118,8 +118,11 @@ class Job:
 
     def interrupt(self, group: int) -> None:
         # A group can outlive its leader. Popen.send_signal would skip an exited
-        # direct child, so address the surviving console group explicitly.
-        self.kernel.GenerateConsoleCtrlEvent(1, group)  # CTRL_BREAK_EVENT; may have no console.
+        # direct child, so address the surviving console group explicitly. The
+        # caller must share its console; CREATE_NEW_PROCESS_GROUP only masks Ctrl+C,
+        # not Ctrl+Break. Job assignment and CREATE_SUSPENDED do not change that.
+        if not self.kernel.GenerateConsoleCtrlEvent(1, group):  # CTRL_BREAK_EVENT
+            self._error()
 
     def terminate(self) -> None:
         if not self.kernel.TerminateJobObject(self.handle, 1):

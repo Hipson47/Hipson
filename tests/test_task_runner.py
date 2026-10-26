@@ -26,8 +26,14 @@ class _NativeRun(bash._Run):
         self.handles.extend(handles)
         options = {"creationflags": 0 if self.env.get("RUNNER_TEST_CTRL_C") else subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {
             "process_group": 0 if group_leader else None}
+        # Windows venv python.exe can be a launcher. Report the PID from the actual
+        # runner interpreter, which owns the assignment and the Job handle.
+        runner_pid = self.root / f"runner-{len(self.processes)}.pid"
+        bootstrap = ("import os; from pathlib import Path; from hipson.cli import main; "
+                     f"Path({str(runner_pid)!r}).write_text(str(os.getpid()), encoding='utf-8'); "
+                     "raise SystemExit(main())")
         process = subprocess.Popen(
-            [sys.executable, "-m", "hipson.cli", "task", "run", "--task", self.task, "--actor", "codex",
+            [sys.executable, "-c", bootstrap, "task", "run", "--task", self.task, "--actor", "codex",
              "--role", "builder", "--mode", "rw", "--scope", "src", *extra, "--", sys.executable, str(worker)],
             cwd=cwd or self.root, env=self.env, stdin=handles[0], stdout=handles[1], stderr=handles[2], **options)
         self.processes.append(process)
@@ -73,7 +79,10 @@ print('worker output')
         assert run.wait(process) == 0, run.stderr(process)
         view, events = run.view()
         assignment = view["assignments"][0]
-        assert assignment["owner_pid"] == process.pid
+        runner_pid = int((tmp_path / "runner-0.pid").read_text())
+        assert assignment["owner_pid"] == runner_pid
+        if sys.platform != "win32":
+            assert runner_pid == process.pid
         assert assignment["owner_host"] == socket.gethostname()
         assert assignment["owner_boot_id"] == ledger._boot_id()
         assert assignment["owner_pid_namespace"] == ledger._pid_namespace()
@@ -313,11 +322,13 @@ def _windows_signal_check(root, control):
 import signal, time
 from pathlib import Path
 def stopped(sig, frame):
-    Path('forwarded').touch()
+    Path('forwarded').write_text(str(sig), encoding='utf-8')
     raise SystemExit(0)
 signal.signal(signal.SIGBREAK, stopped)
 Path('ready.json').write_text('[]')
-time.sleep(120)
+# CPython only wakes a Windows sleep for SIGINT, not SIGBREAK. Return to Python
+# regularly to dispatch the break handler within the runner's grace period.
+while True: time.sleep(0.05)
 """
         process = run.start(source)
         pids = _ready(run, process)
@@ -331,6 +342,7 @@ time.sleep(120)
         assert _stopped(pids)
         if control != "escalate":
             assert (root / "forwarded").exists()
+            assert (root / "forwarded").read_text() == str(int(signal.SIGBREAK))
         assert run.view()[0]["assignments"][0]["status"] == "cancelled"
         assert run.view()[0]["claims"] == []
 
@@ -422,6 +434,14 @@ def test_task_run_windows_job_api_containment_and_fail_closed():
         assert job.active()
         job.interrupt(42)
         kernel.GenerateConsoleCtrlEvent.assert_called_once_with(1, 42)
+        kernel.GenerateConsoleCtrlEvent.return_value = False
+        with patch.object(ctypes, "WinError", side_effect=OSError("no shared console"), create=True):
+            try:
+                job.interrupt(42)
+            except OSError as exc:
+                assert "no shared console" in str(exc)
+            else:
+                raise AssertionError("Console delivery failures must be reported")
         job.terminate()
         kernel.TerminateJobObject.assert_called_once_with(0x123456789, 1)
         job.close()
@@ -439,6 +459,20 @@ def test_task_run_windows_job_api_containment_and_fail_closed():
                 raise AssertionError("A worker must not run outside its job")
             kernel.ResumeThread.assert_not_called()
             job.close()
+
+
+def test_task_run_windows_console_failure_still_stops_job():
+    from unittest.mock import Mock
+
+    job, child = Mock(), Mock()
+    job.interrupt.side_effect = OSError("no shared console")
+    job.active.side_effect = [True, True, False, False]
+    with patch.object(task_runner, "_message") as message:
+        assert task_runner._stop(child, job, signal.SIGTERM, 0)
+    job.interrupt.assert_called_once_with(child.pid)
+    job.terminate.assert_called_once_with()
+    message.assert_called_once_with(
+        "could not forward Ctrl+Break: no shared console; enforcing Job cleanup after grace")
 
 
 def test_task_run_rollout_cancel_with_stdin_still_open(tmp_path):

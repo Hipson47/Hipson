@@ -266,7 +266,10 @@ def test_audit_h03_runner_refuses_wrong_project_before_assignment(tmp_path: Path
         assert (other / "marker.txt").exists()
         view, events = run.view()
         override = next(e for e in events if e["type"] == "project_mismatch_override")
-        assert str(project.resolve()) in override["summary"] and str(other.resolve()) in override["summary"]
+        prefix = "Explicit --allow-project-mismatch: "
+        assert override["summary"].startswith(prefix)
+        assert json.loads(override["summary"][len(prefix):]) == {
+            "expected": str(project.resolve()), "actual": str(other.resolve()), "matches": False}
         assert view["assignments"][0]["id"] in override["refs"]
         assert override["actor"] == "codex" and view["assignments"][0]["status"] == "passed"
 
