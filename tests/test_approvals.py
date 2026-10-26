@@ -351,3 +351,27 @@ def test_sandbox_rejects_broad_wsl_profiles_even_when_selected_as_workspace():
         assert not check_read_path(profile, profile).allowed, raw
     project = Path("/mnt/c/Users/audit-user/project").resolve()
     assert check_read_path(project / "README.md", project).allowed
+
+
+def test_prepare_read_only_command_exact_argv_and_environment_contract():
+    # Pins the hardening contract exactly: every element matters for helper and pager safety.
+    from hipson.sandbox import prepare_read_only_command
+
+    inherited = {"GIT_EXTERNAL_DIFF": "/bin/evil", "git_dir": "/elsewhere", "PAGER": "less", "pager": "more",
+                 "GITX": "kept", "HOME_SAFE": "kept"}
+    with patch.dict(os.environ, inherited, clear=False):
+        argv, env = prepare_read_only_command(["git", "diff", "--stat"])
+    assert argv == ["git", "--no-pager", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
+                    "-c", "diff.external=", "diff", "--no-ext-diff", "--no-textconv", "--stat"]
+    assert not any(key.upper().startswith("GIT_") and key not in ("GIT_PAGER", "GIT_OPTIONAL_LOCKS",
+                                                                   "GIT_TERMINAL_PROMPT") for key in env)
+    assert "git_dir" not in env and "GIT_EXTERNAL_DIFF" not in env
+    assert env["GITX"] == "kept" and env["HOME_SAFE"] == "kept"
+    assert env["GIT_PAGER"] == "cat" and env["PAGER"] == "cat"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0" and env["GIT_TERMINAL_PROMPT"] == "0"
+    if sys.platform != "win32":  # POSIX env keys are case-sensitive; a lowercase pager is a different key.
+        assert "pager" not in env
+    with patch.dict(os.environ, inherited, clear=False):
+        status_argv, _ = prepare_read_only_command(["git", "status", "--short"])
+    assert status_argv == ["git", "--no-pager", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
+                           "-c", "diff.external=", "status", "--short"]
