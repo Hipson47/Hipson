@@ -21,8 +21,9 @@ repository, so no API token exists anywhere. The workflow is `.github/workflows/
 
    The project is created on the first successful upload; a pending publisher does not reserve
    the name, so do the first release soon after.
-3. **GitHub environment.** Repository → Settings → Environments → New environment → `pypi`.
-   Recommended: add yourself under "Required reviewers", so every upload waits for your click.
+3. **GitHub environment** `pypi` (Repository → Settings → Environments). Configured on 2026-10-26:
+   required reviewer `Hipson47` (every upload waits for that approval) and deployments allowed only
+   from tags matching `v*`, so no branch can publish.
 
 ## Each release
 
@@ -36,5 +37,5 @@ repository, so no API token exists anywhere. The workflow is `.github/workflows/
    environment and uploads. Approve it under Actions → the run → Review deployments.
 5. Create the GitHub Release for the tag (`gh release create vX.Y.Z --notes-file docs/release-X.Y.md`).
 
-A tag that already exists can be published with Actions → "Release to PyPI" → Run workflow,
-entering the tag. PyPI never accepts the same version twice; fix forward with a new patch version.
+A tag that already exists can be published with Actions → "Release to PyPI" → Run workflow: pick
+the tag under "Use workflow from" (the environment rejects branch refs) and enter the same tag. PyPI never accepts the same version twice; fix forward with a new patch version.
