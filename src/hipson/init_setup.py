@@ -27,6 +27,19 @@ from hipson.redaction import redact_text
 CLIENTS = ("auto", "claude", "codex", "none")
 TIMEOUT = 15
 
+# Codex rmcp-client/src/utils.rs defaults; do not inherit the entire init environment.
+# https://github.com/openai/codex/blob/main/codex-rs/rmcp-client/src/utils.rs
+_CODEX_POSIX_ENV = (
+    "HOME", "LOGNAME", "PATH", "SHELL", "USER", "__CF_USER_TEXT_ENCODING",
+    "LANG", "LC_ALL", "TERM", "TMPDIR", "TZ",
+)
+_CODEX_WINDOWS_ENV = (
+    "PATH", "PATHEXT", "SHELL", "COMSPEC", "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE",
+    "USERNAME", "USERDOMAIN", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "PROGRAMFILES",
+    "PROGRAMFILES(X86)", "PROGRAMW6432", "PROGRAMDATA", "LOCALAPPDATA", "APPDATA",
+    "TEMP", "TMP", "TMPDIR", "POWERSHELL", "PWSH",
+)
+
 
 @dataclass
 class InitPlan:
@@ -113,7 +126,24 @@ def _resolved_path(value: str, project: Path) -> Path:
     return (path if path.is_absolute() else project / path).resolve()
 
 
-def _registration_matches(existing: Any, command: str, args: list[str], project: Path) -> bool:
+def _server_cwd(entry: dict[str, Any], project: Path) -> Path:
+    value = entry.get("cwd", str(project))
+    if not isinstance(value, str) or not value:
+        raise ValueError("MCP working directory must be a nonempty path")
+    cwd = _resolved_path(value, project)
+    if not cwd.is_dir():
+        raise ValueError(f"MCP working directory does not exist: {cwd}")
+    return cwd
+
+
+def _codex_environment(entry: dict[str, Any]) -> dict[str, str]:
+    names = _CODEX_WINDOWS_ENV if sys.platform == "win32" else _CODEX_POSIX_ENV
+    env = {key: os.environ[key] for key in (*names, *entry.get("env_vars", [])) if key in os.environ}
+    env.update(entry.get("env", {}))
+    return env
+
+
+def _registration_matches(existing: Any, command: str, args: list[str], project: Path, *, codex: bool = False) -> bool:
     if not isinstance(existing, dict) or existing.get("type", "stdio") != "stdio" or existing.get("enabled", True) is not True:
         return False
     environment = existing.get("env", {})
@@ -122,42 +152,58 @@ def _registration_matches(existing: Any, command: str, args: list[str], project:
     required = {"task.open", "task.board"}
     if (
         not isinstance(environment, dict)
-        or any(not isinstance(key, str) or not isinstance(value, str) or os.environ.get(key) != value for key, value in environment.items())
+        or any(not isinstance(key, str) or not isinstance(value, str) or (key != "HIPSON_LEDGER" and os.environ.get(key) != value) for key, value in environment.items())
         or not isinstance(forwarded, list) or any(not isinstance(key, str) or key not in os.environ for key in forwarded)
         or not isinstance(disabled, list) or any(not isinstance(name, str) for name in disabled)
         or required.intersection(disabled)
         or (allowed is not None and (not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed) or not required <= set(allowed)))
     ):
         return False
+    try:
+        cwd = _server_cwd(existing, project) if codex else project
+        effective_env = _codex_environment(existing) if codex else {**os.environ, **environment}
+        if effective_env.get("HIPSON_LEDGER"):
+            effective_db = _resolved_path(effective_env["HIPSON_LEDGER"], cwd)
+        elif effective_env.get("HIPSON_HOME"):
+            effective_db = _resolved_path(effective_env["HIPSON_HOME"], cwd) / "ledger.sqlite"
+        elif effective_env.get("XDG_CONFIG_HOME"):
+            effective_db = _resolved_path(effective_env["XDG_CONFIG_HOME"], cwd) / "hipson" / "ledger.sqlite"
+        else:
+            effective_db = Path.home() / ".config" / "hipson" / "ledger.sqlite"
+        if effective_db.resolve() != ledger.default_ledger_db().resolve():
+            return False
+    except (OSError, ValueError):
+        return False
     current_command, current_args = existing.get("command"), existing.get("args", [])
     if not isinstance(current_command, str) or not isinstance(current_args, list) or not all(isinstance(arg, str) for arg in current_args):
         return False
     located = shutil.which(current_command) if Path(current_command).name == current_command else None
-    if _resolved_path(located or current_command, project) != _resolved_path(command, project):
+    if _resolved_path(located or current_command, cwd) != _resolved_path(command, project):
         return False
 
-    def normalized(arguments: list[str]) -> list[str]:
+    def normalized(arguments: list[str], base: Path) -> list[str]:
         result = []
         index = 0
         while index < len(arguments):
             arg = arguments[index]
             if arg == "--project" and index + 1 < len(arguments):
                 index += 1
-                result.extend(["--project", os.path.normcase(str(_resolved_path(arguments[index], project)))])
+                result.extend(["--project", os.path.normcase(str(_resolved_path(arguments[index], base)))])
             elif arg.startswith("--project="):
-                result.extend(["--project", os.path.normcase(str(_resolved_path(arg.split("=", 1)[1], project)))])
+                result.extend(["--project", os.path.normcase(str(_resolved_path(arg.split("=", 1)[1], base)))])
             else:
                 result.append(arg)
             index += 1
         return result
 
-    return normalized(current_args) == normalized(args)
+    return normalized(current_args, cwd) == normalized(args, project)
 
 
-def _verification(entry: dict[str, Any]) -> dict[str, Any]:
+def _verification(entry: dict[str, Any], project: Path, *, codex: bool = False) -> dict[str, Any]:
     return {
         "command": [entry["command"], *entry.get("args", [])],
-        "env": {**os.environ, **entry.get("env", {})},
+        "env": _codex_environment(entry) if codex else {**os.environ, **entry.get("env", {})},
+        "cwd": _server_cwd(entry, project) if codex else project,
         "enabled_tools": entry.get("enabled_tools"), "disabled_tools": entry.get("disabled_tools", []),
     }
 
@@ -219,6 +265,15 @@ def _claude_registrations(plan: InitPlan, project: Path, user_config: Path) -> l
     local = projects.get(str(project), {})
     if not isinstance(local, dict):
         raise ValueError(f"Cannot safely inspect Claude local scope at {user_config}.")
+    disabled = local.get("disabledMcpServers", [])
+    if not isinstance(disabled, list) or any(not isinstance(name, str) for name in disabled):
+        raise ValueError(f"Cannot safely inspect Claude disabledMcpServers at {user_config}.")
+    if "hipson" in disabled:
+        raise ValueError(
+            f"Claude hipson is disabled for this project: {project}. "
+            f"Run {format_command(['claude'])} in that directory; "
+            "use /mcp in Claude Code to re-enable hipson, then rerun hipson init."
+        )
     registrations = []
     # Claude selects one complete entry in this order, without merging fields.
     for scope, config in (("local", local), ("project", shared), ("user", user)):
@@ -298,7 +353,7 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 actions.append(action)
                 effective = registrations[0][1] if action["status"] == "skipped" else {"command": command, "args": server_args}
                 if action["status"] != "conflict":
-                    plan.verifications.append(_verification(effective))
+                    plan.verifications.append(_verification(effective, project))
             elif name == "codex":
                 home, warnings = detect_codex_home()
                 report["checks"]["warnings"] = warnings
@@ -308,11 +363,12 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 try:
                     servers = parsed.get("mcp_servers", {})
                     configured = "hipson" in servers
-                    matches = configured and _registration_matches(servers["hipson"], command, server_args, project)
+                    matches = configured and _registration_matches(servers["hipson"], command, server_args, project, codex=True)
                     addition = ("\n" if original else "") + (
                         "\n[mcp_servers.hipson]\n"
                         f"command = {json.dumps(command, ensure_ascii=False)}\n"
                         f"args = {json.dumps(server_args, ensure_ascii=False)}\n"
+                        f"env = {{ HIPSON_LEDGER = {json.dumps(str(db), ensure_ascii=False)} }}\n"
                     )
                     if original and b"\r\n" in original:
                         addition = addition.replace("\n", "\r\n")
@@ -326,7 +382,9 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                     "detail": "already configured" if matches else "append TOML (existing bytes preserved)",
                     "append": addition if not configured else "",
                 }
-                effective_config = parsed if configured else _merge_config(parsed, {"mcp_servers": {"hipson": {"command": command, "args": server_args}}})
+                effective_config = parsed if configured else _merge_config(parsed, {"mcp_servers": {"hipson": {
+                    "command": command, "args": server_args, "env": {"HIPSON_LEDGER": str(db)},
+                }}})
                 project_layers = []
                 for layer_path in _codex_project_paths(project):
                     layer = _codex_config(plan, layer_path)
@@ -338,18 +396,18 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                     desired = {"command": command, "args": server_args}
                     action["detail"] = (
                         f"Codex hipson registration conflict at {path}: existing {_registration_description('user', servers['hipson'])}; "
-                        f"desired {_registration_description('user', desired)}. Command, args, environment, tool filters and enabled state must match. "
+                        f"desired {_registration_description('user', desired)}. Command, args, working directory, effective ledger, environment, tool filters and enabled state must match. "
                         "Remove or rename the conflicting table explicitly before rerunning, or select a separate CODEX_HOME; setup never replaces it."
                     )
                     report["errors"].append(action["detail"])
-                elif not _registration_matches(effective, command, server_args, project):
+                elif not _registration_matches(effective, command, server_args, project, codex=True):
                     action.update(status="conflict", detail=(
                         f"Codex effective hipson registration conflict in project config: {', '.join(project_layers)}. "
-                        "Command, args, environment, tool filters and enabled state must match; setup never replaces project overrides."
+                        "Command, args, working directory, effective ledger, environment, tool filters and enabled state must match; setup never replaces project overrides."
                     ))
                     report["errors"].append(action["detail"])
                 if action["status"] != "conflict":
-                    plan.verifications.append(_verification(effective))
+                    plan.verifications.append(_verification(effective, project, codex=True))
                 actions.append(action)
         for action in actions:
             path = Path(action["path"])
@@ -360,7 +418,7 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
             "methods": ["initialize", "notifications/initialized", "tools/list"],
         }
         if not plan.verifications:
-            plan.verifications.append(_verification({"command": command, "args": server_args}))
+            plan.verifications.append(_verification({"command": command, "args": server_args}, project))
         if plan.snapshots:
             report["checks"]["config_lock_directory"] = str(Path.home() / ".hipson" / "init-locks")
         report["next_steps"] = [
@@ -405,14 +463,13 @@ def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None
                 raise ValueError("Codex config did not retain the planned bytes")
         else:
             result = _run(action["command"], project)
-            written = snapshot(path)
             if result.returncode:
-                raise ValueError(f"Claude MCP registration failed (exit {result.returncode}); restoring the failing action.")
+                raise ValueError(f"Claude MCP registration failed (exit {result.returncode}).")
             parsed = json.loads(path.read_bytes())
             entry = parsed.get("mcpServers", {}).get("hipson")
         command = plan.report["checks"]["hipson_executable"]
         args = ["mcp", "serve", "--project", str(project), "--stdio"]
-        if not _registration_matches(entry, command, args, project):
+        if not _registration_matches(entry, command, args, project, codex=action["kind"] == "codex"):
             raise ValueError(f"Invalid {action['kind']} registration after update")
         if written is not None:
             unchanged(path, written)
@@ -420,14 +477,17 @@ def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None
         _check_sources(plan)
     except BaseException:
         if started:
-            current = snapshot(path)
-            if (
-                (written is not None and current != written)
-                or (action["kind"] == "codex" and written is None and current.content not in (original.content, desired))
-            ):
-                action["recovery"] = "Concurrent edit retained; inspect the backup before restoring manually."
+            # Claude writes through an external process: a timeout, failed exit or
+            # even invalid output cannot establish ownership of the current file.
+            try:
+                restore(path, original, backup, expected=written if written is not None else original)
+            except (OSError, ValueError):
+                action["recovery"] = (
+                    f"Unowned or concurrent edit retained at {path}. Manual recovery: "
+                    + (f"inspect and merge {backup} into {path}, preserving newer edits."
+                       if backup else f"inspect {path}; remove it manually only if none of its contents should be retained.")
+                )
             else:
-                restore(path, original, backup)
                 action["recovery"] = "restored" if original.content is not None else "removed new config"
         raise
 
@@ -479,6 +539,7 @@ def apply_plan(plan: InitPlan) -> None:
 def verify_mcp(
     command: list[str], project: Path, *, env: dict[str, str] | None = None,
     enabled_tools: list[str] | None = None, disabled_tools: list[str] | None = None,
+    cwd: Path | None = None,
 ) -> dict[str, Any]:
     verification: dict[str, Any] = {"status": "failed", "command": command}
     requests = [
@@ -489,7 +550,7 @@ def verify_mcp(
         {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     ]
     try:
-        result = _run(command, project, input_text="".join(json.dumps(item) + "\n" for item in requests), env=env)
+        result = _run(command, cwd if cwd is not None else project, input_text="".join(json.dumps(item) + "\n" for item in requests), env=env)
         verification["exit_code"] = result.returncode
         responses = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         by_id = {item.get("id"): item for item in responses if isinstance(item, dict)}
@@ -524,6 +585,8 @@ def format_report(report: dict[str, Any]) -> str:
             lines.append(f"  Before edit: back up to {action['backup_before_edit']}.")
         if action.get("backup"):
             lines.append(f"  Backup: {action['backup']}")
+        if action.get("recovery"):
+            lines.append(f"  Recovery: {action['recovery']}")
         if action.get("command"):
             lines.append(f"  cwd: {action['cwd']}\n  {format_command(action['command'])}")
         if action.get("append"):

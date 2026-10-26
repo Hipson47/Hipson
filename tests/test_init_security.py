@@ -90,7 +90,7 @@ print(json.dumps(plan.report))
             assert child.returncode == 0, (stdout, stderr)
             reports.append(json.loads(stdout))
         parsed = tomllib.loads(setup.codex_config.read_text(encoding="utf-8"))
-        assert parsed["mcp_servers"]["hipson"] == setup.registration()
+        assert parsed["mcp_servers"]["hipson"] == {**setup.registration(), "env": {"HIPSON_LEDGER": str(setup.db)}}
         assert sum(report["ok"] for report in reports) == 1, reports
         assert any("changed since planning" in str(report["errors"]) for report in reports)
         assert len(list(setup.codex_home.glob("config.toml.backup-*"))) == 1
@@ -128,7 +128,7 @@ def test_init_detects_same_bytes_replacement_and_edit_during_backup(tmp_path):
         assert setup.codex_config.read_bytes() == (before if variant == "replacement" else b'# newer editor content\n')
 
 
-def test_init_failed_partial_claude_registration_restores_the_failing_action(tmp_path):
+def test_init_failed_partial_claude_registration_retains_unowned_changes_for_recovery(tmp_path):
     for existing in (False, True):
         setup = _Setup(tmp_path / str(existing))
         if existing:
@@ -139,9 +139,13 @@ def test_init_failed_partial_claude_registration_restores_the_failing_action(tmp
         before = path.read_bytes() if path.exists() else None
         report = setup.run("--client", "claude", "--yes", "--json", expected=1)
         assert not report["ok"] and report["actions"][1]["status"] == "failed"
-        assert (path.read_bytes() if path.exists() else None) == before
+        assert path.read_bytes() == b'{"partial":'
+        assert "Manual recovery" in report["actions"][1]["recovery"]
         if existing:
             assert Path(report["actions"][1]["backup"]).read_bytes() == before
+            path.write_bytes(before)  # User inspects the backup and restores explicitly.
+        else:
+            path.unlink()  # User inspects and removes the failed new file explicitly.
         setup.env["INIT_ADD_PARTIAL"] = ""
         assert setup.run("--client", "claude", "--yes", "--json")["ok"]
 

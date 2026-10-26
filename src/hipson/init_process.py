@@ -1,4 +1,7 @@
-"""Contained subprocess communication for init's clients and MCP verification."""
+"""Init client/MCP cleanup within a POSIX process group or a Windows Job.
+
+POSIX descendants that create a new session/process group escape this containment.
+"""
 
 from __future__ import annotations
 
@@ -39,7 +42,7 @@ def run_contained(
         stdout, stderr = child.communicate(None if input_text is None else input_text.encode("utf-8"), timeout=timeout)
         return subprocess.CompletedProcess(command, child.returncode, stdout.decode("utf-8"), stderr.decode("utf-8"))
     finally:
-        # Also stop descendants left behind by an otherwise successful launcher.
+        # Also stop descendants still in the group/Job after a successful launcher.
         try:
             if job:
                 job.close()  # KILL_ON_JOB_CLOSE also covers .cmd grandchildren.

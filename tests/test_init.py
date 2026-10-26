@@ -136,6 +136,7 @@ def test_init_dry_run_exact_plan_without_setup_writes(tmp_path):
     appended = tomllib.loads(actions["codex"]["append"])["mcp_servers"]["hipson"]
     assert appended["command"] == report["checks"]["hipson_executable"]
     assert appended["args"] == claude["command"][10:]
+    assert appended["env"] == {"HIPSON_LEDGER": str(setup.db)}
     text = setup.run("--client", "codex", "--dry-run")
     assert "Append exactly" in text and actions["codex"]["append"].replace("\r\n", "\n") in text
     assert str(setup.codex_config) in text and "backup-" in text
@@ -363,7 +364,8 @@ def test_init_codex_compares_the_complete_command_and_args_before_skipping(tmp_p
             entry["args"] = ["mcp", "serve", "--project=.", "--stdio"]
         setup.codex_home.mkdir()
         original = (f'# keep bytes\r\n[mcp_servers."hipson"]\r\ncommand = {json.dumps(entry["command"])}\r\n'
-                    f'args = {json.dumps(entry["args"])}\r\nenabled = {"false" if variant == "disabled" else "true"}\r\n').encode()
+                    f'args = {json.dumps(entry["args"])}\r\nenabled = {"false" if variant == "disabled" else "true"}\r\n'
+                    f'env = {{ HIPSON_LEDGER = {json.dumps(str(setup.db))} }}\r\n').encode()
         setup.codex_config.write_bytes(original)
         before = setup.snapshots()
         for options in (("--dry-run",), ("--yes",)):

@@ -122,9 +122,10 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
         staged.unlink(missing_ok=True)
 
 
-def restore(path: Path, original: Snapshot, backup: Path | None) -> None:
+def restore(path: Path, original: Snapshot, backup: Path | None, *, expected: Snapshot) -> None:
     """Restore only the failing action, retaining its backup as recovery evidence."""
-    current = snapshot(path)
+    unchanged(path, expected)
+    current = expected
     if current == original:
         return
     if original.content is None:

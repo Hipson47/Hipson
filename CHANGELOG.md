@@ -16,12 +16,17 @@
 - Make init planning file-only, independent of Claude's human-readable discovery responses.
   Serialize config transactions with OS locks, identity/hash checks, private exclusive backups,
   atomic Codex replacement and recovery of failing actions. Inspect Codex project layers and
-  effective environment/tool filters before success; contain client/MCP subprocess trees on
-  timeout or interruption with POSIX process groups and Windows Jobs. Add offline regressions
+  effective environment/tool filters before success; stop client/MCP processes remaining in their
+  POSIX process group or Windows Job on timeout or interruption. Detached POSIX descendants are
+  outside this cleanup guarantee. Add offline regressions
   for concurrency, partial writes, backup permissions, overrides and descendant cleanup.
 - Fix native Windows init snapshot checks when path and descriptor stats report different
   meanings for `st_ctime_ns`. Retain full before/after checks within each stat API, file
   identity checks and content hashes; test timestamp-preserving edits and replacements.
+- Preserve Claude config changes with unknown ownership after registration failures, timeout or
+  interruption; retain backups and report manual recovery steps. Bind new Codex registrations to
+  the absolute CLI ledger, verify with Codex's forwarded environment and server working directory,
+  reject missing working directories, and detect Claude's per-project Hipson disablement.
 - Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
   project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
   and Codex rollout facts. POSIX process groups preserve orphan claims; Windows inherits guardian

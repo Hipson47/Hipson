@@ -168,11 +168,17 @@ the absolute installed Hipson executable and project path. No provider credentia
   Claude only. See [Codex MCP configuration](https://developers.openai.com/codex/mcp/).
   Setup also inspects `.codex/config.toml` layers from the repository root to the target project,
   including currently absent files; incompatible effective project overrides stop setup.
+  New registrations explicitly bind `env.HIPSON_LEDGER` to the CLI's absolute ledger path.
+  Verification uses Codex's default environment allowlist plus configured `env_vars` and `env`,
+  so `HIPSON_HOME` or `XDG_CONFIG_HOME` in the setup shell cannot silently select another server ledger.
+  Relative project arguments resolve against the registration's `cwd`; that directory must exist
+  and is also used for verification.
 - An existing `hipson` registration reports **already configured** only when its scope, resolved
   executable, arguments (including the resolved `--project` path), and enabled stdio transport match
   the requested setup. A different command, project, extra argument or disabled entry is a **conflict**.
-  Environment overrides must equal the current setup environment; a different ledger or other changed
-  variable is a conflict. Codex tool filters must leave `task.open` and `task.board` available.
+  Environment overrides must select the same effective ledger and otherwise equal the setup environment;
+  a different ledger or other changed variable is a conflict. Codex tool filters must leave
+  `task.open` and `task.board` available.
   If a Claude user entry conflicts with the default project scope, setup plans a project-scoped
   override and preserves the user entry. This still requires confirmation and a backup before edits.
   Claude local entries take precedence over project entries; project entries take precedence over user
@@ -181,6 +187,9 @@ the absolute installed Hipson executable and project path. No provider credentia
   command and project. Codex conflicts also stop setup; use a separate `CODEX_HOME` for another project
   or explicitly remove/rename its conflicting table. `--yes` never authorizes replacing a conflict.
   A project-scoped Claude entry may need approval on the client's first use.
+  If Claude's per-project `disabledMcpServers` lists `hipson`, setup reports **disabled for this project**
+  and stops without changing that preference. Run `claude` in the project and use `/mcp` to re-enable
+  Hipson before rerunning setup.
 - Before config edits, setup creates an exclusive `*.backup-YYYYMMDD-HHMMSS` backup, adding `-N`
   on collision. Ledger migrations also get a SQLite snapshot backup, including committed WAL data.
   Backups are private from creation (0600 on POSIX); incomplete copies are removed.
@@ -188,8 +197,11 @@ the absolute installed Hipson executable and project path. No provider credentia
   remain for reuse; the OS releases the locks on process exit. Config identity and content are
   rechecked against the plan, including after backup. Codex writes use a private staging file beside
   the config and atomic replacement, preserving its mode and existing bytes/line endings. Resulting
-  configs are parsed and validated; a failing action is restored from its backup (or a new file removed).
-  An unrelated concurrent edit is retained and reported for manual recovery. Invalid/incompatible
+  configs are parsed and validated. A failing action is restored from its backup (or a new file removed)
+  only when its current snapshot still matches the file init itself wrote; if init has no owned write,
+  the file must still match the original snapshot. Claude's external writes have unknown ownership,
+  so changes after a failed exit, timeout or interruption are retained with any backup and an exact
+  manual recovery step. Concurrent edits are also retained. Invalid/incompatible
   configs, changed discovery sources and backup errors stop setup with a nonzero exit.
 
 `hipson init --dry-run` prints the planned commands, their working directory, backup policy and exact
@@ -203,7 +215,9 @@ actions (or a conflict/failed action), backup paths, verification and next steps
 fails, earlier successful actions remain recorded in the report and a rerun skips matching registrations.
 After applying setup, Hipson verifies each effective registration's command, arguments, environment
 and tool filters with an MCP initialize + tools/list handshake. Client commands and verification run
-in POSIX process groups or Windows Jobs; timeout/interruption stops their descendants, including `.cmd` launchers.
+in POSIX process groups or Windows Jobs; timeout/interruption stops processes remaining in that group
+or Job, including Windows `.cmd` launchers. Descendants that detach from the POSIX process group
+(for example, with `setsid`) escape this cleanup and must be stopped separately.
 This verifies the local server; the client's trust settings may still require approval.
 
 Restart the lead client to load its MCP config, then open your first real task:
