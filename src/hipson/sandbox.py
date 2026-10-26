@@ -101,8 +101,10 @@ def prepare_read_only_command(command: list[str]) -> tuple[list[str], dict[str, 
     }
     if command[0] != "git":
         return list(command), environment
-    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_PAGER="cat",
-                       PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    # Keep the user's global/system config: it carries core.autocrlf (Git for Windows), safe.directory
+    # and excludes, and dropping it changes what status/diff report. Helpers are disabled explicitly
+    # below instead; repository-local config is loaded either way.
+    environment.update(GIT_PAGER="cat", PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     subcommand = command[1]
     options = ["--no-ext-diff", "--no-textconv"] if subcommand in ("diff", "log", "show") else []
     hardened = ["git", "--no-pager", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
