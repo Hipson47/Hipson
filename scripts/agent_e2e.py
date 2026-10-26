@@ -120,6 +120,14 @@ def hipson_proxy(workdir: str, expected_ledger: str) -> int:
                  "ledger": os.environ.get("HIPSON_LEDGER"), "before": before, "after": snapshot(db, root)}
         with (root / ".harness" / "cli.jsonl").open("a", encoding="utf-8") as log:
             log.write(json.dumps(scrub_value(entry)) + "\n")
+        if sys.argv[1:3] == ['task', 'run']:
+            # Native runner process exits are evidence too, even if a lead shell handles failure.
+            with (root / '.harness' / 'runner.jsonl').open('a', encoding='utf-8') as log:
+                fcntl.flock(log, fcntl.LOCK_EX)
+                log.write(json.dumps(scrub_value({
+                    'command': shlex.join(['hipson', *sys.argv[1:]]),
+                    'exit_code': proc.returncode, 'output': proc.stdout + proc.stderr,
+                })) + '\n')
     sys.stdout.write(proc.stdout)
     sys.stderr.write(proc.stderr)
     return proc.returncode

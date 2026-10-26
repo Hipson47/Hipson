@@ -12,7 +12,7 @@ from datetime import datetime
 KEYWORDS = frozenset({
     "$schema", "title", "description", "$defs", "$ref", "type", "const", "enum",
     "properties", "additionalProperties", "required", "items", "uniqueItems",
-    "pattern", "minLength", "minimum", "maximum", "format",
+    "pattern", "minLength", "maxLength", "maxItems", "minimum", "maximum", "format",
 })
 TYPES = frozenset({"object", "array", "string", "boolean", "integer", "number", "null"})
 
@@ -110,6 +110,8 @@ def _errors(schema, payload, root, path):
     if isinstance(payload, str):
         if len(payload) < schema.get("minLength", 0):
             errors.append(f"{path}: minLength")
+        if 'maxLength' in schema and len(payload) > schema['maxLength']:
+            errors.append(f'{path}: maxLength')
         if "pattern" in schema and re.search(schema["pattern"], payload) is None:
             errors.append(f"{path}: pattern")
         if schema.get("format") == "date-time" and not _date_time(payload):
@@ -120,6 +122,8 @@ def _errors(schema, payload, root, path):
         if "maximum" in schema and payload > schema["maximum"]:
             errors.append(f"{path}: maximum")
     if isinstance(payload, list):
+        if 'maxItems' in schema and len(payload) > schema['maxItems']:
+            errors.append(f'{path}: maxItems')
         if schema.get("uniqueItems") and any(
             _equal(item, other) for index, item in enumerate(payload) for other in payload[:index]
         ):

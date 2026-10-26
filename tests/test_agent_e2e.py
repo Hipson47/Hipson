@@ -51,7 +51,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
                     HIPSON_LEDGER=str(sentinel)):
         runs = [harness.run_scenario(name, tmp_path / name, keep=True) for name in harness.scenario_names()]
     assert sentinel.read_text() == "owner state must be untouched"
-    assert len(runs) == 3
+    assert len(runs) == 5
     for run in runs:
         assert run["passed"], run
         assert run["metrics"]["hipson_invocations"] > 0
@@ -75,6 +75,8 @@ def test_agent_e2e_reference_solutions(tmp_path):
 @_linux_harness
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
+        ("worker-dies", "worker-ignore-journal.sh", "inspect failure journal"),
+        ("result-busy", "result-no-ack.sh", "explicitly acknowledge"),
         ("lead-flow", "lead-no-review.sh", "separate structured reviewer"),
         ("conflict", "conflict-bypass.sh", "live holder was bypassed"),
         ("recovery", "recovery-tamper.sh", "stale claim must be released by ledger reap"),
@@ -170,7 +172,9 @@ def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
         "do sleep 0.02; done\n"
         "hipson task status --task T-0001 --to in_progress --actor lead --summary 'holder finished'\n"
         "examples/agent-run.sh --task T-0001 --actor next --role builder --mode rw --scope src/parser "
-        "--result-file next.json -- bin/fake-worker build next.json\n")
+        "--result-file next.json -- bin/fake-worker build next.json\n"
+        "hipson task ack --assignment A-0001\n"
+        "hipson task ack --assignment A-0002\n")
     reviewed = tmp_path / "reviewed.sh"
     reviewed.write_text(wait + "hipson task status --task T-0001 --to review --actor lead --summary verified\n"
                         "hipson task status --task T-0001 --to done --actor lead --summary accepted\n")

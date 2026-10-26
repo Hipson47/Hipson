@@ -52,7 +52,48 @@
         "owner_host": { "type": ["string", "null"], "minLength": 1 },
         "owner_pid_namespace": { "type": ["string", "null"], "minLength": 1 },
         "lease_until": { "type": ["string", "null"], "format": "date-time" },
-        "result": { "$ref": "#/$defs/result" }
+        "result": { "$ref": "#/$defs/result" },
+        "activity": { "$ref": "#/$defs/activity" },
+        "failure_journal": { "$ref": "#/$defs/journal" },
+        "acknowledged_at": { "type": ["string", "null"], "format": "date-time" },
+        "ack_note": { "type": "string", "maxLength": 1024 },
+        "ack_state": { "enum": ["not_required", "unacknowledged", "acknowledged"] }
+      }
+    },
+    "observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timestamp", "source", "text"],
+      "properties": {
+        "timestamp": {"type": "string"},
+        "source": {"enum": ["stdout", "stderr", "progress"]},
+        "text": {"type": "string", "maxLength": 1024}
+      }
+    },
+    "activity": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["heartbeat_at", "last_stdout", "last_stderr", "progress", "observations", "untrusted_fields"],
+      "properties": {
+        "heartbeat_at": {"type": "string"},
+        "last_stdout": {"type": "string", "maxLength": 1024},
+        "last_stderr": {"type": "string", "maxLength": 1024},
+        "progress": {"type": "string", "maxLength": 1024},
+        "observations": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/observation"}},
+        "untrusted_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "journal": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["result_state", "exit_code", "signal", "duration_seconds", "changed_files", "diff_stat", "log_tail", "reason", "uncertainty"],
+      "properties": {
+        "result_state": {"enum": ["none", "rejected", "valid"]},
+        "exit_code": {"type": ["integer", "null"]},
+        "signal": {"type": ["integer", "null"]},
+        "duration_seconds": {"type": ["number", "null"], "minimum": 0},
+        "changed_files": {"type": "array", "maxItems": 100, "items": {"type": "string", "maxLength": 1024}},
+        "diff_stat": {"type": "string", "maxLength": 8192},
+        "log_tail": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/observation"}},
+        "reason": {"type": "string", "maxLength": 1024},
+        "uncertainty": {"type": "string", "maxLength": 1024}
       }
     },
     "result": {

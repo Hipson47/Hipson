@@ -473,12 +473,12 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'findings'").fetchall() == []
         assert _rows(SimpleNamespace(connection=connection)) == before
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         after = _rows(store)
         for table in ("tasks", "events", "claims"):
             assert after[table] == before[table]
-        assert [row[:-2] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-2:] == (None, None) for row in after["assignments"])
+        assert [row[:-6] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-6:] == (None, None, None, None, None, "") for row in after["assignments"])
         assert store.findings() == []
         finding = store.add_finding("T-0001", actor="lead", severity="major", title="Legacy follow-up")
         assert finding["id"] == "F-0001" and store.events("T-0001")[-1]["seq"] == 7

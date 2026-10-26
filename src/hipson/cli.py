@@ -1792,7 +1792,7 @@ def command_task(args: argparse.Namespace) -> int:
     try:
         dry_run = args.task_command == "reap" and args.dry_run
         finding_list = args.task_command == "finding" and args.finding_command == "list"
-        read_only = args.task_command in ("show", "events", "list", "board", "brief", "context") or dry_run or finding_list
+        read_only = args.task_command in ("show", "events", "list", "board", "brief", "context", "activity") or dry_run or finding_list
         if args.task_command == "context":
             args.task = task_context.context_task(args.task)
         elif args.task_command == "brief":
@@ -1805,6 +1805,8 @@ def command_task(args: argparse.Namespace) -> int:
         )
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if read_only and not db.exists():
+            if args.task_command == 'activity':
+                raise ledger.LedgerError(f'Assignment not found: {args.assignment}')
             if args.task_command in ("show", "events", "brief", "context") or ((dry_run or finding_list) and args.task is not None):
                 raise ledger.LedgerError(f"Task not found: {args.task}")
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
@@ -1830,6 +1832,10 @@ def command_task(args: argparse.Namespace) -> int:
                 payload = store.finish(
                     args.assignment, result=args.result, summary=args.summary, refs=args.ref, worker_result=report,
                 )
+            elif args.task_command == 'activity':
+                payload = store.activity(args.assignment)
+            elif args.task_command == 'ack':
+                payload = store.ack(args.assignment, note=args.note)
             elif args.task_command == "finding":
                 if args.finding_command == "add":
                     payload = store.add_finding(
@@ -1866,7 +1872,11 @@ def command_task(args: argparse.Namespace) -> int:
                     print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
                     for item in view["assignments"]:
                         actor = _bounded_cli(item["actor"], escape_controls=True)
-                        print(f"  {item['id']} {actor}:{item['role']}/{item['mode']} [{item['status']}]")
+                        heartbeat = _bounded_cli((item['activity'] or {}).get('heartbeat_at') or 'unknown', escape_controls=True)
+                        print(f"  {item['id']} {actor}:{item['role']}/{item['mode']} [{item['status']}] "
+                              f"{item['ack_state']}; last activity={heartbeat}")
+                        if item['failure_journal']:
+                            print(f"    Journal: {_bounded_json(item['failure_journal'], limit=800, escape_controls=True)}")
                         result = item["result"]
                         if result is not None:
                             print(
@@ -1893,6 +1903,8 @@ def command_task(args: argparse.Namespace) -> int:
                     for task in tasks:
                         active = ", ".join(
                             f"{item['id']} {_bounded_cli(item['actor'], escape_controls=True)}:{item['role']}/{item['mode']}"
+                            f" [{item['status']}; {item['ack_state']}; last activity="
+                            f"{_bounded_cli((item['activity'] or {}).get('heartbeat_at') or 'unknown', escape_controls=True)}]"
                             for item in task["assignments"]
                         ) or "unassigned"
                         title = _bounded_cli(task["title"], limit=60, escape_controls=True)
@@ -1924,6 +1936,8 @@ def build_parser() -> argparse.ArgumentParser:
             ("assign", "Assign a worker and claim write scope"),
             ("run", "Run and record a worker on Linux, macOS or Windows"),
             ("finish", "Finish an assignment and release its claims"),
+            ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
+            ('ack', 'Acknowledge an ended assignment result or failure journal'),
             ("reap", "Cancel orphaned assignments and release their claims"),
             ("event", "Append a task event"),
             ("status", "Transition a task"),
@@ -1932,7 +1946,7 @@ def build_parser() -> argparse.ArgumentParser:
             ("context", "Read worker context; defaults to HIPSON_TASK"),
             ("events", "List task events in sequence order"),
             ("list", "List tasks"),
-            ("board", "Show non-terminal tasks with active assignments"),
+            ("board", "Show active tasks and unacknowledged assignment results"),
             ("finding", "Record and track review findings"),
         )
     }
@@ -1967,6 +1981,9 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["finish"].add_argument("--assignment", required=True)
     task_parsers["finish"].add_argument("--result", choices=ledger.RESULTS, required=True)
     task_parsers["finish"].add_argument("--result-file", help="Strict worker result JSON; validated before any write")
+    for name in ('activity', 'ack'):
+        task_parsers[name].add_argument('--assignment', required=True)
+    task_parsers['ack'].add_argument('--note', default='')
     finding_sub = task_parsers["finding"].add_subparsers(dest="finding_command", required=True)
     for action in ("add", "update", "list"):
         finding_parser = finding_sub.add_parser(action)

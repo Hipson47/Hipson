@@ -17,6 +17,8 @@ from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
+    "task.activity": ({"assignment"}, set()),
+    "task.ack": ({"assignment", "approved"}, {"note"}),
     "task.show": ({"task"}, set()),
     "task.brief": ({"task", "role"}, {"scope"}),
     "task.context": (set(), {"task"}),
@@ -37,6 +39,7 @@ TASK_TOOLS = {
     "task.status": ({"task", "to", "actor", "approved"}, {"summary", "force", "reason"}),
 }
 WRITE_ARGUMENTS = {
+    "task.ack": {"assignment": "A-0001"},
     "task.open": {"project": ".", "title": "Ledger", "objective": "Track ownership"},
     "task.assign": {"task": "T-0001", "actor": "codex", "role": "builder", "mode": "rw", "scope": ["src"]},
     "task.finish": {"assignment": "A-0001", "result": "passed", "summary": "Checks pass"},
@@ -166,13 +169,14 @@ def test_ledger_mcp_full_lifecycle_and_strict_payloads(tmp_path: Path):
                        ref=["report.md"], approved=True)
     _assert_assignment(finished)
     assert finished["status"] == "passed" and finished["ended_at"]
+    command("task.ack", assignment=assigned["id"], approved=True)
     for state in ("review", "done"):
         view = command("task.status", task=task, to=state, actor="claude", approved=True)
         assert_strict_schema("task.schema.json", view)
         assert view["status"] == state and view["claims"] == []
     assert command("task.board") == []
     events = command("task.events", task=task)
-    assert [item["type"] for item in events] == ["opened", "assigned", "progress", "finished", "status", "status"]
+    assert [item["type"] for item in events] == ["opened", "assigned", "progress", "finished", "acknowledged", "status", "status"]
     assert view["revision"] == len(events)
     for item in events:
         assert_strict_schema("task-event.schema.json", item)
@@ -275,6 +279,8 @@ def test_ledger_mcp_rejects_caller_db_for_every_task_tool(tmp_path: Path):
             arguments["task"] = "T-0001"
         if name == "task.brief":
             arguments["role"] = "builder"
+        if name == 'task.activity':
+            arguments['assignment'] = 'A-0001'
         if name in WRITE_ARGUMENTS:
             arguments["approved"] = True
         result = _call(tmp_path, name, ledger_db=configured, db=str(caller_db), **arguments)

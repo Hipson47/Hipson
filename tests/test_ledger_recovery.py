@@ -41,13 +41,13 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
     with closing(sqlite3.connect(db)) as connection:
         before = _rows(SimpleNamespace(connection=connection))
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         after = _rows(store)
         assert len(after["tasks"]) == 2 and len(after["assignments"]) == 3 and len(after["events"]) == 6
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
-        assert [row[:-6] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-6:] == (None, None, None, None, None, None) for row in after["assignments"])
+        assert [row[:-10] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-10:] == (None, None, None, None, None, None, None, None, None, "") for row in after["assignments"])
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -58,7 +58,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-6] == 42  # Reopening never repeats ALTER TABLE.
+        assert _rows(store)["assignments"][-1][-10] == 42  # Reopening never repeats ALTER TABLE.
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
@@ -153,12 +153,12 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
     assert db.read_bytes() == original
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         after = _rows(store)
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
-        assert [row[:-1] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-1] is None for row in after["assignments"])
+        assert [row[:-5] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-5:] == (None, None, None, None, "") for row in after["assignments"])
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)
@@ -179,7 +179,7 @@ def test_ledger_v4_migration_failure_rolls_back_all_steps(tmp_path: Path):
             assert _rows(SimpleNamespace(connection=connection)) == before
             assert "owner_pid_namespace" not in [r[1] for r in connection.execute("PRAGMA table_info(assignments)")]
         with closing(Ledger(db)) as store:
-            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
 
 
 def test_ledger_never_probes_pid_or_group_across_namespaces(tmp_path: Path):

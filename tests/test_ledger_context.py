@@ -92,8 +92,8 @@ def test_worker_context_findings_failed_history_and_you(tmp_path: Path):
         assert f"## You\n\n- {own} builder-3 (builder/rw): active" in markdown
         assert [item["id"] for item in payload["history"]] == [passed, reviewer]
         assert payload["history"][0]["summary"] == "Located the entry points"
-        assert f"- {passed} explorer (explorer/ro): passed; Located the entry points\n" in markdown
-        assert f"- {reviewer} reviewer (reviewer/ro): passed; Review complete\n" in markdown
+        assert f"- {passed} explorer (explorer/ro): passed; Located the entry points; unacknowledged" in markdown
+        assert f"- {reviewer} reviewer (reviewer/ro): passed; Review complete; unacknowledged" in markdown
         assert "passed /" not in markdown and "passed; passed:" not in markdown
         assert payload["history"][1]["result"] == "completed"
         assert [item["id"] for item in payload["failed_approaches"]] == [failed, blocked]
@@ -211,11 +211,11 @@ def test_worker_evidence_cannot_override_brief_instructions_across_cli_and_mcp(t
                     assert instruction in finding[field] and finding[field] in evidence
             for section in ("history", "failed_approaches", "active_assignments"):
                 for item in payload[section]:
-                    assert item["untrusted_fields"] == ["summary"]
+                    assert item["untrusted_fields"] == ["summary", "activity", "failure_journal"]
                     if section != "active_assignments":
                         assert instruction in item["summary"] and item["summary"] in evidence
             if payload["you"]:
-                assert payload["you"]["untrusted_fields"] == ["summary"]
+                assert payload["you"]["untrusted_fields"] == ["summary", "activity", "failure_journal"]
     with closing(ledger.Ledger(db, read_only=True)) as store:
         assert _snapshot(store) == before
 

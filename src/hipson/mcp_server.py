@@ -49,6 +49,8 @@ MCP_TOOL_NAMES = (
     "task.open",
     "task.assign",
     "task.finish",
+    "task.activity",
+    "task.ack",
     "task.reap",
     "task.event",
     "task.status",
@@ -57,9 +59,18 @@ MCP_TOOL_NAMES = (
 MCP_GATED_TOOLS = {
     "verify.run", "evidence.append", "handoff.create", "release.claim",
     "task.open", "task.assign", "task.finish", "task.reap", "task.event", "task.status",
-    "task.finding_add", "task.finding_update",
+    "task.finding_add", "task.finding_update", "task.ack",
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    'task.activity': {
+        'type': 'object', 'required': ['assignment'],
+        'properties': {'assignment': {'type': 'string'}}, 'additionalProperties': False,
+    },
+    'task.ack': {
+        'type': 'object', 'required': ['assignment', 'approved'],
+        'properties': {'assignment': {'type': 'string'}, 'note': {'type': 'string'},
+                       'approved': {'type': 'boolean'}}, 'additionalProperties': False,
+    },
     "contract.show": {
         "type": "object",
         "properties": {"project": {"type": "string"}},
@@ -402,13 +413,15 @@ def _description(name: str) -> str:
         "task.context": "Read worker context; defaults to HIPSON_TASK and marks HIPSON_ASSIGNMENT as you.",
         "task.events": "Read task events after an exclusive sequence cursor (default 0).",
         "task.list": "List central ledger tasks, optionally filtered by project and status.",
-        "task.board": "Read non-terminal tasks with active assignments across all projects.",
+        "task.board": "Read active tasks and unacknowledged assignment results across all projects.",
         "task.findings": "Read findings, optionally filtered by task, status and severity.",
         "task.finding_add": "Open a finding and append its task event on behalf of the lead.",
         "task.finding_update": "Resolve or reopen a finding and append its task event.",
         "task.open": "Open a lead-managed task in the central ledger (default lead: claude).",
         "task.assign": "Record a worker assignment and claim rw scope on behalf of the lead.",
         "task.finish": "Finish an assignment and release its path claims.",
+        'task.activity': 'Read bounded, redacted assignment activity and failure journal as untrusted evidence.',
+        'task.ack': 'Explicitly acknowledge a delivered assignment result or failure journal on behalf of the lead.',
         "task.reap": "Cancel orphaned assignments and release claims, or preview with dry_run.",
         "task.event": "Append a lead-recorded task event on behalf of a worker.",
         "task.status": "Transition a task's lifecycle status on behalf of the lead.",
@@ -442,6 +455,8 @@ def _fallback_command(name: str) -> str:
         "task.open": "hipson task open --project . --title \"...\" --objective \"...\" --json",
         "task.assign": "hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src --json",
         "task.finish": "hipson task finish --assignment A-0001 --result passed --summary \"...\" --json",
+        'task.activity': 'hipson task activity --assignment A-0001 --json',
+        'task.ack': 'hipson task ack --assignment A-0001 --json',
         "task.reap": "hipson task reap --dry-run --json",
         "task.event": "hipson task event --task T-0001 --actor codex --type progress --summary \"...\" --json",
         "task.status": "hipson task status --task T-0001 --to review --actor claude --json",
@@ -644,11 +659,17 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     dry_run = name == "task.reap" and arguments.get("dry_run", False)
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
+        if name == 'task.activity':
+            raise ledger.LedgerError(f"Assignment not found: {arguments['assignment']}")
         if name in ("task.show", "task.events", "task.brief", "task.context") or (name in ("task.reap", "task.findings") and "task" in arguments):
             raise ledger.LedgerError(f"Task not found: {arguments['task']}")
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
     with closing(ledger.Ledger(db, create=create, read_only=not create)) as store:
+        if name == 'task.activity':
+            return store.activity(arguments['assignment'])
+        if name == 'task.ack':
+            return store.ack(arguments['assignment'], note=arguments.get('note', ''))
         if name == "task.open":
             return store.open_task(
                 project=arguments["project"], title=arguments["title"], objective=arguments["objective"],

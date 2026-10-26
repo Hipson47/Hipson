@@ -24,7 +24,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -119,6 +119,10 @@ SCHEMA: tuple[str, ...] = (
         lease_until TEXT,
         result TEXT,
         owner_pid_namespace TEXT,
+        activity TEXT,
+        failure_journal TEXT,
+        acknowledged_at TEXT,
+        ack_note TEXT NOT NULL DEFAULT '',
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -181,6 +185,13 @@ MIGRATION_V2_TO_V3 = (
 MIGRATION_V3_TO_V4 = (
     "ALTER TABLE assignments ADD COLUMN owner_pid_namespace TEXT",
     "UPDATE schema_version SET version = 4 WHERE singleton = 1",
+)
+MIGRATION_V4_TO_V5 = (
+    "ALTER TABLE assignments ADD COLUMN activity TEXT",
+    "ALTER TABLE assignments ADD COLUMN failure_journal TEXT",
+    "ALTER TABLE assignments ADD COLUMN acknowledged_at TEXT",
+    "ALTER TABLE assignments ADD COLUMN ack_note TEXT NOT NULL DEFAULT ''",
+    "UPDATE schema_version SET version = 5 WHERE singleton = 1",
 )
 
 
@@ -257,6 +268,11 @@ class Assignment(TypedDict):
     owner_pid_namespace: str | None
     lease_until: str | None
     result: TaskResult | None
+    activity: dict[str, Any] | None
+    failure_journal: dict[str, Any] | None
+    acknowledged_at: str | None
+    ack_note: str
+    ack_state: str
 
 
 class ReapedAssignment(TypedDict):
@@ -626,7 +642,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -638,6 +654,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2, 3):
                         for statement in MIGRATION_V3_TO_V4:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4):
+                        for statement in MIGRATION_V4_TO_V5:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -826,28 +845,74 @@ class Ledger:
         return "lease_expired" if expired else None
 
     def _reap_assignment(self, item: Assignment, reason: str) -> Assignment:
+        from hipson.task_activity import bounded_journal
+        now = _timestamp()
+        activity = item['activity'] or {}
+        last = activity.get('heartbeat_at') or 'unknown'
+        owner = 'owner died' if reason in ('pid_gone', 'boot_id_changed') else 'owner liveness unknown'
+        journal = bounded_journal({
+            'result_state': 'none', 'exit_code': None, 'signal': None,
+            'duration_seconds': max(0, (datetime.fromisoformat(now) - datetime.fromisoformat(item['started_at'])).total_seconds()),
+            'changed_files': [], 'diff_stat': '', 'log_tail': activity.get('observations', []),
+            'reason': f'{owner}; last activity at {last}; {reason}',
+            'uncertainty': 'Supervisor unavailable; exit status and project changes were not observed.',
+        })
         self.connection.execute(
-            "UPDATE assignments SET status = 'cancelled', ended_at = ? WHERE id = ?", (_timestamp(), item["id"])
+            "UPDATE assignments SET status = 'cancelled', ended_at = ?, failure_journal = ? WHERE id = ?",
+            (now, json.dumps(journal), item["id"]),
         )
         self.connection.execute("DELETE FROM claims WHERE assignment = ?", (item["id"],))
-        self._append_event(item["task"], item["actor"], "reaped", f"{item['id']}: {reason}", [item["id"]])
+        self._append_event(item["task"], item["actor"], "reaped", f"{item['id']}: {journal['reason']}", [item["id"]])
         return self._assignment(item["id"])
+
+    def observe(self, assignment: str, activity: dict[str, Any]) -> None:
+        """Runner observations never renew leases, reap owners, or release claims."""
+        from hipson.task_activity import bounded_activity
+        snapshot = bounded_activity(activity)
+        with self._transaction():
+            current = self._assignment(assignment)
+            if current['status'] != 'active':
+                raise LedgerError(f'Assignment {assignment} is already finished')
+            self.connection.execute('UPDATE assignments SET activity = ? WHERE id = ?',
+                                    (json.dumps(snapshot), assignment))
+
+    def activity(self, assignment: str) -> Assignment:
+        with self._transaction(write=False):
+            return cast(Assignment, redact_value(self._assignment(assignment)))
+
+    def ack(self, assignment: str, *, note: str = '') -> Assignment:
+        """Explicit, idempotent lead acknowledgement; never inferred from reads."""
+        with self._transaction():
+            current = self._assignment(assignment)
+            if current['status'] == 'active':
+                raise LedgerError(f'Cannot acknowledge active assignment {assignment}')
+            if current['acknowledged_at'] is None:
+                from hipson.task_activity import safe_text
+                self.connection.execute('UPDATE assignments SET acknowledged_at = ?, ack_note = ? WHERE id = ?',
+                                        (_timestamp(), safe_text(note), assignment))
+                self._append_event(current['task'], self._task(current['task'])['lead'], 'acknowledged',
+                                   f'{assignment}: {safe_text(note) or "result acknowledged"}', [assignment])
+            return cast(Assignment, redact_value(self._assignment(assignment)))
 
     def finish(
         self, assignment: str, *, result: str, summary: str, refs: Sequence[str] = (),
         worker_result: object = None,
+        failure_journal: dict[str, Any] | None = None,
     ) -> Assignment:
         if result not in RESULTS:
             raise LedgerError(f"Assignment result must be one of {RESULTS}")
         summary = require_text(summary, "summary")
         report = validate_task_result(worker_result) if worker_result is not None else None
+        from hipson.task_activity import bounded_journal
+        journal = bounded_journal(failure_journal) if failure_journal is not None else None
         with self._transaction():
             current = self._assignment(assignment)
             if current["status"] != "active":
                 raise LedgerError(f"Assignment {assignment} is already finished ({current['status']})")
             self.connection.execute(
-                "UPDATE assignments SET status = ?, ended_at = ?, result = ? WHERE id = ?",
-                (result, _timestamp(), json.dumps(report) if report is not None else None, assignment),
+                "UPDATE assignments SET status = ?, ended_at = ?, result = ?, failure_journal = ? WHERE id = ?",
+                (result, _timestamp(), json.dumps(report) if report is not None else None,
+                 json.dumps(journal) if journal is not None else None, assignment),
             )
             self.connection.execute("DELETE FROM claims WHERE assignment = ?", (assignment,))
             counts = ""
@@ -1007,15 +1072,18 @@ class Ledger:
                 view = self._view(task)
                 active = [item for item in view["assignments"] if item["status"] == "active"]
                 severe = [item for item in view["findings"] if item["severity"] in ("blocking", "major")]
+                unread = [item for item in view['assignments'] if item['ack_state'] == 'unacknowledged']
                 blockers = [f"active assignment {item['id']} ({item['mode']})" for item in active]
                 blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
                 blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
+                blockers += [f"unacknowledged result {item['id']}" for item in unread]
                 if blockers and not force:
                     raise LedgerError(f"Cannot mark {task} done: " + "; ".join(blockers))
                 if force:
                     blocker_refs = list(dict.fromkeys([
                         *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
                         *[item["id"] for item in severe],
+                        *[item['id'] for item in unread],
                     ]))
                     self._append_event(task, actor, "done_override",
                                        f"Reason: {reason.strip()}; blockers: " + ("; ".join(blockers) or "none"),
@@ -1061,10 +1129,9 @@ class Ledger:
 
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):
-            tasks = self.connection.execute(
-                "SELECT id FROM tasks WHERE status NOT IN ('done', 'cancelled') ORDER BY created_at, id"
-            ).fetchall()
-            return [self._view(row["id"], active_only=True) for row in tasks]
+            views = [self._view(row['id'], active_only=True) for row in self.connection.execute(
+                'SELECT id FROM tasks ORDER BY created_at, id')]
+            return [view for view in views if view['status'] not in ('done', 'cancelled') or view['assignments']]
 
     def _task(self, task: str) -> Task:
         row = self.connection.execute("SELECT * FROM tasks WHERE id = ?", (task,)).fetchone()
@@ -1083,10 +1150,12 @@ class Ledger:
         assignments = [
             self._assignment_dict(row)
             for row in self.connection.execute(
-                "SELECT * FROM assignments WHERE task = ? AND (? = 0 OR status = 'active') ORDER BY started_at, id",
-                (task, active_only),
+                "SELECT * FROM assignments WHERE task = ? ORDER BY started_at, id",
+                (task,),
             )
         ]
+        if active_only:
+            assignments = [item for item in assignments if item['status'] == 'active' or item['ack_state'] == 'unacknowledged']
         claims: list[Claim] = [
             {"assignment": row["assignment"], "path": row["path"]}
             for row in self.connection.execute(
@@ -1144,6 +1213,12 @@ class Ledger:
             "owner_pid_namespace": row["owner_pid_namespace"] if "owner_pid_namespace" in row.keys() else None,
             "lease_until": row["lease_until"] if "lease_until" in row.keys() else None,
             "result": json.loads(row["result"]) if "result" in row.keys() and row["result"] is not None else None,
+            'activity': json.loads(row['activity']) if 'activity' in row.keys() and row['activity'] else None,
+            'failure_journal': json.loads(row['failure_journal']) if 'failure_journal' in row.keys() and row['failure_journal'] else None,
+            'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
+            'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
+            'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged'
+                          if 'acknowledged_at' in row.keys() and row['acknowledged_at'] else 'unacknowledged'),
         }
 
     @staticmethod

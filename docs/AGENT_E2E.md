@@ -16,7 +16,7 @@ explicitly skip on macOS and native Windows. This limit does not apply to the
 macOS CLI or worker wrapper. Linux CI continues to require zero skipped tests.
 
 ```sh
-# Offline: execute all three reference solutions, without invoking Codex.
+# Offline: execute all five reference solutions, without invoking Codex.
 .venv/bin/python scripts/agent_e2e.py --scenario all --driver fake
 
 # On demand: authenticated Codex CLI on PATH, explicit model and effort.
@@ -128,6 +128,14 @@ the harness stops that helper after judging the run.
 | `lead-flow` | Empty ledger, broken colon parser | Lead opens task; builder finishes; a separate reviewer returns a structured result with one finding; follow-up builder fixes it; both selected builders' claims cover `src/parser/pairs.py`; lead links and resolves the finding, then reviews and closes; parser handles spaces; all claims released. |
 | `conflict` | Real runner/worker process holding `src/parser` | Another builder attempt gets launcher exit 75 and a ledger conflict; agent leaves a reasoned block, redirects to disjoint scope, or waits for normal holder completion; no live holder bypass. |
 | `recovery` | An active assignment with a real exited owner and retained claims | Ledger recovery emits `reaped` with `pid_gone` before a replacement builder assignment; replacement fixes the colon parser and finishes; task remains in progress for later review. |
+| `worker-dies` | Unreliable worker fixture exits 9 with partial changes and no result | Native runner journals exit, changes and log tail; lead reads activity before replacement, acknowledges both deliveries, verifies recovery and leaves task in review. Broken solution skips journal inspection. |
+| `result-busy` | Parser task plus independent lead task, worker waits for a busy marker | Result arrives while another task occupies the lead; board exposes the unread delivery; lead inspects and acknowledges it before closing. Broken solution forces done without acknowledgement. |
+
+The native `task run` launcher is recorded as one CLI operation, including its heartbeat updates
+and finish, and its actual exit is included in `runner.jsonl`. Concurrent CLI calls are serialized
+by the proxy; the busy-lead scenario releases the worker while an independent-task call waits,
+then observes that result still pending during that task's event. This makes delivery/consumption
+ordering deterministic without editing the ledger or relying on worker claims.
 
 Hipson inserts a reviewer's `finding_opened` immediately before `finished` in the
 same transaction. The lead-flow oracle checks this actual ordering, rather than

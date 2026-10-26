@@ -45,10 +45,12 @@ def test_task_run_result_loader_exceptions_cannot_override_process_outcome(tmp_p
                   UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid")):
         store = Mock()
         with patch.object(ledger, "load_task_result", side_effect=error), patch.object(ledger, "Ledger", return_value=store):
-            task_runner._finish(tmp_path / "unused.db", args, "A-0001", 7, 0, "", "nonce", time.time())
+            task_runner._finish(tmp_path / "unused.db", args, "A-0001", 7, 0, "", "nonce", time.time(), {}, str(tmp_path))
         store.finish.assert_called_once()
         assert store.finish.call_args.kwargs["result"] == "failed"
         assert store.finish.call_args.kwargs["worker_result"] is None
+        assert store.finish.call_args.kwargs['failure_journal']['result_state'] == 'rejected'
+        assert store.finish.call_args.kwargs['failure_journal']['exit_code'] == 7
 
 
 def test_task_run_result_file_read_is_bounded(tmp_path):
@@ -163,7 +165,11 @@ def test_task_run_detached_descendant_retains_claim_after_owner_kill(tmp_path):
             assert len(store.show(run.task)["claims"]) == 1
             os.kill(detached, signal.SIGKILL)
             bash._wait_for(lambda: _stopped([detached]), "Detached child did not stop")
-            assert store.reap()[0]["reason"] == "pid_gone"
+            reaped = store.reap()[0]
+            assert reaped['reason'] == 'pid_gone'
+            journal = reaped['assignment']['failure_journal']
+            assert journal['exit_code'] is journal['signal'] is None
+            assert 'owner died; last activity at ' in journal['reason']
 
 
 def test_task_run_linux_empty_snapshot_cannot_release_live_children():
@@ -203,8 +209,10 @@ def test_task_run_windows_contains_runner_before_process_creation(tmp_path):
             patch.object(signal, "signal"), patch.object(task_runner, "Job", return_value=job), \
             patch.object(ledger, "Ledger", return_value=store), patch.object(task_runner, "_active", return_value=False), \
             patch.object(task_runner, "_finish"), patch.object(subprocess, "Popen", side_effect=create), \
+            patch.object(task_runner.task_activity, 'Activity') as activity, \
             patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True):
-        assert task_runner._execute(tmp_path / "unused.db", args, ["worker"], False, {}, 0) == 0
+        activity.return_value.snapshot.return_value = {}
+        assert task_runner._execute(tmp_path / "unused.db", args, ["worker"], False, {'expected': str(tmp_path)}, 0) == 0
     assert calls == ["protect", "create"], "Worker creation must inherit pre-established containment"
 
 
@@ -283,7 +291,7 @@ def test_task_run_windows_guardian_failure_prevents_launch(tmp_path):
             patch.object(signal, "signal"), patch.object(task_runner, "Job", return_value=job), \
             patch.object(ledger, "Ledger", return_value=store), patch.object(task_runner, "_finish") as finish, \
             patch.object(subprocess, "Popen") as create:
-        assert task_runner._execute(tmp_path / "unused.db", args, ["worker"], False, {}, 0) == 75
+        assert task_runner._execute(tmp_path / "unused.db", args, ["worker"], False, {'expected': str(tmp_path)}, 0) == 75
     create.assert_not_called()
     job.close.assert_called_once()
     assert finish.call_args.args[3] == 75

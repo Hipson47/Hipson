@@ -341,6 +341,9 @@ time.sleep(120)
                 assert run.wait(process) == 128 + sig, run.stderr(process)
                 assert (root / "forwarded").exists()
                 assert run.view()[0]["claims"] == []
+                journal = run.view()[0]['assignments'][0]['failure_journal']
+                assert journal['signal'] == sig and journal['exit_code'] == 128 + sig
+                assert journal['result_state'] == 'none'
 
 
 def _windows_signal_check(root, control):

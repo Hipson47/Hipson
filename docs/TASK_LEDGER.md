@@ -31,15 +31,16 @@ use the same central ledger. `task run` also launches a worker; no provider or H
    summary, evidence refs, and optionally a structured `--result-file`. This ends
    the assignment and releases its claims;
    it does not complete the task or independently verify the worker's report.
-5. The lead inspects the diff and verifies acceptance criteria, then uses
+5. The lead inspects the result/journal and diff, verifies acceptance criteria, explicitly
+   acknowledges each ended assignment with `hipson task ack --assignment A [--note TEXT]`, then uses
    `hipson task status` to move the task to `review` and, once accepted, `done`.
    Failed work can return from review to `in_progress` for another assignment.
 6. For an interrupted wrapper, inspect `hipson task reap --dry-run`, then run
    `hipson task reap` to cancel proven orphans and release their claims. Reaping
    does not change task status; the lead decides how to resume or close it.
 
-The wrapper is an external integration owned by the lead, not a worker launcher
-provided by `hipson task`. A finished assignment or a `passed` result is a
+Use the native `hipson task run` launcher or an external integration owned by the lead.
+A finished assignment or a `passed` result is a
 recorded outcome, not an enforced verification gate on task status.
 
 ## CLI examples
@@ -54,6 +55,8 @@ hipson task assign --task T-0001 --actor codex --role builder --mode rw \
 hipson task brief --task T-0001 --role builder --scope src/hipson --scope tests
 hipson task event --task T-0001 --actor codex --type progress --summary "Implementation ready"
 hipson task finish --assignment A-0001 --result passed --summary "Checks pass" --ref tests/test_ledger.py
+hipson task activity --assignment A-0001 --json
+hipson task ack --assignment A-0001 --note "Read result and checked evidence"
 hipson task finding add --task T-0001 --actor claude --severity major --title "Missing guard" \
   --detail "Validate before writing" --location src/hipson/ledger.py:1 --source-assignment A-0001
 hipson task finding update --finding F-0001 --status fixed --actor claude \
@@ -103,16 +106,16 @@ finding can automatically reopen a done task as described below. Task status cha
 assignments: finish each active assignment explicitly to release its claims,
 including after task cancellation. Notes/events and finishing existing active
 assignments remain available after task termination for audit and cleanup.
-Finishing an assignment twice fails. The board omits terminal tasks and shows
-only active assignments; `show` includes the full assignment history and current
+Finishing an assignment twice fails. The board shows active assignments and
+unacknowledged deliveries, including on terminal tasks; `show` includes the full assignment history and current
 claims. List and board JSON return arrays; task/event JSON use the registered
 `hipson.task` / `hipson.task_event` schemas.
 
 `done` requires no active assignments (including readers), no remaining claims,
-and no open `blocking` or `major` findings. A refusal changes neither status nor
+no unacknowledged assignment results/journals, and no open `blocking` or `major` findings. A refusal changes neither status nor
 events. Resolve the findings and finish or reap the work first. An explicit
 `--force --reason "operator explanation"` permits an exception from `review`:
-a separate `done_override` event lists every active assignment, claim and severe
+a separate `done_override` event lists every active assignment, claim, unacknowledged delivery and severe
 finding with the reason. It commits atomically with the status event and leaves
 those assignments and claims intact for explicit cleanup. It does not bypass
 the lifecycle transition rules. Every done status event lists any remaining
@@ -146,12 +149,14 @@ would change which tree or files its claims protect. Read-only scope labels can
 be masked safely. Redaction is best effort; never supply real credentials.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 4; artifact schema version `1.0`). Writes migrate existing
+(database version 5; artifact schema version `1.0`). Writes migrate existing
 stores in place in one transaction. The v1→v2 step adds four nullable assignment
 ownership/lease columns; v2→v3 adds a nullable JSON `assignments.result` column,
 the `findings` table, and its task/status/severity index. The v3→v4 step adds
-nullable `assignments.owner_pid_namespace`. All existing rows,
-claims, and events remain; old assignments receive NULL values for added columns.
+nullable `assignments.owner_pid_namespace`. The v4→v5 step adds nullable JSON `activity`
+and `failure_journal`, nullable `acknowledged_at`, and `ack_note` (default empty).
+All existing rows, claims, and events remain. Old assignments receive NULL values for added
+nullable columns; ended legacy assignments are unacknowledged until explicitly consumed.
 A failure in any step rolls back both DDL and version updates. Unknown
 versions are refused. Initialization and each
 mutation use `BEGIN IMMEDIATE`. Each mutation commits its state change, event,
@@ -166,6 +171,48 @@ mutations roll back completely. Events have a database-wide autoincrement sequen
 Read snapshots do not increment revisions. SQLite triggers reject updates and
 deletes to events; this is append-only history, not tamper-proof storage against
 someone who controls the database file.
+
+## Assignment activity and delivery acknowledgement (1.4a)
+
+`hipson task activity --assignment A [--json]` returns an assignment with its current
+activity, end journal, result and acknowledgement state. The native runner observes a heartbeat
+once per second, the last complete stdout/stderr lines, and worker-declared progress. Output
+continues to the caller unchanged; persisted observations are redacted. A worker can append
+one line per action to `$HIPSON_PROGRESS_FILE`, supplied by the runner, without writing the ledger:
+
+```sh
+printf '%s\n' 'Finished parser inspection; running focused tests' >> "$HIPSON_PROGRESS_FILE"
+```
+
+The runner retains at most 20 observations, 1024 characters per observation, and reads at most
+64 KiB of progress per heartbeat; backlogged bytes await later heartbeats. It keeps the original file descriptor
+so replacing the progress path cannot redirect its reads. Oversized lines are discarded; credential
+patterns, known credential environment values, and multiline private keys are masked. Progress
+file disk use is controlled by its writer; these bounds limit runner reads, memory and ledger storage.
+The latest heartbeat is a supervisor observation time, not proof of completed worker work.
+Heartbeat/progress writes neither renew leases nor append task events/revisions. Silent or stale
+activity never releases claims; existing owner-liveness and lease rules still decide recovery.
+
+On exit, the native runner records `failure_journal` with `result_state` (`none`, `rejected`,
+`valid`), shell-compatible exit code, observed signal, duration, up to 100 changed-file status lines,
+bounded unstaged/staged `git diff --stat`, and the bounded observation tail. Git snapshots run
+from the task's registered project with inherited `GIT_*` overrides removed. They can include
+pre-existing or concurrent edits; they do not attribute those changes to this worker. Git failures
+are recorded as unavailable. A rejected result does not replace the worker's actual process exit.
+An interrupted supervisor records its observed signal after stopping the worker tree. After
+supervisor death, reap records “owner died; last activity at …” with unknown exit/signal and
+unobserved project changes, preserving uncertainty. Unverified lease expiry records unknown
+owner liveness. The legacy Bash launcher receives acknowledgement semantics through `finish`
+and `reap`; activity capture and exit snapshots require the native runner.
+
+Every ended assignment (structured result, legacy finish summary, or reaped failure journal)
+has `ack_state=unacknowledged` until `hipson task ack --assignment A [--note TEXT]`. Reads never
+acknowledge a delivery. Acknowledgement is atomic, idempotent, records the task's lead label,
+timestamp and bounded redacted note, and appends one `acknowledged` event. It refuses active
+assignments. It records consumption, not approval or independent verification of worker claims.
+Board, show, brief/context and MCP expose pending deliveries; bounded contexts report omitted
+entries. All worker output, progress, journals and results remain inside the brief's untrusted-data
+boundary and cannot change worker rules, scope, permissions or the return contract.
 
 The existing `redaction.redact_text` runs on titles, objectives, acceptance items,
 all event summaries, finding titles/details/locations/resolution notes, and every
@@ -466,12 +513,13 @@ recorded identity is no longer trustworthy.
 
 ## Read-only access
 
-CLI `task show/brief/context/events/list/board`, `task finding list`, `task reap --dry-run`, and
+CLI `task show/brief/context/activity/events/list/board`, `task finding list`, `task reap --dry-run`, and
 MCP task reads open the ledger read-only. They never initialize a database,
 migrate a legacy version, or set WAL journal mode. V1 assignments expose null
 owner fields; v1/v2 assignments expose null results and empty findings without
 changing the file. V1/v2/v3 assignments expose a null PID namespace without
-migrating. Writes still initialize and migrate transactionally.
+migrating. V1–v4 reads expose null activity/journals/ack timestamps without migrating.
+Writes still initialize and migrate transactionally.
 
 Missing stores return empty arrays for list/board, unfiltered finding lists,
 and unfiltered dry runs; show/brief/context, events, task-filtered finding lists, and
@@ -543,6 +591,8 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.open` | `project`, `title`, `objective`, `approved=true` | `acceptance`, `lead` (default `claude`) |
 | `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `owner_pid_namespace`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
+| `task.activity` | `assignment` | none |
+| `task.ack` | `assignment`, `approved=true` | `note` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
 | `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty), `force` (default `false`), `reason` (required with `force`) |
@@ -550,7 +600,7 @@ return `Task not found` errors. Approved write tools may initialize the store.
 `acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
 options. Role, mode, result, and status enums match the CLI. An `rw` assignment
 requires a nonempty `scope`; `ro` may omit it. Unknown arguments are rejected.
-All eight write tools require the literal boolean `approved: true`, checked before
+All nine write tools require the literal boolean `approved: true`, checked before
 opening the database. Approval is an execution gate, not identity authentication;
 the lead remains responsible for recording worker activity. `task.reap` requires
 approval even when `dry_run` is true. Owner arguments use integers/strings as in

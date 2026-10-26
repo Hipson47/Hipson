@@ -13,4 +13,7 @@ hipson task finding update --finding F-0001 --status fixed --actor lead \
   --resolved-by-assignment A-0003 --resolution-note "Verified whitespace trimming"
 hipson task show --task T-0001
 hipson task status --task T-0001 --to review --actor lead
+hipson task ack --assignment A-0001
+hipson task ack --assignment A-0002
+hipson task ack --assignment A-0003
 hipson task status --task T-0001 --to done --actor lead

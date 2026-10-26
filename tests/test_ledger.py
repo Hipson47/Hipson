@@ -307,7 +307,7 @@ def test_ledger_schema_version_wal_and_append_only_events(tmp_path: Path):
         assert store.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert store.connection.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         for sql in ("UPDATE events SET summary = 'changed'", "DELETE FROM events"):
             _error(lambda sql=sql: store.connection.execute(sql), "append-only", sqlite3.IntegrityError)
         assert len(store.events(task)) == 1 and store.show(task)["revision"] == 1
@@ -323,6 +323,7 @@ def test_ledger_list_board_and_terminal_cleanup(tmp_path: Path):
         assigned = _assign(store, task)
         read = _assign(store, task, ["."], mode="ro")
         store.finish(read["id"], result="passed", summary="Read done")
+        store.ack(read["id"])
         other = _open(store, tmp_path / "two")["id"]
         assert [item["id"] for item in store.list_tasks(project=tmp_path / "one" / ".")] == [task]
         assert [item["id"] for item in store.list_tasks(status="open")] == [other]
@@ -330,7 +331,7 @@ def test_ledger_list_board_and_terminal_cleanup(tmp_path: Path):
         assert [item["id"] for item in store.board()[0]["assignments"]] == [assigned["id"]]
         assert len(store.show(task)["assignments"]) == 2
         store.set_status(task, to="cancelled", actor="claude")
-        assert [item["id"] for item in store.board()] == [other]
+        assert [item["id"] for item in store.board()] == [task, other]
         store.finish(assigned["id"], result="cancelled", summary="Cleanup")
         assert store.show(task)["claims"] == []
         assert store.add_event(task, actor="claude", type="note", summary="Post-terminal audit")["type"] == "note"

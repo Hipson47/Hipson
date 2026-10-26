@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Record bounded, redacted assignment activity and progress-file observations in `task run`,
+  with exit journals for missing/rejected results and unknown-outcome journals after owner death.
+  Activity never releases claims. Add `task activity` and explicit `task ack` (also MCP tools);
+  unacknowledged deliveries remain visible on board/context and block `done` unless overridden.
+  Migrate ledgers transactionally to v5; add offline worker-death and busy-lead agent scenarios.
+
 ## 1.3.0 - 2026-10-27
 
 Release notes: [docs/release-1.3.md](docs/release-1.3.md).

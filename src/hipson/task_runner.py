@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import NoReturn
 
-from hipson import ledger
+from hipson import ledger, task_activity
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job
@@ -93,7 +93,8 @@ def _rollout_facts(nonce: str, started: float, refs: list[str]) -> str:
 
 
 def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, signum: int,
-            note: str, nonce: str, started: float) -> None:
+            note: str, nonce: str, started: float, snapshot: dict, project: str,
+            child_signal: int = 0) -> None:
     refs = list(args.ref)
     try:
         facts = _rollout_facts(nonce, started, refs) if args.rollout else ""
@@ -103,23 +104,35 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
     result = "cancelled" if signum else "passed" if code == 0 else "failed"
     summary = f"worker process exit={name}{facts}{note}; process result only, not lead verification"
     report = None
+    result_state = 'none'
     if args.result_file:
         try:
             path = Path(args.result_file).expanduser()
             if path.exists() and path.stat().st_size:
                 report = ledger.load_task_result(path)
+                result_state = 'valid'
         except Exception as exc:  # Evidence must never override the process result, even on parser/resource limits.
             _message(f"result file rejected ({type(exc).__name__})")
             summary += "; result file rejected"
+            result_state = 'rejected'
+    journal = {
+        **task_activity.project_changes(project), 'result_state': result_state,
+        'exit_code': code, 'signal': signum or child_signal or None,
+        'duration_seconds': max(0, time.time() - started),
+        'log_tail': snapshot.get('observations', []), 'reason': summary,
+    }
     try:
         with closing(ledger.Ledger(db)) as store:
             try:
-                store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report)
+                store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report,
+                             failure_journal=journal)
             except Exception:
                 if report is None:
                     raise
                 _message("result file rejected; recording process outcome without worker evidence")
-                store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs)
+                journal['result_state'] = 'rejected'
+                store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs,
+                             failure_journal=journal)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not finish {assignment}: {exc}; run 'hipson task reap'")
 
@@ -222,6 +235,12 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
     launching = False
     code, note, safe = 75, "", True
     nonce, started = f"ledger-run-{uuid.uuid4()}", time.time()
+    activity: task_activity.Activity | None = None
+    progress_dir: tempfile.TemporaryDirectory[str] | None = None
+    progress = None
+    child_signal = 0
+    snapshot: dict = {}
+    next_heartbeat = 0.0
     try:
         if not windows:
             tree = ProcessTree()
@@ -234,8 +253,16 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
         _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
+        progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
+        progress_path = Path(progress_dir.name) / 'progress'
+        progress = progress_path.open('w+b', buffering=0)
+        activity = task_activity.Activity(progress)
+        snapshot = activity.snapshot()
+        with closing(ledger.Ledger(db)) as store:
+            store.observe(assignment, snapshot)
         env = {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
-               "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db)}
+               "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
+               'HIPSON_PROGRESS_FILE': str(progress_path)}
         with tempfile.TemporaryFile() as brief:
             if args.rollout:
                 # Reading stdin in a daemon keeps cancellation responsive even with an open pipe.
@@ -262,6 +289,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     job.protect_runner()
                 launching = True
                 child = subprocess.Popen(command, env=env, stdin=brief if args.rollout else None,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]  # CREATE_SUSPENDED
                 launching = False
                 safe = False
@@ -274,13 +302,23 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         child.kill()
                         child.wait()
                         raise
+                if child.stdout is None or child.stderr is None:
+                    raise OSError('worker output pipes are unavailable')
+                activity.relay(child.stdout, 'stdout', sys.stdout.fileno())
+                activity.relay(child.stderr, 'stderr', sys.stderr.fileno())
                 while child.poll() is None and not signum:
                     if tree:
                         tree.members()
+                    if time.monotonic() >= next_heartbeat:
+                        snapshot = activity.snapshot()
+                        with closing(ledger.Ledger(db)) as store:
+                            store.observe(assignment, snapshot)
+                        next_heartbeat = time.monotonic() + task_activity.HEARTBEAT_SECONDS
                     time.sleep(0.05)
                 outcome = child.poll()
                 code = outcome if outcome is not None else 0
                 if code < 0:
+                    child_signal = -code
                     code = 128 - code  # Shell-compatible status for a child killed by a signal.
                 if signum or _active(job, tree):
                     if not signum:
@@ -310,10 +348,23 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 safe = False
         if signum:
             code = 128 + signum
+        if activity:
+            activity.join()
+            try:
+                snapshot = activity.snapshot(final=True)
+                with closing(ledger.Ledger(db)) as store:
+                    store.observe(assignment, snapshot)
+            except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+                _message(f'could not record final activity: {exc}')
         if assignment and safe:
-            _finish(db, args, assignment, code, signum, note, nonce, started)
+            _finish(db, args, assignment, code, signum, note, nonce, started, snapshot,
+                    str(check['expected']), child_signal)
         elif assignment:
             _message(f"worker processes survived KILL; leaving {assignment} active (run 'hipson task reap' later)")
+        if progress:
+            progress.close()
+        if progress_dir:
+            progress_dir.cleanup()
         for number, handler in previous.items():
             signal.signal(number, handler)
         if tree:
