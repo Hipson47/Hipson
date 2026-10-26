@@ -35,7 +35,15 @@ def snapshot(path: Path) -> Snapshot:
         after = os.fstat(source.fileno())
     def identity(value: os.stat_result) -> tuple[int, ...]:
         return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
-    if identity(info) != identity(before) or identity(before) != identity(after) or identity(after) != identity(path.lstat()):
+    # Windows CPython can report creation time in lstat().st_ctime_ns but change
+    # time in fstat().st_ctime_ns. Compare full metadata within each API, then
+    # bind the path to the descriptor using the fields with shared semantics.
+    final = path.lstat()
+    if (
+        identity(info) != identity(final)
+        or identity(before) != identity(after)
+        or identity(info)[:-1] != identity(before)[:-1]
+    ):
         raise ValueError(f"Configuration changed while reading: {path}; rerun hipson init.")
     return Snapshot(content, identity(after), hashlib.sha256(content).digest())
 

@@ -19,6 +19,9 @@
   effective environment/tool filters before success; contain client/MCP subprocess trees on
   timeout or interruption with POSIX process groups and Windows Jobs. Add offline regressions
   for concurrency, partial writes, backup permissions, overrides and descendant cleanup.
+- Fix native Windows init snapshot checks when path and descriptor stats report different
+  meanings for `st_ctime_ns`. Retain full before/after checks within each stat API, file
+  identity checks and content hashes; test timestamp-preserving edits and replacements.
 - Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
   project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
   and Codex rollout facts. POSIX process groups preserve orphan claims; Windows inherits guardian
