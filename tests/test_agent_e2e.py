@@ -51,7 +51,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
                     HIPSON_LEDGER=str(sentinel)):
         runs = [harness.run_scenario(name, tmp_path / name, keep=True) for name in harness.scenario_names()]
     assert sentinel.read_text() == "owner state must be untouched"
-    assert len(runs) == 5
+    assert len(runs) == 6
     for run in runs:
         assert run["passed"], run
         assert run["metrics"]["hipson_invocations"] > 0
@@ -75,13 +75,16 @@ def test_agent_e2e_reference_solutions(tmp_path):
 @_linux_harness
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
+        ('resume', 'resume-no-ack.sh', 'explicitly acknowledge'),
+        ('resume', 'resume-second-writer.sh', 'second writer'),
+        ('resume', 'resume-ignore-finding.sh', 'major finding'),
         ("worker-dies", "worker-ignore-journal.sh", "inspect failure journal"),
         ("result-busy", "result-no-ack.sh", "explicitly acknowledge"),
         ("lead-flow", "lead-no-review.sh", "separate structured reviewer"),
         ("conflict", "conflict-bypass.sh", "live holder was bypassed"),
         ("recovery", "recovery-tamper.sh", "stale claim must be released by ledger reap"),
     ):
-        run = harness.run_scenario(name, tmp_path / name, solution=BROKEN / script)
+        run = harness.run_scenario(name, tmp_path / (name + '-' + script), solution=BROKEN / script)
         assert not run["passed"], run
         if name == "recovery":
             assert not run["measurement_valid"]
@@ -228,7 +231,7 @@ def test_agent_e2e_cleanup_surviving_group_after_leader_exits(tmp_path):
             try:
                 if Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[-1].split()[0] == "Z":
                     break
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 break
             time.sleep(0.01)
         else:

@@ -17,6 +17,8 @@ from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
+    'lead.resume': (set(), {'project'}),
+    'task.now': (set(), {'project'}),
     "task.activity": ({"assignment"}, set()),
     "task.ack": ({"assignment", "approved"}, {"note"}),
     "task.show": ({"task"}, set()),
@@ -112,7 +114,7 @@ def test_ledger_mcp_catalog_schemas_and_contract(tmp_path: Path):
         assert "db" not in schema["properties"]
         assert catalog_tools[name]["input_schema"] == schema
         assert catalog_tools[name]["approval_required"] == ("approved" in required)
-        assert catalog_tools[name]["fallback_command"].startswith("hipson task ")
+        assert catalog_tools[name]["fallback_command"].startswith('hipson lead ' if name == 'lead.resume' else 'hipson task ')
     for name, field, values in (
         ("task.assign", "role", ["builder", "reviewer", "explorer", "researcher"]),
         ("task.assign", "mode", ["ro", "rw"]),

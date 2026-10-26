@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add read-only `task now` / MCP `task.now` for pending deliveries, blockers, active-worker
+  activity ages, review decisions and terminal cleanup, with project-local full commit SHAs and subjects.
+  Add deterministic `lead resume` / MCP `lead.resume` for context recovery: objectives, acceptance,
+  decisions, failures, findings, verification revision freshness and project Git state. Text is bounded
+  to 24,000 characters with untrusted evidence boundaries; JSON retains the full view.
+  Add an offline resume mission with reference and broken solutions for acknowledgement, live-scope
+  preservation and finding repair.
 - Record bounded, redacted assignment activity and progress-file observations in `task run`,
   with exit journals for missing/rejected results and unknown-outcome journals after owner death.
   Activity never releases claims. Add `task activity` and explicit `task ack` (also MCP tools);

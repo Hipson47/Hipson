@@ -19,6 +19,7 @@ from hipson import (
     agents,
     evals,
     init_setup,
+    lead_context,
     learning,
     ledger,
     mcp_server,
@@ -1788,6 +1789,21 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_lead_view(args: argparse.Namespace) -> int:
+    try:
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        if db.exists():
+            with closing(ledger.Ledger(db, read_only=True)) as store:
+                payload = lead_context.build(store, project=args.project, resume=args.command == 'lead')
+        else:
+            payload = lead_context.build(None, project=args.project, resume=args.command == 'lead')
+        print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else lead_context.render(payload))
+        return 0
+    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1
+
+
 def command_task(args: argparse.Namespace) -> int:
     try:
         dry_run = args.task_command == "reap" and args.dry_run
@@ -1947,6 +1963,7 @@ def build_parser() -> argparse.ArgumentParser:
             ("events", "List task events in sequence order"),
             ("list", "List tasks"),
             ("board", "Show active tasks and unacknowledged assignment results"),
+            ('now', 'Show lead attention, pending results, active work and cleanup (read-only)'),
             ("finding", "Record and track review findings"),
         )
     }
@@ -2017,6 +2034,16 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
+    task_parsers['now'].add_argument('--project')
+    task_parsers['now'].set_defaults(func=command_lead_view)
+
+    lead = subparsers.add_parser('lead', help='Restore lead context from the task ledger')
+    lead_sub = lead.add_subparsers(dest='lead_command', required=True)
+    resume = lead_sub.add_parser('resume', help='Read deterministic, bounded lead context without changing state')
+    resume.add_argument('--project')
+    resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
+    resume.add_argument('--json', action='store_true', help='Print full machine-readable context')
+    resume.set_defaults(func=command_lead_view)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")
     doctor.add_argument("--agent-surfaces", action="store_true", help="Report agent integration readiness")

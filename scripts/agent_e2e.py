@@ -401,12 +401,13 @@ class Fixture:
         return self.cli("task", "open", "--project", ".", "--title", title, "--objective", "Fix pair parsing",
                         "--acceptance", "Parser work is safely delegated", "--lead", "lead")["id"]
 
-    def start_holder(self, task: str) -> str:
+    def start_holder(self, task: str, *, scope: str = 'src/parser') -> str:
         log = (self.workdir / ".harness" / "holder.log").open("w", encoding="utf-8")
         try:
             proc = subprocess.Popen(["examples/agent-run.sh", "--task", task, "--actor", "holder",
-                                     "--role", "builder", "--mode", "rw", "--scope", "src/parser",
-                                     "--result-file", "holder.json", "--", "bin/fake-worker", "hold", "holder.json"],
+                                     "--role", "builder", "--mode", "rw", "--scope", scope,
+                                     "--result-file", "holder.json", "--", "bin/fake-worker", "hold", "holder.json",
+                                     scope + '/pairs.py'],
                                     cwd=self.workdir, env=self.env, stdout=log, stderr=log, text=True,
                                     start_new_session=True)
         finally:
@@ -621,8 +622,11 @@ def run_scenario(name: str, output: Path, *, driver: str = "fake", solution: Pat
             write_json(output / "initial.json", initial)
             # Setup invocations are preconditions, not agent friction.
             (workdir / ".harness" / "cli.jsonl").write_text("")
+            (workdir / '.harness' / 'runner.jsonl').write_text('')
             watch = LedgerWatch(fixture.ledger)
             mission = (scenario / "mission.md").read_text(encoding="utf-8")
+            if 'resume_output' in seed:
+                mission += '\n\n' + seed['resume_output']
             (output / "mission.md").write_text(mission, encoding="utf-8")
             if driver == "codex":
                 executable = shutil.which("codex")

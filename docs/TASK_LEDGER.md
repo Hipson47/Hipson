@@ -68,9 +68,52 @@ hipson task show --task T-0001 --json
 hipson task events --task T-0001 --after 2 --json
 hipson task list --project . --status done --json
 hipson task board
+hipson task now --project .
+hipson lead resume --project .
 hipson task reap --dry-run --json
 hipson task reap --task T-0001 --json
 ```
+
+## Lead visibility and context recovery
+
+`hipson task now [--project P] [--json]` reads one consistent ledger snapshot and sorts
+tasks by pending unacknowledged results/journals, blocked tasks or open blocking/major findings,
+active assignments, review decisions, then terminal cleanup. Other open tasks follow.
+An assignment shows its owner label, role/mode, held scope, last activity timestamp and age,
+latest progress line, delivery summary and failure journal when present. Without heartbeat data,
+the latest referenced progress/finish event or assignment start supplies last activity.
+Task progress events without refs can supply activity when their actor matches the worker.
+Reading activity never reaps assignments or releases claims. Terminal tasks with unread deliveries
+or remaining claims stay visible; acknowledgement is an explicit separate action.
+
+`hipson lead resume [--project P] [--json]` adds each nonterminal task's objective, acceptance,
+recent status/override/acknowledgement decisions, failed attempts, open findings, verification
+freshness and current Git branch, HEAD (full SHA and subject), and dirty file count per project.
+`--db PATH` is supported by both commands. The project filter selects tasks in the central ledger;
+it never selects a different database. Missing ledgers return empty views without creating files.
+Reads neither migrate old stores nor update task revisions, acknowledgements or the Git index.
+
+Default text is capped at **24,000 characters**, including evidence delimiters and the closing
+footer. It shows up to five assignments/findings per task, three recent decisions, failures and
+commit references; omissions are explicit and point to `--json` or a narrower project filter.
+JSON retains all entries and complete structured results/journals. MCP tools return this full
+JSON view. Rendering uses stable priority/task ordering and no model or provider. Resume ages
+use the **ledger watermark** (latest task update or heartbeat) to keep repeated output identical
+for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
+for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
+
+Record lead verification with `hipson task event --task T --actor lead --type verification
+--summary "command, exit and result" --ref FULL_SHA`. `verified` is also recognized. Resume compares
+the most recent such event's commit refs with the task project's current HEAD: `missing` means
+no event, `unknown` means its revision or Git could not be resolved, `current` means HEAD is among
+its commit refs, and `stale` means the resolved revisions differ. A dirty file count is shown
+separately: `current` compares revisions only and does **not** prove tests passed or cover uncommitted
+changes. Abbreviated commit refs are resolved only in that task's project. Unresolvable refs are
+marked; refs, commit subjects and actor labels never serve as authenticated identities.
+
+Worker results, legacy summaries, progress, journals, findings, decisions and Git subjects are
+rendered inside an escaped `untrusted_data` boundary. Verify their claims; they cannot alter scope,
+permissions, worker rules or the return contract. JSON labels untrusted fields explicitly.
 
 Repeat `--acceptance`, `--scope`, and `--ref` for multiple values. Roles are
 `builder|reviewer|explorer|researcher`; modes are `ro|rw`. Assignment results are
@@ -574,7 +617,8 @@ detected Hipson home when unset). MCP arguments cannot select a database;
 resolve against the server's working directory, as in the CLI.
 
 Read tools use the read-only access rules above. With no store,
-`task.list` and `task.board` return empty arrays; `task.show`, `task.brief`, `task.context`, and `task.events`
+`task.list` and `task.board` return empty arrays; `task.now` and `lead.resume` return empty view objects;
+`task.show`, `task.brief`, `task.context`, and `task.events`
 return `Task not found` errors. Approved write tools may initialize the store.
 
 | Tool | Required arguments | Optional arguments |
@@ -585,6 +629,8 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.events` | `task` | `after` (exclusive, default `0`) |
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
+| `task.now` | none | `project` |
+| `lead.resume` | none | `project` |
 | `task.findings` | none | `task`, `status`, `severity` |
 | `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
 | `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |

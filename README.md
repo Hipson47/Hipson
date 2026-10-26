@@ -203,11 +203,18 @@ Use the task id printed by `task open` in place of `T-0001` when your ledger alr
 ```bash
 hipson task open --project . --title "Fix parser" --objective "Parser accepts trailing commas" --acceptance "tests pass"
 hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src/parser -- python -c "print('worker check')"
-hipson task board
+hipson task now
+hipson task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
 hipson task status --task T-0001 --to review --actor lead --summary "verified: tests pass"
 hipson task status --task T-0001 --to done --actor lead
 hipson task events --task T-0001
 ```
+
+Use `hipson task now --project .` for pending results, activity ages, blockers, review decisions
+and cleanup. After context loss, `hipson lead resume --project .` restores objectives, acceptance,
+decisions, failed attempts, findings, verification freshness and Git state in bounded text.
+Both are read-only; add `--json` for the full view. Use the assignment id printed by your runner
+in place of `A-0001` when acknowledging its result.
 
 Wrap real workers so the ledger fills itself:
 

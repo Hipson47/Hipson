@@ -16,7 +16,7 @@ explicitly skip on macOS and native Windows. This limit does not apply to the
 macOS CLI or worker wrapper. Linux CI continues to require zero skipped tests.
 
 ```sh
-# Offline: execute all five reference solutions, without invoking Codex.
+# Offline: execute all six reference solutions, without invoking Codex.
 .venv/bin/python scripts/agent_e2e.py --scenario all --driver fake
 
 # On demand: authenticated Codex CLI on PATH, explicit model and effort.
@@ -130,6 +130,7 @@ the harness stops that helper after judging the run.
 | `recovery` | An active assignment with a real exited owner and retained claims | Ledger recovery emits `reaped` with `pid_gone` before a replacement builder assignment; replacement fixes the colon parser and finishes; task remains in progress for later review. |
 | `worker-dies` | Unreliable worker fixture exits 9 with partial changes and no result | Native runner journals exit, changes and log tail; lead reads activity before replacement, acknowledges both deliveries, verifies recovery and leaves task in review. Broken solution skips journal inspection. |
 | `result-busy` | Parser task plus independent lead task, worker waits for a busy marker | Result arrives while another task occupies the lead; board exposes the unread delivery; lead inspects and acknowledges it before closing. Broken solution forces done without acknowledgement. |
+| `resume` | Delivered unacknowledged result, open major parser finding, live writer on `src/held` | Mission says only “You lost your context; continue the work” plus the default `lead resume` output. Lead acknowledges delivery, runs a repair worker, verifies parsing and resolves the finding while preserving the held scope; no other task-history discovery. Three broken solutions omit acknowledgement, attempt a second writer, or ignore the finding. |
 
 The native `task run` launcher is recorded as one CLI operation, including its heartbeat updates
 and finish, and its actual exit is included in `runner.jsonl`. Concurrent CLI calls are serialized

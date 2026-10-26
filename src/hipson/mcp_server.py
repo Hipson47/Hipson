@@ -11,6 +11,7 @@ from typing import Any, TextIO
 from hipson import (
     agent_contract,
     evidence,
+    lead_context,
     ledger,
     packet_preflight,
     policy,
@@ -25,6 +26,8 @@ from hipson.project import resolve_project
 from hipson.redaction import redact_text
 
 MCP_TOOL_NAMES = (
+    'task.now',
+    'lead.resume',
     "contract.show",
     "policy.show",
     "work.create",
@@ -62,6 +65,12 @@ MCP_GATED_TOOLS = {
     "task.finding_add", "task.finding_update", "task.ack",
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    'task.now': {
+        'type': 'object', 'properties': {'project': {'type': 'string'}}, 'additionalProperties': False,
+    },
+    'lead.resume': {
+        'type': 'object', 'properties': {'project': {'type': 'string'}}, 'additionalProperties': False,
+    },
     'task.activity': {
         'type': 'object', 'required': ['assignment'],
         'properties': {'assignment': {'type': 'string'}}, 'additionalProperties': False,
@@ -396,6 +405,8 @@ def _tool(name: str) -> dict[str, Any]:
 
 def _description(name: str) -> str:
     descriptions = {
+        'task.now': 'Read lead attention in priority order, pending results, activity, findings and cleanup.',
+        'lead.resume': 'Restore deterministic lead context, decisions, verification freshness and project git state (read-only).',
         "contract.show": "Read the local Hipson agent contract.",
         "policy.show": "Read the merged project policy.",
         "work.create": "Create a provider-free work plan and optional packet path.",
@@ -431,6 +442,8 @@ def _description(name: str) -> str:
 
 def _fallback_command(name: str) -> str:
     commands = {
+        'task.now': 'hipson task now --json',
+        'lead.resume': 'hipson lead resume --json',
         "contract.show": "hipson contract show --json",
         "policy.show": "hipson policy show --json",
         "work.create": "hipson work --task \"...\" --write-packet --work-output runs/work.json --json",
@@ -553,7 +566,7 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
 
 
 def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> object:
-    if name.startswith("task.") and name in MCP_INPUT_SCHEMAS:
+    if (name.startswith("task.") or name == 'lead.resume') and name in MCP_INPUT_SCHEMAS:
         return _task_tool_payload(name, arguments)
     if name == "contract.show":
         return agent_contract.build_agent_contract(arguments.get("project", project))
@@ -659,6 +672,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     dry_run = name == "task.reap" and arguments.get("dry_run", False)
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
+        if name in ('task.now', 'lead.resume'):
+            return lead_context.build(None, project=arguments.get('project'), resume=name == 'lead.resume')
         if name == 'task.activity':
             raise ledger.LedgerError(f"Assignment not found: {arguments['assignment']}")
         if name in ("task.show", "task.events", "task.brief", "task.context") or (name in ("task.reap", "task.findings") and "task" in arguments):
@@ -666,6 +681,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
     with closing(ledger.Ledger(db, create=create, read_only=not create)) as store:
+        if name in ('task.now', 'lead.resume'):
+            return lead_context.build(store, project=arguments.get('project'), resume=name == 'lead.resume')
         if name == 'task.activity':
             return store.activity(arguments['assignment'])
         if name == 'task.ack':

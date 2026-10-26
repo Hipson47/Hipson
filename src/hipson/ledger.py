@@ -1133,6 +1133,19 @@ class Ledger:
                 'SELECT id FROM tasks ORDER BY created_at, id')]
             return [view for view in views if view['status'] not in ('done', 'cancelled') or view['assignments']]
 
+    def lead_snapshot(self, *, project: str | Path | None = None) -> list[tuple[TaskView, list[TaskEvent]]]:
+        """Read views and events at one ledger revision, without migration or recovery."""
+        project_path = str(Path(project).expanduser().resolve()) if project is not None else None
+        with self._transaction(write=False):
+            return [
+                (self._view(row['id']), [self._event_dict(event) for event in self.connection.execute(
+                    'SELECT * FROM events WHERE task = ? ORDER BY seq', (row['id'],))])
+                for row in self.connection.execute(
+                    'SELECT id FROM tasks WHERE (? IS NULL OR project = ?) ORDER BY id',
+                    (project_path, project_path),
+                )
+            ]
+
     def _task(self, task: str) -> Task:
         row = self.connection.execute("SELECT * FROM tasks WHERE id = ?", (task,)).fetchone()
         if row is None:
