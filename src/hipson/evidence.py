@@ -53,8 +53,15 @@ def _ledger_lock(root: Path) -> Iterator[None]:
         try:
             lock_dir.mkdir()
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError) as exc:
+            # Windows reports a lock directory that another writer is removing (delete pending) as
+            # access denied: that is contention, not a failure. A real permission problem still
+            # surfaces once the deadline passes.
+            if isinstance(exc, PermissionError) and sys.platform != "win32":
+                raise
             if time.monotonic() >= deadline:
+                if isinstance(exc, PermissionError):
+                    raise
                 raise TimeoutError(f"Evidence lock timed out; check for a stale lock: {lock_dir}") from None
             time.sleep(0.01)
     try:

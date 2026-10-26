@@ -139,6 +139,39 @@ def test_evidence_lock_backend_matches_platform():
         assert evidence.fcntl is fcntl
 
 
+def test_evidence_windows_lock_retries_delete_pending_access_denied(tmp_path: Path):
+    # Seen on the Windows CI runner: mkdir of a lock dir another writer is removing -> WinError 5.
+    real_mkdir = Path.mkdir
+    calls = []
+
+    def flaky_mkdir(self, *args, **kwargs):
+        calls.append(self.name)
+        if self.name == ".evidence.lock.d" and calls.count(".evidence.lock.d") == 1:
+            raise PermissionError(5, "Access is denied")
+        return real_mkdir(self, *args, **kwargs)
+
+    with patch.object(evidence, "fcntl", None), patch.object(evidence.sys, "platform", "win32"),             patch.object(Path, "mkdir", flaky_mkdir):
+        record = evidence.build_evidence_record(work_plan={"work_id": "work_lock", "task": "Lock contention"},
+                                                ledger_root=tmp_path, actor="worker", task_id="T-0001")
+        evidence.append_record(tmp_path, record)
+    assert calls.count(".evidence.lock.d") == 2
+    assert len(evidence.ledger_path(tmp_path).read_text(encoding="utf-8").splitlines()) == 1
+    assert not (tmp_path / ".evidence.lock.d").exists()
+
+
+def test_evidence_lock_permission_error_is_not_retried_off_windows(tmp_path: Path):
+    def denied(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    with patch.object(evidence, "fcntl", None), patch.object(evidence.sys, "platform", "linux"),             patch.object(Path, "mkdir", denied):
+        try:
+            evidence.append_record(tmp_path, {})
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("A POSIX permission error must not be retried as contention")
+
+
 def test_evidence_portable_lock_serializes_processes(tmp_path: Path):
     _concurrent_appends(tmp_path, fallback=True)
     assert not (tmp_path / ".evidence.lock.d").exists()
