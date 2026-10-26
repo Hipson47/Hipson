@@ -3,11 +3,11 @@
 Hipson needs Python 3.11+ and Git. The commands below ask uv to install/use Python 3.12.
 No provider credentials are needed for CLI, task ledger, MCP or evidence commands.
 
-| Platform | CLI, ledger, MCP, evidence | `examples/agent-run.sh` | Agent e2e harness |
+| Platform | CLI, ledger, MCP, evidence, `hipson task run` | `examples/agent-run.sh` | Agent e2e harness |
 |---|---|---|---|
 | Linux | Supported | Supported | Supported |
 | macOS | Supported | Supported with Bash and `python3` | Linux/WSL2 only |
-| Windows native | Supported, leases/explicit finish for worker recovery | Use WSL2 | Use WSL2 |
+| Windows native | Supported (Job Object worker containment) | Use WSL2 | Use WSL2 |
 | Windows WSL2 | Supported | Supported | Supported |
 
 ## Linux
@@ -46,7 +46,8 @@ claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --s
 claude mcp get hipson
 ```
 
-The wrapper supports stock macOS Bash 3.2 and BSD `ps`. Ensure `python3` is on PATH
+`hipson task run` needs no Bash. The optional Bash wrapper supports stock macOS Bash 3.2 and BSD `ps`.
+For that wrapper, ensure `python3` is on PATH
 (`uv python install --default 3.12` and `uv python update-shell` if needed; reopen Terminal).
 It uses Python's `os.setsid()` without a `setsid` executable and falls back to `uuidgen` or Python
 without `/proc`. Boot identity comes from `sysctl -n kern.bootsessionuuid`.
@@ -74,25 +75,30 @@ claude mcp get hipson
 `hipson.exe` runs directly; it needs no `cmd /c` or Bash wrapper. Use the Windows Claude Code
 installation here. The CLI and MCP wire format use UTF-8; MCP accepts CRLF requests and emits LF responses.
 
-Native Windows supports task commands, SQLite coordination, MCP and concurrent evidence appends.
-It does not support the Bash worker wrapper or the Linux agent e2e harness. For manually managed
-workers, set a bounded lease and explicitly finish each assignment:
+Native Windows supports the worker runner, task commands, SQLite coordination, MCP and concurrent
+evidence appends. Run and record a worker without Bash:
 
 ```powershell
 hipson task open --project . --title "Parser check" --objective "Verify parser" --json
-hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src --lease-seconds 3600
+hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src --lease-seconds 3600 -- python -c "print('worker check')"
 hipson task board
-hipson task finish --assignment A-0001 --result passed --summary "Worker exited 0; lead verification pending"
 ```
+
+The runner attaches a suspended child to a Job Object before allowing it to execute.
+Descendants stay in that job; `KILL_ON_JOB_CLOSE` terminates the tree if the runner is killed.
+Ctrl+C and Ctrl+Break forward Ctrl+Break to the worker's process group, followed by bounded
+Job termination when needed. Leftovers stop before the runner records finish and releases claims.
+The Linux agent e2e harness still needs WSL2.
 
 Use the task/assignment IDs printed by your commands. `hipson task reap` recovers expired leases.
 Windows PID probes use query-only handles (`OpenProcess` + `GetExitCodeProcess`), never signals.
-They cannot check surviving POSIX worker groups. Windows boot identity is unavailable: after a reboot,
+They do not probe POSIX worker groups; `task run` contains Windows descendants with its Job Object.
+Windows boot identity is unavailable: after a reboot,
 a reused live PID can keep a claim active until its lease expires or the lead explicitly finishes it.
 Access denied or unknown probe errors conservatively keep claims. Leases must cover the work duration;
 an expired lease can release a claim even if a worker is still running.
 
-## Windows through WSL2 (recommended for workers)
+## Windows through WSL2
 
 In an administrator PowerShell:
 
@@ -146,8 +152,9 @@ For native Windows, use the executable directly, with no activation script polic
 claude mcp add --transport stdio hipson -- "$($PWD.Path)\.venv\Scripts\hipson.exe" mcp serve --project "$($PWD.Path)" --stdio
 ```
 
-For a global install, the wrapper is available in a source clone, not installed as a CLI command.
-Launch it from that clone with `bash examples/agent-run.sh --help`; `hipson` and `python3` must be on PATH.
+`hipson task run --help` is available in global installs and clones on every OS.
+The optional legacy Bash wrapper is available in a source clone. Launch it with
+`bash examples/agent-run.sh --help`; `hipson` and `python3` must be on PATH.
 For development, use `uv sync --all-extras` to install the test/static-analysis tools too.
 
 ## Storage and recovery
@@ -185,8 +192,9 @@ or register an absolute executable path: `"$(command -v hipson)"` on POSIX,
 
 CI runs both test runners, static checks, builds and a real installed CLI/MCP stdio smoke on
 Ubuntu (Python 3.11/3.12), macOS and Windows (Python 3.12). Windows CI runs the real process-query
-regression; all platforms also test its error paths with mocked ctypes. The agent e2e harness
-explicitly skips outside Linux/WSL2; Linux CI still requires zero skipped tests. Both test runners
+regression and native Job Object tree cleanup plus Ctrl+C/Ctrl+Break forwarding. All platforms
+run the native runner contract tests; platform APIs also have mocked error-path coverage.
+The agent e2e harness explicitly skips outside Linux/WSL2; Linux CI still requires zero skipped tests. Both test runners
 fail macOS/Windows CI on any skip outside the exact reason allowlist in `tests/support.py`:
 
 - macOS and Windows: Linux-only e2e, subreaper/zombie inspection and process-group recovery controls.

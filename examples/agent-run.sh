@@ -14,6 +14,7 @@ usage() {
 Usage: agent-run.sh --task TASK --actor ACTOR --role ROLE --mode MODE [OPTIONS] -- COMMAND [ARGS...]
 
 Record a worker assignment, run COMMAND, then finish it with the process outcome.
+Cross-platform alternative (including native Windows): hipson task run --help.
 
 Options:
   --task TASK          Task ID (required)

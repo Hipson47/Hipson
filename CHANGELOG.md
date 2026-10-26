@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add `hipson task run`: a stdlib worker runner for Linux, macOS and native Windows with
+  project binding, owner identity, atomic claims, signal forwarding, structured-result fallback,
+  and Codex rollout facts. POSIX process groups preserve orphan claims; Windows suspends workers
+  until Job Object attachment and kills their entire tree on runner death. Native runner tests
+  run in the existing Ubuntu/macOS/Windows CI matrix; platform smoke includes runner checks.
+
 ## 1.2.1 - 2026-10-26
 
 - **PyPI release workflow**: `.github/workflows/release.yml` publishes version tags through PyPI

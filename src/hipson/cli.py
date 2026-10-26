@@ -29,6 +29,7 @@ from hipson import (
     review_kit,
     run_control,
     task_context,
+    task_runner,
     verification,
     workflow,
 )
@@ -1903,12 +1904,13 @@ def build_parser() -> argparse.ArgumentParser:
     task = subparsers.add_parser("task", help="Record lead-managed tasks, assignments, claims, and events")
     task.add_argument("--db", help="Task ledger SQLite path; overrides HIPSON_LEDGER")
     task.add_argument("--json", action="store_true", help="Print machine-readable task output")
-    task_sub = task.add_subparsers(dest="task_command", required=True)
+    task_sub = task.add_subparsers(dest="task_command", required=True, parser_class=task_runner.RunParser)
     task_parsers = {
         name: task_sub.add_parser(name, help=help_text)
         for name, help_text in (
             ("open", "Open a task"),
             ("assign", "Assign a worker and claim write scope"),
+            ("run", "Run and record a worker on Linux, macOS or Windows"),
             ("finish", "Finish an assignment and release its claims"),
             ("reap", "Cancel orphaned assignments and release their claims"),
             ("event", "Append a task event"),
@@ -1933,6 +1935,7 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("finish", "event"):
             task_parser.add_argument("--summary", required=True)
             task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
+    task_runner.configure(task_parsers["run"])
     task_parsers["open"].add_argument("--project", required=True)
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)

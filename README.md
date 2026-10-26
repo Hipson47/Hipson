@@ -7,7 +7,7 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 521, zero CI skips](https://img.shields.io/badge/tests-521%20%7C%200%20CI%20skips-2ea043)
+![Tests: 534, zero CI skips](https://img.shields.io/badge/tests-534%20%7C%200%20CI%20skips-2ea043)
 ![Bounded mutation score: 65.12%](https://img.shields.io/badge/bounded%20mutation-65.12%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
@@ -74,7 +74,7 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 521 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.2.0, 2026-10-26; 404 tests when the ledger landed) |
+| Test suite | 534 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (Unreleased; 404 tests when the ledger landed) |
 | Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
 | Agent e2e | A real Codex agent (gpt-6.1-sol) is given a natural-language mission and must reach it with Hipson alone; oracles check the resulting ledger, not the agent's report. 3 scenarios (lead flow, claim conflict, crash recovery). Latest live run 3/3; the first run found a real bug (claims reaped across PID namespaces), now fixed. Local and on demand: [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
@@ -91,7 +91,7 @@ inside evidence payloads.
 ```mermaid
 flowchart LR
   L([Lead<br/><sub>Claude Code</sub>]) -->|task open| T[(Task ledger<br/><sub>SQLite</sub>)]
-  L -->|brief + task id| R[agent-run.sh<br/><sub>wrapper</sub>]
+  L -->|brief + task id| R[hipson task run<br/><sub>worker runner</sub>]
   R -->|assign + owner + claims| T
   R --> W[Worker<br/><sub>Codex · agy · subagent</sub>]
   W -->|report, diff| L
@@ -103,7 +103,7 @@ flowchart LR
 | Who | Does |
 |---|---|
 | **Lead** | Plans, opens the task, briefs workers, verifies results itself, closes the task. The only one that sets `done`. |
-| **Wrapper** (`examples/agent-run.sh`) | Records the assignment with owner and claims, runs the worker in its own process group, forwards signals, records the result. |
+| **Runner** (`hipson task run`) | Records the assignment with owner and claims, contains the worker tree in a POSIX process group or Windows Job Object, forwards signals, records the result. |
 | **Worker** | Does the bounded job in worker mode and returns evidence. Never writes the ledger, never talks to other workers. |
 | **Hipson** | Ledger, claims, reaping, evidence chain, MCP tools, and the existing local workflow (scan, packets, verify, audit). |
 
@@ -114,10 +114,10 @@ can install Python for you. Choose your OS below, then run the task example.
 
 | OS | Support |
 |---|---|
-| Linux | Full CLI, ledger, MCP, evidence and worker wrapper |
-| macOS | Full CLI, ledger, MCP, evidence and worker wrapper (Bash + `python3`) |
-| Windows native | CLI, ledger, MCP and evidence; use leases and explicit finish for workers |
-| Windows WSL2 | Full Linux support; recommended Windows route for running workers |
+| Linux | Full CLI, ledger, MCP, evidence and native worker runner |
+| macOS | Full CLI, ledger, MCP, evidence and native worker runner |
+| Windows native | Full CLI, ledger, MCP, evidence and native worker runner |
+| Windows WSL2 | Full Linux support |
 
 ### Linux
 
@@ -145,7 +145,7 @@ hipson doctor
 claude mcp add --transport stdio hipson -- hipson mcp serve --project "$PWD" --stdio
 ```
 
-The wrapper uses Python's `os.setsid()` when `setsid` is absent. No GNU utilities are required.
+The native runner uses Python for process containment; no Bash or GNU utilities are required.
 
 ### Windows native (PowerShell)
 
@@ -166,8 +166,9 @@ hipson doctor
 claude mcp add --transport stdio hipson -- hipson mcp serve --project "$($PWD.Path)" --stdio
 ```
 
-Use `--lease-seconds 3600` on `hipson task assign` and finish assignments explicitly.
-`examples/agent-run.sh` and the agent e2e harness do not run natively on Windows.
+Run workers directly with `hipson task run` (example below). It records the assignment and
+process outcome, forwards console interrupts and contains descendants in a Windows Job Object.
+The Bash example and Linux agent e2e harness still require WSL2.
 
 ### Windows WSL2
 
@@ -191,13 +192,12 @@ MCP registration from a clone, PATH troubleshooting and verification commands, s
 [docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md). The MCP commands follow
 [Claude Code's stdio registration syntax](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
 
-Run a task by hand to see the model:
+Run a task (the same command syntax works in PowerShell):
 
 ```bash
 hipson task open --project . --title "Fix parser" --objective "Parser accepts trailing commas" --acceptance "tests pass"
-hipson task assign --task T-0001 --actor codex --role builder --mode rw --scope src/parser
+hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src/parser -- python -c "print('worker check')"
 hipson task board
-hipson task finish --assignment A-0001 --result passed --summary "worker exited 0" --ref runs/report.md
 hipson task status --task T-0001 --to review --actor lead --summary "verified: tests pass"
 hipson task status --task T-0001 --to done --actor lead
 hipson task events --task T-0001
@@ -208,12 +208,14 @@ Wrap real workers so the ledger fills itself:
 ```bash
 TASK=$(hipson task open --project . --title "Add rate limit" --objective "API returns 429 over quota" --json \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
-examples/agent-run.sh --task "$TASK" --actor codex --role builder --mode rw --scope src/api --rollout codex \
+hipson task run --task "$TASK" --actor codex --role builder --mode rw --scope src/api --rollout codex \
   -- codex exec -s workspace-write < brief.md
 hipson task events --task "$TASK"
 ```
 
-The wrapper exits with the worker's code, or 75 when a live writer already holds an overlapping scope.
+The runner exits with the worker's code, **75** for an assignment refusal, **76** for a project
+mismatch, or **64** for invalid arguments. Use `--result-file PATH` to ingest a structured worker
+report. The process outcome is recorded even if the report is rejected.
 
 The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`
 (`$env:USERPROFILE\.config\hipson\ledger.sqlite` on native Windows).

@@ -6,9 +6,10 @@ never write the ledger themselves. `actor` and `lead` are recorded labels, **not
 authenticated identities**. This CLI does not enforce that operational boundary.
 
 The database defaults to `<detect_hipson_home()>/ledger.sqlite`. `HIPSON_LEDGER`
-overrides the default; `--db PATH` overrides both. Every subcommand supports
-`--db` and `--json` (also accepted before the subcommand). The CLI and MCP tools
-use the same central ledger; no provider, Hermes, or worker execution is involved.
+overrides the default; `--db PATH` overrides both. Task subcommands support
+`--db` and `--json` (also accepted before the subcommand); `run` preserves the child's stdout
+instead of emitting a JSON envelope. The CLI and MCP tools
+use the same central ledger. `task run` also launches a worker; no provider or Hermes is required.
 
 ## Lead and worker flow
 
@@ -73,8 +74,8 @@ Repeat `--acceptance`, `--scope`, and `--ref` for multiple values. Roles are
 `passed|failed|cancelled`. Task and assignment IDs are database-wide sequential
 `T-0001` / `A-0001` identifiers (growing beyond four digits when necessary).
 Project paths are expanded and resolved to absolute paths.
-The published `examples/agent-run.sh` checks the current canonical git toplevel
-(or current directory outside git) against this registered project before assigning
+`hipson task run` and the published `examples/agent-run.sh` check the canonical git toplevel
+(or cwd outside git) against this registered project before assigning
 or starting a worker. Discovery ignores all inherited `GIT_*` overrides,
 including repository/worktree/index paths, configuration and discovery limits,
 and verifies that the actual cwd is inside the resolved root.
@@ -237,12 +238,12 @@ hipson task brief --task T-0001 --role reviewer --scope src/hipson
 hipson task context
 hipson task context --json
 # The worker writes /tmp/result.json; the wrapper records it after the process exits:
-examples/agent-run.sh --task T-0001 --actor codex --role builder --mode rw \
+hipson task run --task T-0001 --actor codex --role builder --mode rw \
   --scope src --result-file /tmp/result.json -- command-that-writes-result
 ```
 
-`agent-run.sh --result-file PATH` submits the file only when it exists and is
-non-empty after the worker exits. If finish rejects that attempt, the wrapper
+`hipson task run --result-file PATH` (and the legacy Bash wrapper) submits the file
+only when it exists and is non-empty after the worker exits. If finish rejects that attempt, the wrapper
 retries without the file and appends `result file rejected` to the summary.
 Missing/empty files use the ordinary finish path. Valid reports are attached to
 the assignment; the child's exit code still determines the process outcome and
@@ -321,10 +322,44 @@ creating findings. Result storage, generated findings and their events, claim
 release, and the finish event commit together or roll back together. Repeating
 a finish fails without duplicating findings.
 
+## Native worker runner
+
+```sh
+hipson task run --task T-0001 --actor codex --role builder --mode rw \
+  --scope src --ref tests/report.md --result-file result.json -- command arg
+```
+
+Available on Linux, macOS and native Windows, including global installations. `--mode` defaults
+to `ro`; `rw` requires at least one `--scope`. Scopes and refs are repeatable. Optional arguments:
+`--lease-seconds N`, `--rollout codex`, and `--allow-project-mismatch`. A literal `--` separates
+runner options from the child command. `--db` works before or after `run`; `HIPSON_LEDGER` also applies.
+Exit codes: child's status (128 + signal on POSIX), **75** for assignment refusal, **76** for
+project mismatch, **64** for invalid arguments. A missing executable returns **127**; an unusable executable returns **126**.
+
+The runner records its own PID, hostname, boot identity and Linux PID namespace where available.
+The child receives `HIPSON_ROLE=worker`, `HIPSON_TASK`, and `HIPSON_ASSIGNMENT`, with inherited
+stdin/stdout/stderr. POSIX runners establish an isolated session/process group (or retain their
+existing group when already its leader); the worker shares that group so surviving descendants
+retain claims after runner SIGKILL. INT/TERM/HUP are forwarded, then remaining processes are
+killed after a grace period. The runner stops leftover descendants even after a successful child exit,
+then records finish. `AGENT_RUN_GRACE_SECONDS` controls the grace period (default 15 seconds).
+
+Windows workers start suspended with `CREATE_NEW_PROCESS_GROUP`, attach to a non-inheritable,
+non-breakaway Job Object, then resume. `KILL_ON_JOB_CLOSE` contains and kills the whole descendant
+tree on runner death. Ctrl+C/Ctrl+Break are forwarded as Ctrl+Break; after grace the job is terminated.
+Job process counts confirm cleanup before finish. PID liveness checks use query-only handles,
+never `os.kill` probes. If containment cannot be established the worker does not execute.
+After a hard-killed runner, use `hipson task reap` to release the orphaned assignment.
+
+`--rollout codex` appends a unique `ledger-run-UUID` marker to the stdin brief and matches only
+session JSONL files created/modified since this run that contain that marker. It records model,
+reasoning effort and rollout path, or explicit unknown facts if none is found. These are worker
+process facts, not lead verification; the worker report cannot complete the task itself.
+
 ## Orphan recovery (S3a)
 
-An optional owner identifies the wrapper process responsible for finishing an
-assignment. The wrapper must call `setsid` (the binary or Python's `os.setsid()`) to become its process group's leader
+An optional owner identifies the runner process responsible for finishing an
+assignment. On POSIX the wrapper must call `setsid` (the binary or Python's `os.setsid()`) to become its process group's leader
 (PID equals PGID), then start the worker as a child in that group. Supply the
 wrapper's positive PID, boot ID, hostname, and Linux PID namespace when assigning.
 On Linux/WSL2:
@@ -361,9 +396,10 @@ runner is killed. Zombies also count as present until their parent reaps them.
 On native Windows, a query-only process handle checks `GetExitCodeProcess == STILL_ACTIVE`;
 no signal is sent and no process group is probed. Access denied and unknown query errors
 keep claims active. Windows has no boot identity here, so PID reuse after reboot is guarded
-only by lease expiry or explicit finish. Use leases for native Windows workers; use WSL2
-for the Bash wrapper and worker-group recovery. macOS boot identity is obtained through
-a bounded `sysctl -n kern.bootsessionuuid` call, returning unknown on failure.
+only by lease expiry or explicit finish. Use leases for native Windows workers.
+`task run` uses a Job Object to terminate descendants when its owner dies; manually managed
+workers need their own cleanup. The Bash wrapper still requires WSL2 on Windows.
+macOS boot identity is obtained through a bounded `sysctl -n kern.bootsessionuuid` call, returning unknown on failure.
 Missing boot/PID fields cannot prove
 that condition; an unavailable current boot ID cannot prove a boot change. A
 different or missing host disables liveness checks. An owner-less assignment is

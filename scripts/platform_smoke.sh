@@ -70,7 +70,7 @@ if [ "$(uname -s)" = "Darwin" ] || [ "$(uname -s)" = "Linux" ]; then
   if [ -n "$boot" ]; then ok "boot identity available ($boot)"; else bad "boot identity available" "_boot_id() returned nothing"; fi
 fi
 
-# README quick start, verbatim.
+# Manual ledger lifecycle (the runner below automates assign/finish).
 check "task open" "$H" task open --project . --title "Fix parser" --objective "Parser accepts trailing commas" --acceptance "tests pass"
 check "task assign (rw claim)" "$H" task assign --task T-0001 --actor codex --role builder --mode rw --scope src/parser
 check "task board" "$H" task board
@@ -113,6 +113,34 @@ HIPSON_BIN="$H" examples/agent-run.sh --task T-0002 --actor third --role builder
 code=$?
 if [ "$code" = 0 ]; then ok "scope reusable after reap"; else bad "scope reusable after reap (exit $code)" "$(cat "$WORK/third.log")"; fi
 check "agent-run.sh --help" examples/agent-run.sh --help
+
+# Native runner: same claim/finish contract, available without a source-clone wrapper.
+check "hipson task run --help" "$H" task run --help
+"$H" task open --project . --title "Native runner" --objective "Cross-platform worker checks" >/dev/null 2>&1
+"$H" task run --task T-0003 --actor native-holder --role builder --mode rw --scope src \
+  -- python3 -c 'import time; time.sleep(30)' >"$WORK/native-holder.log" 2>&1 &
+holder=$!
+BG="$holder"
+i=0; while [ $i -lt 100 ] && ! "$H" task show --task T-0003 --json 2>/dev/null | grep -q '"native-holder"'; do sleep 0.1; i=$((i + 1)); done
+"$H" task run --task T-0003 --actor native-second --role builder --mode rw --scope src \
+  -- python3 -c 'pass' >"$WORK/native-second.log" 2>&1
+code=$?
+if [ "$code" = 75 ]; then ok "native runner refuses overlapping writer (exit 75)"; else bad "native runner conflict (got $code)" "$(cat "$WORK/native-second.log")"; fi
+kill -TERM "$holder" 2>/dev/null
+wait "$holder" 2>/dev/null
+code=$?
+BG=""
+if [ "$code" = 143 ]; then ok "native runner forwards TERM (exit 143)"; else bad "native runner TERM (got $code)" "$(cat "$WORK/native-holder.log")"; fi
+check "native runner scope reusable, stdin and refs" "$H" task run --task T-0003 --actor native-next \
+  --role builder --mode rw --scope src --ref runs/report.md -- python3 -c 'import sys; assert sys.stdin.read() == "brief\n"' <<<"brief"
+"$H" task run --task T-0003 --actor native-failed --role reviewer -- python3 -c 'raise SystemExit(9)' \
+  >"$WORK/native-failed.log" 2>&1
+code=$?
+if [ "$code" = 9 ]; then ok "native runner preserves failed child code (exit 9)"; else bad "native runner failed code (got $code)" "$(cat "$WORK/native-failed.log")"; fi
+(cd "$WORK" && "$H" task run --task T-0003 --actor wrong-project --role reviewer -- python3 -c 'pass') \
+  >"$WORK/native-mismatch.log" 2>&1
+code=$?
+if [ "$code" = 76 ]; then ok "native runner binds project (exit 76)"; else bad "native runner project check (got $code)" "$(cat "$WORK/native-mismatch.log")"; fi
 
 # MCP over stdio: initialize + tools/list + a read tool.
 mcp_out=$(printf '%s\n' \
