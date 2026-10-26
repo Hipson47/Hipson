@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.3.0 - 2026-10-27
+
+Release notes: [docs/release-1.3.md](docs/release-1.3.md).
+
 - Replace the progress-template `hipson init` with consent-gated lead setup on Linux, macOS and
   Windows: check prerequisites, initialize/migrate the task ledger, register Claude Code and/or Codex
   MCP idempotently, verify initialize/tools-list, and print first-task commands. Add exact dry-run
