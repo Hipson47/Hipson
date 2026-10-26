@@ -176,12 +176,13 @@ def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
                         "hipson task status --task T-0001 --to done --actor lead --summary accepted\n")
     run = harness.run_scenario("conflict", tmp_path / "ok", solution=reviewed)
     assert run["passed"], run
-    # The ledger itself refuses done without review, so the realistic mistake is closing while the holder lives.
+    # Even an explicit ledger override cannot make premature closure satisfy the scenario oracle.
     early = tmp_path / "early.sh"
     early.write_text((harness.SCENARIOS / "conflict/solution.sh").read_text()
                      + "hipson task status --task T-0001 --to in_progress --actor lead --summary resume\n"
                      "hipson task status --task T-0001 --to review --actor lead --summary looks-fine\n"
-                     "hipson task status --task T-0001 --to done --actor lead --summary closed\n")
+                     "hipson task status --task T-0001 --to done --actor lead --summary closed "
+                     "--force --reason 'Deliberately premature closure for oracle test'\n")
     run = harness.run_scenario("conflict", tmp_path / "bad", solution=early)
     assert not run["passed"]
     assert any("closed while the parser work was pending or unreviewed" in f for f in run["failures"]), run

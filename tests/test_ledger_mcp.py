@@ -34,7 +34,7 @@ TASK_TOOLS = {
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
     "task.reap": ({"approved"}, {"task", "dry_run"}),
     "task.event": ({"task", "actor", "type", "summary", "approved"}, {"ref"}),
-    "task.status": ({"task", "to", "actor", "approved"}, {"summary"}),
+    "task.status": ({"task", "to", "actor", "approved"}, {"summary", "force", "reason"}),
 }
 WRITE_ARGUMENTS = {
     "task.open": {"project": ".", "title": "Ledger", "objective": "Track ownership"},

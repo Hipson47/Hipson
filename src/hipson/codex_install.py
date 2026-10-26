@@ -47,8 +47,19 @@ def merge_managed_block(existing: str, block: str) -> str:
 
 def backup_file(path: Path) -> Path:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup = path.with_name(f"{path.name}.backup-{stamp}")
-    shutil.copy2(path, backup)
+    counter = 0
+    while True:
+        suffix = f"-{counter}" if counter else ""
+        backup = path.with_name(f"{path.name}.backup-{stamp}{suffix}")
+        try:
+            destination = backup.open("xb")
+        except FileExistsError:
+            counter += 1
+            continue
+        break
+    with destination, path.open("rb") as source:
+        shutil.copyfileobj(source, destination)
+    shutil.copystat(path, backup)
     return backup
 
 

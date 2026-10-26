@@ -227,3 +227,45 @@ def test_approval_policy_rejects_declared_path_field_with_wrong_type_before_risk
     assert decision.allowed is False
     assert decision.blocked is True
     assert "path value must be a string" in decision.reason
+
+
+def test_audit_h05_git_arguments_reject_writes_and_helpers():
+    denied = [
+        ["branch", "-D", "x"], ["branch", "newname"], ["branch", "-m", "old", "new"],
+        ["branch", "--delete", "x"], ["branch", "--edit-description"], ["branch", "-f", "x"],
+        ["diff", "--output=file"], ["diff", "--output", "file"], ["show", "--output=file"],
+        ["log", "--output=file"], ["show", "-ofile"], ["show", "-o", "file"],
+        ["diff", "--ext-diff"], ["show", "--textconv"], ["log", "--ext-diff"],
+        ["-c", "diff.external=command", "diff"], ["-cdiff.external=command", "diff"],
+        ["branch", "--list", "--delete", "x"], ["diff", "--out=file"], ["show", "--textc"],
+        ["branch", "-"], ["branch", "--all=yes"], ["branch", "--list=x"],
+        ["branch", "--format"], ["branch", "--sort", "--delete"], ["branch", "--unknown"],
+        ["branch", "--show-current", "newname"], ["-cfoo=bar", "status"],
+        ["branch", "--format", "value", "--delete", "x"], ["branch", "-d"],
+        ["branch", "-X"], ["branch", "-avX"], ["show", "--output=file=name"],
+    ]
+    for arguments in denied:
+        assert not is_allowlisted_read_only_command(["git", *arguments]), arguments
+    for arguments in (["status", "--short"], ["diff", "--stat"], ["log", "-1"], ["show", "HEAD:README.md"],
+                      ["branch"], ["branch", "-arv"], ["branch", "-avv"], ["branch", "--list", "feature/*"],
+                      ["branch", "--show-current"], ["diff", "--", "--output=file"]):
+        assert is_allowlisted_read_only_command(["git", *arguments]), arguments
+    for option in ("--all", "--remotes", "--verbose", "--no-color", "--no-column", "--ignore-case",
+                   "--contains", "--no-contains", "--merged", "--no-merged", "--color", "--column"):
+        assert is_allowlisted_read_only_command(["git", "branch", option]), option
+    for option in ("--format", "--sort", "--points-at"):
+        assert is_allowlisted_read_only_command(["git", "branch", option + "=HEAD"]), option
+        assert is_allowlisted_read_only_command(["git", "branch", option, "HEAD"]), option
+    for arguments in ([], ["git"], ["other", "status"]):
+        assert not is_allowlisted_read_only_command(arguments)
+    assert is_allowlisted_read_only_command(["ls", "-l"])
+    assert is_allowlisted_read_only_command(["pwd"])
+
+
+def test_sandbox_rejects_broad_wsl_profiles_even_when_selected_as_workspace():
+    # Choosing an over-broad workspace must not turn an entire Windows profile into readable input.
+    for raw in ("/mnt/c/Users", "/mnt/c/Users/audit-user", "/mnt/c/uSeRs/audit-user"):
+        profile = Path(raw).resolve()
+        assert not check_read_path(profile, profile).allowed, raw
+    project = Path("/mnt/c/Users/audit-user/project").resolve()
+    assert check_read_path(project / "README.md", project).allowed

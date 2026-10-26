@@ -260,6 +260,9 @@ Full command reference and workflows: [docs/USAGE.md](docs/USAGE.md). All docs: 
 - **Honest limits.** Actor names are recorded labels, not authenticated identities. Path claims coordinate
   cooperating agents; they are not filesystem permissions. Worker mode is an instruction, not a sandbox.
 
+Hipson is a **beta coordination tool for cooperating agents**, not a security boundary or an enforced
+release gate. A task reaching `done` checks ledger closure, not the truth of its evidence or release readiness.
+
 Keep real provider keys in `~/.config/hipson/agents.env` or your shell, never in git.
 
 ## Development

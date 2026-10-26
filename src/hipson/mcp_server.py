@@ -322,6 +322,8 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "to": {"type": "string", "enum": list(ledger.STATUSES)},
             "actor": {"type": "string"},
             "summary": {"type": "string"},
+            "force": {"type": "boolean"},
+            "reason": {"type": "string"},
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -694,6 +696,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         if name == "task.status":
             return store.set_status(
                 arguments["task"], to=arguments["to"], actor=arguments["actor"], summary=arguments.get("summary", ""),
+                force=arguments.get("force", False), reason=arguments.get("reason", ""),
             )
         if name == "task.show":
             return store.show(arguments["task"])
@@ -751,6 +754,9 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments[key], key)
     if name == "task.assign":
         ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
+    if name == "task.status":
+        ledger.validate_status_override(to=arguments["to"], force=arguments.get("force", False),
+                                        reason=arguments.get("reason", ""))
     if name == "task.brief":
         ledger.normalize_scope(arguments.get("scope", []))
     if name == "task.finding_update" and arguments["status"] == "open":

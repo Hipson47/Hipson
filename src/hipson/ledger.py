@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
-from hipson.redaction import redact_text
+from hipson.redaction import redact_text, redact_value
 
 SCHEMA_VERSION = 4
 BUSY_TIMEOUT_MS = 10_000
@@ -325,7 +325,21 @@ def validate_assignment_scope(scope: Sequence[str], *, mode: str) -> list[str]:
     if mode == "rw" and not paths:
         # An rw assignment without claims would let two writers share a tree unnoticed.
         raise LedgerError("An rw assignment needs at least one scope path; use '.' for the whole project")
-    return paths
+    if mode == "rw" and any(redact_text(path) != path for path in paths):
+        # Redacting a claim would silently change the path it protects.
+        raise LedgerError("Write scope paths must not contain secret-shaped text")
+    return [redact_text(path) for path in paths]
+
+
+def validate_status_override(*, to: str, force: bool, reason: str) -> None:
+    if type(force) is not bool or not isinstance(reason, str):
+        raise LedgerError("force must be boolean and reason must be text")
+    if force:
+        require_text(reason, "Override reason")
+        if to != "done":
+            raise LedgerError("--force and --reason apply only to done")
+    elif reason:
+        raise LedgerError("--reason requires --force")
 
 
 def require_text(value: str, field: str) -> str:
@@ -643,9 +657,11 @@ class Ledger:
         lead: str = "claude",
     ) -> TaskView:
         project_path = str(Path(project).expanduser().resolve())
+        if redact_text(project_path) != project_path:
+            raise LedgerError("Project paths must not contain secret-shaped text")
         title = redact_text(require_text(title, "title"))
         objective = redact_text(require_text(objective, "objective"))
-        lead = require_text(lead, "lead")
+        lead = redact_text(require_text(lead, "lead"))
         accepted = [redact_text(item) for item in acceptance]
         with self._transaction():
             number = self.connection.execute(
@@ -674,17 +690,17 @@ class Ledger:
         owner_pid_namespace: str | None = None,
         lease_seconds: int | None = None,
     ) -> Assignment:
-        actor = require_text(actor, "actor")
+        actor = redact_text(require_text(actor, "actor"))
         if role not in ROLES or mode not in MODES:
             raise LedgerError(f"Assignment requires role in {ROLES} and mode in {MODES}")
         paths = validate_assignment_scope(scope, mode=mode)
         if owner_pid is not None and (type(owner_pid) is not int or not 1 <= owner_pid <= 2**31 - 1):
             raise LedgerError("owner_pid must be an integer between 1 and 2147483647")
-        owner_boot_id = require_text(owner_boot_id, "owner_boot_id") if owner_boot_id is not None else None
-        owner_host = require_text(owner_host, "owner_host") if owner_host is not None else None
+        owner_boot_id = redact_text(require_text(owner_boot_id, "owner_boot_id")) if owner_boot_id is not None else None
+        owner_host = redact_text(require_text(owner_host, "owner_host")) if owner_host is not None else None
         if owner_pid_namespace is not None and not isinstance(owner_pid_namespace, str):
             raise LedgerError("owner_pid_namespace must be a string")
-        owner_pid_namespace = require_text(owner_pid_namespace, "owner_pid_namespace") if owner_pid_namespace is not None else None
+        owner_pid_namespace = redact_text(require_text(owner_pid_namespace, "owner_pid_namespace")) if owner_pid_namespace is not None else None
         if lease_seconds is not None and (type(lease_seconds) is not int or lease_seconds < 0):
             raise LedgerError("lease_seconds must be a nonnegative integer")
         result: Assignment | None = None
@@ -753,7 +769,7 @@ class Ledger:
         # No new assignment or claims have been created in this branch.
         if result is None:
             raise ClaimConflictError(conflict)
-        return result
+        return cast(Assignment, redact_value(result))
 
     def reap(self, *, task: str | None = None, dry_run: bool = False) -> list[ReapedAssignment]:
         """Recheck under the writer lock, committing each orphan independently."""
@@ -773,25 +789,29 @@ class Ledger:
                 reason = self._orphan_reason(current)
                 if reason is not None:
                     item = current if dry_run else self._reap_assignment(current, reason)
-                    result.append({"assignment": item, "reason": reason})
+                    result.append({"assignment": cast(Assignment, redact_value(item)), "reason": reason})
         return result
 
     def _orphan_reason(self, item: Assignment) -> str | None:
-        if item["lease_until"] is not None and datetime.fromisoformat(item["lease_until"]) <= datetime.now(UTC):
-            return "lease_expired"
+        expired = item["lease_until"] is not None and datetime.fromisoformat(item["lease_until"]) <= datetime.now(UTC)
         if item["owner_host"] is None or item["owner_host"] != self._hostname():
-            return None
+            return "lease_expired" if expired else None
+        boot = self._boot_id() if item["owner_boot_id"] is not None else None
         if item["owner_boot_id"] is not None:
-            boot = self._boot_id()
             if boot is not None and item["owner_boot_id"] != boot:
                 return "boot_id_changed"
         # PIDs and process groups have meaning only in the owner's namespace.
         # Unknown local identity also cannot justify releasing namespaced claims.
-        if item["owner_pid_namespace"] is not None and item["owner_pid_namespace"] != self._pid_namespace():
-            return None
-        if item["owner_pid"] is not None and not self._pid_alive(item["owner_pid"]):
-            return "pid_gone"
-        return None
+        namespace = self._pid_namespace()
+        if item["owner_pid_namespace"] is not None and item["owner_pid_namespace"] != namespace:
+            return "lease_expired" if expired else None
+        if item["owner_pid"] is not None:
+            if not self._pid_alive(item["owner_pid"]):
+                return "pid_gone"
+            if boot is not None and item["owner_boot_id"] == boot and item["owner_pid_namespace"] == namespace:
+                # A verified live PID or process group retains ownership beyond its lease.
+                return None
+        return "lease_expired" if expired else None
 
     def _reap_assignment(self, item: Assignment, reason: str) -> Assignment:
         self.connection.execute(
@@ -834,7 +854,7 @@ class Ledger:
             self._append_event(
                 current["task"], current["actor"], "finished", f"{result}: {summary}{counts}", [assignment, *refs]
             )
-            return self._assignment(assignment)
+            return cast(Assignment, redact_value(self._assignment(assignment)))
 
     def add_finding(
         self, task: str, *, actor: str, severity: str, title: str, detail: str = "", location: str = "",
@@ -907,7 +927,7 @@ class Ledger:
                 [finding, *([resolved_by_assignment] if resolved_by_assignment else []),
                  *([fix_task] if fix_task and fix_task != current["task"] else [])],
             )
-            return self._finding(finding)
+            return cast(Finding, redact_value(self._finding(finding)))
 
     def findings(
         self, *, task: str | None = None, status: str | None = None, severity: str | None = None,
@@ -919,7 +939,7 @@ class Ledger:
         with self._transaction(write=False):
             if task is not None:
                 self._task(task)
-            return self._findings(task=task, status=status, severity=severity)
+            return cast(list[Finding], redact_value(self._findings(task=task, status=status, severity=severity)))
 
     def _findings(
         self, *, task: str | None = None, status: str | None = None, severity: str | None = None,
@@ -947,15 +967,42 @@ class Ledger:
             self._task(task)
             return self._append_event(task, actor, type, summary, refs)
 
-    def set_status(self, task: str, *, to: str, actor: str, summary: str = "") -> TaskView:
+    def set_status(
+        self, task: str, *, to: str, actor: str, summary: str = "", force: bool = False, reason: str = "",
+    ) -> TaskView:
         actor = require_text(actor, "actor")
+        validate_status_override(to=to, force=force, reason=reason)
         with self._transaction():
             current = self._task(task)
             previous = current["status"]
             if to not in TRANSITIONS[previous]:
                 raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to}")
+            refs: list[str] = []
+            if to == "done":
+                view = self._view(task)
+                active = [item for item in view["assignments"] if item["status"] == "active"]
+                severe = [item for item in view["findings"] if item["severity"] in ("blocking", "major")]
+                blockers = [f"active assignment {item['id']} ({item['mode']})" for item in active]
+                blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
+                blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
+                if blockers and not force:
+                    raise LedgerError(f"Cannot mark {task} done: " + "; ".join(blockers))
+                if force:
+                    blocker_refs = list(dict.fromkeys([
+                        *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
+                        *[item["id"] for item in severe],
+                    ]))
+                    self._append_event(task, actor, "done_override",
+                                       f"Reason: {reason.strip()}; blockers: " + ("; ".join(blockers) or "none"),
+                                       blocker_refs)
+                remaining = [item for item in view["findings"] if item["severity"] in ("minor", "info")]
+                refs = [item["id"] for item in remaining]
+                summary = f"{previous} -> done" + (f": {summary}" if summary else "")
+                summary += "; remaining minor/info findings: " + (
+                    "; ".join(f"{item['id']} [{item['severity']}]: {item['title']}" for item in remaining) or "none"
+                )
             self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
-            self._append_event(task, actor, "status", summary or f"{previous} -> {to}", [])
+            self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
             return self._view(task)
 
     def show(self, task: str) -> TaskView:
@@ -978,14 +1025,14 @@ class Ledger:
         if status is not None and status not in STATUSES:
             raise LedgerError(f"Task status must be one of {STATUSES}")
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
-        return [
+        return cast(list[Task], redact_value([
             self._task_dict(row)
             for row in self.connection.execute(
                 """SELECT * FROM tasks WHERE (? IS NULL OR project = ?) AND (? IS NULL OR status = ?)
                    ORDER BY created_at, id""",
                 (project_path, project_path, status, status),
             )
-        ]
+        ]))
 
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):
@@ -1023,14 +1070,14 @@ class Ledger:
                 (task,),
             )
         ]
-        return {**current, "assignments": assignments, "claims": claims,
-                "findings": self._findings(task=task, status="open")}
+        return cast(TaskView, redact_value({**current, "assignments": assignments, "claims": claims,
+                                          "findings": self._findings(task=task, status="open")}))
 
     def _append_event(self, task: str, actor: str, type: str, summary: str, refs: Sequence[str]) -> TaskEvent:
         now = _timestamp()
         cursor = self.connection.execute(
             "INSERT INTO events (task, actor, type, summary, refs, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (task, actor, type, redact_text(summary), json.dumps(list(refs)), now),
+            (task, redact_text(actor), redact_text(type), redact_text(summary), json.dumps(redact_value(list(refs))), now),
         )
         self.connection.execute("UPDATE tasks SET revision = revision + 1, updated_at = ? WHERE id = ?", (now, task))
         row = self.connection.execute("SELECT * FROM events WHERE seq = ?", (cursor.lastrowid,)).fetchone()
@@ -1076,7 +1123,7 @@ class Ledger:
 
     @staticmethod
     def _event_dict(row: sqlite3.Row) -> TaskEvent:
-        return {
+        return cast(TaskEvent, redact_value({
             "artifact_kind": "hipson.task_event",
             "schema_version": "1.0",
             "seq": row["seq"],
@@ -1086,4 +1133,4 @@ class Ledger:
             "summary": row["summary"],
             "refs": json.loads(row["refs"]),
             "timestamp": row["timestamp"],
-        }
+        }))

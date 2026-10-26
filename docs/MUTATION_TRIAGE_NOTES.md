@@ -2,7 +2,7 @@
 
 Status: historical verification and partial mutation-run snapshots, not current
 checkout results. Counts and survivor IDs below belong to those earlier runs.
-The current `pyproject.toml` bounds mutmut to `approvals.py`, `redaction.py`, and
+The current `pyproject.toml` bounds mutmut to `approvals.py`, `evidence.py`, `redaction.py`, and
 `sandbox.py`; other module batches require an explicitly scoped configuration
 change. No complete mutation-closure claim is made here.
 

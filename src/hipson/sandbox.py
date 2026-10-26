@@ -66,7 +66,54 @@ def is_allowlisted_read_only_command(command: list[str]) -> bool:
     executable = command[0]
     if executable in READ_ONLY_COMMANDS:
         return True
-    return executable == "git" and len(command) > 1 and command[1] in READ_ONLY_GIT_SUBCOMMANDS
+    # Global git options (notably -c / --config-env) are deliberately outside this grammar.
+    if executable != "git" or len(command) < 2 or command[1] not in READ_ONLY_GIT_SUBCOMMANDS:
+        return False
+    subcommand, arguments = command[1], command[2:]
+    if subcommand == "branch":
+        return _is_branch_listing(arguments)
+    for argument in arguments:
+        if argument == "--":
+            break  # Everything after the path separator is a path, not an option.
+        option = argument.partition("=")[0]
+        if argument.startswith("-o") or (
+            option.startswith("--") and any(
+                unsafe.startswith(option) for unsafe in ("--output", "--ext-diff", "--textconv")
+            )
+        ):
+            return False
+    return True
+
+
+def _is_branch_listing(arguments: list[str]) -> bool:
+    # Branch accepts bare names as creation requests, even without an explicit write flag.
+    listing = False
+    takes_value = False
+    for argument in arguments:
+        if takes_value:
+            if argument.startswith("-"):
+                return False
+            takes_value = False
+            continue
+        option, equals, _ = argument.partition("=")
+        if option == "--list":
+            if equals:
+                return False
+            listing = True
+        elif argument.startswith("-") and set(argument[1:]) <= set("arv"):
+            if argument == "-":
+                return False
+        elif option in ("--show-current", "--all", "--remotes", "--verbose", "--no-color", "--no-column", "--ignore-case"):
+            if equals:
+                return False
+        elif option in ("--format", "--sort", "--points-at"):
+            takes_value = not equals
+        elif option in ("--contains", "--no-contains", "--merged", "--no-merged", "--color", "--column"):
+            # Optional values must use '='; this keeps a bare branch name unambiguous.
+            pass
+        elif argument.startswith("-") or not listing:
+            return False
+    return not takes_value
 
 
 def _check_workspace_path(path: str | Path, cwd: Path, *, require_generated: bool) -> SandboxDecision:

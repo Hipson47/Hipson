@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -150,8 +148,7 @@ def _install_text_surface(
 def _write_preserved_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.read_text(encoding="utf-8") != text:
-        backup = path.with_name(f"{path.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
-        shutil.copy2(path, backup)
+        backup_file(path)
     path.write_text(text, encoding="utf-8")
 
 

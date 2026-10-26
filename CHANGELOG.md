@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **External audit 2026-10-26**
+  - Refuse `done` with active assignments, claims, or open blocking/major findings
+    in CLI and MCP. Require a reason for an audited force override and record
+    remaining minor/info findings on closure.
+  - Keep verified live owners' claims beyond lease expiry; retain lease recovery
+    for owner-less and unverifiable assignments.
+  - Bind the Bash wrapper to the task project before assignment, with exit 76 for
+    mismatches and an explicit recorded `--allow-project-mismatch` escape hatch.
+  - Redact actor/lead labels, refs and other ledger metadata before persistence
+    and mask legacy text on reads without rewriting stored evidence.
+  - Check git arguments for branch mutations, output writes and helper execution;
+    create installer backups exclusively so same-second saves cannot overwrite.
+  - Clarify beta coordination limits and the four-module mutation scope.
+
 - **Cross-platform installation**
   - Support macOS CLI, ledger, MCP, evidence and the Bash worker wrapper, including
     Python session/UUID fallbacks, BSD utilities and boot-session identity.

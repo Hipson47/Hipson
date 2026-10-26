@@ -1784,6 +1784,8 @@ def command_task(args: argparse.Namespace) -> int:
             args.task = task_context.context_task(args.task)
         elif args.task_command == "brief":
             args.scope = ledger.normalize_scope(args.scope)
+        elif args.task_command == "status":
+            ledger.validate_status_override(to=args.to, force=args.force, reason=args.reason)
         report = (
             ledger.load_task_result(args.result_file)
             if args.task_command == "finish" and args.result_file else None
@@ -1833,7 +1835,8 @@ def command_task(args: argparse.Namespace) -> int:
             elif args.task_command == "event":
                 payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
             elif args.task_command == "status":
-                payload = store.set_status(args.task, to=args.to, actor=args.actor, summary=args.summary)
+                payload = store.set_status(args.task, to=args.to, actor=args.actor, summary=args.summary,
+                                           force=args.force, reason=args.reason)
             elif args.task_command in ("brief", "context"):
                 worker_view = (
                     task_context.brief(store, args.task, role=args.role, scope=args.scope)
@@ -1977,6 +1980,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["event"].add_argument("--type", required=True)
     task_parsers["status"].add_argument("--to", choices=ledger.STATUSES, required=True)
     task_parsers["status"].add_argument("--summary", default="")
+    task_parsers["status"].add_argument("--force", action="store_true", help="Override done blockers with an audit event")
+    task_parsers["status"].add_argument("--reason", default="", help="Required explanation for --force")
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)

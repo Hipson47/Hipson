@@ -73,6 +73,14 @@ Repeat `--acceptance`, `--scope`, and `--ref` for multiple values. Roles are
 `passed|failed|cancelled`. Task and assignment IDs are database-wide sequential
 `T-0001` / `A-0001` identifiers (growing beyond four digits when necessary).
 Project paths are expanded and resolved to absolute paths.
+The published `examples/agent-run.sh` checks the current canonical git toplevel
+(or current directory outside git) against this registered project before assigning
+or starting a worker. Project subdirectories and symlink aliases are accepted;
+a nested git repository belongs to its own project. A mismatch exits **76**,
+leaving no assignment or worker. An intentional
+cross-project invocation needs `--allow-project-mismatch`; the wrapper must record
+a `project_mismatch_override` event with both paths and the assignment ID before
+starting the command. Assignment refusal still exits **75**.
 
 Allowed task transitions:
 
@@ -95,6 +103,17 @@ only active assignments; `show` includes the full assignment history and current
 claims. List and board JSON return arrays; task/event JSON use the registered
 `hipson.task` / `hipson.task_event` schemas.
 
+`done` requires no active assignments (including readers), no remaining claims,
+and no open `blocking` or `major` findings. A refusal changes neither status nor
+events. Resolve the findings and finish or reap the work first. An explicit
+`--force --reason "operator explanation"` permits an exception from `review`:
+a separate `done_override` event lists every active assignment, claim and severe
+finding with the reason. It commits atomically with the status event and leaves
+those assignments and claims intact for explicit cleanup. It does not bypass
+the lifecycle transition rules. Every done status event lists any remaining
+open `minor`/`info` findings, including their IDs. MCP `task.status` follows the
+same rules through `force` and `reason`.
+
 Write assignments claim each normalized scope path until finished. Paths use
 repo-relative POSIX syntax; backslashes, redundant separators and `.` components
 are normalized, and duplicates removed. Absolute paths, drive prefixes, NULs,
@@ -105,6 +124,12 @@ claims. An `rw` assignment requires at least one scope path (use `.` for the
 whole project), so a writer is never unclaimed. Matching is lexical,
 case-sensitive, and does not resolve scope symlinks or coordinate nested project
 roots; claims are coordination records, not filesystem access controls.
+All user-controlled ledger text is pattern-redacted before persistence, including
+actor/lead labels, refs, event types, owner metadata and worker results. Read paths
+also redact legacy rows without rewriting them. Project paths and write scope
+paths containing secret-shaped text are rejected: masking a coordination path
+would change which tree or files its claims protect. Read-only scope labels can
+be masked safely. Redaction is best effort; never supply real credentials.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
 (database version 4; artifact schema version `1.0`). Writes migrate existing
@@ -304,14 +329,17 @@ the CLI or MCP server process. `--lease-seconds` is a nonnegative integer; it
 sets a UTC expiry relative to assignment creation (`0` expires immediately).
 There is no lease renewal operation in S3a.
 
-Only active assignments are considered. Recovery chooses the first applicable
-reason in this order:
+Only active assignments are considered. A verified live owner keeps its assignment
+and claims even after lease expiry: its hostname and boot ID must match the local
+identity, its PID namespace must match (both absent on macOS/native Windows), and
+its PID or POSIX process group must still be alive. Lease expiry applies only to
+owner-less or unverifiable owners. Recovery uses these conditions:
 
 | Reason | Condition |
 | --- | --- |
-| `lease_expired` | The lease has expired, regardless of host or process liveness. |
 | `boot_id_changed` | The recorded host equals the current hostname, and the supplied boot ID differs from the current Linux boot ID or macOS boot-session UUID. |
 | `pid_gone` | The recorded host equals the current hostname, any recorded PID namespace matches the current namespace, and the supplied PID (plus its POSIX process group on Linux/macOS) no longer exists. |
+| `lease_expired` | No verified live owner protects the assignment, and its lease has expired. |
 
 On Linux/macOS, owner checks use `os.kill(pid, 0)` and, if the PID is absent,
 `os.killpg(pid, 0)`. Only ESRCH from both proves the owner gone; EPERM or any
@@ -358,9 +386,10 @@ reaping. A live overlapping holder still causes `claim_conflict`.
 The Python `Ledger` constructor accepts `hostname`, `boot_id`, `pid_namespace`, and `pid_alive`
 callables so tests can control liveness without depending on free real PIDs.
 The injected `pid_alive` probe represents both PID and process-group liveness.
-PID or process-group ID reuse within one boot cannot be detected with this ownership tuple, so it
-can delay recovery; use a bounded lease when that matters. Lease expiry releases
-claims even if the owner is alive, so wrappers must choose durations accordingly.
+PID or process-group ID reuse within one boot cannot be detected with this ownership
+tuple, so it can delay recovery. A verified live owner is never displaced merely
+because its lease expired. Inspect and explicitly finish an assignment when its
+recorded identity is no longer trustworthy.
 
 ## Read-only access
 
@@ -443,7 +472,7 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
-| `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty) |
+| `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty), `force` (default `false`), `reason` (required with `force`) |
 
 `acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
 options. Role, mode, result, and status enums match the CLI. An `rw` assignment

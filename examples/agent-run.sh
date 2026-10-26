@@ -6,7 +6,7 @@
 # alive while any process of that group exists, so a SIGKILLed runner whose worker survives keeps its
 # claims. INT/TERM/HUP are forwarded to the worker (KILL after a grace period) before the run is finished.
 # The finish records the worker's process result, which is not lead verification.
-# Exit codes: the child's code; 75 when the ledger refused the assignment (e.g. live claim conflict).
+# Exit codes: the child's code; 75 for refused assignment; 76 for project mismatch.
 set -uo pipefail
 
 usage() {
@@ -25,9 +25,10 @@ Options:
   --ref PATH           Evidence reference; repeatable
   --result-file PATH   Ingest structured worker result on finish
   --rollout codex      Attach this run's Codex rollout facts
+  --allow-project-mismatch  Run in another project, recording an explicit override event
   -h, --help          Print this help and exit
 
-Exit: child status; 75 for refused assignment; 64 for invalid arguments.
+Exit: child status; 75 for refused assignment; 76 for project mismatch; 64 for invalid arguments.
 EOF
 }
 
@@ -43,6 +44,7 @@ fi
 HIPSON_BIN=${HIPSON_BIN:-hipson}
 GRACE_SECONDS=${AGENT_RUN_GRACE_SECONDS:-15}
 task="" actor="" role="" mode="" lease="" rollout="" result_file=""
+allow_project_mismatch=0
 scope=() refs=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,12 +58,42 @@ while [ $# -gt 0 ]; do
     --ref) refs+=("$2"); shift 2;;
     --result-file) result_file=$2; shift 2;;
     --rollout) rollout=$2; shift 2;;
+    --allow-project-mismatch) allow_project_mismatch=1; shift;;
     --) shift; break;;
     *) echo "agent-run: unknown option $1" >&2; exit 64;;
   esac
 done
 [ -n "$task" ] && [ -n "$actor" ] && [ -n "$role" ] && [ -n "$mode" ] && [ $# -gt 0 ] || {
   echo "agent-run: --task, --actor, --role, --mode and a command after -- are required" >&2; exit 64; }
+
+# Resolve both paths through the filesystem (symlinks and project subdirectories are fine).
+# Keep this before assigning: a mismatched invocation must leave no worker or claim behind.
+if ! task_json=$("$HIPSON_BIN" task show --task "$task" --json); then
+  echo "agent-run: could not read task $task; worker not started" >&2
+  exit 75
+fi
+if ! project_check=$(python3 -c '
+import json, pathlib, subprocess, sys
+task = json.load(sys.stdin)
+project = pathlib.Path(task["project"]).resolve()
+cwd = pathlib.Path.cwd().resolve()
+try:
+    top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd,
+                         capture_output=True, text=True, check=False, timeout=10)
+except FileNotFoundError:
+    top = None
+actual = pathlib.Path(top.stdout.strip()).resolve() if top is not None and top.returncode == 0 else cwd
+inside_non_git_project = (top is None or top.returncode != 0) and cwd.is_relative_to(project)
+print(json.dumps({"expected": str(project), "actual": str(actual), "matches": project == actual or inside_non_git_project}))
+' <<<"$task_json"); then
+  echo "agent-run: could not verify task project; worker not started" >&2
+  exit 76
+fi
+project_mismatch=$(python3 -c 'import json,sys; print(0 if json.load(sys.stdin)["matches"] else 1)' <<<"$project_check")
+if [ "$project_mismatch" = 1 ] && [ "$allow_project_mismatch" = 0 ]; then
+  echo "agent-run: project mismatch $project_check; worker not started (explicit override: --allow-project-mismatch)" >&2
+  exit 76
+fi
 
 assignment="" child="" finished=0 rc=0 signal="" facts="" note=""
 workdir=$(mktemp -d); marker="$workdir/start"; touch "$marker"
@@ -170,6 +202,14 @@ if ! assignment_json=$("$HIPSON_BIN" "${assign_args[@]}"); then
   exit 75
 fi
 assignment=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$assignment_json")
+if [ "$project_mismatch" = 1 ]; then
+  if ! "$HIPSON_BIN" task event --task "$task" --actor "$actor" --type project_mismatch_override \
+      --summary "Explicit --allow-project-mismatch: $project_check" --ref "$assignment" >/dev/null; then
+    echo "agent-run: could not record project override; worker not started" >&2
+    rc=75
+    exit 75
+  fi
+fi
 echo "agent-run: $task $assignment $actor/$role/$mode" >&2
 # Hipson's instructions put agents into worker mode on this (no own orchestration, no ledger writes).
 export HIPSON_ROLE=worker HIPSON_TASK="$task" HIPSON_ASSIGNMENT="$assignment"

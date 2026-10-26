@@ -115,7 +115,7 @@ class _Run:
         self.workers = []
         self.handles = []
 
-    def start(self, source, *, stdin="", extra=(), group_leader=False):
+    def start(self, source, *, stdin="", extra=(), group_leader=False, cwd=None):
         index = len(self.processes)
         worker = self.root / f"worker-{index}.py"
         worker.write_text(source, encoding="utf-8")
@@ -127,7 +127,7 @@ class _Run:
         process = subprocess.Popen(
             ["bash", str(RUNNER), "--task", self.task, "--actor", "codex", "--role", "builder",
              "--mode", "rw", "--scope", "src", *extra, "--", sys.executable, str(worker)],
-            cwd=self.root, env=self.env, stdin=handles[0], stdout=handles[1], stderr=handles[2],
+            cwd=cwd or self.root, env=self.env, stdin=handles[0], stdout=handles[1], stderr=handles[2],
             process_group=0 if group_leader else None,
         )
         self.processes.append(process)
@@ -217,6 +217,70 @@ def test_agent_run_help_succeeds_without_opening_ledger(tmp_path: Path):
         assert proc.returncode == 0, proc.stderr
         assert "Usage:" in proc.stdout and "--result-file" in proc.stdout and "--lease-seconds" in proc.stdout
         assert not db.exists()
+
+
+def test_audit_h03_runner_refuses_wrong_project_before_assignment(tmp_path: Path):
+    _supported()
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    for root in (project, other):
+        subprocess.run(["git", "init", str(root)], check=True, capture_output=True, timeout=10)
+    with _case(project) as run:
+        process = run.start("from pathlib import Path\nPath('marker.txt').touch()\n", cwd=other)
+        assert run.wait(process) == 76, run.stderr(process)
+        assert "project mismatch" in run.stderr(process) and "worker not started" in run.stderr(process)
+        assert not (other / "marker.txt").exists()
+        view, events = run.view()
+        assert view["assignments"] == [] and view["claims"] == [] and len(events) == 1
+        process = run.start("from pathlib import Path\nPath('marker.txt').touch()\n", cwd=other,
+                            extra=("--allow-project-mismatch",))
+        assert run.wait(process) == 0, run.stderr(process)
+        assert (other / "marker.txt").exists()
+        view, events = run.view()
+        override = next(e for e in events if e["type"] == "project_mismatch_override")
+        assert str(project.resolve()) in override["summary"] and str(other.resolve()) in override["summary"]
+        assert view["assignments"][0]["id"] in override["refs"]
+        assert override["actor"] == "codex" and view["assignments"][0]["status"] == "passed"
+
+
+def test_audit_h03_runner_accepts_git_subdirectories_and_symlinks(tmp_path: Path):
+    _supported()
+    project = tmp_path / "project"
+    project.mkdir()
+    subprocess.run(["git", "init", str(project)], check=True, capture_output=True, timeout=10)
+    subdir = project / "src"
+    subdir.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(project, target_is_directory=True)
+    with _case(project) as run:
+        for cwd in (subdir, alias, alias / "src"):
+            process = run.start("pass\n", cwd=cwd)
+            assert run.wait(process) == 0, run.stderr(process)
+        view, events = run.view()
+        assert len(view["assignments"]) == 3 and all(a["status"] == "passed" for a in view["assignments"])
+        assert not any(e["type"] == "project_mismatch_override" for e in events)
+
+
+def test_audit_h03_runner_checks_non_git_cwd_and_nested_repositories(tmp_path: Path):
+    _supported()
+    project, other = tmp_path / "project", tmp_path / "other"
+    project.mkdir()
+    other.mkdir()
+    subdir = project / "subdir"
+    subdir.mkdir()
+    with _case(project) as run:
+        process = run.start("pass\n", cwd=subdir)
+        assert run.wait(process) == 0, run.stderr(process)
+        for cwd in (other, subdir):
+            if cwd == subdir:
+                subprocess.run(["git", "init", str(subdir)], check=True, capture_output=True, timeout=10)
+            process = run.start("from pathlib import Path\nPath('marker.txt').touch()\n", cwd=cwd)
+            assert run.wait(process) == 76, run.stderr(process)
+            assert not (cwd / "marker.txt").exists()
+        view, _ = run.view()
+        assert len(view["assignments"]) == 1
 
 
 def test_agent_run_records_passed_failed_and_forwards_stdin(tmp_path: Path):
