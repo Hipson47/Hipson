@@ -219,6 +219,32 @@ def test_agent_run_help_succeeds_without_opening_ledger(tmp_path: Path):
         assert not db.exists()
 
 
+def test_runner_ignores_inherited_git_project_overrides(tmp_path: Path):
+    _supported()
+    project, other = tmp_path / "project", tmp_path / "elsewhere"
+    project.mkdir()
+    other.mkdir()
+    subprocess.run(["git", "init", str(project)], check=True, capture_output=True, timeout=10)
+    with _case(project) as run:
+        run.env.update(GIT_DIR=str(project / ".git"), GIT_WORK_TREE=str(project),
+                       GIT_COMMON_DIR=str(project / ".git"), GIT_INDEX_FILE=str(project / ".git" / "index"),
+                       GIT_CEILING_DIRECTORIES=str(tmp_path), GIT_DISCOVERY_ACROSS_FILESYSTEM="1")
+        process = run.start("from pathlib import Path\nPath('should-not-start').touch()\n", cwd=other)
+        assert run.wait(process) == 76, run.stderr(process)
+        assert not (other / "should-not-start").exists()
+        view, events = run.view()
+        assert view["assignments"] == [] and view["claims"] == []
+        assert [event["type"] for event in events] == ["opened"]
+        # Stale discovery settings must also not reject the correct repository or a subdirectory.
+        subdir = project / "src"
+        subdir.mkdir()
+        run.env.update(GIT_DIR=str(other / ".git"), GIT_WORK_TREE=str(other), GIT_COMMON_DIR=str(other / ".git"),
+                       GIT_CEILING_DIRECTORIES=str(project))
+        process = run.start("print('correct project')\n", cwd=subdir)
+        assert run.wait(process) == 0, run.stderr(process)
+        assert not any(event["type"] == "project_mismatch_override" for event in run.view()[1])
+
+
 def test_audit_h03_runner_refuses_wrong_project_before_assignment(tmp_path: Path):
     _supported()
     project = tmp_path / "project"

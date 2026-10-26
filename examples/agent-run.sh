@@ -73,18 +73,21 @@ if ! task_json=$("$HIPSON_BIN" task show --task "$task" --json); then
   exit 75
 fi
 if ! project_check=$(python3 -c '
-import json, pathlib, subprocess, sys
+import json, os, pathlib, subprocess, sys
 task = json.load(sys.stdin)
 project = pathlib.Path(task["project"]).resolve()
 cwd = pathlib.Path.cwd().resolve()
+# Repository discovery must describe the real cwd, not an inherited Git override.
+git_env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 try:
     top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd,
-                         capture_output=True, text=True, check=False, timeout=10)
+                         env=git_env, capture_output=True, text=True, check=False, timeout=10)
 except FileNotFoundError:
     top = None
 actual = pathlib.Path(top.stdout.strip()).resolve() if top is not None and top.returncode == 0 else cwd
 inside_non_git_project = (top is None or top.returncode != 0) and cwd.is_relative_to(project)
-print(json.dumps({"expected": str(project), "actual": str(actual), "matches": project == actual or inside_non_git_project}))
+matches = (project == actual and cwd.is_relative_to(actual)) or inside_non_git_project
+print(json.dumps({"expected": str(project), "actual": str(actual), "matches": matches}))
 ' <<<"$task_json"); then
   echo "agent-run: could not verify task project; worker not started" >&2
   exit 76

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def check_skill_file_path(path: str | Path, root: str | Path | None, cwd: Path) 
 
 
 def is_allowlisted_read_only_command(command: list[str]) -> bool:
+    """Check argument syntax only; Git also requires prepare_read_only_command at execution."""
     if not command:
         return False
     executable = command[0]
@@ -83,6 +85,29 @@ def is_allowlisted_read_only_command(command: list[str]) -> bool:
         ):
             return False
     return True
+
+
+def prepare_read_only_command(command: list[str]) -> tuple[list[str], dict[str, str]]:
+    """Build argv/environment together; executors must use both without shell=True.
+
+    This is an internal execution contract, not a tool-input assertion. Approval
+    callers may opt into hardened_exec only when their executor uses this pair.
+    """
+    if not is_allowlisted_read_only_command(command):
+        raise ValueError("Command is not allowlisted for read-only execution")
+    environment = {
+        key: value for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_") and key.upper() != "PAGER"
+    }
+    if command[0] != "git":
+        return list(command), environment
+    environment.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_PAGER="cat",
+                       PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    subcommand = command[1]
+    options = ["--no-ext-diff", "--no-textconv"] if subcommand in ("diff", "log", "show") else []
+    hardened = ["git", "--no-pager", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
+                "-c", "diff.external=", subcommand, *options, *command[2:]]
+    return hardened, environment
 
 
 def _is_branch_listing(arguments: list[str]) -> bool:

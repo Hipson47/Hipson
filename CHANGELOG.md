@@ -6,14 +6,19 @@
   - Refuse `done` with active assignments, claims, or open blocking/major findings
     in CLI and MCP. Require a reason for an audited force override and record
     remaining minor/info findings on closure.
+    Atomically reopen done tasks when severe findings are added or reopened,
+    including reviewer-result ingestion, with a finding-linked `reopened` event.
   - Keep verified live owners' claims beyond lease expiry; retain lease recovery
     for owner-less and unverifiable assignments.
   - Bind the Bash wrapper to the task project before assignment, with exit 76 for
     mismatches and an explicit recorded `--allow-project-mismatch` escape hatch.
+    Scrub inherited Git overrides during discovery and check actual cwd containment.
   - Redact actor/lead labels, refs and other ledger metadata before persistence
     and mask legacy text on reads without rewriting stored evidence.
   - Check git arguments for branch mutations, output writes and helper execution;
     create installer backups exclusively so same-second saves cannot overwrite.
+    Harden allowlisted Git execution against implicit diff/textconv, pager and
+    filesystem-monitor helpers; require the executor guarantee for read-only grants.
   - Clarify beta coordination limits and the four-module mutation scope.
 
 - **Cross-platform installation**

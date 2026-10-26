@@ -35,6 +35,11 @@ class ApprovalDecision:
 
 @dataclass(frozen=True)
 class ApprovalPolicy:
+    """hardened_exec is a trusted caller guarantee, never a tool-input field.
+
+    Opt in only when execution uses prepare_read_only_command's argv and env.
+    """
+
     def evaluate_tool(
         self,
         spec: ToolSpec,
@@ -44,6 +49,7 @@ class ApprovalPolicy:
         approved: bool = False,
         fake_provider: bool = False,
         dry_run: bool | None = None,
+        hardened_exec: bool = False,
     ) -> ApprovalDecision:
         path_decision = _check_tool_path_policies(spec, input_data, context)
         if path_decision is not None:
@@ -55,6 +61,7 @@ class ApprovalPolicy:
             approved=approved,
             fake_provider=fake_provider,
             dry_run=dry_run,
+            hardened_exec=hardened_exec,
             check_legacy_paths=False,
         )
 
@@ -67,6 +74,7 @@ class ApprovalPolicy:
         approved: bool = False,
         fake_provider: bool = False,
         dry_run: bool | None = None,
+        hardened_exec: bool = False,
     ) -> ApprovalDecision:
         return self._evaluate_risk(
             risk_level,
@@ -75,6 +83,7 @@ class ApprovalPolicy:
             approved=approved,
             fake_provider=fake_provider,
             dry_run=dry_run,
+            hardened_exec=hardened_exec,
             check_legacy_paths=True,
         )
 
@@ -87,6 +96,7 @@ class ApprovalPolicy:
         approved: bool,
         fake_provider: bool,
         dry_run: bool | None,
+        hardened_exec: bool,
         check_legacy_paths: bool,
     ) -> ApprovalDecision:
         effective_dry_run = context.dry_run if dry_run is None else dry_run
@@ -106,11 +116,11 @@ class ApprovalPolicy:
             return _requires_approval(risk_level, "External actions require explicit approval")
         if risk_level == "exec":
             command = _command(input_data)
-            if command and is_allowlisted_read_only_command(command):
+            if command and is_allowlisted_read_only_command(command) and (command[0] != "git" or hardened_exec):
                 return _allowed(risk_level, "Allowlisted read-only command")
             if approved:
                 return _allowed(risk_level, "Exec action allowed by explicit approval")
-            return _requires_approval(risk_level, "Exec actions require explicit approval unless allowlisted")
+            return _requires_approval(risk_level, "Exec actions require approval unless allowlisted; Git requires executor hardening")
         return _blocked(risk_level, f"Unsupported risk level: {risk_level}")
 
 

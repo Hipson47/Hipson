@@ -75,7 +75,10 @@ Repeat `--acceptance`, `--scope`, and `--ref` for multiple values. Roles are
 Project paths are expanded and resolved to absolute paths.
 The published `examples/agent-run.sh` checks the current canonical git toplevel
 (or current directory outside git) against this registered project before assigning
-or starting a worker. Project subdirectories and symlink aliases are accepted;
+or starting a worker. Discovery ignores all inherited `GIT_*` overrides,
+including repository/worktree/index paths, configuration and discovery limits,
+and verifies that the actual cwd is inside the resolved root.
+Project subdirectories and symlink aliases are accepted;
 a nested git repository belongs to its own project. A mismatch exits **76**,
 leaving no assignment or worker. An intentional
 cross-project invocation needs `--allow-project-mismatch`; the wrapper must record
@@ -94,7 +97,8 @@ any non-terminal -> cancelled
 
 Assignment to an open task advances it to `in_progress` in the same transaction.
 Assignments can also be recorded while blocked or in review. Terminal tasks
-cannot transition or receive new assignments. Task status changes do not finish
+cannot receive new assignments or manual status transitions. An open severe
+finding can automatically reopen a done task as described below. Task status changes do not finish
 assignments: finish each active assignment explicitly to release its claims,
 including after task cancellation. Notes/events and finishing existing active
 assignments remain available after task termination for audit and cleanup.
@@ -113,6 +117,15 @@ those assignments and claims intact for explicit cleanup. It does not bypass
 the lifecycle transition rules. Every done status event lists any remaining
 open `minor`/`info` findings, including their IDs. MCP `task.status` follows the
 same rules through `force` and `reason`.
+
+Creating or reopening a `blocking`/`major` finding on a `done` task atomically
+returns it to `in_progress`, making it visible on the board again. A `reopened`
+event names and references the triggering finding. The finding, task status,
+events, and revisions commit together under the same writer lock, including
+when a finding arrives concurrently with closure or through reviewer-result
+ingestion after forced closure. The finding is always accepted; an earlier
+force override does not suppress reopening. Other task statuses and
+`minor`/`info` findings keep their current task status.
 
 Write assignments claim each normalized scope path until finished. Paths use
 repo-relative POSIX syntax; backslashes, redundant separators and `.` components

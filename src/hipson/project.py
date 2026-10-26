@@ -26,6 +26,7 @@ from hipson.redaction import (
     sanitize_path,
     summarize_sensitive_path,
 )
+from hipson.sandbox import is_allowlisted_read_only_command, prepare_read_only_command
 
 DEFAULT_TIMEOUT = 20
 MAX_EMBEDDED_DIFF_CHARS = 60000
@@ -43,9 +44,13 @@ class CommandResult:
 
 
 def run(command: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
+    execution_command, environment = (
+        prepare_read_only_command(command) if is_allowlisted_read_only_command(command) else (command, None)
+    )
     try:
         proc = subprocess.run(
-            command,
+            execution_command,
+            env=environment,
             cwd=str(cwd),
             text=True,
             encoding="utf-8",

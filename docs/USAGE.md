@@ -356,6 +356,19 @@ fail closed outside the runtime approval policy. Runtime, scheduler, and manual
 tool-run decisions are recorded as bounded approval records in the session DB.
 Approval records can include optional expiry metadata for future approval UX.
 
+The default registry has no generic exec tool. For internal executors,
+`is_allowlisted_read_only_command` checks argument syntax only. Git may execute
+helpers through inherited environment or repository configuration. The shared
+`hipson.project.run` executor applies `prepare_read_only_command` to allowlisted
+commands: it uses the returned argv and environment together without a shell,
+disables external diff/text conversion, pagers and filesystem monitors, ignores
+inherited `GIT_*`/`PAGER` overrides and user/system Git configuration, and turns
+off optional Git locks. Repository data and attributes remain readable.
+`ApprovalPolicy.evaluate`/`evaluate_tool` require approval for Git exec by
+default. Only trusted executor code using this hardening contract may pass
+`hardened_exec=True`; a same-named tool input cannot enable it. Non-allowlisted
+commands retain their explicit approval requirement.
+
 Learning is approval-gated. `learn propose` reads a session trajectory and
 prints memory plus draft/reference-only skill candidates without writing durable
 memory. Memory proposals include message, tool-call, and approval provenance.

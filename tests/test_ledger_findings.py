@@ -3,6 +3,8 @@
 import copy
 import json
 import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +34,164 @@ def _result():
 
 def _snapshot(store):
     return {**_rows(store), "findings": [tuple(row) for row in store.connection.execute("SELECT * FROM findings")]}
+
+
+def _done_task(store, project):
+    task = _open(store, project)["id"]
+    for status in ("in_progress", "review", "done"):
+        store.set_status(task, to=status, actor="lead")
+    return task
+
+
+def _assert_finding_reopened_task(store, task, finding):
+    view = store.show(task)
+    assert view["status"] == "in_progress"
+    assert view["revision"] == len(store.events(task))
+    assert any(item["id"] == task for item in store.board())
+    reopened = [event for event in store.events(task) if event["type"] == "reopened"]
+    assert len(reopened) == 1
+    assert finding["id"] in reopened[0]["summary"] and reopened[0]["refs"] == [finding["id"]]
+
+
+def test_severe_finding_creation_reopens_done_task(tmp_path: Path):
+    with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
+        for severity in ("blocking", "major"):
+            task = _done_task(store, tmp_path)
+            finding = store.add_finding(task, actor="reviewer", severity=severity, title="Late regression")
+            assert finding["status"] == "open"
+            _assert_finding_reopened_task(store, task, finding)
+            assert not any(event["type"] == "done_override" for event in store.events(task))
+
+
+def test_finding_reopening_changes_only_done_tasks_with_severe_findings(tmp_path: Path):
+    with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
+        for severity in ledger.FINDING_SEVERITIES:
+            for status in ("review", "done", "cancelled"):
+                task = _open(store, tmp_path)["id"]
+                finding = store.add_finding(task, actor="lead", severity=severity, title="Original issue")
+                store.update_finding(finding["id"], status="fixed", actor="lead")
+                store.set_status(task, to="in_progress", actor="lead")
+                store.set_status(task, to="review", actor="lead")
+                if status != "review":
+                    store.set_status(task, to=status, actor="lead")
+                reopened = store.update_finding(finding["id"], status="open", actor="reviewer",
+                                                resolution_note="Reproduced again")
+                if status == "done" and severity in ("blocking", "major"):
+                    _assert_finding_reopened_task(store, task, reopened)
+                else:
+                    assert store.show(task)["status"] == status
+                    assert not any(event["type"] == "reopened" for event in store.events(task))
+        for severity in ("minor", "info"):
+            task = _done_task(store, tmp_path)
+            store.add_finding(task, actor="reviewer", severity=severity, title="Optional follow-up")
+            assert store.show(task)["status"] == "done"
+
+
+def test_reviewer_result_reopens_forced_done_task(tmp_path: Path):
+    with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
+        task = _open(store, tmp_path)["id"]
+        assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")
+        store.set_status(task, to="review", actor="lead")
+        store.set_status(task, to="done", actor="lead", force=True, reason="Review still running")
+        store.finish(assignment["id"], result="passed", summary="Review complete", worker_result=_result())
+        finding = store.findings(task=task, severity="major")[0]
+        assert finding["source_assignment"] == assignment["id"]
+        _assert_finding_reopened_task(store, task, finding)
+        assert store.show(task)["assignments"][0]["status"] == "passed"
+
+
+def test_finding_and_task_reopening_rollback_together(tmp_path: Path):
+    with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
+        task = _open(store, tmp_path)["id"]
+        resolved = store.add_finding(task, actor="lead", severity="major", title="Resolved issue")
+        store.update_finding(resolved["id"], status="fixed", actor="lead")
+        for status in ("in_progress", "review", "done"):
+            store.set_status(task, to=status, actor="lead")
+        before = _snapshot(store)
+        store.connection.execute("""CREATE TRIGGER reject_reopen BEFORE INSERT ON events WHEN NEW.type = 'reopened'
+                                  BEGIN SELECT RAISE(ABORT, 'injected reopen failure'); END""")
+        operations = [
+            lambda: store.add_finding(task, actor="reviewer", severity="major", title="New issue"),
+            lambda: store.update_finding(resolved["id"], status="open", actor="reviewer", resolution_note="Still fails"),
+        ]
+        for operation in operations:
+            _error(operation, "injected reopen failure", sqlite3.IntegrityError)
+            assert _snapshot(store) == before
+
+
+def test_finding_waiting_for_closure_reopens_after_commit(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(Ledger(db)) as store:
+        task = _open(store, tmp_path)["id"]
+        store.set_status(task, to="in_progress", actor="lead")
+        store.set_status(task, to="review", actor="lead")
+    closing_task = threading.Event()
+    finding_ready = threading.Event()
+    adding_finding = threading.Event()
+    release_closure = threading.Event()
+
+    def close_task():
+        with closing(Ledger(db)) as store:
+            append = store._append_event
+
+            def pause_commit(*args):
+                event = append(*args)
+                closing_task.set()
+                assert release_closure.wait(10), "Finding writer never started"
+                return event
+
+            with patch.object(store, "_append_event", pause_commit):
+                assert finding_ready.wait(10), "Finding connection never opened"
+                store.set_status(task, to="done", actor="lead")
+
+    def add_finding():
+        with closing(Ledger(db)) as store:
+            finding_ready.set()
+            assert closing_task.wait(10), "Closure never acquired writer lock"
+            adding_finding.set()
+            return store.add_finding(task, actor="reviewer", severity="major", title="Concurrent regression")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        closed = pool.submit(close_task)
+        added = pool.submit(add_finding)
+        try:
+            assert closing_task.wait(10), "Closure never acquired writer lock"
+            assert adding_finding.wait(10), "Finding writer never started"
+        finally:
+            release_closure.set()
+        closed.result(timeout=15)
+        finding = added.result(timeout=15)
+    with closing(Ledger(db, read_only=True)) as store:
+        _assert_finding_reopened_task(store, task, finding)
+
+
+def test_cli_and_mcp_severe_findings_reopen_done_tasks(tmp_path: Path):
+    db = tmp_path / "ledger.sqlite"
+    for interface in ("cli", "mcp"):
+        for action in ("add", "reopen"):
+            with closing(Ledger(db)) as store:
+                task = _open(store, tmp_path)["id"]
+                if action == "reopen":
+                    finding = store.add_finding(task, actor="lead", severity="major", title="Old issue")
+                    store.update_finding(finding["id"], status="fixed", actor="lead")
+                for status in ("in_progress", "review", "done"):
+                    store.set_status(task, to=status, actor="lead")
+            if interface == "cli":
+                arguments = (["add", "--task", task, "--severity", "major", "--title", "Late issue"]
+                             if action == "add" else
+                             ["update", "--finding", finding["id"], "--status", "open", "--note", "Reproduced"])
+                rc, stdout, stderr = run_cli_inprocess(
+                    "task", "finding", *arguments, "--db", str(db), "--actor", "reviewer", "--json")
+                assert rc == 0, stderr
+                finding = json.loads(stdout)
+            else:
+                arguments = ({"task": task, "severity": "major", "title": "Late issue"} if action == "add" else
+                             {"finding": finding["id"], "status": "open", "resolution_note": "Reproduced"})
+                finding = _payload(_call(tmp_path, "task.finding_add" if action == "add" else "task.finding_update",
+                                         ledger_db=db, actor="reviewer", approved=True, **arguments))
+            with closing(Ledger(db, read_only=True)) as store:
+                assert store.show(task)["status"] == "in_progress"
+                assert finding["status"] == "open"
 
 
 def _v2_file(db):

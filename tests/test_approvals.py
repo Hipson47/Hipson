@@ -1,9 +1,17 @@
+import os
 import sys
 from pathlib import Path
 from unittest import SkipTest
+from unittest.mock import patch
 
 from hipson.approvals import ApprovalPolicy
-from hipson.sandbox import check_read_path, check_skill_root_path, check_write_path, is_allowlisted_read_only_command
+from hipson.project import run
+from hipson.sandbox import (
+    check_read_path,
+    check_skill_root_path,
+    check_write_path,
+    is_allowlisted_read_only_command,
+)
 from hipson.tools import PathPolicy, ToolContext, ToolResult, ToolSpec, build_default_registry
 
 
@@ -17,7 +25,7 @@ def test_approval_policy_matrix_and_metadata(tmp_path: Path):
     external = policy.evaluate("external", {}, context)
     external_dry = policy.evaluate("external", {}, context, dry_run=True)
     external_fake = policy.evaluate("external", {}, context, fake_provider=True)
-    exec_read_only = policy.evaluate("exec", {"cmd": ["git", "status", "--short"]}, context)
+    exec_read_only = policy.evaluate("exec", {"cmd": ["git", "status", "--short"]}, context, hardened_exec=True)
     exec_needs_approval = policy.evaluate("exec", {"cmd": ["python", "script.py"]}, context)
     dangerous = policy.evaluate("dangerous", {}, context)
 
@@ -189,6 +197,80 @@ def test_exec_allowlist_is_read_only_and_narrow():
     assert is_allowlisted_read_only_command(["git", "diff"]) is True
     assert is_allowlisted_read_only_command(["git", "commit", "-m", "x"]) is False
     assert is_allowlisted_read_only_command(["rm", "-rf", "."]) is False
+
+
+def _git_helper(tmp_path):
+    marker = tmp_path / "helper-ran"
+    helper = tmp_path / "helper.py"
+    helper.write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\nprint('helper output')\n", encoding="utf-8")
+    return marker, f'"{Path(sys.executable).as_posix()}" "{helper.as_posix()}"'
+
+
+def test_git_read_only_execution_disables_inherited_external_diff(tmp_path: Path):
+    marker, helper = _git_helper(tmp_path)
+    old, new = tmp_path / "old", tmp_path / "new"
+    old.write_text("before\n", encoding="utf-8")
+    new.write_text("after\n", encoding="utf-8")
+    command = ["git", "diff", "--no-index", "--", str(old), str(new)]
+    assert is_allowlisted_read_only_command(command)
+    with patch.dict(os.environ, {"GIT_EXTERNAL_DIFF": helper}):
+        result = run(command, tmp_path)
+    assert result.code == 1, result.stderr
+    assert not marker.exists(), "Read-only execution invoked GIT_EXTERNAL_DIFF"
+    assert "-before" in result.stdout and "+after" in result.stdout
+
+
+def test_git_read_only_execution_disables_configured_textconv(tmp_path: Path):
+    marker, helper = _git_helper(tmp_path)
+    assert run(["git", "init"], tmp_path).code == 0
+    for key, value in (("user.name", "Test"), ("user.email", "test@example.com"),
+                       ("diff.audit.textconv", helper), ("diff.audit.cachetextconv", "false")):
+        result = run(["git", "config", key, value], tmp_path)
+        assert result.code == 0, result.stderr
+    (tmp_path / ".gitattributes").write_text("*.txt diff=audit\n", encoding="utf-8")
+    (tmp_path / "file.txt").write_text("before\n", encoding="utf-8")
+    assert run(["git", "add", "."], tmp_path).code == 0
+    hooks = tmp_path / "empty-hooks"
+    hooks.mkdir()
+    result = run(["git", "-c", f"core.hooksPath={hooks}", "-c", "commit.gpgSign=false", "commit", "-m", "base"], tmp_path)
+    assert result.code == 0, result.stderr
+    (tmp_path / "file.txt").write_text("after\n", encoding="utf-8")
+    for arguments in (["diff"], ["show", "HEAD", "--", "file.txt"], ["log", "-p", "-1", "--", "file.txt"]):
+        result = run(["git", *arguments], tmp_path)
+        assert result.code == 0, result.stderr
+        assert not marker.exists(), f"Read-only execution invoked a configured text converter: {arguments}"
+        assert "before" in result.stdout
+
+
+def test_git_read_only_grant_requires_executor_hardening(tmp_path: Path):
+    policy = ApprovalPolicy()
+    context = ToolContext(cwd=tmp_path, repo_root=None, session_id="test")
+    command = {"cmd": ["git", "diff", "--no-index", "--", "old", "new"]}
+    for untrusted in (command, {**command, "hardened_exec": True}):
+        decision = policy.evaluate("exec", untrusted, context)
+        assert not decision.allowed and decision.requires_approval
+    spec = ToolSpec(name="unsafe.exec", description="An executor with no hardening guarantee",
+                    input_schema={"required": {"cmd": "list"}}, output_contract={"ok": "bool"},
+                    risk_level="exec", approval_required=False,
+                    handler=lambda _data, _context: ToolResult(ok=True, output={"ok": True}, summary="ok"))
+    assert policy.evaluate_tool(spec, command, context).requires_approval
+    assert policy.evaluate("exec", command, context, hardened_exec=True).allowed
+    assert policy.evaluate_tool(spec, command, context, hardened_exec=True).allowed
+    assert policy.evaluate("exec", {"cmd": ["git", "diff", "--ext-diff"]}, context,
+                           hardened_exec=True).requires_approval
+
+
+def test_git_read_only_execution_scrubs_injected_config_and_fsmonitor(tmp_path: Path):
+    marker, helper = _git_helper(tmp_path)
+    assert run(["git", "init"], tmp_path).code == 0
+    assert run(["git", "config", "core.fsmonitor", helper], tmp_path).code == 0
+    hostile = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": helper,
+               "GIT_PAGER": helper, "PAGER": helper, "GIT_EXTERNAL_DIFF": helper}
+    command = ["git", "status", "--short"]
+    with patch.dict(os.environ, hostile):
+        result = run(command, tmp_path)
+    assert result.code == 0, result.stderr
+    assert not marker.exists(), "Read-only status invoked a filesystem monitor"
 
 
 def test_approval_policy_fault_injection_fails_closed_for_overrides_and_unsafe_paths(tmp_path: Path):

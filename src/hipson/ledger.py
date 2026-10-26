@@ -892,7 +892,18 @@ class Ledger:
              redact_text(location), now, now),
         )
         self._append_event(task, actor, "finding_opened", f"{finding} [{severity}]: {title}", [finding])
+        self._reopen_for_finding(task, finding=finding, severity=severity, actor=actor)
         return self._finding(finding)
+
+    def _reopen_for_finding(self, task: str, *, finding: str, severity: str, actor: str) -> None:
+        """Keep closure and finding writes atomic under the caller's writer lock."""
+        if severity not in ("blocking", "major"):
+            return
+        changed = self.connection.execute(
+            "UPDATE tasks SET status = 'in_progress' WHERE id = ? AND status = 'done'", (task,)
+        ).rowcount
+        if changed:
+            self._append_event(task, actor, "reopened", f"done -> in_progress: open {severity} finding {finding}", [finding])
 
     def update_finding(
         self, finding: str, *, status: str, actor: str, resolution_note: str = "",
@@ -927,6 +938,8 @@ class Ledger:
                 [finding, *([resolved_by_assignment] if resolved_by_assignment else []),
                  *([fix_task] if fix_task and fix_task != current["task"] else [])],
             )
+            if status == "open":
+                self._reopen_for_finding(current["task"], finding=finding, severity=current["severity"], actor=actor)
             return cast(Finding, redact_value(self._finding(finding)))
 
     def findings(
