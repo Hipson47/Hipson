@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.4.0 - 2026-10-27
+
+Release notes: [docs/release-1.4.md](docs/release-1.4.md).
+
 - Judge worker-death, busy-lead and resume agent missions by preserved evidence, acknowledgement,
   verified repairs and held-scope safety. Report command choices, resume/now usage and lookups as
   metrics. Add a lead quick reference to CLI/task help, README and task-ledger documentation.
