@@ -20,11 +20,11 @@ from hipson import ledger, task_activity, task_verification
 def parse_check(text: str) -> list[str]:
     """Split one --check value like a POSIX shell would, without ever running a shell."""
     if os.name == 'nt' and '\\' in text:
-        raise ledger.LedgerError(f'--check {text!r}: use forward slashes in paths; a backslash is an escape here')
+        raise ledger.LedgerError(f'--check "{text}": use forward slashes in paths; a backslash is an escape here')
     try:
         argv = shlex.split(text)
     except ValueError as exc:
-        raise ledger.LedgerError(f'--check {text!r}: {exc}') from exc
+        raise ledger.LedgerError(f'--check "{text}": {exc}') from exc
     if not argv:
         raise ledger.LedgerError('--check needs a command')
     return argv
