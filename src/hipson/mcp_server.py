@@ -677,6 +677,13 @@ def _contained_arguments(name: str, arguments: dict[str, Any], project: Path) ->
         if not isinstance(declared, str) or not declared or not Path(declared).is_absolute():  # "~" is not expanded downstream.
             raise ValueError(f"{name}: work plan project must be an absolute path inside the served project {root}")
         contained("work plan project", declared)
+        packet = plan.get("packet")
+        packet_path = packet.get("path") if isinstance(packet, dict) else None
+        if packet_path not in (None, ""):
+            # audit.show hashes this file; a relative value resolves against the working directory there.
+            contained("work plan packet.path", str(packet_path))
+            if not Path(str(packet_path)).is_absolute():
+                contained("work plan packet.path", str(Path.cwd() / str(packet_path)))
     return checked
 
 

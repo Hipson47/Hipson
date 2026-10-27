@@ -385,3 +385,16 @@ def test_oversized_json_integers_are_a_parse_error_not_a_crash(tmp_path):
     mcp_server.serve_stdio(project_path=tmp_path, stdin=stdin, stdout=output)
     replies = [json.loads(line) for line in output.getvalue().splitlines()]
     assert replies[0]['error']['code'] == -32700 and replies[1]['id'] == 2
+
+
+def test_work_plan_packet_paths_stay_in_the_served_project(tmp_path):
+    project = tmp_path / 'served'
+    (project / 'runs').mkdir(parents=True)
+    plan = project / 'runs' / 'plan.json'
+    plan.write_text(json.dumps({'artifact_kind': 'hipson.work_plan', 'work_id': 'w', 'project': str(project),
+                                'packet': {'path': str(tmp_path / 'outside.txt')}}))
+    (tmp_path / 'outside.txt').write_text('outside')
+    request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+               'params': {'name': 'audit.show', 'arguments': {'work': str(plan)}}}
+    result = mcp_server._handle_request(json.dumps(request), project=project)['result']
+    assert result['isError'] is True and 'packet.path must stay inside' in result['content'][0]['text']

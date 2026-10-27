@@ -37,7 +37,7 @@ Status: **fixed** (with test), **mitigated** (partial fix, follow-up named), **o
 | ID | Finding | Status |
 |---|---|---|
 | C1 | Read-only Git calls (scan, work, contract) could run filter drivers | fixed for scan/read paths (`prepare_read_only_command(cwd=...)`) |
-| C2 | Workflow MCP tools read any path, e.g. `quality.report` sidecar `.env` | fixed: every path and a work plan's own `project` must resolve inside the served project (plan contents never widen it); run artifacts must be regular files in their run; sensitive files refused. Behavior change: one MCP server per project (`hipson init` already registers it that way) |
+| C2 | Workflow MCP tools read any path, e.g. `quality.report` sidecar `.env` | fixed: every path and a work plan's own `project` must resolve inside the served project (plan contents never widen it); run artifacts must be regular files in their run; the plan's `project` must be absolute and its `packet.path` contained; sensitive files refused. Behavior change: one MCP server per project (`hipson init` already registers it that way). Not a sandbox: `verify.run` (approval required) executes the plan's commands with the user's privileges, and what those commands read is outside this boundary |
 | C3 | Skill lookup and scans followed symlinks out of the root | fixed |
 | C4 | Sensitive tracked-file diff bodies stayed in scans/packets (= D02) | fixed: whole per-file sections omitted |
 | C5 | Truncation before redaction could expose private-key bodies | fixed: redact before truncate, bounded reads |
