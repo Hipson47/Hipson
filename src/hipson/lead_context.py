@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 from datetime import UTC, datetime
 from itertools import zip_longest
 from pathlib import Path
@@ -91,8 +92,12 @@ def _stat_dirty(project: str) -> int | None:
             continue
         try:
             info = (Path(project) / os.fsdecode(path)).lstat()
-            modified = (info.st_size != int(size) or info.st_mtime_ns != int(msec) * 10**9 + int(mnsec)
-                        or info.st_ctime_ns != int(csec) * 10**9 + int(cnsec)
+            # Git for Windows stores index timestamps in whole seconds; Python's
+            # filesystem stat retains subsecond precision on NTFS.
+            precision = 10**9 if sys.platform == 'win32' else 1
+            modified = (info.st_size != int(size)
+                        or info.st_mtime_ns // precision != (int(msec) * 10**9 + int(mnsec)) // precision
+                        or info.st_ctime_ns // precision != (int(csec) * 10**9 + int(cnsec)) // precision
                         or stat.S_IFMT(info.st_mode) != stat.S_IFMT(int(mode, 8))
                         or (os.name == 'posix' and bool(info.st_mode & stat.S_IXUSR) != bool(int(mode, 8) & stat.S_IXUSR)))
         except OSError:

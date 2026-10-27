@@ -299,7 +299,10 @@ def test_copied_multitask_v4_ledger_no_legacy_pending_and_compact_open_first(tmp
         if read_only:
             assert db.read_bytes() == copied
     assert source.read_bytes() == original
-    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)), patch('hipson.lead_context.datetime', wraps=datetime) as clock:
+        # task now reports wall-clock activity ages. CLI/MCP equality needs the same
+        # instant even on slower runners that cross a second between the two reads.
+        clock.now.return_value = datetime.now(UTC)
         for args in (('task', 'now'), ('lead', 'resume')):
             code, text, errors = _cli(*args)
             assert code == 0 and not errors
@@ -319,6 +322,24 @@ def test_copied_multitask_v4_ledger_no_legacy_pending_and_compact_open_first(tmp
                 assert mcp == json.loads(full)
             else:
                 assert mcp['tasks'] == expanded['tasks']
+
+
+def test_lead_compact_budget_holds_for_long_and_multibyte_project_paths(tmp_path):
+    with closing(Ledger(tmp_path / 'ledger.sqlite')) as store:
+        for _ in range(5):
+            _open(store, tmp_path)
+        for resume in (False, True):
+            view = lead_context.build(store, resume=resume)
+            # Exercise different fit/omission boundaries, independent of the host's
+            # actual temporary-directory prefix and filesystem path-length limits.
+            for length in range(0, 600, 7):
+                for entry in (view['now'] if resume else view)['tasks']:
+                    entry['project'] = '/private/var/folders/' + '\u754c' * length + '/project'
+                for project in view.get('projects', []):
+                    project['project'] = '/private/var/folders/' + '\u754c' * length + '/project'
+                text = lead_context.render(view)
+                assert len(text.encode('utf-8')) + 1 <= lead_context.TEXT_LIMIT, (resume, length)
+                assert text.count('</untrusted_data>') == 1 and '--json' in text
 
 
 def test_resume_byte_budget_reports_omissions_for_multibyte_evidence(tmp_path):

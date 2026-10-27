@@ -67,13 +67,29 @@ def _changes(before: dict[str, Any], after: dict[str, Any], generated: set[str])
     return changes
 
 
+def _filter_overrides(project: str) -> list[str]:
+    """Disable configured drivers while retaining Git's built-in text/EOL conversion."""
+    from hipson.lead_context import _git
+
+    names = _git(project, 'config', '--null', '--name-only', '--list')
+    if names is None:
+        raise ValueError('Git filter configuration is unavailable or exceeds its read limit')
+    overrides: list[str] = []
+    for key in sorted(set(names.split(b'\0')[:-1])):
+        if key.startswith(b'filter.') and key.rsplit(b'.', 1)[-1] in (b'clean', b'smudge', b'process', b'required'):
+            value = 'false' if key.endswith(b'.required') else ''
+            overrides.extend(('-c', os.fsdecode(key) + '=' + value))
+    return overrides
+
+
 def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                   covered: set[str] | None = None) -> dict[str, Any]:
-    """Hash raw HEAD/index/worktree differences without running Git filters.
+    """Bind raw content; use Git's built-in normalization only for the dirty flag.
 
     A raw content inventory is used instead of `git diff HEAD`: even --no-textconv
-    diff can execute clean/process filters. Never follow directory symlinks. Gitlinks
-    and unreadable/special files fail closed rather than silently omitting content.
+    diff can execute clean/process filters. Disable drivers before asking Git to hash
+    normalized content. Never follow directory symlinks. Gitlinks and unreadable/special
+    files fail closed rather than silently omitting content.
     """
     from hipson.lead_context import _git
 
@@ -143,6 +159,7 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                 paths.update(os.fsencode((Path(directory) / name).relative_to(root).as_posix()) for name in walk_files)
         files: list[dict[str, Any]] = []
         dirty = index_dirty
+        filter_overrides: list[str] | None = None
         excluded = {db, Path(str(db) + '-wal'), Path(str(db) + '-shm'), Path(str(db) + '-journal')}
         for name in sorted(paths):
             relative = Path(os.fsdecode(name))
@@ -182,7 +199,7 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                 mode = b'100755' if os.name == 'posix' and info.st_mode & stat.S_IXUSR else b'100644'
             else:
                 raise ValueError('Special file prevents project fingerprinting')
-            # Git object hashes compare raw file bytes with HEAD without invoking hash-object filters.
+            # The acceptance fingerprint always covers raw bytes, including line endings.
             algorithm = 'sha256' if len(str(result['revision'])) == 64 else 'sha1'
             blob_hash = hashlib.new(algorithm, usedforsecurity=False)
             blob_hash.update(f'blob {size}\0'.encode())
@@ -195,6 +212,18 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                     while chunk := stream.read(65536):
                         blob_hash.update(chunk)
                         file_hash.update(chunk)
+            blob = blob_hash.hexdigest().encode()
+            if git and mode != b'120000' and name in baseline and baseline[name][0] == mode \
+                    and baseline[name][1] != blob:
+                # A CRLF checkout can differ from its LF blob without being dirty.
+                # Never let hash-object run a repository-configured clean/process helper.
+                if filter_overrides is None:
+                    filter_overrides = _filter_overrides(str(root))
+                normalized = _git(str(root), *filter_overrides, 'hash-object', '--', filename)
+                if normalized is None:
+                    raise ValueError('Git normalized content hash is unavailable')
+                blob = normalized.strip()
+            if content is None:
                 after = path.lstat()
                 if (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
                         after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
@@ -202,7 +231,7 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
             files.append({'path': filename, 'state': mode.decode() + ':' + file_hash.hexdigest(),
                           'index': hashlib.sha256(index_entries[name]).hexdigest() if name in index_entries else None,
                           'tracked': tracked})
-            dirty |= baseline.get(name) != (mode, blob_hash.hexdigest().encode())
+            dirty |= baseline.get(name) != (mode, blob)
         result.update(files=files, fingerprint=_fingerprint(files), dirty=dirty if git else bool(files))
         if git and _git(project, 'rev-parse', '--verify', 'HEAD') != head:
             raise ValueError('HEAD moved while fingerprinting')

@@ -491,6 +491,11 @@ producing a misleading clean scan.
 
 ## Task verification cache policy
 
+The `dirty` flag respects Git's built-in text/EOL normalization (`core.autocrlf` and
+`.gitattributes`), with configured clean, smudge and process helpers disabled. The
+acceptance fingerprint still binds raw bytes: changing only line endings after a
+passing check makes its evidence stale, even when Git considers the checkout clean.
+
 `hipson task verify` excludes Git-ignored untracked files and these built-in tool caches
 from its working-tree fingerprint, including caches left by earlier failed checks:
 

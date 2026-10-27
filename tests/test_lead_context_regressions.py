@@ -47,6 +47,29 @@ def test_resume_never_invokes_clean_or_process_filters(tmp_path):
         assert _files(project) == before
 
 
+def test_resume_accepts_git_for_windows_whole_second_index_timestamps(tmp_path):
+    project = tmp_path / 'project'
+    _repo(project)
+    git = lead_context._git
+
+    def whole_seconds(*args):
+        data = git(*args)
+        if data is not None and '--debug' in args:
+            return re.sub(rb'((?:ctime|mtime): \d+):\d+', rb'\1:0', data)
+        return data
+
+    before = _files(project)
+    with patch.object(lead_context, '_git', side_effect=whole_seconds), \
+            patch.object(sys, 'platform', 'win32'):
+        assert lead_context._stat_dirty(str(project)) == 0
+        tracked = project / 'file.txt'
+        stamp = tracked.stat().st_mtime_ns + 10_000_000_000
+        os.utime(tracked, ns=(stamp, stamp))
+        assert lead_context._stat_dirty(str(project)) == 1
+    assert {path: value for path, value in _files(project).items() if path != Path('file.txt')} == {
+        path: value for path, value in before.items() if path != Path('file.txt')}
+
+
 def test_resume_prioritizes_atomic_action_records_before_descriptions(tmp_path):
     with closing(Ledger(tmp_path / 'ledger.sqlite')) as store:
         task = _open(store, tmp_path)

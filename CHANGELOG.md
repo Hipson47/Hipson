@@ -12,6 +12,10 @@
 - Exclude known untracked tool caches even without Git ignore rules, so failed-check bytecode
   cannot stale a later passing verification. Keep tracked files and non-cache source covered;
   `build/` and `target/` require Git ignore rules to exclude their untracked contents.
+- Preserve Git's built-in text/EOL normalization for clean-checkout detection while disabling
+  configured filter helpers; verification freshness still covers raw bytes. Compare lead-resume
+  index timestamps at Git for Windows' whole-second precision. Make bytecode fixtures explicit
+  and freeze activity ages for CLI/MCP equality checks on slower runners.
 - Show verification freshness in task/lead views and reviewer briefs. Add offline false-green,
   altered-tests and stale-verification missions with reference and broken solutions; retain
   executable README and platform smoke lifecycles with an explicit verification step.

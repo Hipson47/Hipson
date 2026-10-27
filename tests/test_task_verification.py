@@ -211,10 +211,14 @@ def test_verify_retry_excludes_prior_bytecode_but_keeps_late_source_edits_stale(
         (project / 'test_m.py').write_text('import m\nassert m.value == 1\n')
         with closing(ledger.Ledger(fixture / 'ledger.sqlite')) as store:
             task = _task(store, project)
-            command = [sys.executable, 'test_m.py']
+            # Explicitly create local bytecode even when the interpreter inherits
+            # PYTHONDONTWRITEBYTECODE or a PYTHONPYCACHEPREFIX outside the project.
+            command = [sys.executable, '-c', 'import py_compile, runpy; '
+                       'py_compile.compile("m.py", cfile="__pycache__/m.pyc", doraise=True); '
+                       'runpy.run_path("test_m.py", run_name="__main__")']
             failed = task_verification.run(store.path, task, command)
             assert failed['exit_code'] == 1
-            assert list((project / '__pycache__').glob('m.*.pyc'))
+            assert (project / '__pycache__/m.pyc').is_file()
             _error(lambda task=task: store.set_status(task, to='review', actor='lead'), 'failing verification')
             fixed = 'value = 1  # repaired\n'  # Change size too, so Python cannot reuse old bytecode.
             module.write_text(fixed)
@@ -373,7 +377,9 @@ def test_verification_read_only_git_avoids_filters_hooks_pagers_and_overrides(tm
     sentinel = tmp_path / 'executed'
     malicious = f'echo executed > "{sentinel}"'
     _git(project, 'config', 'filter.evidence.clean', malicious)
+    _git(project, 'config', 'filter.evidence.smudge', malicious)
     _git(project, 'config', 'filter.evidence.process', malicious)
+    _git(project, 'config', 'filter.evidence.required', 'true')
     _git(project, 'config', 'core.fsmonitor', malicious)
     _git(project, 'config', 'core.pager', malicious)
     (project / '.gitattributes').write_text('*.py filter=evidence\n')
@@ -521,6 +527,20 @@ def test_git_unavailable_submodules_and_unsafe_directory_links_fail_closed(tmp_p
     assert state['fingerprint'] is None and 'symlink' in state['error']
 
 
+def test_normalization_refuses_unavailable_filter_configuration(tmp_path):
+    project = _project(tmp_path)
+    (project / 'source.py').write_bytes(b'value = 2\n')
+    git = lead_context._git
+
+    def unavailable_config(*args):
+        assert 'hash-object' not in args, 'Must not hash with unsanitized filter configuration'
+        return None if 'config' in args else git(*args)
+
+    with patch.object(lead_context, '_git', side_effect=unavailable_config):
+        state = task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')
+    assert state['fingerprint'] is None and 'filter configuration is unavailable' in state['error'], state
+
+
 def test_verification_dirty_flag_includes_index_only_changes(tmp_path):
     project = _project(tmp_path)
     file = project / 'source.py'
@@ -529,6 +549,47 @@ def test_verification_dirty_flag_includes_index_only_changes(tmp_path):
     file.write_text('value = 1\n')  # Worktree matches HEAD, but staged content differs.
     state = task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')
     assert state['fingerprint'] and state['dirty'] is True, state
+
+
+def test_crlf_checkout_is_clean_but_raw_line_ending_changes_stale_verification(tmp_path):
+    project = _project(tmp_path)
+    _git(project, 'config', 'core.autocrlf', 'true')
+    (project / '.gitattributes').write_bytes(b'* text=auto\n*.bin -text\n')
+    binary = project / 'data.bin'
+    binary.write_bytes(b'binary\0\r\n')
+    _git(project, 'add', '.')
+    _git(project, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'Text normalization')
+    # Force a real CRLF checkout on every OS, including the Linux regression runner.
+    source = project / 'source.py'
+    source.unlink()
+    _git(project, 'checkout', '--', 'source.py')
+    original = source.read_bytes()
+    assert original == b'value = 1\r\n'
+    assert _git(project, 'status', '--porcelain') == ''
+    index = project / '.git/index'
+    before_index = (index.read_bytes(), index.stat().st_mtime_ns)
+    db = tmp_path / 'ledger.sqlite'
+    before = task_verification.project_state(str(project), db)
+    assert before['fingerprint'] and before['dirty'] is False, before
+    assert lead_context._stat_dirty(str(project)) == 0
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before_index
+    with closing(ledger.Ledger(db)) as store:
+        task = _task(store, project)
+        passed = verify_fixture(store, task)
+        assert passed['dirty'] is False and not passed['state_changed'], passed
+        store.set_status(task, to='review', actor='lead')
+        source.write_bytes(original.replace(b'\r\n', b'\n'))
+        normalized = task_verification.project_state(str(project), db)
+        assert normalized['dirty'] is False and normalized['fingerprint'] != before['fingerprint'], normalized
+        _error(lambda: store.set_status(task, to='done', actor='lead'), 'source.py: state before=')
+        source.write_bytes(original)
+        source.write_bytes(original.replace(b'1', b'2'))
+        assert task_verification.project_state(str(project), db)['dirty'] is True
+        source.write_bytes(original)
+        binary.write_bytes(b'binary\0\n')
+        assert task_verification.project_state(str(project), db)['dirty'] is True
+        binary.write_bytes(b'binary\0\r\n')
+        assert store.set_status(task, to='done', actor='lead')['verification']['accepted'] == passed['id']
 
 
 def test_fingerprint_preserves_trailing_spaces_in_git_project_path(tmp_path):
