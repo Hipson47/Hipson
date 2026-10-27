@@ -370,7 +370,7 @@ requires-dist = [
     { name = "mutmut", marker = "extra == 'dev'", specifier = ">=3.8.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=2.1.0" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.10.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0,<9.2" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
 ]
 provides-extras = ["dev"]
@@ -381,7 +381,7 @@ dev = [
     { name = "mutmut", specifier = ">=3.8.0" },
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "pip-audit", specifier = ">=2.10.0" },
-    { name = "pytest", specifier = ">=8.0.0" },
+    { name = "pytest", specifier = ">=8.0.0,<9.2" },
     { name = "ruff", specifier = ">=0.8.0" },
 ]
 
