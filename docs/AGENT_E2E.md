@@ -128,9 +128,16 @@ the harness stops that helper after judging the run.
 | `lead-flow` | Empty ledger, broken colon parser | Lead opens task; builder finishes; a separate reviewer returns a structured result with one finding; follow-up builder fixes it; both selected builders' claims cover `src/parser/pairs.py`; lead links and resolves the finding, then reviews and closes; parser handles spaces; all claims released. |
 | `conflict` | Real runner/worker process holding `src/parser` | Another builder attempt gets launcher exit 75 and a ledger conflict; agent leaves a reasoned block, redirects to disjoint scope, or waits for normal holder completion; no live holder bypass. |
 | `recovery` | An active assignment with a real exited owner and retained claims | Ledger recovery emits `reaped` with `pid_gone` before a replacement builder assignment; replacement fixes the colon parser and finishes; task remains in progress for later review. |
-| `worker-dies` | Unreliable worker fixture exits 9 with partial changes and no result | Native runner journals exit, changes and log tail; lead reads activity before replacement, acknowledges both deliveries, verifies recovery and leaves task in review. Broken solution skips journal inspection. |
-| `result-busy` | Parser task plus independent lead task, worker waits for a busy marker | Result arrives while another task occupies the lead; board exposes the unread delivery; lead inspects and acknowledges it before closing. Broken solution forces done without acknowledgement. |
-| `resume` | Delivered unacknowledged result, open major parser finding, live writer on `src/held` | Mission says only “You lost your context; continue the work” plus the default `lead resume` output. Lead acknowledges delivery, runs a repair worker, verifies parsing and resolves the finding while preserving the held scope; no other task-history discovery. Three broken solutions omit acknowledgement, attempt a second writer, or ignore the finding. |
+| `worker-dies` | Unreliable worker fixture exits 9 with partial changes and no result | Native runner's exit, changes and log tail remain in the failed assignment's journal unchanged, with no invented result; a later scoped builder recovers parsing, both deliveries are acknowledged and the task stays in review. Broken solution leaves the failure unacknowledged. |
+| `result-busy` | Parser task plus independent lead task, worker waits for a busy marker | Delivery remains pending during independent work; it is acknowledged before closure through review, parser works and independent task stays in progress. Broken solution forces done without acknowledgement. |
+| `resume` | Delivered unacknowledged result, open major parser finding, live writer on `src/held` | Mission says only “You lost your context; continue the work” plus the default `lead resume` output. Lead acknowledges deliveries, runs a repair worker, verifies parsing and links/resolves the finding while preserving the held scope. Three broken solutions omit acknowledgement, attempt a second writer, or ignore the finding. |
+
+These oracles judge outcomes, not actor names or preferred discovery commands. Agents may read
+additional task history or use `task now`, `task board`, `task show`, activity, result files or the
+supplied resume. The reference resume solution acts from that output alone; its offline test
+requires zero additional history lookups. Discovery choices and journal-read ordering are reported
+as metrics and never make an otherwise safe outcome fail. The worker-death negative fixture now
+omits failure acknowledgement; its former read-command omission is covered as an allowed path.
 
 The native `task run` launcher is recorded as one CLI operation, including its heartbeat updates
 and finish, and its actual exit is included in `runner.jsonl`. Concurrent CLI calls are serialized
@@ -162,7 +169,13 @@ among valid runs (`null`/`n/a` if none). Invalid runs are labeled `INVALID` and
 their `harness_errors` are separate from agent failures. It also includes
 per-run failures,
 command counts, exact failing Hipson invocations with exit codes and first error
-lines, help/docs lookups, turns, wall duration, and token usage when present.
+lines, help/docs lookups, turns, wall duration, and token usage when present. Audited successful
+non-help calls supply `used_lead_resume`, `used_task_now`, `first_hipson_command`, per-command
+`read_commands`, `task_history_lookups` (excluding resume/now), and
+`failure_journal_read_before_recovery`. The journal metric observes whether a read exposed the
+failed assignment and journal before a replacement builder was assigned; it does not prove that
+the agent understood the evidence. Usage booleans are null without an audit; journal ordering is
+null when no recovery was observed. These metrics also appear in replay reports, excluding setup.
 `--keep` retains a copy of the fixture under the run's `workspace/`; otherwise
 the temporary workspace is removed. Retained ledger project paths refer to the
 original temporary location and are for inspection, not direct replay.

@@ -4,6 +4,6 @@ hipson task run --task T-0001 --actor unreliable --role builder --mode rw --scop
   -- python3 bin/crash-worker.py || test "$?" = 9
 hipson task run --task T-0001 --actor replacement --role builder --mode rw --scope src/parser \
   --result-file replacement.json -- bin/fake-worker build replacement.json
-hipson task ack --assignment A-0001
+# Recover the parser but leave the failed delivery unconsumed.
 hipson task ack --assignment A-0002
 hipson task status --task T-0001 --to review --actor lead

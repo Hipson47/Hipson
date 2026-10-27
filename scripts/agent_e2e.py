@@ -197,6 +197,46 @@ def first_error(output: str) -> str:
                 lines[0] if lines else "(no output)")
 
 
+def workflow_command(args: list[str]) -> str:
+    """Task-level --db/--json options may precede the subcommand."""
+    if args[:1] != ['task']:
+        return ' '.join(args[:2])
+    index = 1
+    while index < len(args):
+        if args[index] == '--db':
+            index += 2
+        elif args[index] == '--json' or args[index].startswith('--db='):
+            index += 1
+        else:
+            break
+    return ' '.join(['task', *args[index:index + 1]])
+
+
+def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Command choices measure discoverability/friction, never scenario acceptance."""
+    reads = ('lead resume', 'task now', 'task show', 'task events', 'task board',
+             'task list', 'task context', 'task brief', 'task activity')
+    calls = [(i, workflow_command(e['args']), e) for i, e in enumerate(audit or [])
+             if e['exit_code'] == 0 and '--help' not in e['args'] and '-h' not in e['args']]
+    counts = Counter(command for _, command, _ in calls if command in reads)
+    failure_reads = []
+    for index, _, entry in calls:
+        before = {a['id']: (t['id'], a) for t in entry.get('before', {}).get('tasks', []) for a in t['assignments']}
+        for task in entry.get('after', {}).get('tasks', []):
+            if not any(a['id'] not in before and a['role'] == 'builder' for a in task['assignments']):
+                continue
+            for task_id, failed in before.values():
+                if task_id == task['id'] and failed['status'] == 'failed' and failed.get('failure_journal'):
+                    failure_reads.append(any(i < index and command in reads and failed['id'] in read['output']
+                                             and 'journal' in read['output'].lower() for i, command, read in calls))
+    return {'used_lead_resume': bool(counts['lead resume']) if audit is not None else None,
+            'used_task_now': bool(counts['task now']) if audit is not None else None,
+            'first_hipson_command': calls[0][1] if calls else None,
+            'read_commands': {command: counts[command] for command in reads},
+            'task_history_lookups': sum(counts[command] for command in reads if command not in ('lead resume', 'task now')),
+            'failure_journal_read_before_recovery': all(failure_reads) if failure_reads else None}
+
+
 def metrics(transcript: Transcript, duration: float, audit: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     # Audited CLI exits expose failures even inside a shell command that later exits zero.
     invocations = ([{"command": shlex.join(["hipson", *entry["args"]]),
@@ -213,7 +253,7 @@ def metrics(transcript: Transcript, duration: float, audit: list[dict[str, Any]]
             "docs_lookups": sum(bool(re.search(r"\b(?:cat|sed|head|less|rg)\b.*(?:docs/|\.md\b)",
                                               c.get("command", ""))) for c in transcript.commands),
             "turns": transcript.turns, "duration_seconds": round(duration, 3),
-            "token_usage": transcript.usage or None}
+            "token_usage": transcript.usage or None, **workflow_metrics(audit)}
 
 
 class LedgerWatch:
@@ -771,7 +811,11 @@ def write_report(output: Path, runs: list[dict[str, Any]]) -> dict[str, Any]:
         lines.extend(["", f"## {index}. {run['scenario']}: {outcome}", "",
                       f"Commands: {m['total_commands']}; Hipson calls: {m['hipson_invocations']}; "
                       f"help/docs: {m['help_lookups']}/{m['docs_lookups']}; turns: {m['turns']}; "
-                      f"duration: {m['duration_seconds']}s; tokens: {m['token_usage']}", ""])
+                      f"duration: {m['duration_seconds']}s; tokens: {m['token_usage']}", "",
+                      f"Lead resume used: {m['used_lead_resume']}; task now used: {m['used_task_now']}; "
+                      f"first Hipson command: {m['first_hipson_command']}; history lookups: {m['task_history_lookups']}; "
+                      f"failure journal read before recovery: {m['failure_journal_read_before_recovery']}", "",
+                      f"Read commands: {m['read_commands']}", ""])
         lines.extend(f"- {failure}" for failure in run["failures"])
         lines.extend(f"- Harness error: {error}" for error in run.get("harness_errors", []))
         lines.extend(f"- Exit {f['exit_code']}: {f['first_error_line']} (`{f['command']}`)"

@@ -15,6 +15,13 @@
 
 </div>
 
+## Lead quick reference
+
+- After context loss: `hipson lead resume`
+- What needs attention now: `hipson task now`
+- Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
+
 <table>
 <tr>
 <td width="44%" align="center">

@@ -28,3 +28,14 @@ def passed_worker(item, role, mode):
     return (item["role"] == role and item["mode"] == mode and item["status"] == "passed"
             and item["owner_pid"] is not None and item["result"] is not None
             and item["result"]["status"] == "completed")
+
+
+def assignment_observations(ctx, assignment):
+    """Observe delivery preservation across snapshots, independent of read commands."""
+    states = [ctx.initial, *[state for entry in ctx.audit for state in (entry['before'], entry['after'])], ctx.state]
+    return [item for state in states for task in state['tasks'] for item in task['assignments']
+            if item['id'] == assignment]
+
+
+def covers_parser(item):
+    return any(path in ('.', 'src', 'src/parser', 'src/parser/pairs.py') for path in item['scope'])

@@ -62,6 +62,9 @@ def test_agent_e2e_reference_solutions(tmp_path):
         assert (directory / "final.json").is_file()
         assert not (directory / "workspace/codex-home").exists()
         if run['scenario'] == 'resume':
+            assert run['metrics']['used_lead_resume'] is True
+            assert run['metrics']['first_hipson_command'] == 'lead resume'
+            assert run['metrics']['task_history_lookups'] == 0
             resume = json.loads((directory / 'seed.json').read_text())['resume_output']
             assert len(resume.encode('utf-8')) <= 4096
             for required in ('A-0001', 'F-0001', 'src/held', 'src/parser', 'bin/fake-worker fix',
@@ -85,7 +88,7 @@ def test_agent_e2e_broken_solutions(tmp_path):
         ('resume', 'resume-no-ack.sh', 'explicitly acknowledge'),
         ('resume', 'resume-second-writer.sh', 'second writer'),
         ('resume', 'resume-ignore-finding.sh', 'major finding'),
-        ("worker-dies", "worker-ignore-journal.sh", "inspect failure journal"),
+        ("worker-dies", "worker-ignore-journal.sh", "acknowledge failure journal"),
         ("result-busy", "result-no-ack.sh", "explicitly acknowledge"),
         ("lead-flow", "lead-no-review.sh", "separate structured reviewer"),
         ("conflict", "conflict-bypass.sh", "live holder was bypassed"),
@@ -101,6 +104,87 @@ def test_agent_e2e_broken_solutions(tmp_path):
         assert run["measurement_valid"] and any(message in f for f in run["failures"]), run
         if name == "lead-flow":
             assert any("set to done before scenario acceptance" in f for f in run["failures"]), run
+
+
+@_linux_harness
+def test_agent_e2e_outcomes_allow_different_discovery_commands_and_actor_labels(tmp_path):
+    for name in ('worker-dies', 'result-busy', 'resume'):
+        reference = (harness.SCENARIOS / name / 'solution.sh').read_text()
+        if name == 'worker-dies':
+            # The former negative fixture only omitted a read command. A journal
+            # preserved and acknowledged in the ledger remains a valid outcome.
+            reference = reference.replace('hipson task activity --assignment A-0001 --json\n', '')
+            reference = reference.replace('--actor unreliable', '--actor first-builder')
+            reference = reference.replace('--actor replacement', '--actor recovery-builder')
+        elif name == 'result-busy':
+            reference = reference.replace('hipson task board --json', 'hipson task now --json')
+            reference = reference.replace('hipson task show --task T-0001 --json\n', '')
+            ack = 'hipson task ack --assignment A-0001 --note "Read delivery and verified parser"'
+            review = 'hipson task status --task T-0001 --to review --actor lead'
+            reference = reference.replace(ack, '').replace(review, review + '\n' + ack)
+        else:
+            reference = 'hipson task show --task T-0001 --json\nhipson task events --task T-0001\n' + reference
+        script = tmp_path / f'{name}.sh'
+        script.write_text(reference)
+        run = harness.run_scenario(name, tmp_path / name, solution=script)
+        assert run['measurement_valid'] and run['passed'], run
+        observations = run['metrics']
+        if name == 'worker-dies':
+            assert observations['failure_journal_read_before_recovery'] is False
+        elif name == 'result-busy':
+            assert observations['used_task_now'] is True
+            assert observations['read_commands']['task board'] == 0
+            assert observations['read_commands']['task show'] == 0
+        else:
+            assert observations['used_lead_resume'] is True
+            assert observations['first_hipson_command'] == 'task show'
+            assert observations['task_history_lookups'] == 2
+
+
+@_linux_harness
+def test_agent_e2e_replay_rejects_lost_failure_evidence_and_invented_result(tmp_path):
+    saved = tmp_path / 'run'
+    assert harness.run_scenario('worker-dies', saved)['passed']
+    final = json.loads((saved / 'final.json').read_text())
+    original_audit = harness.read_jsonl(saved / 'cli.jsonl')
+    for field, value in (('failure_journal', None), ('result', {'status': 'completed'})):
+        changed = copy.deepcopy(final)
+        changed['tasks'][0]['assignments'][0][field] = value
+        (saved / 'final.json').write_text(json.dumps(changed))
+        # Keep the recorded write continuous, so the scenario oracle itself must
+        # reject evidence loss/overwrite instead of relying on invalid replay.
+        audit = copy.deepcopy(original_audit)
+        audit[-1]['after'] = changed
+        (saved / 'cli.jsonl').write_text(''.join(json.dumps(entry) + '\n' for entry in audit))
+        replay = harness.replay_scenario(saved)
+        assert replay['measurement_valid'] and not replay['passed'], replay
+        assert any('preserve exit' in f for f in replay['failures']), replay
+
+
+@_linux_harness
+def test_agent_e2e_acknowledgement_after_forced_done_cannot_repair_acceptance(tmp_path):
+    reference = (harness.SCENARIOS / 'result-busy/solution.sh').read_text()
+    ack = 'hipson task ack --assignment A-0001 --note "Read delivery and verified parser"'
+    close = 'hipson task status --task T-0001 --to done --actor lead'
+    script = tmp_path / 'late-ack.sh'
+    script.write_text(reference.replace(ack, '').replace(close, close + ' --force --reason late-ack\n' + ack))
+    run = harness.run_scenario('result-busy', tmp_path / 'run', solution=script)
+    assert run['measurement_valid'] and not run['passed'], run
+    assert any('set to done before scenario acceptance' in f for f in run['failures']), run
+    assert any('explicitly acknowledge delivered result before closing' in f for f in run['failures']), run
+
+
+def test_lead_quick_reference_is_discoverable():
+    for args in (['--help'], ['task', '--help']):
+        help_text = subprocess.run([sys.executable, '-c', 'from hipson.cli import main; main()', *args],
+                                   capture_output=True, text=True, check=True, timeout=10).stdout
+        assert 'Lead quick reference:' in help_text
+        for command in ('hipson lead resume', 'hipson task now', 'hipson task ack --assignment', 'hipson task run --task'):
+            assert command in help_text
+    for path in ('README.md', 'docs/TASK_LEDGER.md'):
+        intro = (ROOT / path).read_text().split('## Lead quick reference', 1)[1].split('\n\n', 2)[1]
+        for command in ('hipson lead resume', 'hipson task now', 'hipson task ack --assignment', 'hipson task run --task'):
+            assert command in intro
 
 
 @_linux_harness
@@ -320,6 +404,29 @@ def test_agent_e2e_parser_errors_and_hidden_cli_failure():
                               0.5, audit)
     assert metrics["failing_invocations"][0]["exit_code"] == 1
     assert metrics["token_usage"] is None
+
+
+@_linux_harness
+def test_agent_e2e_workflow_metrics_count_successful_calls_without_help():
+    audit = [{'args': args, 'exit_code': code, 'output': ''} for args, code in (
+        (['lead', 'resume', '--help'], 0),
+        (['task', 'now', '--help'], 0),
+        (['lead', 'resume'], 1),
+        (['task', 'show', '--task', 'T-0001'], 2),
+    )]
+    observations = harness.metrics(harness.Transcript(), 0, audit)
+    assert observations['used_lead_resume'] is False
+    assert observations['used_task_now'] is False
+    assert observations['task_history_lookups'] == 0
+    audit.extend({'args': args, 'exit_code': 0, 'output': ''} for args in (
+        ['lead', 'resume'], ['task', '--json', '--db', 'ledger.sqlite', 'now'],
+        ['task', '--db=ledger.sqlite', 'show', '--task', 'T-0001']))
+    observations = harness.metrics(harness.Transcript(), 0, audit)
+    assert observations['used_lead_resume'] is True
+    assert observations['used_task_now'] is True
+    assert observations['first_hipson_command'] == 'lead resume'
+    assert observations['task_history_lookups'] == 1
+    assert harness.metrics(harness.Transcript(), 0)['used_lead_resume'] is None
 
 
 @_linux_harness

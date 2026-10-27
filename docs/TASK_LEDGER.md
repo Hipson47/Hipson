@@ -1,5 +1,12 @@
 # Task ledger
 
+## Lead quick reference
+
+- After context loss: `hipson lead resume`
+- What needs attention now: `hipson task now`
+- Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
+
 Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
 never write the ledger themselves. `actor` and `lead` are recorded labels, **not

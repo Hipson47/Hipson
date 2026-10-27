@@ -4,6 +4,7 @@
 def setup(fixture):
     task = fixture.open_task('Consume a result while busy')
     other = fixture.open_task('Independent lead work')
+    fixture.cli('task', 'status', '--task', other, '--to', 'in_progress', '--actor', 'lead')
     (fixture.workdir / 'bin/delayed-worker.py').write_text(
         "import subprocess, time\nfrom pathlib import Path\n"
         "Path('.worker-ready').touch()\n"

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Judge worker-death, busy-lead and resume agent missions by preserved evidence, acknowledgement,
+  verified repairs and held-scope safety. Report command choices, resume/now usage and lookups as
+  metrics. Add a lead quick reference to CLI/task help, README and task-ledger documentation.
 - Add read-only `task now` / MCP `task.now` for pending deliveries, blockers, active-worker
   activity ages, review decisions and terminal cleanup, with project-local full commit SHAs and subjects.
   Add deterministic `lead resume` / MCP `lead.resume` for context recovery: objectives, acceptance,

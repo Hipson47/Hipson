@@ -1937,11 +1937,21 @@ def command_task(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hipson", description="Hipson Codex-native local dev workflow tool")
+    lead_quick_reference = (
+        "Lead quick reference:\n"
+        "  After context loss: hipson lead resume\n"
+        "  What needs attention now: hipson task now\n"
+        "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
+        "  Run workers: hipson task run --task T-0001 --actor codex --role builder "
+        "--mode rw --scope src -- COMMAND [ARGS...]"
+    )
+    parser = argparse.ArgumentParser(prog="hipson", description="Hipson Codex-native local dev workflow tool",
+                                     epilog=lead_quick_reference, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"hipson {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    task = subparsers.add_parser("task", help="Record lead-managed tasks, assignments, claims, and events")
+    task = subparsers.add_parser("task", help="Record lead-managed tasks, assignments, claims, and events",
+                                epilog=lead_quick_reference, formatter_class=argparse.RawDescriptionHelpFormatter)
     task.add_argument("--db", help="Task ledger SQLite path; overrides HIPSON_LEDGER")
     task.add_argument("--json", action="store_true", help="Print machine-readable task output")
     task_sub = task.add_subparsers(dest="task_command", required=True, parser_class=task_runner.RunParser)
