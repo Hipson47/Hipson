@@ -79,19 +79,8 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     command: str | list[str] = argv
     if sys.platform == "win32" and Path(argv[0]).suffix.lower() in (".cmd", ".bat"):
-        # cmd.exe expands each environment reference once. Quoting every argument and
-        # disabling delayed expansion preserves spaces, %, ! and shell metacharacters.
-        if any('"' in arg or "\n" in arg or "\r" in arg for arg in argv):
-            raise ValueError("Cannot pass quotes or newlines to a Windows batch client.")
-        env = dict(os.environ if env is None else env)
-        for index, arg in enumerate(argv):
-            # Batch launchers conventionally forward %* to an executable. Escape
-            # trailing backslashes before the closing quote for that argv parser.
-            trailing = len(arg) - len(arg.rstrip("\\"))
-            env[f"HIPSON_INIT_ARG_{index}"] = arg + "\\" * trailing
-        arguments = " ".join(f'"%HIPSON_INIT_ARG_{index}%"' for index in range(len(argv)))
-        cmd = os.environ.get("COMSPEC", "cmd.exe")
-        command = f'"{cmd}" /d /v:off /s /c "{arguments}"'
+        from hipson.task_windows import batch_command
+        command, env = batch_command(argv, dict(os.environ if env is None else env), "HIPSON_INIT_ARG_")
     return run_contained(command, project, env=env, input_text=input_text, timeout=TIMEOUT)
 
 
@@ -326,6 +315,12 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 claude = clients[name]
                 if claude is None:
                     raise ValueError("Claude Code is not on PATH (including claude.cmd on Windows).")
+                overrides = [key for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME") if os.environ.get(key)]
+                if overrides:
+                    # The Claude registration stores no environment: Claude must be started with the same one.
+                    report["checks"].setdefault("warnings", []).append(
+                        f"{', '.join(overrides)} chose the ledger {db}, but the Claude Code registration does not "
+                        "record it. Start Claude Code with the same environment, or it will use the default ledger.")
                 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
                 user_config = (Path(config_dir).expanduser().resolve() if config_dir else Path.home()) / ".claude.json"
                 path = project / ".mcp.json" if scope == "project" else user_config
@@ -437,6 +432,7 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                             "--check", "<your test command>", "--start"]),
             format_command(["hipson", "task", "run", "--task", "<task-id>", "--actor", "worker", "--role", "builder", "--mode", "rw", "--scope", ".", "--", "<worker-command>"]),
             format_command(["hipson", "task", "now"]),
+            format_command(["hipson", "task", "ack", "--assignment", "<assignment-id>", "--note", "<what you checked>"]),
             format_command(["hipson", "task", "close", "--task", "<task-id>"]),
         ]
         if any(item["kind"] == "claude" and item["status"] == "planned" for item in actions):

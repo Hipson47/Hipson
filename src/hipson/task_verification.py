@@ -480,14 +480,16 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
     invocation = [sys.executable, '-m', 'hipson.cli', 'task', 'verify', '--db', str(db), '--task', task,
                   '--label', label, '--timeout', str(timeout), '--json',
                   *(['--actor', actor] if actor is not None else []), '--', *command]
+    from hipson.task_runner import supervise
     try:
-        process = subprocess.run(invocation, capture_output=True, timeout=timeout + 30, check=False)
+        # Forward Ctrl+C/TERM to the supervisor so it stops its check tree and records the outcome.
+        _, stdout, stderr = supervise(invocation, capture=True, timeout=timeout + 30)
     except subprocess.SubprocessError as exc:
         raise ledger.LedgerError('Verification supervisor did not finish within its execution budget') from exc
     try:
-        return json.loads(process.stdout)
+        return json.loads(stdout)
     except (ValueError, UnicodeError) as exc:
-        raise ledger.LedgerError(task_activity.safe_text(process.stderr.decode(errors='replace')) or
+        raise ledger.LedgerError(task_activity.safe_text(stderr.decode(errors='replace')) or
                                  'Verification did not return recorded evidence') from exc
 
 

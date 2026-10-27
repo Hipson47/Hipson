@@ -32,10 +32,12 @@ repository, so no API token exists anywhere. The workflow is `.github/workflows/
    `docs/release-X.Y.md` if the release has notable changes.
 2. Merge to `main` with CI green on Ubuntu, macOS and Windows.
 3. Tag and push: `git tag -a vX.Y.Z -m "Hipson X.Y.Z" && git push origin vX.Y.Z`.
-4. The workflow checks that the tag matches both version strings, builds, runs
-   `twine check --strict`, smoke-tests the wheel, then waits for approval in the `pypi`
-   environment and uploads. Approve it under Actions → the run → Review deployments.
+4. The workflow refuses to run from anything but that tag, runs the full CI matrix (Ubuntu, macOS,
+   Windows) on the tagged commit, checks that the tag matches both version strings, builds, runs
+   `twine check --strict` and smoke-tests the wheel. Only when CI and the build pass does it wait for
+   approval in the `pypi` environment and upload. Approve it under Actions → the run → Review deployments.
 5. Create the GitHub Release for the tag (`gh release create vX.Y.Z --notes-file docs/release-X.Y.md`).
 
 A tag that already exists can be published with Actions → "Release to PyPI" → Run workflow: pick
-the tag under "Use workflow from" (the environment rejects branch refs) and enter the same tag. PyPI never accepts the same version twice; fix forward with a new patch version.
+the tag under "Use workflow from" and enter the same tag; a run started from a branch fails its first
+job. PyPI never accepts the same version twice; fix forward with a new patch version.

@@ -3,10 +3,36 @@
 from __future__ import annotations
 
 import ctypes
+import os
+import shutil
 import subprocess
 from ctypes import wintypes
+from pathlib import Path
 
 _guardian: Job | None = None
+
+
+def batch_command(argv: list[str], env: dict[str, str], prefix: str) -> tuple[str | list[str], dict[str, str]]:
+    """Run a .cmd/.bat target through cmd.exe without letting it reinterpret argument text.
+
+    CreateProcess hands batch files to cmd.exe, which would parse &, |, ^, % and ! in arguments. Each
+    argument travels in its own environment variable, expanded exactly once inside quotes with delayed
+    expansion off. Non-batch targets are returned unchanged.
+    """
+    resolved = shutil.which(argv[0]) or argv[0]
+    if Path(resolved).suffix.lower() not in (".cmd", ".bat"):
+        return argv, env
+    if any('"' in arg or "\n" in arg or "\r" in arg for arg in argv):
+        raise ValueError("Cannot pass quotes or newlines to a Windows batch command (.cmd/.bat).")
+    env = dict(env)
+    for index, arg in enumerate([resolved, *argv[1:]]):
+        # Batch launchers conventionally forward %* to an executable. Escape
+        # trailing backslashes before the closing quote for that argv parser.
+        trailing = len(arg) - len(arg.rstrip("\\"))
+        env[f"{prefix}{index}"] = arg + "\\" * trailing
+    arguments = " ".join(f'"%{prefix}{index}%"' for index in range(len(argv)))
+    cmd = os.environ.get("COMSPEC", "cmd.exe")
+    return f'"{cmd}" /d /v:off /s /c "{arguments}"', env
 
 
 class _BasicLimits(ctypes.Structure):

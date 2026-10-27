@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import shlex
-import signal
 import sqlite3
 import subprocess
 import sys
@@ -15,7 +14,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from hipson import ledger, task_activity, task_verification
+from hipson import ledger, task_activity, task_runner, task_verification
 
 
 def parse_check(text: str) -> list[str]:
@@ -149,32 +148,7 @@ def _project(value: str | None) -> str:
 
 
 def _run_worker(command: list[str], cwd: str) -> int:
-    """Run the worker supervisor and let it clean up on cancellation instead of killing it.
-
-    On POSIX the runner leads its own session, so terminal signals reach only this process: forward them.
-    On Windows the runner shares the console and receives Ctrl+C itself; keep waiting for its cleanup.
-    """
-    child = subprocess.Popen(command, cwd=cwd)
-
-    def forward(number: int, frame: object) -> None:
-        if child.poll() is None:
-            try:
-                child.send_signal(number)
-            except OSError:
-                pass
-
-    previous: dict[int, Any] = {}
-    if sys.platform != 'win32':
-        previous = {number: signal.signal(number, forward) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
-    try:
-        while True:
-            try:
-                return child.wait()
-            except KeyboardInterrupt:
-                continue
-    finally:
-        for number, handler in previous.items():
-            signal.signal(number, handler)
+    return task_runner.supervise(command, cwd=cwd)[0]
 
 
 def command_do(args: argparse.Namespace) -> int:

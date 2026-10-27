@@ -181,11 +181,12 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     assert len([call for call in calls if call["args"][:2] == ["mcp", "add"]]) == 1
     assert all(call["client"] == "claude" and call["cwd"] == str(setup.project) for call in calls)
     steps = report["next_steps"]
-    assert len(steps) == 6 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
+    assert len(steps) == 7 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
     assert "--check" in steps[2] and "--start" in steps[2]
-    for index, words in ((3, ("task", "run")), (4, ("task", "now")), (5, ("task", "close"))):
+    for index, words in ((3, ("task", "run")), (4, ("task", "now")), (5, ("task", "ack", "--assignment")),
+                         (6, ("task", "close"))):
         assert all(word in steps[index] for word in words), steps[index]  # POSIX or PowerShell quoting.
-    assert len(second["next_steps"]) == 5  # Nothing new to approve once registered.
+    assert len(second["next_steps"]) == 6  # Nothing new to approve once registered.
 
 
 def test_init_claude_user_scope_backs_up_before_cli_edit(tmp_path):

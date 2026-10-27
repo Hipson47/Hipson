@@ -14,7 +14,26 @@ on:
 permissions: {}
 
 jobs:
+  ref:
+    runs-on: ubuntu-latest
+    permissions: {}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: The workflow must run from the tag it publishes
+        # A manual run started from a branch could otherwise publish untagged branch contents.
+        run: |
+          test "$GITHUB_REF" = "refs/tags/$TAG" || {
+            echo "Run this workflow from the tag (Use workflow from: $TAG); got $GITHUB_REF"; exit 1; }
+
+  ci:
+    needs: ref
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml  # Same matrix as CI, on exactly this tagged commit.
+
   build:
+    needs: ref
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,7 +42,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ env.TAG }}
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
@@ -52,7 +70,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build, ci]
     runs-on: ubuntu-latest
     environment:
       name: pypi

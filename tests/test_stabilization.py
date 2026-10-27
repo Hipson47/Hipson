@@ -3,18 +3,99 @@
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
+from unittest import SkipTest
 from unittest.mock import patch
 
-from hipson import ledger, mcp_server, task_activity, task_verification
+from hipson import init_process, ledger, mcp_server, task_activity, task_runner, task_verification
 from hipson.redaction import redact_text
+from hipson.sandbox import git_filter_overrides, prepare_read_only_command
+from hipson.task_windows import batch_command
 from tests.test_ledger import _error
 from tests.test_task_verification import _git, _project
 
 PY = Path(sys.executable).as_posix()
+SRC = str(Path(__file__).resolve().parents[1] / 'src')
+
+
+def test_batch_targets_get_their_arguments_through_the_environment_not_cmd_parsing(tmp_path):
+    target = tmp_path / 'worker.cmd'
+    target.write_text('@echo off\n')
+    command, env = batch_command([str(target), 'a&whoami', '100%', 'x^y'], {'KEEP': '1'}, 'HIPSON_T_')
+    assert isinstance(command, str) and 'whoami' not in command and '%HIPSON_T_1%' in command
+    assert env['HIPSON_T_1'] == 'a&whoami' and env['HIPSON_T_2'] == '100%' and env['KEEP'] == '1'
+    assert batch_command([PY, 'a&b'], {}, 'HIPSON_T_') == ([PY, 'a&b'], {})  # Executables are untouched.
+    _error(lambda: batch_command([str(target), 'say "hi"'], {}, 'HIPSON_T_'), 'quotes', ValueError)
+
+
+def test_read_only_git_reads_disable_configured_filter_drivers(tmp_path):
+    project = _project(tmp_path)
+    _git(project, 'config', 'filter.mark.clean', 'touch marker')
+    _git(project, 'config', 'filter.mark.process', 'touch marker')
+    overrides = git_filter_overrides(project)
+    assert overrides == ['-c', 'filter.mark.clean=', '-c', 'filter.mark.process=']
+    argv, _ = prepare_read_only_command(['git', 'status', '--porcelain'], cwd=project)
+    assert argv[argv.index('status') - 4:argv.index('status')] == overrides
+    assert git_filter_overrides(tmp_path / 'missing') == []
+
+
+def test_successful_init_subprocess_tolerates_non_utf8_diagnostics(tmp_path):
+    result = init_process.run_contained(
+        [sys.executable, '-c', 'import sys; sys.stdout.write("ok"); sys.stderr.buffer.write(bytes([0xE9]))'],
+        tmp_path, env=dict(os.environ), input_text=None, timeout=20)
+    assert result.returncode == 0 and result.stdout == 'ok' and result.stderr == '�'
+
+
+def test_interrupting_verification_lets_the_supervisor_stop_its_check(tmp_path):
+    if sys.platform == 'win32':
+        raise SkipTest('requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C')
+    project = _project(tmp_path)
+    db = tmp_path / 'ledger.sqlite'
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=project, title='Stop', objective='Interrupt verification')['id']
+    ready, pid_file = tmp_path / 'ready', tmp_path / 'check.pid'
+    check = (f'import os, time; open({str(pid_file)!r}, "w").write(str(os.getpid())); '
+             f'open({str(ready)!r}, "w").close(); time.sleep(60)')
+    lead = (f'import sys; sys.path.insert(0, {SRC!r}); from pathlib import Path; '
+            f'from hipson import task_verification; '
+            f'task_verification.run(Path({str(db)!r}), {task!r}, [{PY!r}, "-c", {check!r}], timeout=60)')
+    env = {key: value for key, value in os.environ.items() if not key.startswith('HIPSON_')}
+    env.update(PYTHONPATH=SRC, AGENT_RUN_GRACE_SECONDS='2')
+    process = subprocess.Popen([sys.executable, '-c', lead], cwd=project, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        deadline = time.monotonic() + 20
+        while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.05)
+        assert ready.exists(), process.communicate(timeout=5)
+        process.send_signal(signal.SIGINT)
+        process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    pid = int(pid_file.read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        os.kill(pid, signal.SIGKILL)
+        raise AssertionError('The interrupted verification check survived')
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        records = store.verifications(task)
+    assert len(records) == 1 and records[0]['exit_code'] == 130  # The supervisor recorded the interruption.
+
+
+def test_supervise_times_out_by_stopping_then_killing(tmp_path):
+    started = time.monotonic()
+    _error(lambda: task_runner.supervise([sys.executable, '-c', 'import time; time.sleep(30)'], timeout=0.5),
+           'timed out', subprocess.TimeoutExpired)
+    assert time.monotonic() - started < 20
 
 
 def _open(store, project, checks=()):

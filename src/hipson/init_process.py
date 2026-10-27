@@ -40,7 +40,9 @@ def run_contained(
         if job:
             job.attach(child)
         stdout, stderr = child.communicate(None if input_text is None else input_text.encode("utf-8"), timeout=timeout)
-        return subprocess.CompletedProcess(command, child.returncode, stdout.decode("utf-8"), stderr.decode("utf-8"))
+        # MCP stdout must be UTF-8; stderr is diagnostics (localized code pages on Windows) and must not fail a run.
+        return subprocess.CompletedProcess(command, child.returncode, stdout.decode("utf-8"),
+                                           stderr.decode("utf-8", errors="replace"))
     finally:
         # Also stop descendants still in the group/Job after a successful launcher.
         try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -87,11 +88,31 @@ def is_allowlisted_read_only_command(command: list[str]) -> bool:
     return True
 
 
-def prepare_read_only_command(command: list[str]) -> tuple[list[str], dict[str, str]]:
+def git_filter_overrides(cwd: Path | str) -> list[str]:
+    """Disable every configured clean/smudge/process filter driver for a read in cwd.
+
+    status/diff re-hash files with stale stat data through the repository's filter drivers, which are
+    arbitrary commands. Git's built-in text/EOL conversion is unaffected. Returns [] outside a repository.
+    """
+    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    try:
+        listed = subprocess.run(["git", "-c", "core.fsmonitor=false", "config", "--null", "--name-only", "--list"],
+                                cwd=str(cwd), env=environment, capture_output=True, timeout=10, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    overrides: list[str] = []
+    for key in sorted(set(listed.stdout.split(b"\0")[:-1])) if listed.returncode == 0 else []:
+        if key.startswith(b"filter.") and key.rsplit(b".", 1)[-1] in (b"clean", b"smudge", b"process", b"required"):
+            overrides.extend(("-c", os.fsdecode(key) + ("=false" if key.endswith(b".required") else "=")))
+    return overrides
+
+
+def prepare_read_only_command(command: list[str], *, cwd: Path | str | None = None) -> tuple[list[str], dict[str, str]]:
     """Build argv/environment together; executors must use both without shell=True.
 
     This is an internal execution contract, not a tool-input assertion. Approval
     callers may opt into hardened_exec only when their executor uses this pair.
+    With cwd, configured Git filter drivers are disabled for that repository too.
     """
     if not is_allowlisted_read_only_command(command):
         raise ValueError("Command is not allowlisted for read-only execution")
@@ -107,8 +128,9 @@ def prepare_read_only_command(command: list[str]) -> tuple[list[str], dict[str, 
     environment.update(GIT_PAGER="cat", PAGER="cat", GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
     subcommand = command[1]
     options = ["--no-ext-diff", "--no-textconv"] if subcommand in ("diff", "log", "show") else []
+    helpers = git_filter_overrides(cwd) if cwd is not None else []
     hardened = ["git", "--no-pager", "-c", "core.pager=cat", "-c", "core.fsmonitor=false",
-                "-c", "diff.external=", subcommand, *options, *command[2:]]
+                "-c", "diff.external=", *helpers, subcommand, *options, *command[2:]]
     return hardened, environment
 
 

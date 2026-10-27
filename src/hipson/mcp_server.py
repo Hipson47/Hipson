@@ -602,6 +602,9 @@ def _handle_request(line: str, *, project: Path) -> dict[str, Any] | None:
         return _tool_error(request_id, str(exc))
     except (OSError, json.JSONDecodeError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return _tool_error(request_id, str(exc))
+    except (TypeError, KeyError, AttributeError) as exc:
+        # Malformed arguments for a tool without a strict schema must fail one request, not the server.
+        return _tool_error(request_id, f"Invalid arguments for {method}: {type(exc).__name__}: {exc}")
     return _error(request_id, -32601, f"Unknown method: {method}")
 
 

@@ -19,14 +19,65 @@ import uuid
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from hipson import ledger, task_activity
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
-from hipson.task_windows import Job
+from hipson.task_windows import Job, batch_command
 
 REMAINDER_COMMANDS = ("hipson task run", "hipson task verify", "hipson task close", "hipson task do")
+GIT_LOCATION_VARIABLES = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES",
+})
+
+
+def supervise(command: list[str], *, cwd: str | None = None, capture: bool = False,
+              timeout: float | None = None) -> tuple[int, bytes, bytes]:
+    """Run a Hipson supervisor (task run / task verify) and let it clean up on cancellation.
+
+    On POSIX the supervisor leads its own session, so terminal signals reach only this caller: forward
+    them instead of letting Python kill the supervisor and orphan its tree. On Windows it shares the
+    console and receives Ctrl+C itself, so keep waiting for its cleanup. A timeout asks the supervisor
+    to stop (SIGTERM / terminate), allows a grace period, then kills it and raises TimeoutExpired.
+    """
+    pipe = subprocess.PIPE if capture else None
+    child = subprocess.Popen(command, cwd=cwd, stdout=pipe, stderr=pipe)
+
+    def forward(number: int, frame: object) -> None:
+        if child.poll() is None:
+            try:
+                child.send_signal(number)
+            except OSError:
+                pass
+
+    previous: dict[int, Any] = {}
+    if sys.platform != 'win32' and threading.current_thread() is threading.main_thread():
+        previous = {number: signal.signal(number, forward) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    deadline = None if timeout is None else time.monotonic() + timeout
+    stopping = False
+    try:
+        while True:
+            remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+            try:
+                output, errors = child.communicate(timeout=remaining)
+                if stopping:
+                    raise subprocess.TimeoutExpired(command, timeout or 0, output, errors)
+                return child.returncode, output or b'', errors or b''
+            except KeyboardInterrupt:
+                continue
+            except subprocess.TimeoutExpired:
+                if stopping:
+                    child.kill()
+                    child.communicate()
+                    raise
+                stopping = True
+                child.terminate()  # SIGTERM lets a POSIX supervisor run its own cleanup.
+                deadline = time.monotonic() + 30
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
 
 
 class RunParser(argparse.ArgumentParser):
@@ -274,7 +325,11 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
         if not verifying:
             with closing(ledger.Ledger(db)) as store:
                 store.observe(assignment, snapshot)
-        env = dict(os.environ) if verifying else {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
+        # Verification runs against the same Git view as its fingerprint (no inherited GIT_* at all);
+        # workers at least cannot be redirected to another repository, index or object store.
+        inherited = {key: value for key, value in os.environ.items()
+                     if not (key.upper().startswith('GIT_') if verifying else key.upper() in GIT_LOCATION_VARIABLES)}
+        env = inherited if verifying else {**inherited, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
                'HIPSON_PROGRESS_FILE': str(progress_path)}
         with tempfile.TemporaryFile() as brief:
@@ -302,7 +357,13 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     job = Job()
                     job.protect_runner()
                 launching = True
-                child = subprocess.Popen(command, env=env, stdin=brief if args.rollout else None,
+                launch: str | list[str] = command
+                if windows:
+                    try:  # .cmd/.bat targets (npm, npx, claude) would otherwise reparse argument text.
+                        launch, env = batch_command(command, env, 'HIPSON_RUN_ARG_')
+                    except ValueError as exc:
+                        raise OSError(str(exc)) from exc
+                child = subprocess.Popen(launch, env=env, stdin=brief if args.rollout else None,
                                          cwd=str(check['expected']) if verifying else None,
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]  # CREATE_SUSPENDED

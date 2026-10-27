@@ -45,7 +45,7 @@ class CommandResult:
 
 def run(command: list[str], cwd: Path, timeout: int = DEFAULT_TIMEOUT) -> CommandResult:
     execution_command, environment = (
-        prepare_read_only_command(command) if is_allowlisted_read_only_command(command) else (command, None)
+        prepare_read_only_command(command, cwd=cwd) if is_allowlisted_read_only_command(command) else (command, None)
     )
     try:
         proc = subprocess.run(

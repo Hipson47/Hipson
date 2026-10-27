@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_call:  # The release workflow runs the full matrix on the tagged commit before publishing.
 
 jobs:
   validate:
