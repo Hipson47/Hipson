@@ -179,20 +179,27 @@ class Activity:
 
 def project_changes(project: str) -> dict[str, Any]:
     """Observe the task project, ignoring inherited Git overrides; never attribute changes to a worker."""
+    from hipson.task_verification import _filter_overrides
+
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}
+    env.update(GIT_TERMINAL_PROMPT='0')
     outputs = []
     try:
+        root = str(Path(project).resolve())
+        # status/diff can run clean/process filters on stale stat data; this runs after worker cleanup.
+        helpers = _filter_overrides(root)
         for command in (['status', '--porcelain=v1', '--untracked-files=normal'],
                         ['diff', '--no-ext-diff', '--no-textconv', '--stat'],
                         ['diff', '--no-ext-diff', '--no-textconv', '--stat', '--cached']):
             with tempfile.TemporaryFile() as output:
-                result = subprocess.run(['git', '--no-optional-locks', '-c', 'core.fsmonitor=false',
-                                         '-C', str(Path(project).resolve()), *command], env=env,
+                result = subprocess.run(['git', '--no-pager', '--no-optional-locks', '-c', 'core.fsmonitor=false',
+                                         '-c', 'core.hooksPath=' + os.devnull, *helpers,
+                                         '-C', root, *command], env=env,
                                         stdout=output, stderr=subprocess.DEVNULL, timeout=5, check=False)
                 output.seek(0)
                 text = output.read(READ_LIMIT).decode('utf-8', errors='replace')
                 outputs.append(text if result.returncode == 0 else '[git observation unavailable]')
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):
         outputs = ['[git observation unavailable]', '']
     return {'changed_files': outputs[0].splitlines()[:100], 'diff_stat': '\n'.join(outputs[1:]),
             'uncertainty': 'Project snapshot may include pre-existing or concurrent changes; it is not worker attribution.'}

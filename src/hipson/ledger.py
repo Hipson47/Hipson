@@ -343,6 +343,18 @@ class CloseRefusedError(LedgerError):
         self.reasons = reasons
 
 
+RESERVED_EVENT_TYPES = frozenset({
+    "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
+    "claim_conflict", "reopened", "override",
+})
+
+
+def reserved_event_type(type: str) -> bool:
+    """Lifecycle readers trust these types; free-form events must not forge them."""
+    return (type in RESERVED_EVENT_TYPES or type.startswith("finding_")
+            or (type.endswith("_override") and type != "project_mismatch_override"))
+
+
 def done_blockers(view: TaskView) -> list[str]:
     """Done blockers other than verification, each with the command that clears it."""
     task = view["id"]
@@ -414,7 +426,14 @@ def require_text(value: str, field: str) -> str:
     """Require nonblank text at both the ledger and transport boundaries."""
     if not value.strip():
         raise LedgerError(f"{field} must not be empty")
+    if _has_surrogate(value):
+        raise LedgerError(f"{field} must be valid Unicode text (lone surrogate)")
     return value.strip()
+
+
+def _has_surrogate(value: str) -> bool:
+    # Lone surrogates survive json.dumps(ensure_ascii=True) but break every UTF-8 writer later.
+    return any(0xD800 <= ord(char) <= 0xDFFF for char in value)
 
 
 def validate_checks(checks: Sequence[Sequence[str]]) -> list[list[str]]:
@@ -454,6 +473,8 @@ def _validate_result_value(value: Any, schema: dict[str, Any], path: str) -> Non
         raise LedgerError(f"Invalid worker result at {path}: expected one of {schema['enum']}")
     if isinstance(value, str) and "pattern" in schema and re.search(schema["pattern"], value) is None:
         raise LedgerError(f"Invalid worker result at {path}: must not be empty or blank")
+    if isinstance(value, str) and _has_surrogate(value):
+        raise LedgerError(f"Invalid worker result at {path}: lone surrogate is not valid Unicode text")
     if isinstance(value, dict):
         properties = schema["properties"]
         if set(value) - properties.keys():
@@ -1182,6 +1203,9 @@ class Ledger:
         actor = require_text(actor, "actor")
         type = require_text(type, "type")
         summary = require_text(summary, "summary")
+        if reserved_event_type(type):
+            raise LedgerError(f"Event type {type!r} is reserved for ledger-recorded transitions; "
+                              "use a descriptive type such as progress or note")
         with self._transaction():
             self._task(task)
             return self._append_event(task, actor, type, summary, refs)
@@ -1206,8 +1230,9 @@ class Ledger:
                 raise CloseRefusedError(task, [f"{task} is {status}; close works from open, in_progress or review"
                                                + ("" if status != "review" else " (use --to done)")])
             reasons = [] if view["verification"]["passing"] else list(view["verification"]["reasons"])
-            if to == "done":
-                reasons += done_blockers(view)
+            blockers = done_blockers(view)
+            # Review must not race a writer assigned after the caller's own checks either.
+            reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]
             if reasons:
                 raise CloseRefusedError(task, reasons)
             if status == "open":

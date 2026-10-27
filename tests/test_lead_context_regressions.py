@@ -114,7 +114,15 @@ def test_post_closure_deliveries_remain_pending_in_default_cli_and_mcp_views(tmp
             item = store.activity(delivery)
             assert item['ack_state'] == 'unacknowledged'
             assert item['acknowledged_at'] is None and item['ack_note'] == ''
-            store.add_event(task, actor='lead', type='status', summary='Late delivery still needs inspection')
+            # A free-form event cannot forge the lifecycle record that defines the closure boundary.
+            for forged in ('status', 'finished', 'acknowledged', 'done_override', 'finding_resolved'):
+                try:
+                    store.add_event(task, actor='lead', type=forged, summary=f'in_progress -> {terminal}')
+                except LedgerError as exc:
+                    assert 'reserved' in str(exc)
+                else:
+                    raise AssertionError(f'Reserved event type accepted: {forged}')
+            store.add_event(task, actor='lead', type='note', summary='Late delivery still needs inspection')
             assert store.activity(delivery)['ack_state'] == 'unacknowledged'
         with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
             for args, tool in ((('task', 'now'), 'task.now'), (('lead', 'resume'), 'lead.resume')):

@@ -225,8 +225,9 @@ def test_resume_hostile_evidence_is_bounded_redacted_and_inside_boundary(tmp_pat
         assignment = _assign(store, task)
         store.finish(assignment, result='failed', summary=hostile)
         store.add_finding(task, actor='reviewer', severity='major', title=hostile, detail=hostile)
-        store.add_event(task, actor='lead', type='status', summary=hostile)
-        store.add_event(task, actor='lead', type=hostile + '_override', summary=hostile)
+        with store._transaction():  # Legacy stores may hold such events; free-form writes now refuse them.
+            store._append_event(task, 'lead', 'status', hostile, [])
+            store._append_event(task, 'lead', hostile + '_override', hostile, [])
         view = lead_context.build(store, resume=True)
         text = lead_context.render(view)
         assert text.count('</untrusted_data>') == 1 and text.count('<untrusted_data') == 1

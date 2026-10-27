@@ -558,7 +558,12 @@ def serve_stdio(
         response = _handle_request(line, project=project)
         if response is None:
             continue
-        stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
+        text = json.dumps(response, ensure_ascii=False)
+        try:
+            text.encode("utf-8")
+        except UnicodeEncodeError:  # Lone surrogates from older stores: escape rather than crash the server.
+            text = json.dumps(response, ensure_ascii=True)
+        stdout.write(text + "\n")
         stdout.flush()
 
 

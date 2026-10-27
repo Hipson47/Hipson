@@ -20,6 +20,7 @@ from typing import Any
 
 from hipson import ledger, task_activity
 from hipson.display import escape_display_controls
+from hipson.redaction import redact_text
 
 OUTPUT_LIMIT = 8192
 FILE_HASH_LIMIT = 16 * 1024 * 1024
@@ -50,16 +51,27 @@ def _fingerprint(files: list[dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
+def _path_key(path: str) -> str:
+    return hashlib.sha256(os.fsencode(path)).hexdigest()
+
+
+def _stored_files(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Persist redacted display paths; the raw-path hash keeps identity for freshness comparisons."""
+    return [{**item, 'path': redact_text(item['path']), 'key': _path_key(item['path'])} for item in files]
+
+
 def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
     """Describe covered path/content changes, including command-created source."""
-    old = {item['path']: item for item in before['files']}
-    new = {item['path']: item for item in after['files']}
+    # Records from before 1.6.1 stored raw paths without a key; their hash is the same identity.
+    old = {item.get('key') or _path_key(item['path']): item for item in before['files']}
+    new = {item.get('key') or _path_key(item['path']): item for item in after['files']}
     changes = []
-    for path in sorted(old.keys() | new.keys()):
-        left, right = old.get(path), new.get(path)
+    for key in sorted(old.keys() | new.keys(), key=lambda name: (new.get(name) or old[name])['path']):
+        left, right = old.get(key), new.get(key)
         previous, current = left['state'] if left else None, right['state'] if right else None
         if previous == current:
             continue
+        path = (right or left or {})['path']
         display_path = escape_display_controls(task_activity.safe_text(path)).replace('<', '&lt;').replace('>', '&gt;')
         changes.append(f'{display_path}: state before={previous} after={current}')
     return changes
@@ -246,7 +258,7 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
             dirty |= baseline.get(name) != (mode, blob)
         # Unknown content cannot establish a clean checkout, even when its stats match.
         clean_or_unknown = None if metadata_fallback else False
-        result.update(files=files, fingerprint=_fingerprint(files),
+        result.update(files=_stored_files(files), fingerprint=_fingerprint(files),
                       dirty=(True if dirty else clean_or_unknown) if git else bool(files))
         if git and _git(project, 'rev-parse', '--verify', 'HEAD') != head:
             raise ValueError('HEAD moved while fingerprinting')
