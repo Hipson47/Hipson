@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 1.6.0 - 2026-10-27
+
+Release notes: [docs/release-1.6.md](docs/release-1.6.md).
+
+- Declare acceptance checks per task (`task open --check`, `task checks`, MCP `checks` / `task.checks`):
+  argv lists without a shell, audited `checks_set` events, reason required to replace, refused in worker
+  contexts. With checks declared, review/done need the latest lead verification of each check to pass fresh;
+  ledger schema v7 adds `tasks.checks`.
+- Add `task close` / MCP `task.close` (verify pending checks or one command, then review and done; a refusal
+  changes nothing and names each blocker's fix) and `task do` (open, run one worker, acknowledge, verify,
+  close). `task verify` without a command runs all declared checks; `task open --start`.
+- Cold-start fixes: executable INSTALL first task, clone route bound to the target project, auto-mode init
+  no longer blocked by a Codex registration for another project, warnings for repositories without commits,
+  MCP package version and lifecycle instructions, next-command hints in refusals, resume classification of
+  unstructured passed workers, `CLAUDE.md`, lead-neutral wording.
+- Agent e2e scenario `checks-close` with a check-weakening broken solution.
+
 ## 1.5.0 - 2026-10-27
 
 Release notes: [docs/release-1.5.md](docs/release-1.5.md).

@@ -4,6 +4,25 @@ Senior software architect and coding agent.
 
 Be concise, direct, practical. Informal chat ok. All code, docs, and comments in English.
 
+## First run: the user wants to use Hipson (not develop it)
+
+This repository is Hipson itself. If the user cloned it to start using Hipson with their own projects:
+
+1. Check `hipson --version`. If it is missing, install it: `uv tool install hipson` (from PyPI) or
+   `uv tool install .` from this clone; uv itself: https://docs.astral.sh/uv/getting-started/installation/.
+   Without uv: create a virtualenv and `python -m pip install .` (see docs/USAGE.md).
+2. In the user's target project (a Git repository with at least one commit), run
+   `hipson init --client claude` when Claude Code is the lead, or `--client codex`; preview with
+   `--dry-run` and show the plan to the user before applying. Then the user restarts the client and
+   approves the project MCP server `hipson`.
+3. The lead workflow is in `hipson --help` (Lead quick reference) and docs/TASK_LEDGER.md: open a task
+   with real acceptance checks (`--check "pytest -q"`), run workers through `hipson task run`,
+   acknowledge results, close with `hipson task close`; `hipson task do` does all of it for one job.
+4. To check this checkout itself: `uv sync --all-extras` then `uv run python scripts/run_tests.py`
+   (about five minutes; `uv run python -m pytest -q` is equivalent).
+
+Never write the user's real configs without showing the `hipson init --dry-run` plan first.
+
 ## Lead and Worker Modes
 
 Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,
@@ -23,8 +42,8 @@ keep the existing standalone behavior.
   provider-free route, scan, packet, verify, memory/handoff, skills, and audit
   contract. Use `hipson route --task "..."` when you only need the lower-level
   routing decision.
-- Keep Codex as the user's primary control surface. The user should not need to
-  invoke Hermes manually for normal work; Codex decides when Hermes adds value.
+- The lead agent (Claude Code or Codex) is the user's primary control surface. The user should not
+  need to invoke Hermes manually for normal work; the lead decides when Hermes adds value.
 - Use `hipson hermes intake --project <repo> --task "<task>"` only when a task
   benefits from Hermes-side intake/status tracking, scheduling, Telegram/gateway
   dispatch, or cross-session bus events. For ordinary coding/review work, use

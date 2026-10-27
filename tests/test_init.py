@@ -180,8 +180,11 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     calls = setup.calls()
     assert len([call for call in calls if call["args"][:2] == ["mcp", "add"]]) == 1
     assert all(call["client"] == "claude" and call["cwd"] == str(setup.project) for call in calls)
-    assert len(report["next_steps"]) == 4 and str(setup.project) in report["next_steps"][0]
-    assert "task" in report["next_steps"][2] and "run" in report["next_steps"][2]
+    steps = report["next_steps"]
+    assert len(steps) == 6 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
+    assert "--check" in steps[2] and "--start" in steps[2]
+    assert "task run" in steps[3] and steps[4] == "hipson task now" and "task close" in steps[5]
+    assert len(second["next_steps"]) == 5  # Nothing new to approve once registered.
 
 
 def test_init_claude_user_scope_backs_up_before_cli_edit(tmp_path):
@@ -548,3 +551,34 @@ def test_init_mcp_verification_rejects_failed_malformed_or_wrong_servers(tmp_pat
             assert init_setup.verify_mcp(["hipson"], tmp_path)["status"] == "failed"
     with patch.object(init_setup, "_run", side_effect=subprocess.TimeoutExpired("hipson", 15)):
         assert init_setup.verify_mcp(["hipson"], tmp_path)["status"] == "failed"
+
+
+def test_init_auto_leaves_codex_registered_for_another_project_and_sets_up_claude(tmp_path):
+    setup = _Setup(tmp_path)
+    entry = setup.registration(setup.root / "other-project")
+    setup.codex_home.mkdir()
+    original = (f'[mcp_servers.hipson]\ncommand = {json.dumps(entry["command"])}\nargs = {json.dumps(entry["args"])}\n'
+                f'env = {{ HIPSON_LEDGER = {json.dumps(str(setup.db))} }}\n').encode()
+    setup.codex_config.write_bytes(original)
+    preview = setup.run("--dry-run", "--json")
+    codex = next(action for action in preview["actions"] if action["kind"] == "codex")
+    assert preview["ok"] and codex["status"] == "skipped" and "left unchanged in auto mode" in codex["detail"]
+    assert any("--client claude" in warning for warning in preview["checks"]["warnings"])
+    report = setup.run("--yes", "--json")
+    claude = [item["status"] for item in report["actions"] if item["kind"] == "claude"]
+    assert report["ok"] and claude and claude[0] != "conflict", report
+    assert setup.codex_config.read_bytes() == original
+    explicit = setup.run("--client", "codex", "--dry-run", "--json", expected=1)
+    assert explicit["actions"][1]["status"] == "conflict"
+
+
+def test_init_warns_when_the_project_repository_has_no_commit(tmp_path):
+    setup = _Setup(tmp_path)
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    subprocess.run(["git", "init", "-q", str(setup.project)], check=True, env=env, timeout=10)
+    report = setup.run("--client", "none", "--dry-run", "--json")
+    assert any("no commits yet" in warning for warning in report["checks"]["warnings"])
+    subprocess.run(["git", "-C", str(setup.project), "-c", "user.name=T", "-c", "user.email=t@example.com",
+                    "commit", "-q", "--allow-empty", "-m", "Initial"], check=True, env=env, timeout=10)
+    report = setup.run("--client", "none", "--dry-run", "--json")
+    assert not any("no commits yet" in warning for warning in report["checks"].get("warnings", []))

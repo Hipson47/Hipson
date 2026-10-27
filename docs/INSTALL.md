@@ -117,27 +117,21 @@ Install/run Claude Code, Hipson and workers in the same WSL distro. Keep active 
 
 ## Clone instead of installing the global CLI
 
-After the OS-specific uv setup, these commands work in Bash, zsh and PowerShell:
+After the OS-specific uv setup, clone Hipson once, then always run it **from your project directory**
+with `--project` pointing at the clone (so `task open --project .` registers your project, not Hipson):
 
 ```text
-git clone https://github.com/Hipson47/Hipson.git
-cd Hipson
-uv sync --python 3.12 --no-dev
-uv run --no-dev hipson init --project /path/to/your/project
+git clone https://github.com/Hipson47/Hipson.git ~/tools/Hipson
+uv sync --project ~/tools/Hipson --python 3.12 --no-dev
+cd /path/to/your/project
+uv run --project ~/tools/Hipson --no-dev hipson init
+uv run --project ~/tools/Hipson --no-dev hipson task now
 ```
 
-For Linux/macOS/WSL2, activate the environment so the wrapper can find `hipson` and `python3`:
-
-```bash
-source .venv/bin/activate
-hipson init --project /path/to/your/project
-```
-
-For native Windows, use the executable directly, with no activation script policy changes:
-
-```powershell
-.\.venv\Scripts\hipson.exe init --project C:\path\to\your\project
-```
+Use an absolute path to the clone (on Windows, for example `C:\tools\Hipson` and
+`Set-Location C:\path\to\your\project`). Activating the clone's environment instead also works:
+`source ~/tools/Hipson/.venv/bin/activate` (Linux/macOS/WSL2) or
+`~/tools/Hipson/.venv/Scripts/hipson.exe` (native Windows), then `cd` into your project.
 
 `hipson task run --help` is available in global installs and clones on every OS.
 The optional legacy Bash wrapper is available in a source clone. Launch it with
@@ -184,8 +178,12 @@ the absolute installed Hipson executable and project path. No provider credentia
   Claude local entries take precedence over project entries; project entries take precedence over user
   entries. A conflicting entry at the target scope or a higher scope stops setup before any writes.
   Remove or rename that entry explicitly and rerun, or select its scope when it already has the desired
-  command and project. Codex conflicts also stop setup; use a separate `CODEX_HOME` for another project
-  or explicitly remove/rename its conflicting table. `--yes` never authorizes replacing a conflict.
+  command and project. Codex keeps one user-scope registration, which names one project. With
+  `--client codex`, a registration for another project stops setup; use a separate `CODEX_HOME` for
+  another project or explicitly remove/rename its conflicting table. In the default auto mode, when
+  Claude Code can be set up, such a Codex registration is left unchanged with a warning and Claude setup
+  continues. With Claude Code as the lead, `hipson init --client claude` avoids the question entirely.
+  `--yes` never authorizes replacing a conflict.
   A project-scoped Claude entry may need approval on the client's first use.
   If Claude's per-project `disabledMcpServers` lists `hipson`, setup reports **disabled for this project**
   and stops without changing that preference. Run `claude` in the project and use `/mcp` to re-enable
@@ -220,19 +218,23 @@ or Job, including Windows `.cmd` launchers. Descendants that detach from the POS
 (for example, with `setsid`) escape this cleanup and must be stopped separately.
 This verifies the local server; the client's trust settings may still require approval.
 
-Restart the lead client to load its MCP config, then open your first real task:
+Restart the lead client to load its MCP config (Claude Code asks once to approve the project server
+`hipson`; `claude mcp get hipson` shows whether it is approved), then open your first real task. This
+coordination smoke test needs a Git repository with at least one commit; put your real test command in
+`--check` (for example `--check "pytest -q"`):
 
 ```text
-hipson task open --project . --title "My first task" --objective "Describe the change" --json
+hipson task open --project . --title "My first task" --objective "Describe the change" --check "git diff --check" --start
 hipson task run --task T-0001 --actor worker --role builder --mode rw --scope . -- python -c "print('worker check')"
 hipson task now
 hipson task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
-hipson task status --task T-0001 --to review --actor lead --summary "verified: worker check passed"
-hipson task status --task T-0001 --to done --actor lead
+hipson task close --task T-0001
 ```
 
 Use the returned task and assignment ids in place of `T-0001` and `A-0001`. Read the result and independently
 check its evidence before acknowledging it; delivered results must be acknowledged before `done`.
+`task close` runs the declared checks on the current tree and then moves the task to `review` and `done`;
+when something blocks it, it changes nothing and prints the command that clears each blocker.
 The setup report prints the initial next steps using your project
 path; setup itself does not add a placeholder task. `hipson init` replaces the old progress-template command;
 existing progress files are untouched.

@@ -3,7 +3,7 @@
   "title": "Hipson Task",
   "type": "object",
   "additionalProperties": false,
-  "required": ["artifact_kind", "schema_version", "id", "project", "title", "objective", "acceptance", "status", "lead", "created_at", "updated_at", "revision"],
+  "required": ["artifact_kind", "schema_version", "id", "project", "title", "objective", "acceptance", "checks", "status", "lead", "created_at", "updated_at", "revision"],
   "properties": {
     "artifact_kind": { "const": "hipson.task" },
     "schema_version": { "const": "1.0" },
@@ -12,6 +12,7 @@
     "title": { "type": "string", "minLength": 1 },
     "objective": { "type": "string", "minLength": 1 },
     "acceptance": { "type": "array", "items": { "type": "string" } },
+    "checks": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
     "status": { "enum": ["open", "in_progress", "blocked", "review", "done", "cancelled"] },
     "lead": { "type": "string", "minLength": 1, "description": "Recorded lead label, not an authenticated identity." },
     "created_at": { "type": "string", "format": "date-time" },
@@ -21,12 +22,24 @@
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Open findings only; use task.findings for resolved history." },
     "verification": {
       "type": "object", "additionalProperties": false,
-      "required": ["freshness", "passing", "reasons", "accepted", "latest", "current", "untrusted_fields"],
+      "required": ["freshness", "passing", "reasons", "accepted", "accepted_ids", "checks", "latest", "current", "untrusted_fields"],
       "properties": {
         "freshness": {"enum": ["missing", "current", "stale", "failing", "partial", "unknown"]},
         "passing": {"type": "boolean"},
         "reasons": {"type": "array", "items": {"type": "string"}},
         "accepted": {"type": ["string", "null"], "pattern": "^V-[0-9a-f]{32}$"},
+        "accepted_ids": {"type": "array", "items": {"type": "string", "pattern": "^V-[0-9a-f]{32}$"}},
+        "checks": {"type": "array", "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["command", "record", "passing", "freshness", "reasons"],
+          "properties": {
+            "command": {"type": "array", "items": {"type": "string"}},
+            "record": {"type": ["string", "null"], "pattern": "^V-[0-9a-f]{32}$"},
+            "passing": {"type": "boolean"},
+            "freshness": {"enum": ["missing", "current", "stale", "failing", "partial", "unknown"]},
+            "reasons": {"type": "array", "items": {"type": "string"}}
+          }
+        }},
         "latest": {"$ref": "#/$defs/verification"},
         "current": {"$ref": "#/$defs/project_state"},
         "untrusted_fields": {"type": "array", "items": {"type": "string"}}

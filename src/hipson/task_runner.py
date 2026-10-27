@@ -26,16 +26,18 @@ from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job
 
+REMAINDER_COMMANDS = ("hipson task run", "hipson task verify", "hipson task close", "hipson task do")
+
 
 class RunParser(argparse.ArgumentParser):
     def parse_known_args(self, args=None, namespace=None):
         parsed, unknown = super().parse_known_args(args, namespace)
-        if self.prog in ("hipson task run", "hipson task verify") and unknown:
+        if self.prog in REMAINDER_COMMANDS and unknown:
             self.error(f"unrecognized arguments: {' '.join(unknown)}")
         return parsed, unknown
 
     def error(self, message: str) -> NoReturn:
-        if self.prog not in ("hipson task run", "hipson task verify"):
+        if self.prog not in REMAINDER_COMMANDS:
             super().error(message)
         self.print_usage(sys.stderr)
         self.exit(64, f"{self.prog}: {message}\n")

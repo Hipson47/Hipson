@@ -766,7 +766,7 @@ def test_verification_non_git_and_v5_migration_are_idempotent_and_read_only(tmp_
     assert db.read_bytes() == original
     for _ in range(2):
         with closing(ledger.Ledger(db)) as store:
-            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 6
+            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
             assert store.show('T-0001')['status'] == 'done'
     project = tmp_path / 'plain'
     project.mkdir()
@@ -837,7 +837,7 @@ def test_v6_migration_rolls_back_table_and_version_together(tmp_path):
         assert connection.execute('SELECT version FROM schema_version').fetchone()[0] == 5
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'verifications'").fetchall() == []
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 6
+        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
 
 
 def test_verification_evidence_and_event_commit_atomically(tmp_path):

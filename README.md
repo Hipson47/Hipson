@@ -19,9 +19,12 @@
 
 - After context loss: `hipson lead resume`
 - What needs attention now: `hipson task now`
-- Acknowledge deliveries: `hipson task ack --assignment A-0001`
-- Verify the candidate: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Start with acceptance checks: `hipson task open --project . --title T --objective O --check 'pytest -q' --start`
 - Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
+- Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Verify and close (runs the checks): `hipson task close --task T-0001`
+- One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
+- Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
 
 <table>
 <tr>
@@ -84,7 +87,7 @@ branch `feat/task-ledger`, 2026-10-25:
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
 | Test suite | 675 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.5.0, 2026-10-27; 404 tests when the ledger landed) |
 | Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
-| Agent e2e | Nine offline missions include false completion, altered tests and stale verification, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
+| Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
 
@@ -184,39 +187,56 @@ Hipson and workers in that same WSL distro.
 `hipson init` checks prerequisites, creates or migrates the ledger, registers MCP with Claude Code
 and/or Codex found on PATH, and verifies MCP with an initialize/tools-list handshake. It shows the
 plan and asks before making changes. Use `--dry-run` to preview, `--yes` for unattended setup,
-`--client claude|codex` to select a client, or `--client none` for the ledger only.
+`--client claude|codex` to select a client (with Claude Code as the lead, `--client claude`), or
+`--client none` for the ledger only.
 Claude defaults to project scope (`.mcp.json`); `--scope user` selects its user config. Codex uses
 `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Existing registrations are left alone;
 config edits get unique backups first. Restart the lead client after setup, then open your first task below.
 
 ### Run from a clone instead
 
-On any OS, after installing uv and Git:
+On any OS, after installing uv and Git, clone once and run Hipson **from your project directory**:
 
 ```text
-git clone https://github.com/Hipson47/Hipson.git
-cd Hipson
-uv sync --python 3.12 --no-dev
-uv run --no-dev hipson init --project /path/to/your/project
+git clone https://github.com/Hipson47/Hipson.git ~/tools/Hipson
+uv sync --project ~/tools/Hipson --python 3.12 --no-dev
+cd /path/to/your/project
+uv run --project ~/tools/Hipson --no-dev hipson init
 ```
 
-Use `uv run --no-dev hipson` in place of `hipson` below. For the wrapper, virtualenv activation,
-MCP registration from a clone, PATH troubleshooting and verification commands, see
-[docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md).
+Use `uv run --project ~/tools/Hipson --no-dev hipson` (an absolute path to the clone) in place of `hipson`
+below. For virtualenv activation, MCP registration from a clone, PATH troubleshooting and verification
+commands, see [docs/INSTALL.md](https://github.com/Hipson47/Hipson/blob/main/docs/INSTALL.md).
 
-Run a task (the same command syntax works in PowerShell):
-
+Run a coordination smoke test (the same command syntax works in PowerShell). It needs a Git
+repository with at least one commit; the worker only prints a line, so the check is a whitespace check.
 Use the task id printed by `task open` in place of `T-0001` when your ledger already has tasks.
 
 ```bash
-hipson task open --project . --title "Fix parser" --objective "Parser accepts trailing commas" --acceptance "tests pass"
+hipson task open --project . --title "Smoke test" --objective "Ledger records a worker and a lead check" --check "git diff --check" --start
 hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src/parser -- python -c "print('worker check')"
 hipson task now
 hipson task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
-hipson task verify --task T-0001 -- git diff --check
-hipson task status --task T-0001 --to review --actor lead --summary "Lead verification passed"
-hipson task status --task T-0001 --to done --actor lead
+hipson task close --task T-0001
 hipson task events --task T-0001
+```
+
+`--check` declares an acceptance check: a command (split like a shell would, but never run through one)
+that the lead runs on the current tree. `review` and `done` need **every** declared check to pass after the
+latest worker result, on the same HEAD and working-tree content; any other passing command does not count.
+Replace `git diff --check` with the command that actually proves your acceptance criteria, for example
+`--check "pytest -q"`, and repeat `--check` for more. `task close` runs the checks that are not yet fresh,
+then moves the task to `review` and `done`; if anything blocks (a failing check, an unread result, an open
+major finding) it changes nothing and prints the command that clears each blocker. `hipson task checks`
+changes the checks later (replacing them needs `--reason`, and workers cannot), `hipson task verify --task T`
+without a command runs them all, and `--force --reason` on `task status` stays the audited override.
+
+For one bounded job, `task do` does it all in one command: open with checks, run the worker, acknowledge
+its result, run the checks and close. If the worker fails or reports partial work, the task stays
+`in_progress` for you to inspect.
+
+```bash
+hipson task do --title "Fix parser" --check "pytest -q" --actor codex --scope src/parser -- codex exec -s workspace-write "Fix the parser"
 ```
 
 Use `hipson task now --project .` for pending results, activity ages, blockers, review decisions
@@ -227,14 +247,17 @@ writable owner checkpoints/closes the store. Git dirty state uses index/stat obs
 content and submodule contents are not inspected. Add `--json` for the full view. Use the assignment id printed by your runner
 in place of `A-0001` when acknowledging its result.
 
-Wrap real workers so the ledger fills itself:
+Wrap real workers so the ledger fills itself. The brief tells the worker its objective, scope, the
+checks the lead will run and the result it must return; review it before launching:
 
 ```bash
-TASK=$(hipson task open --project . --title "Add rate limit" --objective "API returns 429 over quota" --json \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+set -e
+TASK=$(hipson task open --project . --title "Add rate limit" --objective "API returns 429 over quota" \
+  --check "python -m pytest -q" --start --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+hipson task brief --task "$TASK" --role builder --scope src/api > brief.md
 hipson task run --task "$TASK" --actor codex --role builder --mode rw --scope src/api --rollout codex \
   -- codex exec -s workspace-write < brief.md
-hipson task events --task "$TASK"
+hipson task now
 ```
 
 The runner exits with the worker's code, **75** for an assignment refusal, **76** for a project
@@ -248,10 +271,12 @@ The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`
 
 ## Use it from a lead agent (MCP)
 
-Hipson ships a stdio MCP server. Read tools: `task.show`, `task.brief`, `task.context`, `task.events`,
-`task.list`, `task.board`, `task.findings`.
-Write tools (each requires `approved=true`): `task.open`, `task.assign`, `task.finish`, `task.event`,
-`task.status`, `task.reap`, `task.finding_add`, `task.finding_update`.
+Hipson ships a stdio MCP server; its `initialize` response carries the lead lifecycle as instructions.
+Start and recover: `lead.resume`, `task.now`. Read tools: `task.show`, `task.brief`, `task.context`,
+`task.events`, `task.activity`, `task.list`, `task.board`, `task.findings`.
+Write tools (each requires `approved=true`): `task.open`, `task.status`, `task.checks`, `task.verify`,
+`task.close`, `task.ack`, `task.assign`, `task.finish`, `task.event`, `task.reap`, `task.finding_add`,
+`task.finding_update`. Workers are launched by `hipson task run`, not through MCP.
 
 ```bash
 hipson init --client claude
@@ -269,7 +294,7 @@ The ledger sits on top of Hipson's existing local workflow layer:
 |---|---|
 | Work planning | `hipson work`, `hipson route`, `hipson contract show` |
 | Bounded packets for agents | `hipson packet review / exec`, `hipson packet preflight` |
-| Revision-bound task verification | `hipson task verify --task T -- COMMAND [ARGS...]` |
+| Acceptance checks and revision-bound verification | `hipson task open --check`, `hipson task checks`, `hipson task verify`, `hipson task close`, `hipson task do` |
 | Local verification and evidence | `hipson verify run`, `hipson evidence append / show / verify`, `hipson audit show` |
 | Run bundles and release gates | `hipson kit review`, `hipson autopilot`, `hipson run status / validate / handoff`, `hipson release claim` |
 | Memory and sessions | `hipson memory`, `hipson session`, `hipson learn` (approval-gated) |

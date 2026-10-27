@@ -41,11 +41,14 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
     with closing(sqlite3.connect(db)) as connection:
         before = _rows(SimpleNamespace(connection=connection))
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         after = _rows(store)
         assert len(after["tasks"]) == 2 and len(after["assignments"]) == 3 and len(after["events"]) == 6
-        for table in ("tasks", "claims", "events"):
+        for table in ("claims", "events"):
             assert after[table] == before[table]
+        # v7 appends declared acceptance checks, empty for migrated tasks.
+        assert [row[:-1] for row in after["tasks"]] == before["tasks"]
+        assert {row[-1] for row in after["tasks"]} == {"[]"}
         assert [row[:-10] for row in after["assignments"]] == before["assignments"]
         assert all(row[-10:-1] == (None,) * 9 for row in after['assignments'])
         assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
@@ -154,10 +157,13 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
     assert db.read_bytes() == original
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         after = _rows(store)
-        for table in ("tasks", "claims", "events"):
+        for table in ("claims", "events"):
             assert after[table] == before[table]
+        # v7 appends declared acceptance checks, empty for migrated tasks.
+        assert [row[:-1] for row in after["tasks"]] == before["tasks"]
+        assert {row[-1] for row in after["tasks"]} == {"[]"}
         assert [row[:-5] for row in after["assignments"]] == before["assignments"]
         assert all(row[-5:-1] == (None,) * 4 for row in after['assignments'])
         assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
@@ -181,7 +187,7 @@ def test_ledger_v4_migration_failure_rolls_back_all_steps(tmp_path: Path):
             assert _rows(SimpleNamespace(connection=connection)) == before
             assert "owner_pid_namespace" not in [r[1] for r in connection.execute("PRAGMA table_info(assignments)")]
         with closing(Ledger(db)) as store:
-            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
 
 
 def test_ledger_never_probes_pid_or_group_across_namespaces(tmp_path: Path):

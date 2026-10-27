@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 import sqlite3
 import sys
@@ -31,6 +32,7 @@ from hipson import (
     review_kit,
     run_control,
     task_context,
+    task_flow,
     task_runner,
     task_verification,
     verification,
@@ -1816,6 +1818,7 @@ def command_task(args: argparse.Namespace) -> int:
             args.scope = ledger.normalize_scope(args.scope)
         elif args.task_command == "status":
             ledger.validate_status_override(to=args.to, force=args.force, reason=args.reason)
+        checks = [task_flow.parse_check(item) for item in args.check] if args.task_command == "open" else []
         report = (
             ledger.load_task_result(args.result_file)
             if args.task_command == "finish" and args.result_file else None
@@ -1825,7 +1828,7 @@ def command_task(args: argparse.Namespace) -> int:
             if args.task_command == 'activity':
                 raise ledger.LedgerError(f'Assignment not found: {args.assignment}')
             if args.task_command in ("show", "events", "brief", "context") or ((dry_run or finding_list) and args.task is not None):
-                raise ledger.LedgerError(f"Task not found: {args.task}")
+                raise ledger.LedgerError(f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)")
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
             return 0
         with closing(ledger.Ledger(db, read_only=read_only)) as store:
@@ -1837,7 +1840,13 @@ def command_task(args: argparse.Namespace) -> int:
                     objective=args.objective,
                     acceptance=args.acceptance,
                     lead=args.lead,
+                    checks=checks,
                 )
+                if args.start:
+                    payload = store.set_status(payload["id"], to="in_progress", actor=args.lead, summary="started on open")
+                if not args.json:
+                    print(f"{payload['id']} [{payload['status']}] acceptance checks: {ledger.checks_text(payload['checks'])}")
+                    return 0
             elif args.task_command == "assign":
                 payload = store.assign(
                     args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
@@ -1889,6 +1898,9 @@ def command_task(args: argparse.Namespace) -> int:
                     print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
                     print(f"Verification: {view['verification']['freshness']}; "
                           f"{_bounded_json(view['verification']['reasons'], escape_controls=True)}")
+                    for state in view['verification']['checks']:
+                        print(f"  check [{state['freshness']}] {_bounded_cli(shlex.join(state['command']), limit=200, escape_controls=True)}"
+                              f" {state['record'] or ''}".rstrip())
                     for item in view["assignments"]:
                         actor = _bounded_cli(item["actor"], escape_controls=True)
                         heartbeat = _bounded_cli((item['activity'] or {}).get('heartbeat_at') or 'unknown', escape_controls=True)
@@ -1944,12 +1956,16 @@ def build_parser() -> argparse.ArgumentParser:
         "Lead quick reference:\n"
         "  After context loss: hipson lead resume\n"
         "  What needs attention now: hipson task now\n"
-        "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
-        "  Verify candidate: hipson task verify --task T-0001 -- COMMAND [ARGS...]\n"
+        "  Start with acceptance checks: hipson task open --project . --title T --objective O "
+        "--check 'pytest -q' --start\n"
         "  Run workers: hipson task run --task T-0001 --actor codex --role builder "
-        "--mode rw --scope src -- COMMAND [ARGS...]"
+        "--mode rw --scope src -- COMMAND [ARGS...]\n"
+        "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
+        "  Verify and close (runs checks): hipson task close --task T-0001\n"
+        "  One shot: hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]\n"
+        "  Ad-hoc verification: hipson task verify --task T-0001 -- COMMAND [ARGS...]"
     )
-    parser = argparse.ArgumentParser(prog="hipson", description="Hipson Codex-native local dev workflow tool",
+    parser = argparse.ArgumentParser(prog="hipson", description="Local-first control plane for AI coding agents: one lead, many workers, one ledger",
                                      epilog=lead_quick_reference, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--version", action="version", version=f"hipson {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1966,6 +1982,9 @@ def build_parser() -> argparse.ArgumentParser:
             ("assign", "Assign a worker and claim write scope"),
             ("run", "Run and record a worker on Linux, macOS or Windows"),
             ('verify', 'Run lead verification bound to the current revision and working tree'),
+            ('checks', 'Declare or replace the acceptance checks that gate review/done'),
+            ('close', 'Run pending acceptance checks, then move the task to review and done'),
+            ('do', 'Open a task with checks, run one worker, and close it if everything passes'),
             ("finish", "Finish an assignment and release its claims"),
             ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
             ('ack', 'Acknowledge an ended assignment result or failure journal'),
@@ -1995,11 +2014,16 @@ def build_parser() -> argparse.ArgumentParser:
             task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
     task_runner.configure(task_parsers["run"])
     task_verification.configure(task_parsers['verify'])
+    task_flow.configure_checks(task_parsers['checks'])
+    task_flow.configure_close(task_parsers['close'])
+    task_flow.configure_do(task_parsers['do'])
     task_parsers["open"].add_argument("--project", required=True)
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)
     task_parsers["open"].add_argument("--acceptance", action="append", default=[], help="Acceptance criterion; repeatable")
     task_parsers["open"].add_argument("--lead", default="claude")
+    task_flow.add_check_arguments(task_parsers["open"])
+    task_parsers["open"].add_argument("--start", action="store_true", help="Move the new task to in_progress")
     task_parsers["assign"].add_argument("--role", choices=ledger.ROLES, required=True)
     task_parsers["assign"].add_argument("--mode", choices=ledger.MODES, required=True)
     task_parsers["assign"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")

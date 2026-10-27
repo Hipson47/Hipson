@@ -409,6 +409,16 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 if action["status"] != "conflict":
                     plan.verifications.append(_verification(effective, project, codex=True))
                 actions.append(action)
+        usable_claude = any(item["kind"] == "claude" and item["status"] != "conflict" for item in actions)
+        for action in actions:
+            if client == "auto" and action["kind"] == "codex" and action["status"] == "conflict" and usable_claude:
+                # Auto mode must not let an unrelated global Codex registration block Claude's project setup.
+                report["errors"].remove(action["detail"])
+                action.update(status="skipped", detail="left unchanged in auto mode: " + action["detail"]
+                              + " Claude Code setup continues; rerun with --client codex to resolve Codex explicitly.")
+                report["checks"].setdefault("warnings", []).append(
+                    "Codex already has a hipson registration for another project; it was left unchanged. "
+                    "Use --client claude to set up only Claude Code, or --client codex to resolve Codex.")
         for action in actions:
             path = Path(action["path"])
             if action["status"] == "planned" and path.exists():
@@ -422,17 +432,34 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
         if plan.snapshots:
             report["checks"]["config_lock_directory"] = str(Path.home() / ".hipson" / "init-locks")
         report["next_steps"] = [
-            format_command(["hipson", "task", "open", "--project", str(project), "--title", "My first task", "--objective", "Describe the change", "--json"]),
             f"cd {shlex.quote(str(project))}" if sys.platform != "win32" else "Set-Location -LiteralPath '" + str(project).replace("'", "''") + "'",
+            format_command(["hipson", "task", "open", "--project", ".", "--title", "My first task", "--objective", "Describe the change",
+                            "--check", "<your test command>", "--start"]),
             format_command(["hipson", "task", "run", "--task", "<task-id>", "--actor", "worker", "--role", "builder", "--mode", "rw", "--scope", ".", "--", "<worker-command>"]),
-            format_command(["hipson", "task", "board"]),
+            format_command(["hipson", "task", "now"]),
+            format_command(["hipson", "task", "close", "--task", "<task-id>"]),
         ]
+        if any(item["kind"] == "claude" and item["status"] == "planned" for item in actions):
+            report["next_steps"].insert(0, "Restart Claude Code in this project and approve the project MCP server 'hipson' when asked "
+                                           "(check: claude mcp get hipson)")
+        head = subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=project, capture_output=True, text=True,
+                              timeout=10, check=False, env=_git_env()) if shutil.which("git") else None
+        inside = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=project, capture_output=True, text=True,
+                                timeout=10, check=False, env=_git_env()) if shutil.which("git") else None
+        if inside is not None and inside.returncode == 0 and head is not None and head.returncode != 0:
+            report["checks"].setdefault("warnings", []).append(
+                "This Git repository has no commits yet. Tasks cannot close until verification can bind to a commit: "
+                "commit the initial revision first (git add -A && git commit -m 'Initial commit').")
         if report["checks"]["git"] != "ok":
             raise ValueError("Git is missing from PATH; install Git before setup.")
         report["ok"] = not report["errors"]
     except (OSError, ValueError, sqlite3.Error, subprocess.SubprocessError, SystemExit) as exc:
         report["errors"].append(redact_text(str(exc)))
     return plan
+
+
+def _git_env() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 
 
 def _check_sources(plan: InitPlan) -> None:

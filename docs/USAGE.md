@@ -51,9 +51,12 @@ uv sync --all-extras
 uv run hipson --help
 ```
 
-Editable install with standard Python tooling:
+Editable install with standard Python tooling (inside a virtual environment; on Debian/Ubuntu install
+`python3-venv` first if `python3 -m venv` is missing):
 
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 python -m pip install -e ".[dev]"
 hipson --help
 ```

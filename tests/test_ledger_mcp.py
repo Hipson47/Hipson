@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -17,7 +18,9 @@ from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
-    "task.verify": ({"task", "command", "approved"}, {"actor", "label", "timeout"}),
+    "task.verify": ({"task", "approved"}, {"command", "actor", "label", "timeout"}),
+    "task.checks": ({"task", "checks", "approved"}, {"reason", "actor"}),
+    "task.close": ({"task", "approved"}, {"to", "summary", "actor", "command", "timeout"}),
     'lead.resume': (set(), {'project', 'all'}),
     'task.now': (set(), {'project', 'all'}),
     "task.activity": ({"assignment"}, set()),
@@ -33,7 +36,7 @@ TASK_TOOLS = {
                          {"detail", "location", "source_assignment"}),
     "task.finding_update": ({"finding", "status", "actor", "approved"},
                             {"resolution_note", "resolved_by_assignment"}),
-    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "lead"}),
+    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "checks", "lead"}),
     "task.assign": ({"task", "actor", "role", "mode", "approved"},
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
@@ -43,6 +46,8 @@ TASK_TOOLS = {
 }
 WRITE_ARGUMENTS = {
     "task.verify": {"task": "T-0001", "command": [sys.executable, "-c", "pass"]},
+    "task.checks": {"task": "T-0001", "checks": [[sys.executable, "-c", "pass"]]},
+    "task.close": {"task": "T-0001"},
     "task.ack": {"assignment": "A-0001"},
     "task.open": {"project": ".", "title": "Ledger", "objective": "Track ownership"},
     "task.assign": {"task": "T-0001", "actor": "codex", "role": "builder", "mode": "rw", "scope": ["src"]},
@@ -462,3 +467,21 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
         _assert_error(response["result"], "Could not determine home directory")
     assert {tool["name"] for tool in responses[5]["result"]["tools"]} == set(mcp_server.MCP_TOOL_NAMES)
     assert list(project.iterdir()) == [] and not (tmp_path / "home").exists()
+
+
+def test_readme_mcp_inventory_lists_every_task_tool():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Use it from a lead agent (MCP)", 1)[1].split("\n## ", 1)[0]
+    listed = set(re.findall(r"`((?:task|lead)\.[a-z_]+)`", section))
+    expected = {name for name in mcp_server.MCP_TOOL_NAMES if name.startswith(("task.", "lead."))}
+    assert listed == expected, (sorted(expected - listed), sorted(listed - expected))
+
+
+def test_mcp_initialize_reports_package_version_and_lifecycle_instructions():
+    from hipson import __version__
+    reply = mcp_server._handle_request(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+                                      project=Path("."))
+    result = reply["result"]
+    assert result["serverInfo"] == {"name": "hipson", "version": __version__}
+    for phrase in ("task.ack", "task.close", "approved=true", "lead.resume", "launches nothing"):
+        assert phrase in result["instructions"]

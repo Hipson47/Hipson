@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 from collections.abc import Sequence
 from typing import Any, TypedDict
 
@@ -81,6 +82,7 @@ class WorkerContext(TypedDict):
     status: str
     objective: str
     acceptance: list[str]
+    checks: list[str]
     role: str | None
     scope: list[str]
     instructions: str
@@ -179,6 +181,7 @@ def _build(
         "task": _text(view["id"]), "title": _text(view["title"]), "project": _text(view["project"]),
         "status": view["status"], "objective": _text(view["objective"], limit=1200),
         "acceptance": [_text(item, limit=600) for item in view["acceptance"][:MAX_ITEMS]],
+        "checks": [_text(shlex.join(check), limit=600) for check in view["checks"][:MAX_ITEMS]],
         "role": role, "scope": [_text(path) for path in scope[:MAX_ITEMS]],
         "instructions": ROLE_INSTRUCTIONS[role] if role else "Read the task and coordinate scope with the lead.",
         "evidence_policy": EVIDENCE_POLICY,
@@ -207,6 +210,10 @@ def render(view: WorkerContext) -> str:
     lines.extend(f"- {item}" for item in view["acceptance"])
     if not view["acceptance"]:
         lines.append("Not specified.")
+    if view["checks"]:
+        lines.extend(["", "## Acceptance checks", "",
+                      "The lead runs exactly these commands (no shell) before accepting the work; run them yourself first:", ""])
+        lines.extend(f"- {item}" for item in view["checks"])
     lines.extend(["", "## Role and scope", "", f"Role: {view['role'] or 'not specified'}",
                   view["instructions"], "", *[f"- {path}" for path in view["scope"]]])
     if not view["scope"]:

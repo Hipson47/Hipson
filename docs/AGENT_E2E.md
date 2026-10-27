@@ -16,7 +16,7 @@ explicitly skip on macOS and native Windows. This limit does not apply to the
 macOS CLI or worker wrapper. Linux CI continues to require zero skipped tests.
 
 ```sh
-# Offline: execute all nine reference solutions, without invoking Codex.
+# Offline: execute all ten reference solutions, without invoking Codex.
 .venv/bin/python scripts/agent_e2e.py --scenario all --driver fake
 
 # On demand: authenticated Codex CLI on PATH, explicit model and effort.
@@ -255,6 +255,13 @@ Universal checks run for each scenario in addition to its own oracle.
   scenario task, accepts parent-level CLI options, and evaluates historical closure with only
   evidence available then. `stale-verify-cross-task.sh` supplies a pass and stale refusal on another
   task without rerunning it; this decoy must fail even though the scenario task closes normally.
+
+## Declared acceptance checks (1.6)
+
+- `checks-close`: the task declares `python3 tests/acceptance.py` as its acceptance check. The lead
+  must close passing work on a fresh pass of exactly that check, without changing or removing it and
+  without forcing. `checks-close-weaken.sh` replaces the check with `true` (with a reason) and closes;
+  it must fail.
 
 Each has a reference `solution.sh` and a deliberately broken script under `e2e/agents/broken/`.
 Offline runs measure harness/CLI behavior only. Live Codex measurements remain a lead-run gate;

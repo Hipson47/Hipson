@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import shlex
 import sqlite3
 import stat
 import subprocess
@@ -269,8 +270,21 @@ def invocation_context() -> dict[str, Any]:
     return {key: task_activity.safe_text(value) if value is not None else None for key, value in context.items()}
 
 
+def _freshness(record: dict[str, Any] | None, errors: list[str]) -> str:
+    if not errors:
+        return 'current'
+    if record is None:
+        return 'missing'
+    if any(reason.startswith('stale:') for reason in errors):
+        return 'stale'
+    if record['exit_code'] != 0:
+        return 'failing'
+    return 'partial' if any(reason.startswith('partial content coverage') for reason in errors) else 'unknown'
+
+
 def verification_state(records: list[dict[str, Any]], current: dict[str, Any], builder_seq: int,
-                       lead: str) -> dict[str, Any]:
+                       lead: str, checks: list[list[str]] | None = None) -> dict[str, Any]:
+    """Without declared checks the latest lead verification decides; with them, each check's latest run does."""
     def reasons(item: dict[str, Any]) -> list[str]:
         errors = []
         context = item.get('context')
@@ -306,13 +320,26 @@ def verification_state(records: list[dict[str, Any]], current: dict[str, Any], b
         return errors
 
     latest = records[-1] if records else None
-    accepted = latest if latest and not reasons(latest) else None
-    errors = [] if accepted else reasons(latest) if latest else ['missing lead verification; run hipson task verify']
-    freshness = ('current' if accepted else 'missing' if latest is None else 'stale'
-                 if any(reason.startswith('stale:') for reason in errors) else 'failing' if latest['exit_code'] != 0
-                 else 'partial' if any(reason.startswith('partial content coverage') for reason in errors) else 'unknown')
-    return {'freshness': freshness, 'passing': accepted is not None, 'reasons': errors,
-            'accepted': accepted['id'] if accepted else None, 'latest': latest, 'current': current,
+    check_states: list[dict[str, Any]] = []
+    if checks:
+        for check in checks:
+            record = next((item for item in reversed(records) if item.get('command') == check), None)
+            problems = reasons(record) if record else ['missing: never verified; run hipson task verify (no command runs all checks)']
+            check_states.append({'command': check, 'record': record['id'] if record else None,
+                                 'passing': not problems, 'freshness': _freshness(record, problems), 'reasons': problems})
+        errors = [f'check `{shlex.join(state["command"])}`: {reason}'
+                  for state in check_states for reason in state['reasons']]
+        accepted_ids = [] if errors else [state['record'] for state in check_states]
+        failed = next((state for state in check_states if not state['passing']), None)
+        freshness = failed['freshness'] if failed else 'current'
+    else:
+        problems = reasons(latest) if latest else ['missing lead verification; run hipson task verify']
+        errors = problems
+        accepted_ids = [latest['id']] if latest and not problems else []
+        freshness = _freshness(latest, problems)
+    return {'freshness': freshness, 'passing': bool(accepted_ids), 'reasons': errors,
+            'accepted': accepted_ids[-1] if accepted_ids else None, 'accepted_ids': accepted_ids,
+            'checks': check_states, 'latest': latest, 'current': current,
             'untrusted_fields': ['latest.actor', 'latest.context', 'latest.metadata_fallback_paths',
                                  'latest.command', 'latest.label', 'latest.subject', 'latest.output_tail',
                                  'latest.files', 'latest.generated_files', 'latest.changes', 'current.subject',
@@ -325,7 +352,8 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--label', default='')
     parser.add_argument('--actor', help='Invoking actor label (default: task lead); not authenticated')
     parser.add_argument('--timeout', type=float, default=300)
-    parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- COMMAND [ARGS...] (no shell)')
+    parser.add_argument('worker_command', nargs=argparse.REMAINDER,
+                        help="-- COMMAND [ARGS...] (no shell); omit to run every declared acceptance check")
 
 
 def validate(command: list[str], timeout: float) -> None:
@@ -341,11 +369,13 @@ def command(args: argparse.Namespace) -> int:
         args.verification_context = invocation_context()
         if args.actor is not None:
             args.actor = task_activity.safe_text(ledger.require_text(args.actor, 'actor'))
-        if not args.worker_command or args.worker_command[0] != '--':
-            raise ledger.LedgerError('A verification command after -- is required')
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        if not args.worker_command:
+            return _command_checks(db, args)
+        if args.worker_command[0] != '--':
+            raise ledger.LedgerError('A verification command after -- is required (or no command to run declared checks)')
         argv = args.worker_command[1:]
         validate(argv, args.timeout)
-        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
             task = store.show(args.task)
             project = task['project']
@@ -362,16 +392,63 @@ def command(args: argparse.Namespace) -> int:
         record = next((item for item in records if item['id'] == args.verification_id), None)
         if record is None:
             raise ledger.LedgerError(f'Verification evidence unavailable (command exit {code}); closure remains gated')
-        print(json.dumps(record, ensure_ascii=True) if args.json else
-              f"{record['id']} exit={record['exit_code']} duration={record['duration_seconds']:.3f}s "
-              f"revision={record['revision']} fingerprint={record['fingerprint']} changed={record['state_changed']}\n"
-              + '<untrusted_data name="verification_output">\n'
-              + escape_display_controls(record['output_tail']).replace('<', '&lt;').replace('>', '&gt;')
-              + '\n</untrusted_data>')
+        print(json.dumps(record, ensure_ascii=True) if args.json else render(record))
+        if record['fingerprint'] is None:
+            print(f"Warning: this run cannot be closure evidence: {task_activity.safe_text(record.get('error') or 'fingerprint unavailable')}."
+                  " Fix that (for example commit the initial revision) and verify again.", file=sys.stderr)
         return code
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         print(task_activity.safe_text(exc), file=sys.stderr)
         return 1
+
+
+def render(record: dict[str, Any]) -> str:
+    return (f"{record['id']} exit={record['exit_code']} duration={record['duration_seconds']:.3f}s "
+            f"revision={record['revision']} fingerprint={record['fingerprint']} changed={record['state_changed']}\n"
+            f"command: {escape_display_controls(shlex.join(record['command']))}\n"
+            + '<untrusted_data name="verification_output">\n'
+            + escape_display_controls(record['output_tail']).replace('<', '&lt;').replace('>', '&gt;')
+            + '\n</untrusted_data>')
+
+
+def declared_checks(db: Path, task: str) -> list[list[str]]:
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        return store.show(task)['checks']
+
+
+def run_checks(db: Path, task: str, checks: list[list[str]], *, label: str = '', timeout: float = 300,
+               actor: str | None = None, on_record: Any = None) -> list[dict[str, Any]]:
+    """Run checks in order and stop at the first failing one; each run is its own verification record."""
+    records = []
+    for check in checks:
+        record = run(db, task, check, label=label, timeout=timeout, actor=actor)
+        records.append(record)
+        if on_record:
+            on_record(record)
+        if record['exit_code'] != 0:
+            break
+    return records
+
+
+def _command_checks(db: Path, args: argparse.Namespace) -> int:
+    checks = declared_checks(db, args.task)
+    if not checks:
+        raise ledger.LedgerError(f'{args.task} declares no acceptance checks; pass -- COMMAND [ARGS...] or declare them '
+                                 f"with: hipson task checks --task {args.task} --check 'COMMAND ARGS'")
+    validate(checks[0], args.timeout)
+    records = run_checks(db, args.task, checks, label=args.label, timeout=args.timeout, actor=args.actor,
+                         on_record=None if args.json else lambda record: print(render(record), flush=True))
+    if args.json:
+        print(json.dumps(records, ensure_ascii=True))
+    failed = next((record for record in records if record['exit_code'] != 0), None)
+    if failed is None:
+        if not args.json:
+            print(f'All {len(records)} acceptance checks passed.')
+        return 0
+    skipped = len(checks) - len(records)
+    print(f"Check failed: {shlex.join(failed['command'])} (exit {failed['exit_code']})"
+          + (f'; {skipped} later checks not run' if skipped else ''), file=sys.stderr)
+    return int(failed['exit_code']) or 1
 
 
 def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: float = 300,

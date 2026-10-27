@@ -482,10 +482,13 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'findings'").fetchall() == []
         assert _rows(SimpleNamespace(connection=connection)) == before
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         after = _rows(store)
-        for table in ("tasks", "events", "claims"):
+        for table in ("events", "claims"):
             assert after[table] == before[table]
+        # v7 appends declared acceptance checks, empty for migrated tasks.
+        assert [row[:-1] for row in after["tasks"]] == before["tasks"]
+        assert {row[-1] for row in after["tasks"]} == {"[]"}
         assert [row[:-6] for row in after["assignments"]] == before["assignments"]
         assert all(row[-6:-1] == (None,) * 5 for row in after['assignments'])
         assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']

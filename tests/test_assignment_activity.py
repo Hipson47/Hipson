@@ -44,12 +44,15 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
             assert connection.execute('SELECT version FROM schema_version').fetchone()[0] == version
             assert _rows(SimpleNamespace(connection=connection)) == before
         with closing(ledger.Ledger(db)) as store:
-            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 6
+            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
             after = _rows(store)
             extra = {1: 10, 3: 5, 4: 4}[version]
             assert [row[:-extra] for row in after['assignments']] == before['assignments']
-            for table in ('tasks', 'events', 'claims'):
+            for table in ('events', 'claims'):
                 assert after[table] == before[table]
+            # v7 appends declared acceptance checks, empty for migrated tasks.
+            assert [row[:-1] for row in after['tasks']] == before['tasks']
+            assert {row[-1] for row in after['tasks']} == {'[]'}
             assert store.activity('A-0002')['ack_state'] == 'not_required'
             assert_strict_schema('task.schema.json', store.show('T-0001'))
         with closing(ledger.Ledger(db)) as store:

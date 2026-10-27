@@ -191,7 +191,7 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
             decisions = [event for event in events if event['type'] in ('status', 'override', 'acknowledged')
                          or event['type'].endswith('_override')]
             failed = [item for item in assignments if item['status'] in ('failed', 'cancelled')
-                      or (item['failure_journal'] and item['failure_journal'].get('result_state') != 'valid')
+                      or (item['failure_journal'] and item['failure_journal'].get('result_state') == 'rejected')
                       or (item['result'] and item['result']['status'] != 'completed')]
             tasks.append({**task, 'assignments': assignments, 'decisions': decisions, 'failed_attempts': failed})
     entries.sort(key=lambda item: (item['status'] in ('done', 'cancelled') and not item['pending_results'],

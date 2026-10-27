@@ -12,7 +12,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hipson import contracts
-from hipson.ledger import BUSY_TIMEOUT_MS, ClaimConflictError, Ledger, LedgerError, default_ledger_db, normalize_scope
+from hipson.ledger import (
+    BUSY_TIMEOUT_MS,
+    SCHEMA_VERSION,
+    ClaimConflictError,
+    Ledger,
+    LedgerError,
+    default_ledger_db,
+    normalize_scope,
+)
 from hipson.redaction import REDACTION
 from tests.json_schema import schema_errors
 from tests.test_hipson_helpers import assert_schema_valid, run_cli, run_cli_inprocess
@@ -323,7 +331,7 @@ def test_ledger_schema_version_wal_and_append_only_events(tmp_path: Path):
         assert store.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert store.connection.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
         for sql in ("UPDATE events SET summary = 'changed'", "DELETE FROM events"):
             _error(lambda sql=sql: store.connection.execute(sql), "append-only", sqlite3.IntegrityError)
         assert len(store.events(task)) == 1 and store.show(task)["revision"] == 1

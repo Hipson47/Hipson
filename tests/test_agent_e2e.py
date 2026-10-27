@@ -51,7 +51,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
                     HIPSON_LEDGER=str(sentinel)):
         runs = [harness.run_scenario(name, tmp_path / name, keep=True) for name in harness.scenario_names()]
     assert sentinel.read_text() == "owner state must be untouched"
-    assert len(runs) == 9
+    assert len(runs) == len(harness.scenario_names()) == 10
     for run in runs:
         assert run["passed"], run
         assert run["metrics"]["hipson_invocations"] > 0
@@ -86,6 +86,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
         ('false-green', 'false-green.sh', 'must not close'),
+        ('checks-close', 'checks-close-weaken.sh', 'declared acceptance checks were changed'),
         ('altered-tests', 'altered-tests.sh', 'altered acceptance tests'),
         ('stale-verify', 'stale-verify.sh', 'fresh verification'),
         ('stale-verify', 'stale-verify-cross-task.sh', 'ordered'),

@@ -10,6 +10,7 @@ import ctypes
 import json
 import os
 import re
+import shlex
 import socket
 import sqlite3
 import subprocess
@@ -24,7 +25,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -101,7 +102,8 @@ SCHEMA: tuple[str, ...] = (
         lead TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        revision INTEGER NOT NULL CHECK (revision >= 0)
+        revision INTEGER NOT NULL CHECK (revision >= 0),
+        checks TEXT NOT NULL DEFAULT '[]'
     )""",
     """CREATE TABLE assignments (
         id TEXT PRIMARY KEY,
@@ -210,6 +212,13 @@ VERIFICATIONS_DDL = (
 )
 SCHEMA = (*SCHEMA, *VERIFICATIONS_DDL)
 MIGRATION_V5_TO_V6 = (*VERIFICATIONS_DDL, "UPDATE schema_version SET version = 6 WHERE singleton = 1")
+MIGRATION_V6_TO_V7 = (
+    "ALTER TABLE tasks ADD COLUMN checks TEXT NOT NULL DEFAULT '[]'",
+    "UPDATE schema_version SET version = 7 WHERE singleton = 1",
+)
+MAX_CHECKS = 16
+MAX_CHECK_ARGS = 64
+CHECK_ARG_LIMIT = 4096
 
 
 class Task(TypedDict):
@@ -220,6 +229,7 @@ class Task(TypedDict):
     title: str
     objective: str
     acceptance: list[str]
+    checks: list[list[str]]
     status: str
     lead: str
     created_at: str
@@ -381,6 +391,33 @@ def require_text(value: str, field: str) -> str:
     if not value.strip():
         raise LedgerError(f"{field} must not be empty")
     return value.strip()
+
+
+def validate_checks(checks: Sequence[Sequence[str]]) -> list[list[str]]:
+    """Acceptance checks are exact argv lists run by the lead without a shell."""
+    if isinstance(checks, str) or len(checks) > MAX_CHECKS:
+        raise LedgerError(f"Acceptance checks must be a list of at most {MAX_CHECKS} argv lists")
+    normalized: list[list[str]] = []
+    for check in checks:
+        if isinstance(check, str) or not isinstance(check, Sequence) or not check or len(check) > MAX_CHECK_ARGS:
+            raise LedgerError(f"Each acceptance check must be a nonempty argv list of at most {MAX_CHECK_ARGS} items")
+        argv = list(check)
+        for arg in argv:
+            if (not isinstance(arg, str) or len(arg) > CHECK_ARG_LIMIT
+                    or any(ord(char) < 32 or ord(char) == 127 for char in arg)):
+                raise LedgerError(f"Acceptance check arguments must be strings of at most {CHECK_ARG_LIMIT} "
+                                  "characters without control characters")
+            if redact_text(arg) != arg:
+                raise LedgerError("Acceptance checks must not contain secret-shaped text; pass secrets via the environment")
+        if not argv[0].strip():
+            raise LedgerError("An acceptance check needs a command name")
+        if argv not in normalized:
+            normalized.append(argv)
+    return normalized
+
+
+def checks_text(checks: Sequence[Sequence[str]]) -> str:
+    return '; '.join(shlex.join(check) for check in checks) or 'none declared'
 
 
 def _validate_result_value(value: Any, schema: dict[str, Any], path: str) -> None:
@@ -681,7 +718,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -699,6 +736,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2, 3, 4, 5):
                         for statement in MIGRATION_V5_TO_V6:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5, 6):
+                        for statement in MIGRATION_V6_TO_V7:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -725,6 +765,7 @@ class Ledger:
         objective: str,
         acceptance: Sequence[str] = (),
         lead: str = "claude",
+        checks: Sequence[Sequence[str]] = (),
     ) -> TaskView:
         project_path = str(Path(project).expanduser().resolve())
         if redact_text(project_path) != project_path:
@@ -733,6 +774,7 @@ class Ledger:
         objective = redact_text(require_text(objective, "objective"))
         lead = redact_text(require_text(lead, "lead"))
         accepted = [redact_text(item) for item in acceptance]
+        declared = validate_checks(checks)
         with self._transaction():
             number = self.connection.execute(
                 "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1 FROM tasks"
@@ -740,10 +782,30 @@ class Ledger:
             task = f"T-{number:04d}"
             now = _timestamp()
             self.connection.execute(
-                "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0)",
-                (task, project_path, title, objective, json.dumps(accepted), lead, now, now),
+                "INSERT INTO tasks (id, project, title, objective, acceptance, status, lead, created_at, updated_at,"
+                " revision, checks) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0, ?)",
+                (task, project_path, title, objective, json.dumps(accepted), lead, now, now, json.dumps(declared)),
             )
             self._append_event(task, lead, "opened", title, [])
+            if declared:
+                self._append_event(task, lead, "checks_set", "acceptance checks: " + checks_text(declared), [])
+            return self._view(task)
+
+    def set_checks(self, task: str, *, checks: Sequence[Sequence[str]], actor: str, reason: str = "") -> TaskView:
+        """Replace the declared acceptance checks; closure needs each one to pass fresh."""
+        actor = redact_text(require_text(actor, "actor"))
+        declared = validate_checks(checks)
+        with self._transaction():
+            current = self._task(task)
+            if current["status"] in ("done", "cancelled"):
+                raise LedgerError(f"Cannot change acceptance checks of {current['status']} task {task}")
+            if current["checks"] and not reason.strip():
+                raise LedgerError(f"Replacing declared acceptance checks of {task} requires --reason")
+            self.connection.execute("UPDATE tasks SET checks = ? WHERE id = ?", (json.dumps(declared), task))
+            summary = "acceptance checks: " + checks_text(declared)
+            if current["checks"]:
+                summary += f"; previously: {checks_text(current['checks'])}; reason: {redact_text(reason.strip())}"
+            self._append_event(task, actor, "checks_set", summary, [])
             return self._view(task)
 
     def assign(
@@ -838,7 +900,8 @@ class Ledger:
         # Raise after committing the conflict event and any orphan recovery.
         # No new assignment or claims have been created in this branch.
         if result is None:
-            raise ClaimConflictError(conflict)
+            raise ClaimConflictError(conflict + f"; inspect it with hipson task activity --assignment "
+                                     f"{holder['assignment']} and wait, or run hipson task reap if its owner died")
         return cast(Assignment, redact_value(result))
 
     def reap(self, *, task: str | None = None, dry_run: bool = False) -> list[ReapedAssignment]:
@@ -1108,7 +1171,9 @@ class Ledger:
             current = self._task(task)
             previous = current["status"]
             if to not in TRANSITIONS[previous]:
-                raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to}")
+                allowed = ', '.join(sorted(TRANSITIONS[previous])) or 'none (terminal)'
+                hint = f"; hipson task close --task {task} verifies and closes in one step" if to == 'done' else ''
+                raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}")
             refs: list[str] = []
             view = self._view(task)
             verification = view['verification']
@@ -1140,15 +1205,19 @@ class Ledger:
                 )
             if to in ('review', 'done'):
                 if blockers and not force:
-                    raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers))
+                    hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
+                            f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
+                            if not verification['passing'] else '')
+                    raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint)
                 if force and to == 'review':
                     self._append_event(task, actor, 'review_override',
                                        f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
-                accepted = verification['accepted']
-                if accepted:
-                    refs.append(accepted)
+                accepted_ids = verification['accepted_ids']
+                refs.extend(accepted_ids)
                 summary = summary or f'{previous} -> {to}'
-                summary += '; lead verification: ' + (accepted or 'OVERRIDDEN: ' + '; '.join(verification['reasons']))
+                summary += '; lead verification: ' + (', '.join(accepted_ids)
+                                                      or 'OVERRIDDEN: ' + '; '.join(verification['reasons']))
+                summary += '; acceptance checks: ' + checks_text(view['checks'])
             self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
             if to == 'cancelled':
                 summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
@@ -1160,7 +1229,7 @@ class Ledger:
                     self._append_event(task, actor, to + '_override',
                                        f"Reason: {reason.strip()}; final verification blockers: "
                                        + '; '.join(final['verification']['reasons']), [])
-                    refs = [ref for ref in refs if ref != verification['accepted']]
+                    refs = [ref for ref in refs if ref not in verification['accepted_ids']]
                     summary += '; final lead verification OVERRIDDEN: ' + '; '.join(final['verification']['reasons'])
             self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
             stored = self._task(task)
@@ -1242,7 +1311,7 @@ class Ledger:
     def _task(self, task: str) -> Task:
         row = self.connection.execute("SELECT * FROM tasks WHERE id = ?", (task,)).fetchone()
         if row is None:
-            raise LedgerError(f"Task not found: {task}")
+            raise LedgerError(f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)")
         return self._task_dict(row)
 
     def _assignment(self, assignment: str) -> Assignment:
@@ -1256,7 +1325,7 @@ class Ledger:
         from hipson.task_verification import project_state, verification_state
         records = self.verifications(task)
         verification = verification_state(records, project_state(current['project'], self.path),
-                                          self._builder_finished_seq(task), current['lead'])
+                                          self._builder_finished_seq(task), current['lead'], current['checks'])
         assignments = [
             self._assignment_dict(row)
             for row in self.connection.execute(
@@ -1298,6 +1367,7 @@ class Ledger:
             "title": row["title"],
             "objective": row["objective"],
             "acceptance": json.loads(row["acceptance"]),
+            "checks": json.loads(row["checks"]) if "checks" in row.keys() else [],
             "status": row["status"],
             "lead": row["lead"],
             "created_at": row["created_at"],

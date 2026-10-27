@@ -4,11 +4,14 @@
 
 - After context loss: `hipson lead resume`
 - What needs attention now: `hipson task now`
-- Acknowledge deliveries: `hipson task ack --assignment A-0001`
-- Verify the candidate: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Start with acceptance checks: `hipson task open --project . --title T --objective O --check 'pytest -q' --start`
 - Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
+- Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Verify and close (runs the checks): `hipson task close --task T-0001`
+- One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
+- Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
 
-Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
+The lead (for example Claude Code or Codex) is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
 never write the ledger themselves. `actor` and `lead` are recorded labels, **not
 authenticated identities**. This CLI does not enforce that operational boundary.
@@ -41,8 +44,9 @@ use the same central ledger. `task run` also launches a worker; no provider or H
    it does not complete the task or independently verify the worker's report.
 5. The lead inspects the result/journal and diff, verifies acceptance criteria, explicitly
    acknowledges each ended assignment with `hipson task ack --assignment A [--note TEXT]`,
-   runs `hipson task verify --task T -- COMMAND [ARGS...]` on the candidate, then uses
-   `hipson task status` to move the task to `review` and, once accepted, `done`.
+   runs the declared acceptance checks (or `hipson task verify --task T -- COMMAND [ARGS...]`) on the
+   candidate, then moves the task to `review` and, once accepted, `done`; `hipson task close` does
+   these steps and refuses without changing anything when a gate fails.
    Failed work can return from review to `in_progress` for another assignment.
 6. For an interrupted wrapper, inspect `hipson task reap --dry-run`, then run
    `hipson task reap` to cancel proven orphans and release their claims. Reaping
@@ -71,7 +75,10 @@ hipson task finding add --task T-0001 --actor claude --severity major --title "M
 hipson task finding update --finding F-0001 --status fixed --actor claude \
   --resolved-by-assignment A-0001 --resolution-note "Added validation"
 hipson task finding list --task T-0001 --status open --severity major --json
+hipson task checks --task T-0001 --check "python -m pytest -q" --check "ruff check ."
+hipson task verify --task T-0001
 hipson task verify --task T-0001 --label acceptance -- git diff --check
+hipson task close --task T-0001 --to review
 hipson task status --task T-0001 --to review --actor claude
 hipson task status --task T-0001 --to done --actor claude --summary "Review accepted"
 hipson task show --task T-0001 --json
@@ -129,6 +136,39 @@ summary; `--all --json` includes terminal task entries too. MCP tools return thi
 use the **ledger watermark** (latest task update or heartbeat) to keep repeated output identical
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
+
+## Acceptance checks and short flows (1.6)
+
+A task can declare acceptance checks: exact commands that prove its acceptance criteria. Declare them
+with `task open --check CMD` (repeatable; `--start` also moves the new task to `in_progress`), later
+with `hipson task checks --task T --check CMD [--check CMD...]`, or clear them with `--clear`. Each value
+is split like a POSIX shell would split it and stored as an argv list; no shell ever runs it. On Windows,
+write paths in `--check` with forward slashes (a backslash is an escape character); MCP takes argv lists
+directly. Up to 16 checks of up to 64 arguments; arguments must not contain control characters or
+secret-shaped text (pass secrets through the environment). Replacing or clearing declared checks needs
+`--reason`, every change is a `checks_set` event, and both CLI and MCP refuse it in a worker context, so a
+worker cannot rewrite what accepts its own work. Worker briefs list the checks.
+
+With checks declared, `review` and `done` need, for **each** check, its latest lead verification (exact
+argv match) to pass under the freshness rules below. Other verifications are kept as evidence but cannot
+stand in for a check. Without declared checks the previous rule applies: the latest lead verification
+decides. `task show` and the JSON view list every check with `freshness` (`missing`, `current`, `stale`,
+`failing`, `partial`, `unknown`) and its record; `verification.accepted_ids` names the accepted records,
+which the status event references.
+
+- `hipson task verify --task T` without a command runs every declared check in order and stops at the
+  first failure (exit: that check's code). `--json` prints the list of records. MCP `task.verify` without
+  `command` does the same and returns `{records, passing}`.
+- `hipson task close --task T [--to review|done] [--summary S] [-- COMMAND ...]` runs the declared checks
+  that are not currently fresh (or the given command instead), then moves the task through `review` to
+  `done`. It refuses while an assignment is active and, for `done`, first checks unacknowledged results,
+  open blocking/major findings and held claims; a refusal transitions nothing and lists the command that
+  clears each blocker. MCP: `task.close`.
+- `hipson task do --title T --check CMD [--check ...] --actor A [--scope P ...] [--result-file F] -- WORKER ...`
+  opens a task in the current Git repository (or `--project`), starts it, runs one worker through
+  `task run` (default role `builder`, mode `rw`), and, if the worker exits 0 and its structured result (if
+  any) is `completed`, acknowledges that result with a recorded note and closes the task as above.
+  Otherwise the task stays `in_progress` and the worker's exit code is returned.
 
 ## Revision-bound lead verification (1.5)
 

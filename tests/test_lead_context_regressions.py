@@ -207,7 +207,7 @@ def test_lead_views_refuse_rollback_recovery_without_touching_directory(tmp_path
 def test_readme_task_quick_start_executes_to_done(tmp_path):
     readme = (Path(__file__).resolve().parents[1] / 'README.md').read_text()
     block = next(block for block in re.findall(r'```bash\n(.*?)```', readme, re.S)
-                 if block.startswith('hipson task open --project . --title "Fix parser"'))
+                 if block.startswith('hipson task open --project . --title "Smoke test"'))
     commands = []
     for line in block.splitlines():
         args = shlex.split(line)
