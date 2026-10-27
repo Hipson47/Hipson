@@ -570,7 +570,7 @@ def serve_stdio(
 def _handle_request(line: str, *, project: Path) -> dict[str, Any] | None:
     try:
         request = json.loads(line)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:  # Includes integers over Python's digit limit and deep nesting.
         return _error(None, -32700, f"Parse error: {exc}")
     if not isinstance(request, dict):
         return _error(None, -32600, "Invalid request")
@@ -671,8 +671,12 @@ def _contained_arguments(name: str, arguments: dict[str, Any], project: Path) ->
             checked[key] = str(contained(key, arguments[key]))
     if checked.get("work"):
         plan = verification.load_work_plan(checked["work"])
-        if plan.get("project") not in (None, ""):
-            contained("work plan project", plan["project"])
+        # Consumers reload the plan and use its project as written (relative values resolve against the
+        # server's working directory), so only an absolute project inside the served project is accepted.
+        declared = plan.get("project")
+        if not isinstance(declared, str) or not declared or not Path(declared).is_absolute():  # "~" is not expanded downstream.
+            raise ValueError(f"{name}: work plan project must be an absolute path inside the served project {root}")
+        contained("work plan project", declared)
     return checked
 
 

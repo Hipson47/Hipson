@@ -351,3 +351,37 @@ def test_release_publishes_only_from_the_tag_after_ci_passes_on_it():
     assert 'needs: [build, ci]' in release.split('  publish:', 1)[1].split('steps:', 1)[0]
     assert 'test "$GITHUB_REF" = "refs/tags/$TAG"' in release
     assert 'ref: ${{ env.TAG }}' not in release  # Builds the tagged commit the workflow runs on, nothing else.
+
+
+def test_quoted_git_paths_are_decoded_before_sensitivity_checks():
+    from hipson.project import safe_diff
+    # git C-quotes non-ASCII names: "docs/.env exampleé.md" is an ordinary file and keeps its mode change.
+    quoted = 'diff --git "a/docs/.env example\303\251.md" "b/docs/.env example\303\251.md"\nold mode 100644\nnew mode 100755\n'
+    assert 'new mode 100755' in safe_diff(quoted)
+    secret = 'diff --git "a/conf/\303\251/.env" "b/conf/\303\251/.env"\nBinary files differ\n'
+    assert 'sensitive file diff omitted' in safe_diff(secret)
+
+
+def test_work_plans_must_name_the_served_project_absolutely(tmp_path):
+    project = tmp_path / 'served'
+    (project / 'runs').mkdir(parents=True)
+    for declared in ('.', '', None, 'relative/sub'):
+        plan = project / 'runs' / 'plan.json'
+        payload = {'artifact_kind': 'hipson.work_plan', 'work_id': 'w'}
+        if declared is not None:
+            payload['project'] = declared
+        plan.write_text(json.dumps(payload))
+        request = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                   'params': {'name': 'audit.show', 'arguments': {'work': str(plan)}}}
+        result = mcp_server._handle_request(json.dumps(request), project=project)['result']
+        assert result['isError'] is True and 'absolute path inside the served project' in result['content'][0]['text']
+
+
+def test_oversized_json_integers_are_a_parse_error_not_a_crash(tmp_path):
+    huge = '{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "work.create", ' \
+           '"arguments": {"diff_lines": ' + '9' * 5000 + '}}}'
+    output = io.StringIO()
+    stdin = io.StringIO(huge + '\n' + json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'}) + '\n')
+    mcp_server.serve_stdio(project_path=tmp_path, stdin=stdin, stdout=output)
+    replies = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert replies[0]['error']['code'] == -32700 and replies[1]['id'] == 2

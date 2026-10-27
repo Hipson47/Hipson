@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import re
 from pathlib import Path
 from typing import Any
@@ -136,21 +137,31 @@ def drop_sensitive_diff_sections(diff: str) -> str:
 
 def _diff_paths(section: list[str]) -> list[str]:
     """Complete old/new paths of one diff section; whitespace inside a file name is kept intact."""
+    def c_unquote(quoted: str) -> str:
+        # Git C-quotes unusual names: \", \\, \t, \n and octal UTF-8 bytes such as \303\251.
+        return codecs.escape_decode(quoted.encode("latin-1", "backslashreplace"))[0].decode("utf-8", "replace")
+
     def unquote(path: str) -> str:
-        path = path.split("\t", 1)[0]
-        return path[1:-1] if len(path) > 1 and path[0] == path[-1] == '"' else path
+        if path.startswith('"'):
+            match = re.match(r'"((?:[^"\\]|\\.)*)"', path)
+            return c_unquote(match.group(1)) if match else path.strip('"')
+        return path.split("\t", 1)[0]
+
+    def strip_side(path: str) -> str:
+        return path[2:] if path[:2] in ("a/", "b/") else path
 
     paths: list[str] = []
     rest = section[0].split(" ", 2)[2] if section[0].count(" ") >= 2 else ""
     size = (len(rest) - 5) // 2
-    if not rest.startswith('"') and size > 0 and rest == f"a/{rest[2:2 + size]} b/{rest[2:2 + size]}":
+    if rest.startswith('"'):
+        paths.extend(strip_side(c_unquote(value)) for value in re.findall(r'"((?:[^"\\]|\\.)*)"', rest))
+    elif size > 0 and rest == f"a/{rest[2:2 + size]} b/{rest[2:2 + size]}":
         paths.append(rest[2:2 + size])
     for line in section[1:]:
         if line.startswith("@@"):
             break  # Hunk lines are content: "--- a/x" there is a removed line, not a header.
         if line.startswith(("--- ", "+++ ")):
-            value = unquote(line[4:])
-            paths.append(value[2:] if value[:2] in ("a/", "b/") else value)
+            paths.append(strip_side(unquote(line[4:])))
         elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
             paths.append(unquote(line.split(" ", 2)[2]))
     if not paths:  # Unparseable header: fall back to conservative token checks.
