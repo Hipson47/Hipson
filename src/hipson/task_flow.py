@@ -163,7 +163,7 @@ def _run_worker(command: list[str], cwd: str) -> int:
             except OSError:
                 pass
 
-    previous = {}
+    previous: dict[int, Any] = {}
     if sys.platform != 'win32':
         previous = {number: signal.signal(number, forward) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
