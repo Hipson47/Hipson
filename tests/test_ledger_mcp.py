@@ -17,8 +17,8 @@ from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
-    'lead.resume': (set(), {'project'}),
-    'task.now': (set(), {'project'}),
+    'lead.resume': (set(), {'project', 'all'}),
+    'task.now': (set(), {'project', 'all'}),
     "task.activity": ({"assignment"}, set()),
     "task.ack": ({"assignment", "approved"}, {"note"}),
     "task.show": ({"task"}, set()),

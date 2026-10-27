@@ -6,7 +6,10 @@
   activity ages, review decisions and terminal cleanup, with project-local full commit SHAs and subjects.
   Add deterministic `lead resume` / MCP `lead.resume` for context recovery: objectives, acceptance,
   decisions, failures, findings, verification revision freshness and project Git state. Text is bounded
-  to 24,000 characters with untrusted evidence boundaries; JSON retains the full view.
+  to 4,096 UTF-8 bytes with untrusted evidence boundaries and explicit omissions. Open work comes
+  first; terminal tasks collapse to a count with cleanup IDs (`--all` / MCP `all: true` expands them).
+  `--all --json` retains the full view. Pre-v5 finished assignments and closed-task deliveries require
+  no acknowledgment, preventing old history from flooding pending results or blocking closure.
   Add an offline resume mission with reference and broken solutions for acknowledgement, live-scope
   preservation and finding repair.
 - Record bounded, redacted assignment activity and progress-file observations in `task run`,
@@ -14,6 +17,9 @@
   Activity never releases claims. Add `task activity` and explicit `task ack` (also MCP tools);
   unacknowledged deliveries remain visible on board/context and block `done` unless overridden.
   Migrate ledgers transactionally to v5; add offline worker-death and busy-lead agent scenarios.
+- Suppress UTF-16/binary activity observations before redaction, mask overlapping environment
+  credentials longest-first, and drain final progress through the observed EOF in bounded batches
+  so fast-exiting workers retain their actual final observations and failure-journal tail.
 
 ## 1.3.0 - 2026-10-27
 

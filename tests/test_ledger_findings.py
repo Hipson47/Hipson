@@ -478,7 +478,8 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         for table in ("tasks", "events", "claims"):
             assert after[table] == before[table]
         assert [row[:-6] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-6:] == (None, None, None, None, None, "") for row in after["assignments"])
+        assert all(row[-6:-1] == (None,) * 5 for row in after['assignments'])
+        assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         assert store.findings() == []
         finding = store.add_finding("T-0001", actor="lead", severity="major", title="Legacy follow-up")
         assert finding["id"] == "F-0001" and store.events("T-0001")[-1]["seq"] == 7

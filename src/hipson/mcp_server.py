@@ -66,10 +66,10 @@ MCP_GATED_TOOLS = {
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     'task.now': {
-        'type': 'object', 'properties': {'project': {'type': 'string'}}, 'additionalProperties': False,
+        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}}, 'additionalProperties': False,
     },
     'lead.resume': {
-        'type': 'object', 'properties': {'project': {'type': 'string'}}, 'additionalProperties': False,
+        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}}, 'additionalProperties': False,
     },
     'task.activity': {
         'type': 'object', 'required': ['assignment'],
@@ -673,7 +673,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
         if name in ('task.now', 'lead.resume'):
-            return lead_context.build(None, project=arguments.get('project'), resume=name == 'lead.resume')
+            return lead_context.build(None, project=arguments.get('project'), resume=name == 'lead.resume',
+                                      include_all=arguments.get('all', False))
         if name == 'task.activity':
             raise ledger.LedgerError(f"Assignment not found: {arguments['assignment']}")
         if name in ("task.show", "task.events", "task.brief", "task.context") or (name in ("task.reap", "task.findings") and "task" in arguments):
@@ -682,7 +683,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     # closing() preserves the ledger's own transactions, including committed conflicts.
     with closing(ledger.Ledger(db, create=create, read_only=not create)) as store:
         if name in ('task.now', 'lead.resume'):
-            return lead_context.build(store, project=arguments.get('project'), resume=name == 'lead.resume')
+            return lead_context.build(store, project=arguments.get('project'), resume=name == 'lead.resume',
+                                      include_all=arguments.get('all', False))
         if name == 'task.activity':
             return store.activity(arguments['assignment'])
         if name == 'task.ack':

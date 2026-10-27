@@ -1794,9 +1794,9 @@ def command_lead_view(args: argparse.Namespace) -> int:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if db.exists():
             with closing(ledger.Ledger(db, read_only=True)) as store:
-                payload = lead_context.build(store, project=args.project, resume=args.command == 'lead')
+                payload = lead_context.build(store, project=args.project, resume=args.command == 'lead', include_all=args.all)
         else:
-            payload = lead_context.build(None, project=args.project, resume=args.command == 'lead')
+            payload = lead_context.build(None, project=args.project, resume=args.command == 'lead', include_all=args.all)
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else lead_context.render(payload))
         return 0
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
@@ -2035,12 +2035,14 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
     task_parsers['now'].add_argument('--project')
+    task_parsers['now'].add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
     task_parsers['now'].set_defaults(func=command_lead_view)
 
     lead = subparsers.add_parser('lead', help='Restore lead context from the task ledger')
     lead_sub = lead.add_subparsers(dest='lead_command', required=True)
     resume = lead_sub.add_parser('resume', help='Read deterministic, bounded lead context without changing state')
     resume.add_argument('--project')
+    resume.add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
     resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
     resume.add_argument('--json', action='store_true', help='Print full machine-readable context')
     resume.set_defaults(func=command_lead_view)

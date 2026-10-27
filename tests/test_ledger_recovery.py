@@ -47,7 +47,8 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
         assert [row[:-10] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-10:] == (None, None, None, None, None, None, None, None, None, "") for row in after["assignments"])
+        assert all(row[-10:-1] == (None,) * 9 for row in after['assignments'])
+        assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -158,7 +159,8 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
         assert [row[:-5] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-5:] == (None, None, None, None, "") for row in after["assignments"])
+        assert all(row[-5:-1] == (None,) * 4 for row in after['assignments'])
+        assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)

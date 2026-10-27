@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from hipson import cli, lead_context, mcp_server
 from hipson.ledger import Ledger
+from tests.test_assignment_activity import _v4_file
 
 
 def _open(store, project, title='Parser'):
@@ -62,15 +63,16 @@ def test_now_attention_priority_pending_blocked_active_review_cleanup_open(tmp_p
         pending = _open(store, tmp_path, 'Unread delivery')
         assignment = _assign(store, pending, 'pending')
         store.finish(assignment, result='passed', summary='Legacy completion')
-        # Even terminal delivered results must remain visible until consumed.
-        store.set_status(pending, to='cancelled', actor='lead')
         opened = _open(store, tmp_path)
         view = lead_context.build(store)
-        assert [entry['task'] for entry in view['tasks']] == [pending, blocked, active, review, cleanup, opened]
+        assert [entry['task'] for entry in view['tasks']] == [pending, blocked, active, review, opened]
+        assert view['terminal_tasks'] == {'count': 1, 'cleanup': [cleanup]}
         item = view['tasks'][0]['pending_results'][0]
         assert item['summary'] == 'passed: Legacy completion' and item['ack_state'] == 'unacknowledged'
-        store.ack(assignment)
-        assert pending not in [entry['task'] for entry in lead_context.build(store)['tasks']]
+        store.set_status(pending, to='cancelled', actor='lead')
+        assert store.activity(assignment)['ack_state'] == 'not_required'
+        expanded = lead_context.build(store, include_all=True)
+        assert [entry['task'] for entry in expanded['tasks']] == [blocked, active, review, opened, cleanup, pending]
 
 
 def test_now_activity_age_progress_journals_and_failed_resume(tmp_path):
@@ -234,7 +236,7 @@ def test_resume_hostile_evidence_is_bounded_redacted_and_inside_boundary(tmp_pat
                 store.add_finding(extra, actor='reviewer', severity='major', title='y' * 5000)
         full = lead_context.build(store, resume=True)
         text = lead_context.render(full)
-        assert len(text) <= lead_context.TEXT_LIMIT
+        assert len(text.encode('utf-8')) + 1 <= 4096
         assert len(full['tasks']) == 81 and len(full['tasks'][1]['findings']) == 8
         assert 'Omitted' in text and text.count('</untrusted_data>') == 1
 
@@ -249,3 +251,78 @@ def test_read_only_legacy_ledger_is_not_migrated_by_views(tmp_path):
         assert code == 0 and not errors, errors
         assert json.loads(text)['kind'] in ('task.now', 'lead.resume')
     assert hashlib.sha256(db.read_bytes()).digest() == digest
+
+
+def test_copied_multitask_v4_ledger_no_legacy_pending_and_compact_open_first(tmp_path):
+    source, db = tmp_path / 'v4.sqlite', tmp_path / 'copy.sqlite'
+    _v4_file(source)
+    with closing(sqlite3.connect(source)) as connection:
+        # Model a real history: many closed tasks with multiple old finished assignments,
+        # plus legacy deliveries on work still open at migration time.
+        for number in range(3, 24):
+            task = f'T-{number:04d}'
+            status = 'done' if number < 20 else 'review'
+            connection.execute('INSERT INTO tasks SELECT ?, project, ?, objective, acceptance, ?, lead, '
+                               'created_at, updated_at, revision FROM tasks WHERE id = ?',
+                               (task, f'Historical work {number}', status, 'T-0001'))
+            for attempt in range(2):
+                connection.execute('INSERT INTO assignments SELECT ?, ?, actor, role, mode, scope, status, '
+                                   'started_at, ended_at, owner_pid, owner_boot_id, owner_host, lease_until, '
+                                   'result, owner_pid_namespace FROM assignments WHERE id = ?',
+                                   (f'A-{number * 2 + attempt:04d}', task, 'A-0002'))
+        connection.commit()
+        with closing(sqlite3.connect(db)) as target:
+            connection.backup(target)
+    original = source.read_bytes()
+    copied = db.read_bytes()
+    for read_only in (True, False):
+        with closing(Ledger(db, read_only=read_only)) as store:
+            for task, _ in store.lead_snapshot():
+                for assignment in task['assignments']:
+                    assert assignment['ack_state'] == 'not_required'
+                    assert assignment['acknowledged_at'] is None
+            view = lead_context.build(store, resume=True)
+            assert view['now']['terminal_tasks']['count'] == 17
+            assert all(task['status'] not in ('done', 'cancelled') for task in view['tasks'])
+            assert not any(entry['pending_results'] for entry in view['now']['tasks'])
+            if not read_only:
+                store.set_status('T-0020', to='done', actor='lead')
+                # New deliveries on an open task still require the lead's acknowledgment.
+                assignment = store.assign('T-0021', actor='worker', role='reviewer', mode='ro', scope=['.'])['id']
+                store.finish(assignment, result='passed', summary='New delivery')
+                assert store.activity(assignment)['ack_state'] == 'unacknowledged'
+        if read_only:
+            assert db.read_bytes() == copied
+    assert source.read_bytes() == original
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        for args in (('task', 'now'), ('lead', 'resume')):
+            code, text, errors = _cli(*args)
+            assert code == 0 and not errors
+            assert len(text.encode('utf-8')) <= 4096
+            assert '4096 UTF-8 bytes' in text and 'Terminal tasks: 18' in text
+            assert 'Historical work 3' not in text and '--all' in text
+            code, full, errors = _cli(*args, '--all', '--json')
+            assert code == 0 and not errors
+            expanded = json.loads(full)
+            expanded = expanded.get('now', expanded)
+            assert len(expanded['tasks']) == 23
+            assert expanded['tasks'][0]['task'] == 'T-0021'
+            assert expanded['tasks'][-1]['status'] in ('done', 'cancelled')
+            tool = 'task.now' if args[0] == 'task' else 'lead.resume'
+            mcp = mcp_server._tool_payload(tool, {'all': True}, project=tmp_path)
+            if tool == 'lead.resume':
+                assert mcp == json.loads(full)
+            else:
+                assert mcp['tasks'] == expanded['tasks']
+
+
+def test_resume_byte_budget_reports_omissions_for_multibyte_evidence(tmp_path):
+    with closing(Ledger(tmp_path / 'ledger.sqlite')) as store:
+        for _ in range(15):
+            task = _open(store, tmp_path, '\u754c' * 600)
+            assignment = _assign(store, task)
+            store.finish(assignment, result='failed', summary='\u754c' * 600)
+        text = lead_context.render(lead_context.build(store, resume=True))
+        assert len(text.encode('utf-8')) + 1 <= 4096
+        assert text.count('</untrusted_data>') == 1
+        assert 'Omitted' in text and '--json' in text and 'task show' in text

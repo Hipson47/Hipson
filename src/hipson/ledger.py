@@ -186,11 +186,13 @@ MIGRATION_V3_TO_V4 = (
     "ALTER TABLE assignments ADD COLUMN owner_pid_namespace TEXT",
     "UPDATE schema_version SET version = 4 WHERE singleton = 1",
 )
+LEGACY_ACK_NOTE = 'legacy: finished before v5 acknowledgement tracking'
 MIGRATION_V4_TO_V5 = (
     "ALTER TABLE assignments ADD COLUMN activity TEXT",
     "ALTER TABLE assignments ADD COLUMN failure_journal TEXT",
     "ALTER TABLE assignments ADD COLUMN acknowledged_at TEXT",
     "ALTER TABLE assignments ADD COLUMN ack_note TEXT NOT NULL DEFAULT ''",
+    "UPDATE assignments SET ack_note = 'legacy: finished before v5 acknowledgement tracking' WHERE status <> 'active'",
     "UPDATE schema_version SET version = 5 WHERE singleton = 1",
 )
 
@@ -1207,8 +1209,11 @@ class Ledger:
             "revision": row["revision"],
         }
 
-    @staticmethod
-    def _assignment_dict(row: sqlite3.Row) -> Assignment:
+    def _assignment_dict(self, row: sqlite3.Row) -> Assignment:
+        acknowledged = row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None
+        note = row['ack_note'] if 'ack_note' in row.keys() else ''
+        legacy = 'acknowledged_at' not in row.keys() or note == LEGACY_ACK_NOTE
+        terminal = self._task(row['task'])['status'] in ('done', 'cancelled')
         return {
             "id": row["id"],
             "task": row["task"],
@@ -1230,8 +1235,8 @@ class Ledger:
             'failure_journal': json.loads(row['failure_journal']) if 'failure_journal' in row.keys() and row['failure_journal'] else None,
             'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
-            'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged'
-                          if 'acknowledged_at' in row.keys() and row['acknowledged_at'] else 'unacknowledged'),
+            'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
+                          else 'not_required' if legacy or terminal else 'unacknowledged'),
         }
 
     @staticmethod

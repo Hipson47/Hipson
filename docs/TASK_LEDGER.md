@@ -76,28 +76,34 @@ hipson task reap --task T-0001 --json
 
 ## Lead visibility and context recovery
 
-`hipson task now [--project P] [--json]` reads one consistent ledger snapshot and sorts
+`hipson task now [--project P] [--all] [--json]` reads one consistent ledger snapshot and sorts open
 tasks by pending unacknowledged results/journals, blocked tasks or open blocking/major findings,
-active assignments, review decisions, then terminal cleanup. Other open tasks follow.
+active assignments, review decisions, then other open work. Expanded terminal tasks follow.
 An assignment shows its owner label, role/mode, held scope, last activity timestamp and age,
 latest progress line, delivery summary and failure journal when present. Without heartbeat data,
 the latest referenced progress/finish event or assignment start supplies last activity.
 Task progress events without refs can supply activity when their actor matches the worker.
-Reading activity never reaps assignments or releases claims. Terminal tasks with unread deliveries
-or remaining claims stay visible; acknowledgement is an explicit separate action.
+Reading activity never reaps assignments or releases claims. Terminal tasks collapse to one count,
+including the count and IDs of tasks needing cleanup of active assignments or claims. `--all` expands
+terminal tasks after open work. Acknowledgement is an explicit separate action for open tasks.
 
-`hipson lead resume [--project P] [--json]` adds each nonterminal task's objective, acceptance,
+`hipson lead resume [--project P] [--all] [--json]` adds each nonterminal task's objective, acceptance,
 recent status/override/acknowledgement decisions, failed attempts, open findings, verification
 freshness and current Git branch, HEAD (full SHA and subject), and dirty file count per project.
 `--db PATH` is supported by both commands. The project filter selects tasks in the central ledger;
 it never selects a different database. Missing ledgers return empty views without creating files.
 Reads neither migrate old stores nor update task revisions, acknowledgements or the Git index.
 
-Default text is capped at **24,000 characters**, including evidence delimiters and the closing
-footer. It shows up to five assignments/findings per task, three recent decisions, failures and
-commit references; omissions are explicit and point to `--json` or a narrower project filter.
-JSON retains all entries and complete structured results/journals. MCP tools return this full
-JSON view. Rendering uses stable priority/task ordering and no model or provider. Resume ages
+Text is capped at **4,096 UTF-8 bytes**, including evidence delimiters, the closing footer and
+the CLI's final newline. The budget is displayed, including with `--all`. Space is reserved for
+open-task headings before sharing detail space between tasks; held claims and open findings precede
+historical deliveries. It shows up to five active assignments, pending results and findings per task,
+three recent decisions, failures and commit references. Omitted blocks and detail lines are counted;
+truncated fields are marked. Use `task show --task T --json` / `task events --task T --json`, a narrower
+project filter, or `--all --json` for complete history.
+JSON retains complete structured results/journals for visible tasks and a `terminal_tasks` count/cleanup
+summary; `--all --json` includes terminal task entries too. MCP tools return this JSON view and accept
+`all: true` to expand terminal tasks. Rendering uses stable priority/task ordering and no model or provider. Resume ages
 use the **ledger watermark** (latest task update or heartbeat) to keep repeated output identical
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
@@ -228,10 +234,15 @@ printf '%s\n' 'Finished parser inspection; running focused tests' >> "$HIPSON_PR
 ```
 
 The runner retains at most 20 observations, 1024 characters per observation, and reads at most
-64 KiB of progress per heartbeat; backlogged bytes await later heartbeats. It keeps the original file descriptor
-so replacing the progress path cannot redirect its reads. Oversized lines are discarded; credential
-patterns, known credential environment values, and multiline private keys are masked. Progress
-file disk use is controlled by its writer; these bounds limit runner reads, memory and ledger storage.
+64 KiB of progress per heartbeat; backlogged bytes await later heartbeats. Finalization drains unread
+progress through the observed EOF in 64-KiB batches, preserving multiline-key redaction state and
+retaining only the latest 20 observations. Later appends cannot prolong that scan; finalization time
+depends on the unread backlog. It keeps the original file descriptor so replacing the progress path
+cannot redirect its reads. Oversized lines are discarded. Observations support UTF-8; malformed UTF-8
+or NUL-bearing streams (including UTF-16/32) are suppressed from the first detected encoding violation.
+Raw stdout/stderr relay is unchanged. Credential patterns, known credential environment values
+(deduplicated and masked longest-first), and multiline private keys are masked before persistence.
+Progress file disk use is controlled by its writer; these bounds limit memory and ledger storage.
 The latest heartbeat is a supervisor observation time, not proof of completed worker work.
 Heartbeat/progress writes neither renew leases nor append task events/revisions. Silent or stale
 activity never releases claims; existing owner-liveness and lease rules still decide recovery.
@@ -248,8 +259,14 @@ unobserved project changes, preserving uncertainty. Unverified lease expiry reco
 owner liveness. The legacy Bash launcher receives acknowledgement semantics through `finish`
 and `reap`; activity capture and exit snapshots require the native runner.
 
-Every ended assignment (structured result, legacy finish summary, or reaped failure journal)
-has `ack_state=unacknowledged` until `hipson task ack --assignment A [--note TEXT]`. Reads never
+Every new ended assignment on an open task (structured result, legacy finish summary, or reaped failure journal)
+has `ack_state=unacknowledged` until `hipson task ack --assignment A [--note TEXT]`. Assignments finished
+before v5 get `ack_state=not_required`: read-only legacy views infer this from the old schema, and
+the v5 migration preserves the exemption in `ack_note` without fabricating an acknowledgment event
+or timestamp. On already-migrated v5 stores, open-task results retain their acknowledgment requirement
+because migration provenance was not recorded. Unacknowledged ended assignments on done/cancelled
+tasks also show `not_required`; closed history never creates pending deliveries. Explicitly acknowledged
+results retain `acknowledged`. Exempt results do not block `done`. Reads never
 acknowledge a delivery. Acknowledgement is atomic, idempotent, records the task's lead label,
 timestamp and bounded redacted note, and appends one `acknowledged` event. It refuses active
 assignments. It records consumption, not approval or independent verification of worker claims.
@@ -629,8 +646,8 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.events` | `task` | `after` (exclusive, default `0`) |
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
-| `task.now` | none | `project` |
-| `lead.resume` | none | `project` |
+| `task.now` | none | `project`, `all` |
+| `lead.resume` | none | `project`, `all` |
 | `task.findings` | none | `task`, `status`, `severity` |
 | `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
 | `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |

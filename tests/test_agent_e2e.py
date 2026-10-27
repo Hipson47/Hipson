@@ -61,6 +61,13 @@ def test_agent_e2e_reference_solutions(tmp_path):
         assert (directory / "workspace/.git").is_dir()
         assert (directory / "final.json").is_file()
         assert not (directory / "workspace/codex-home").exists()
+        if run['scenario'] == 'resume':
+            resume = json.loads((directory / 'seed.json').read_text())['resume_output']
+            assert len(resume.encode('utf-8')) <= 4096
+            for required in ('A-0001', 'F-0001', 'src/held', 'src/parser', 'bin/fake-worker fix',
+                             'Leave task in_progress', 'Pair elements retain surrounding whitespace'):
+                assert required in resume, f'Resume omitted context needed to act: {required}'
+            assert resume in (directory / 'mission.md').read_text()
         with patch.object(harness, "execute", side_effect=AssertionError("Replay must not launch a driver")), \
                 patch.object(harness, "cleanup_workers", side_effect=AssertionError("Replay must not signal processes")):
             replay = harness.replay_scenario(directory)

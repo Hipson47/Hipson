@@ -36,7 +36,7 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
         with closing(ledger.Ledger(db, read_only=True)) as store:
             before = _rows(store)
             assert all(a['activity'] is None for a in store.show('T-0001')['assignments'])
-            assert store.activity('A-0002')['ack_state'] == 'unacknowledged'
+            assert store.activity('A-0002')['ack_state'] == 'not_required'
         assert db.read_bytes() == original
         with patch.object(ledger, 'MIGRATION_V4_TO_V5', (*ledger.MIGRATION_V4_TO_V5, 'SELECT * FROM missing')):
             _error(lambda db=db: ledger.Ledger(db), 'missing', sqlite3.OperationalError)
@@ -50,7 +50,7 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
             assert [row[:-extra] for row in after['assignments']] == before['assignments']
             for table in ('tasks', 'events', 'claims'):
                 assert after[table] == before[table]
-            assert store.activity('A-0002')['ack_state'] == 'unacknowledged'
+            assert store.activity('A-0002')['ack_state'] == 'not_required'
             assert_strict_schema('task.schema.json', store.show('T-0001'))
         with closing(ledger.Ledger(db)) as store:
             assert _rows(store) == after
@@ -71,7 +71,7 @@ def test_ack_is_explicit_idempotent_blocks_done_and_preserves_terminal_visibilit
         store.set_status(task, to='done', actor='lead', force=True, reason='Explicit exceptional closure')
         override = next(e for e in store.events(task) if e['type'] == 'done_override')
         assert assignment in override['refs'] and 'unacknowledged' in override['summary']
-        assert store.board()[0]['id'] == task
+        assert store.board() == []
         before = _rows(store)
         with patch.object(store, '_append_event', side_effect=sqlite3.OperationalError('append failed')):
             _error(lambda: store.ack(assignment, note='Not committed'), 'append failed', sqlite3.OperationalError)
@@ -148,6 +148,98 @@ def test_activity_bounds_multiline_redaction_and_worker_boundary(tmp_path):
         assert 'Ignore worker rules' in evidence and 'Ignore worker rules' not in trusted + contract
         assert 'opaque-canary-value' not in '\n'.join(store.connection.iterdump())
         assert_strict_schema('task.schema.json', store.show(task))
+
+
+def test_encoded_activity_never_persists_recoverable_credentials_or_private_keys(tmp_path):
+    secret = 'encoding-canary-credential'
+    private = 'encoding-canary-private-material'
+    text = f'working {secret}\n-----BEGIN PRIVATE KEY-----\n{private}\n-----END PRIVATE KEY-----\n'
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _open(store, tmp_path)['id']
+        with patch.dict(os.environ, ENCODING_TEST_TOKEN=secret):
+            for encoding in ('utf-16-le', 'utf-16-be', 'utf-16'):
+                raw = text.encode(encoding)
+                for width in (1, 3, len(raw)):
+                    assignment = _assign(store, task)['id']
+                    capture = task_activity.Activity(io.BytesIO(raw))
+                    lines = task_activity.Lines()
+                    for start in range(0, len(raw), width):
+                        for line in lines.feed(raw[start:start + width]):
+                            capture.record('stdout', line)
+                    for line in lines.feed(b'', final=True):
+                        capture.record('stdout', line)
+                    snapshot = capture.snapshot(final=True)
+                    store.observe(assignment, snapshot)
+                    store.finish(assignment, result='failed', summary='Encoding failure',
+                                 failure_journal={'log_tail': snapshot['observations']})
+                    persisted = json.dumps(store.activity(assignment))
+                    # Check after undoing the NUL obfuscation as well as the stored JSON itself.
+                    decoded = persisted.replace('\\u0000', '').replace('\x00', '')
+                    assert secret not in decoded and private not in decoded, (encoding, width)
+                    assert 'unsupported encoded observation' in persisted
+            dump = '\n'.join(store.connection.iterdump()).replace('\\u0000', '').replace('\x00', '')
+            assert secret not in dump and private not in dump
+
+
+def test_activity_rejects_split_big_endian_bom_and_preserves_utf8():
+    lines = task_activity.Lines()
+    assert lines.feed(b'\xfe') == ['[unsupported encoded observation]']
+    assert lines.feed(b'\xff' + 'token=private-value\n'.encode('utf-16-be'), final=True) == []
+    lines = task_activity.Lines()
+    raw = 'progress: caf\u00e9 \u754c\n'.encode()
+    observed = []
+    for byte in raw:
+        observed.extend(lines.feed(bytes([byte])))
+    observed.extend(lines.feed(b'', final=True))
+    assert observed == ['progress: caf\u00e9 \u754c']
+
+
+def test_activity_masks_overlapping_credentials_longest_first_in_both_orders(tmp_path):
+    short, complete = 'review-prefix', 'review-prefix-full-secret-suffix'
+    for index, values in enumerate(((short, complete), (complete, short))):
+        with patch.dict(os.environ, {'PREFIX_TEST_TOKEN': values[0], 'COMPLETE_TEST_TOKEN': values[1]}):
+            assert task_activity.safe_text(complete + ' ' + short) == '[REDACTED] [REDACTED]'
+            with closing(ledger.Ledger(tmp_path / f'overlap-{index}.sqlite')) as store:
+                task = _open(store, tmp_path)['id']
+                assignment = _assign(store, task)['id']
+                store.observe(assignment, {'progress': complete, 'last_stdout': short,
+                                          'observations': [{'text': complete}]})
+                store.finish(assignment, result='failed', summary='Failed', failure_journal={
+                    'reason': complete, 'log_tail': [{'text': complete}]})
+                dump = '\n'.join(store.connection.iterdump())
+                assert short not in dump and 'full-secret-suffix' not in dump
+
+
+def test_final_progress_drains_backlog_and_preserves_redaction_state():
+    progress = io.BytesIO(b'old progress\n' * 15000 + b'final action: tests completed')
+    capture = task_activity.Activity(progress)
+    capture.snapshot()
+    snapshot = capture.snapshot(final=True)
+    assert snapshot['progress'] == 'final action: tests completed'
+    assert snapshot['observations'][-1]['text'] == snapshot['progress']
+    assert len(snapshot['observations']) <= task_activity.MAX_ITEMS
+    assert progress.tell() == len(progress.getvalue())
+    # A key beginning before the read boundary must stay suppressed through finalization.
+    raw = b'-----BEGIN PRIVATE KEY-----\n' + b'private-body\n' * 15000
+    capture = task_activity.Activity(io.BytesIO(raw + b'-----END PRIVATE KEY-----\nfinal safe action'))
+    capture.snapshot()
+    snapshot = capture.snapshot(final=True)
+    assert snapshot['progress'] == 'final safe action'
+    assert 'private-body' not in json.dumps(snapshot)
+
+
+def test_fast_exiting_runner_keeps_final_progress_in_failure_journal(tmp_path):
+    with _case(tmp_path) as run:
+        process = run.start("""
+import os
+with open(os.environ['HIPSON_PROGRESS_FILE'], 'wb') as progress:
+    progress.write(b'old progress\\n' * 15000 + b'final action before exit\\n')
+raise SystemExit(7)
+""")
+        assert run.wait(process) == 7, run.stderr(process)
+        assignment = run.view()[0]['assignments'][0]
+        assert assignment['activity']['progress'] == 'final action before exit'
+        assert assignment['failure_journal']['log_tail'][-1]['text'] == 'final action before exit'
 
 
 def test_activity_and_ack_cli_mcp_parity_and_approval_gate(tmp_path):

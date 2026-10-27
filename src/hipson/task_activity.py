@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import subprocess
@@ -22,11 +23,14 @@ HEARTBEAT_SECONDS = 1.0
 
 def safe_text(value: object, limit: int = LINE_LIMIT) -> str:
     text = str(value)
+    if '\x00' in text or '\ufffe' in text or '\ufeff' in text:
+        return '[unsupported encoded observation]'
     if len(text) > READ_LIMIT:
         return '[observation exceeded size limit]'
-    for key, secret in os.environ.items():
-        if secret and re.search(r'(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|ACCESS_KEY_ID)(?:_|$)', key, re.I):
-            text = text.replace(secret, REDACTION)
+    secrets = {secret for key, secret in os.environ.items() if secret and re.search(
+        r'(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|ACCESS_KEY_ID)(?:_|$)', key, re.I)}
+    for secret in sorted(secrets, key=lambda value: (-len(value), value)):
+        text = text.replace(secret, REDACTION)
     text = redact_text(text)
     # Also suppress an incomplete key block, including when bounded reads cut off its end.
     text = re.sub(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*', REDACTION, text, flags=re.DOTALL)
@@ -68,9 +72,25 @@ class Lines:
         self.pending = b''
         self.oversize = False
         self.private = False
+        self.unsupported = False
+        self.decoder = codecs.getincrementaldecoder('utf-8')()
 
     def feed(self, chunk: bytes, *, final: bool = False) -> list[str]:
-        parts = (self.pending + chunk).split(b'\n')
+        if self.unsupported:
+            return []
+        # Observations support UTF-8 only. Reject UTF-16/32 and binary streams before
+        # byte-line splitting can disguise credentials/private-key boundaries with NULs.
+        data = self.pending + chunk
+        try:
+            self.decoder.decode(chunk, final=final)
+            unsupported = b'\x00' in data
+        except UnicodeDecodeError:
+            unsupported = True
+        if unsupported:
+            self.pending = b''
+            self.unsupported = True
+            return ['[unsupported encoded observation]']
+        parts = data.split(b'\n')
         self.pending = parts.pop()
         if final and (self.pending or self.oversize):
             parts.append(self.pending)
@@ -130,10 +150,23 @@ class Activity:
         thread.start()
 
     def snapshot(self, *, final: bool = False) -> dict[str, Any]:
-        chunk = self.progress_file.read(READ_LIMIT)
-        # Only the latest observations in a bounded batch are retained, at most once per heartbeat.
-        for line in self.progress_lines.feed(chunk, final=final)[-MAX_ITEMS:]:
-            self.record('progress', line)
+        remaining = READ_LIMIT
+        if final:
+            position = self.progress_file.tell()
+            remaining = max(0, self.progress_file.seek(0, os.SEEK_END) - position)
+            self.progress_file.seek(position)
+        # Finalization drains through the observed EOF in bounded batches, retaining
+        # parser/key state and only the last MAX_ITEMS. Later appends cannot prolong it.
+        while remaining:
+            chunk = self.progress_file.read(min(READ_LIMIT, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            for line in self.progress_lines.feed(chunk)[-MAX_ITEMS:]:
+                self.record('progress', line)
+        if final:
+            for line in self.progress_lines.feed(b'', final=True):
+                self.record('progress', line)
         with self.lock:
             return bounded_activity({'heartbeat_at': datetime.now(UTC).isoformat(),
                                      'last_stdout': self.last['stdout'], 'last_stderr': self.last['stderr'],
