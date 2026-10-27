@@ -22,6 +22,7 @@ PLATFORM_SKIP_REASONS = {
         "Windows chmod cannot enforce POSIX directory/sidecar permissions; ACL errors are mocked separately",
         "requires POSIX directory mode bits and geteuid; Windows ACL errors are mocked separately",
         "Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege",
+        "requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C",
     },
 }
 

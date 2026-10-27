@@ -149,6 +149,13 @@ if [ "$code" = 9 ]; then ok "native runner preserves failed child code (exit 9)"
 code=$?
 if [ "$code" = 76 ]; then ok "native runner binds project (exit 76)"; else bad "native runner project check (got $code)" "$(cat "$WORK/native-mismatch.log")"; fi
 
+# Short flow (1.6): a declared acceptance check gates closure; task close runs it, task do does it all.
+short=$("$H" task open --project . --title "Short flow" --objective "Close on a declared check" \
+  --check "python3 -c pass" --start --json 2>"$WORK/short-open.log" | json_field '["id"]')
+check "task close runs the declared check" "$H" task close --task "$short"
+check "task do (open, worker, check, close)" "$H" task do --title "One shot" --check "python3 -c pass" \
+  --actor smoke --scope src -- python3 -c 'print("one-shot worker")'
+
 # MCP over stdio: initialize + tools/list + a read tool.
 mcp_out=$(printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \

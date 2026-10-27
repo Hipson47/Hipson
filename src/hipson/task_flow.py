@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -39,20 +40,10 @@ def _db(args: argparse.Namespace) -> Path:
     return Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
 
 
-def done_blockers(view: ledger.TaskView) -> list[str]:
-    """Done blockers other than verification, each with the command that clears it."""
-    task = view['id']
-    blockers = [f"active assignment {item['id']}: wait for it, or hipson task reap --task {task}"
-                for item in view['assignments'] if item['status'] == 'active']
-    blockers += [f"unacknowledged result {item['id']}: read it (hipson task show --task {task}), then "
-                 f"hipson task ack --assignment {item['id']}"
-                 for item in view['assignments'] if item['ack_state'] == 'unacknowledged']
-    blockers += [f"open {item['severity']} finding {item['id']}: fix it, then hipson task finding update "
-                 f"--finding {item['id']} --to fixed --actor {view['lead']}"
-                 for item in view['findings'] if item['severity'] in ('blocking', 'major')]
-    if view['claims'] and not any(item['status'] == 'active' for item in view['assignments']):
-        blockers.append(f'held claims: hipson task reap --task {task}')
-    return blockers
+def _refused(task: str, db: Path, reasons: list[str], records: list[dict[str, Any]], code: int = 1) -> dict[str, Any]:
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        status = store.show(task)['status']
+    return {'task': task, 'closed': False, 'status': status, 'records': records, 'reasons': reasons, 'exit_code': code}
 
 
 def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: str | None = None,
@@ -60,7 +51,8 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
           on_record: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Verify (declared checks that are not yet fresh, or one given command), then review and done.
 
-    Nothing transitions unless every gate is known to pass, so a refused close leaves the task as it was.
+    Known blockers refuse before any check runs; the transitions happen in one ledger transaction that
+    rechecks every gate, so a refused close never leaves an intermediate status behind.
     """
     task_verification.invocation_context()
     if to not in ('review', 'done'):
@@ -72,10 +64,10 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
         raise ledger.LedgerError(f"Cannot close {task} from status {view['status']}")
     if view['status'] == 'review' and to == 'review':
         raise ledger.LedgerError(f'{task} is already in review')
-    blockers = done_blockers(view) if to == 'done' else []
     active = [item['id'] for item in view['assignments'] if item['status'] == 'active']
-    if active:  # Verifying while a worker still writes would only produce stale evidence.
-        raise ledger.LedgerError(f'Cannot close {task}: ' + '; '.join(blockers or [f'active assignment {active[0]}']))
+    blockers = ledger.done_blockers(view) if to == 'done' or active else []
+    if blockers:  # Verifying now would only append evidence to a close that must be refused anyway.
+        return _refused(task, db, blockers, [])
     if command is not None:
         task_verification.validate(command, timeout)
         pending = [command]
@@ -85,30 +77,16 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
                                            actor=actor, on_record=on_record) if pending else []
     failed = next((record for record in records if record['exit_code'] != 0), None)
     if failed is not None:
-        return {'task': task, 'closed': False, 'status': view['status'], 'records': records,
-                'reasons': [f"check `{shlex.join(failed['command'])}` failed with exit {failed['exit_code']}"],
-                'exit_code': int(failed['exit_code']) or 1}
-    with closing(ledger.Ledger(db, create=False)) as store:
-        view = store.show(task)
-        verification = view['verification']
-        if not verification['passing']:
-            hint = ([] if view['checks'] or records else
-                    [f"no acceptance checks declared: run hipson task close --task {task} -- COMMAND, or declare "
-                     f"them with hipson task checks --task {task} --check 'COMMAND'"])
-            return {'task': task, 'closed': False, 'status': view['status'], 'records': records,
-                    'reasons': hint + verification['reasons'], 'exit_code': 1}
-        blockers = done_blockers(view) if to == 'done' else []
-        if blockers:
-            return {'task': task, 'closed': False, 'status': view['status'], 'records': records,
-                    'reasons': blockers, 'exit_code': 1}
-        status = view['status']
-        if status == 'open':
-            store.set_status(task, to='in_progress', actor=actor, summary='started by close')
-            status = 'in_progress'
-        if status == 'in_progress':
-            view = store.set_status(task, to='review', actor=actor, summary=summary)
-        if to == 'done':
-            view = store.set_status(task, to='done', actor=actor, summary=summary)
+        return _refused(task, db, [f"check `{shlex.join(failed['command'])}` failed with exit {failed['exit_code']}"],
+                        records, int(failed['exit_code']) or 1)
+    try:
+        with closing(ledger.Ledger(db, create=False)) as store:
+            view = store.close_task(task, to=to, actor=actor, summary=summary)
+    except ledger.CloseRefusedError as exc:
+        hint = ([] if view['checks'] or records else
+                [f"no acceptance checks declared: run hipson task close --task {task} -- COMMAND, or declare "
+                 f"them with hipson task checks --task {task} --check 'COMMAND'"])
+        return _refused(task, db, hint + exc.reasons, records)
     return {'task': task, 'closed': True, 'status': view['status'], 'records': records, 'reasons': [],
             'accepted': view['verification']['accepted_ids'], 'exit_code': 0}
 
@@ -170,6 +148,35 @@ def _project(value: str | None) -> str:
     return str(Path(top.stdout.strip()).resolve()) if top.returncode == 0 and top.stdout.strip() else str(start)
 
 
+def _run_worker(command: list[str], cwd: str) -> int:
+    """Run the worker supervisor and let it clean up on cancellation instead of killing it.
+
+    On POSIX the runner leads its own session, so terminal signals reach only this process: forward them.
+    On Windows the runner shares the console and receives Ctrl+C itself; keep waiting for its cleanup.
+    """
+    child = subprocess.Popen(command, cwd=cwd)
+
+    def forward(number: int, frame: object) -> None:
+        if child.poll() is None:
+            try:
+                child.send_signal(number)
+            except OSError:
+                pass
+
+    previous = {}
+    if sys.platform != 'win32':
+        previous = {number: signal.signal(number, forward) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    try:
+        while True:
+            try:
+                return child.wait()
+            except KeyboardInterrupt:
+                continue
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)
+
+
 def command_do(args: argparse.Namespace) -> int:
     """Open a task with checks, run one worker, and close it when the worker and every check pass."""
     try:
@@ -195,20 +202,20 @@ def command_do(args: argparse.Namespace) -> int:
               *(['--lease-seconds', str(args.lease_seconds)] if args.lease_seconds is not None else []),
               *(['--result-file', args.result_file] if args.result_file else []),
               *(['--rollout', args.rollout] if args.rollout else []), *args.worker_command]
-    try:
-        code = subprocess.run(worker, cwd=project, check=False).returncode
-    except KeyboardInterrupt:
-        code = 130
+    code = _run_worker(worker, project)
     try:
         with closing(ledger.Ledger(db, create=False)) as store:
             view = store.show(task)
-            mine = [item for item in view['assignments'] if item['actor'] == args.actor]
-            assignment = mine[-1] if mine else None
+            # This task was opened above, so its only assignment is the one the runner recorded.
+            assignment = view['assignments'][0] if len(view['assignments']) == 1 else None
             report = assignment['result'] if assignment else None
+            state = ((assignment['failure_journal'] or {}) if assignment else {}).get('result_state')
             if assignment and assignment['status'] != 'active':
-                print(f"hipson task do: {assignment['id']} {assignment['status']}; "
+                print(f"hipson task do: {assignment['id']} {assignment['status']}; result file: {state or 'n/a'}; "
                       f"result: {task_activity.safe_text(report['summary'] if report else 'none', 400)}", file=sys.stderr)
+            # A rejected or missing requested report is not an unstructured success.
             healthy = (code == 0 and assignment is not None and assignment['status'] == 'passed'
+                       and state != 'rejected' and (state == 'valid' or not args.result_file)
                        and (report is None or report['status'] == 'completed'))
             if not healthy or assignment is None:
                 print(f'hipson task do: worker did not complete (exit {code}); {task} stays {view["status"]}. '

@@ -102,6 +102,7 @@
         "coverage": {"enum": ["complete", "partial"]},
         "metadata_fallback_paths": {"type": "array", "items": {"type": "string"}},
         "command": {"type": "array", "items": {"type": "string", "maxLength": 4096}},
+        "argv_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "exit_code": {"type": "integer"},
         "duration_seconds": {"type": "number", "minimum": 0},
         "started_at": {"type": "string", "format": "date-time"},

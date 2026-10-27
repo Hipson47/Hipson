@@ -255,6 +255,11 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
     return result
 
 
+def argv_identity(argv: list[str]) -> str:
+    """Identify the complete executed argv; the stored command is bounded and redacted for display."""
+    return hashlib.sha256(json.dumps(argv, ensure_ascii=True).encode('ascii')).hexdigest()
+
+
 def _fallback_paths(state: dict[str, Any]) -> list[str]:
     return sorted(item['path'] for item in state.get('files', []) if ':metadata:' in item['state'])
 
@@ -323,7 +328,9 @@ def verification_state(records: list[dict[str, Any]], current: dict[str, Any], b
     check_states: list[dict[str, Any]] = []
     if checks:
         for check in checks:
-            record = next((item for item in reversed(records) if item.get('command') == check), None)
+            # Match the full-argv identity: a longer command must not pass as the check it truncates to.
+            identity = argv_identity(check)
+            record = next((item for item in reversed(records) if item.get('argv_sha256') == identity), None)
             problems = reasons(record) if record else ['missing: never verified; run hipson task verify (no command runs all checks)']
             check_states.append({'command': check, 'record': record['id'] if record else None,
                                  'passing': not problems, 'freshness': _freshness(record, problems), 'reasons': problems})
@@ -487,6 +494,7 @@ def finish(db: Path, args: argparse.Namespace, code: int, started_at: str, start
               'actor': args.actor, 'context': args.verification_context,
               'coverage': 'partial' if fallback else 'complete', 'metadata_fallback_paths': fallback,
               'command': [task_activity.safe_text(arg, 4096) for arg in args.worker_command[1:]],
+              'argv_sha256': argv_identity(args.worker_command[1:]),
               'exit_code': code, 'duration_seconds': max(0, time.monotonic() - started),
               'started_at': started_at, 'finished_at': ledger._timestamp(),
               **before, 'state_changed': bool(changes), 'builder_finished_seq': builder_seq, 'output_tail': output,

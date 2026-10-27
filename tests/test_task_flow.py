@@ -3,11 +3,14 @@
 import json
 import os
 import shlex
+import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import closing
 from pathlib import Path
+from unittest import SkipTest
 from unittest.mock import patch
 
 from hipson import ledger, task_context, task_flow, task_verification
@@ -59,12 +62,29 @@ def test_declared_checks_gate_review_and_done_per_command(tmp_path):
         task_verification.run(store.path, task, PASS)
         task_verification.run(store.path, task, SECOND)
         assert store.show(task)['verification']['passing']
-        # A later failing run of a declared check replaces its earlier pass.
         task_verification.run(store.path, task, [PY, '-c', 'pass', 'extra'])
         assert store.show(task)['verification']['passing']
-        store.set_checks(task, checks=[PASS, FAIL], actor='claude', reason='tighten')
-        task_verification.run(store.path, task, FAIL)
-        _error(lambda: store.set_status(task, to='done', actor='claude'), f'check `{shlex.join(FAIL)}`: failing')
+        # A later failing run of the same argv replaces its earlier pass.
+        flaky = [PY, '-c', 'import os, sys; sys.exit(int(os.environ.get("FLOW_EXIT", "0")))']
+        store.set_checks(task, checks=[PASS, flaky], actor='claude', reason='environment-driven check')
+        task_verification.run(store.path, task, flaky)
+        assert store.show(task)['verification']['passing']
+        with patch.dict(os.environ, FLOW_EXIT='3'):
+            task_verification.run(store.path, task, flaky)
+        _error(lambda: store.set_status(task, to='done', actor='claude'), f'check `{shlex.join(flaky)}`: failing')
+
+
+def test_a_longer_command_cannot_pass_as_the_check_it_truncates_to(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        failing = [PY, '-c', 'import sys; sys.exit(3)'.ljust(ledger.CHECK_ARG_LIMIT)]
+        task = _open(store, project, checks=(failing,))
+        record = task_verification.run(store.path, task, [PY, '-c', failing[2] + ' if False else None'])
+        assert record['exit_code'] == 0 and record['command'] == failing  # Display form is bounded.
+        assert record['argv_sha256'] != task_verification.argv_identity(failing)
+        _error(lambda: store.set_status(task, to='review', actor='claude'), 'missing: never verified')
+        assert task_verification.run(store.path, task, failing)['exit_code'] == 3
+        _error(lambda: store.set_status(task, to='review', actor='claude'), 'failing')
 
 
 def test_cli_verify_without_command_runs_checks_in_order_and_stops_at_first_failure(tmp_path):
@@ -157,18 +177,20 @@ def test_close_reuses_fresh_checks_and_refuses_without_changing_state(tmp_path):
         assignment = store.assign(task, actor='codex', role='builder', mode='ro')['id']
         store.finish(assignment, result='passed', summary='done')
         bare = _open(store, project, checks=())
-    # A builder result after the verification makes it stale, and its unread result blocks done.
+    # A builder result after the verification makes it stale; its unread result refuses done before any check runs.
     result = task_flow.close(db, task)
     assert not result['closed'] and any('unacknowledged result' in reason for reason in result['reasons'])
     with closing(ledger.Ledger(db, read_only=True)) as store:
-        assert store.show(task)['status'] == 'in_progress' and len(store.verifications(task)) == 2
+        before = store.show(task)
+        assert before['status'] == 'in_progress' and len(store.verifications(task)) == 1
     with closing(ledger.Ledger(db)) as store:
         store.ack(assignment, note='read')
-    count = 2
     assert task_flow.close(db, task, to='review')['status'] == 'review'
     with closing(ledger.Ledger(db, read_only=True)) as store:
-        assert len(store.verifications(task)) == count  # The fresh run was reused.
+        assert len(store.verifications(task)) == 2  # The stale check was rerun once.
     assert task_flow.close(db, task)['status'] == 'done'
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert len(store.verifications(task)) == 2  # The fresh run was reused.
     refused = task_flow.close(db, bare)
     assert not refused['closed'] and 'no acceptance checks declared' in refused['reasons'][0]
     failing = task_flow.close(db, bare, command=FAIL)
@@ -176,6 +198,41 @@ def test_close_reuses_fresh_checks_and_refuses_without_changing_state(tmp_path):
     assert task_flow.close(db, bare, command=PASS)['status'] == 'done'
     with patch.dict(os.environ, HIPSON_ASSIGNMENT='A-0001'):
         _error(lambda: task_flow.close(db, bare), 'worker context')
+
+
+def test_close_rechecks_every_gate_in_one_transaction(tmp_path):
+    project = _project(tmp_path)
+    db = tmp_path / 'ledger.sqlite'
+    with closing(ledger.Ledger(db)) as store:
+        task = _open(store, project)
+        task_verification.run(db, task, PASS)
+        # A finding that lands after the caller's checks still refuses done, and review is rolled back too.
+        store.add_finding(task, actor='reviewer', severity='major', title='Late finding')
+        events = len(store.events(task))
+        _error(lambda: store.close_task(task, actor='claude'), 'open major finding', ledger.CloseRefusedError)
+        assert store.show(task)['status'] == 'in_progress' and len(store.events(task)) == events
+        store.update_finding(store.findings(task=task)[0]['id'], actor='claude', status='fixed', resolution_note='ok')
+        events = len(store.events(task))
+        original = store._set_status_locked
+
+        def fail_done(task_id, **kwargs):
+            if kwargs['to'] == 'done':
+                raise ledger.LedgerError('injected failure after review')
+            return original(task_id, **kwargs)
+
+        with patch.object(store, '_set_status_locked', side_effect=fail_done):
+            _error(lambda: store.close_task(task, actor='claude'), 'injected failure')
+        assert store.show(task)['status'] == 'in_progress' and len(store.events(task)) == events
+        assert store.close_task(task, actor='claude')['status'] == 'done'
+        cancelled = _open(store, project)
+
+    def cancel(record):
+        with closing(ledger.Ledger(db)) as writer:
+            writer.set_status(cancelled, to='cancelled', actor='claude', summary='cancelled during verification')
+
+    result = task_flow.close(db, cancelled, to='review', on_record=cancel)
+    assert not result['closed'] and result['status'] == 'cancelled' and result['exit_code'] == 1
+    assert 'close works from open, in_progress or review' in result['reasons'][0]
 
 
 def _worker(tmp_path, project, *, code=0, status='completed'):
@@ -224,6 +281,68 @@ def test_do_leaves_failed_or_partial_work_in_progress(tmp_path):
             assert store.show(task)['status'] == 'in_progress' and not store.verifications(task)
     missing = _cli(project, db, 'do', '--title', 'No check', '--actor', 'fake', '--', PY, script)
     assert missing.returncode != 0 and '--check' in missing.stderr
+    # A malformed report, or a requested one that never appears, is not an unstructured success.
+    result, script = _worker(tmp_path, project)
+    rejected = tmp_path / 'rejected.json'
+    rejected.write_text('{"status": "completed"')
+    bad = _cli(project, db, 'do', '--title', 'Rejected', '--check', shlex.join(PASS), '--actor', 'fake',
+               '--scope', 'source.py', '--result-file', str(rejected), '--', PY, script)
+    assert bad.returncode == 1 and 'result file: rejected' in bad.stderr, bad.stderr
+    absent = _cli(project, db, 'do', '--title', 'Absent', '--check', shlex.join(PASS), '--actor', 'fake',
+                  '--scope', 'source.py', '--result-file', str(tmp_path / 'never.json'), '--', PY, '-c', 'pass')
+    assert absent.returncode == 1 and 'result file: none' in absent.stderr, absent.stderr
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        for task in ('T-0003', 'T-0004'):
+            view = store.show(task)
+            assert view['status'] == 'in_progress' and view['assignments'][0]['ack_state'] == 'unacknowledged'
+
+
+def test_do_finds_its_assignment_despite_label_normalization(tmp_path):
+    project = _project(tmp_path)
+    db = tmp_path / 'ledger.sqlite'
+    result, script = _worker(tmp_path, project)
+    done = _cli(project, db, 'do', '--title', 'Label', '--check', shlex.join(PASS), '--actor', ' fake ',
+                '--scope', 'source.py', '--result-file', str(result), '--', PY, script)
+    assert done.returncode == 0 and 'T-0001 [done]' in done.stdout, done.stderr
+
+
+def test_interrupting_do_lets_the_runner_stop_its_worker(tmp_path):
+    if sys.platform == 'win32':
+        raise SkipTest('requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C')
+    project = _project(tmp_path)
+    db = tmp_path / 'ledger.sqlite'
+    ready, pid_file = tmp_path / 'ready', tmp_path / 'worker.pid'
+    worker = (f'import os, time; open({str(pid_file)!r}, "w").write(str(os.getpid())); '
+              f'open({str(ready)!r}, "w").close(); time.sleep(60)')
+    env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src'), 'AGENT_RUN_GRACE_SECONDS': '2'}
+    for key in ('HIPSON_ROLE', 'HIPSON_TASK', 'HIPSON_ASSIGNMENT'):
+        env.pop(key, None)
+    process = subprocess.Popen([sys.executable, '-m', 'hipson.cli', 'task', 'do', '--db', str(db), '--title', 'Stop',
+                                '--check', shlex.join(PASS), '--actor', 'fake', '--scope', 'source.py', '--',
+                                PY, '-c', worker], cwd=project, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True)
+    try:
+        deadline = time.monotonic() + 20
+        while not ready.exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.05)
+        assert ready.exists(), process.communicate(timeout=5)
+        process.send_signal(signal.SIGINT)
+        _, stderr = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+    assert process.returncode == 130 and 'stays in_progress' in stderr, stderr
+    pid = int(pid_file.read_text())
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        os.kill(pid, signal.SIGKILL)
+        raise AssertionError('The interrupted worker survived task do')
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        view = store.show('T-0001')
+    assert view['status'] == 'in_progress' and view['assignments'][0]['status'] == 'cancelled' and not view['claims']
 
 
 def test_brief_lists_checks_for_the_worker(tmp_path):

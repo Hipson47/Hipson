@@ -335,6 +335,30 @@ class LedgerError(ValueError):
     """Invalid ledger operation, suitable for a CLI error message."""
 
 
+class CloseRefusedError(LedgerError):
+    """A close was refused before any transition; reasons name the command that clears each blocker."""
+
+    def __init__(self, task: str, reasons: list[str]) -> None:
+        super().__init__(f"Cannot close {task}: " + "; ".join(reasons))
+        self.reasons = reasons
+
+
+def done_blockers(view: TaskView) -> list[str]:
+    """Done blockers other than verification, each with the command that clears it."""
+    task = view["id"]
+    active = [item for item in view["assignments"] if item["status"] == "active"]
+    blockers = [f"active assignment {item['id']}: wait for it, or hipson task reap --task {task}" for item in active]
+    blockers += [f"unacknowledged result {item['id']}: read it (hipson task show --task {task}), then "
+                 f"hipson task ack --assignment {item['id']}"
+                 for item in view["assignments"] if item["ack_state"] == "unacknowledged"]
+    blockers += [f"open {item['severity']} finding {item['id']}: fix it, then hipson task finding update "
+                 f"--finding {item['id']} --to fixed --actor {view['lead']}"
+                 for item in view["findings"] if item["severity"] in ("blocking", "major")]
+    if view["claims"] and not active:
+        blockers.append(f"held claims: hipson task reap --task {task}")
+    return blockers
+
+
 class ClaimConflictError(LedgerError):
     """A conflicting assignment was refused and its conflict event committed."""
 
@@ -1168,73 +1192,103 @@ class Ledger:
         actor = require_text(actor, "actor")
         validate_status_override(to=to, force=force, reason=reason)
         with self._transaction():
-            current = self._task(task)
-            previous = current["status"]
-            if to not in TRANSITIONS[previous]:
-                allowed = ', '.join(sorted(TRANSITIONS[previous])) or 'none (terminal)'
-                hint = f"; hipson task close --task {task} verifies and closes in one step" if to == 'done' else ''
-                raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}")
-            refs: list[str] = []
+            return self._set_status_locked(task, to=to, actor=actor, summary=summary, force=force, reason=reason)
+
+    def close_task(self, task: str, *, to: str = "done", actor: str, summary: str = "") -> TaskView:
+        """Move through review (and done) in one transaction; any refused gate rolls back every step."""
+        actor = require_text(actor, "actor")
+        if to not in ("review", "done"):
+            raise LedgerError("Close target must be review or done")
+        with self._transaction():
             view = self._view(task)
-            verification = view['verification']
-            blockers = []
-            if to in ('review', 'done') and not verification['passing']:
-                blockers.extend(verification['reasons'])
+            status = view["status"]
+            if status not in ("open", "in_progress", "review") or (status == "review" and to == "review"):
+                raise CloseRefusedError(task, [f"{task} is {status}; close works from open, in_progress or review"
+                                               + ("" if status != "review" else " (use --to done)")])
+            reasons = [] if view["verification"]["passing"] else list(view["verification"]["reasons"])
             if to == "done":
-                active = [item for item in view["assignments"] if item["status"] == "active"]
-                severe = [item for item in view["findings"] if item["severity"] in ("blocking", "major")]
-                unread = [item for item in view['assignments'] if item['ack_state'] == 'unacknowledged']
-                blockers += [f"active assignment {item['id']} ({item['mode']})" for item in active]
-                blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
-                blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
-                blockers += [f"unacknowledged result {item['id']}" for item in unread]
-                if force:
-                    blocker_refs = list(dict.fromkeys([
-                        *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
-                        *[item["id"] for item in severe],
-                        *[item['id'] for item in unread],
-                    ]))
-                    self._append_event(task, actor, "done_override",
-                                       f"Reason: {reason.strip()}; blockers: " + ("; ".join(blockers) or "none"),
-                                       blocker_refs)
-                remaining = [item for item in view["findings"] if item["severity"] in ("minor", "info")]
-                refs += [item["id"] for item in remaining]
-                summary = f"{previous} -> done" + (f": {summary}" if summary else "")
-                summary += "; remaining minor/info findings: " + (
-                    "; ".join(f"{item['id']} [{item['severity']}]: {item['title']}" for item in remaining) or "none"
-                )
-            if to in ('review', 'done'):
-                if blockers and not force:
-                    hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
-                            f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
-                            if not verification['passing'] else '')
-                    raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint)
-                if force and to == 'review':
-                    self._append_event(task, actor, 'review_override',
-                                       f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
-                accepted_ids = verification['accepted_ids']
-                refs.extend(accepted_ids)
-                summary = summary or f'{previous} -> {to}'
-                summary += '; lead verification: ' + (', '.join(accepted_ids)
-                                                      or 'OVERRIDDEN: ' + '; '.join(verification['reasons']))
-                summary += '; acceptance checks: ' + checks_text(view['checks'])
-            self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
-            if to == 'cancelled':
-                summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
-            final = self._view(task)
-            if to in ('review', 'done') and not final['verification']['passing']:
-                if not force:
-                    raise LedgerError(f"Cannot mark {task} {to}: " + '; '.join(final['verification']['reasons']))
-                if final['verification']['reasons'] != verification['reasons']:
-                    self._append_event(task, actor, to + '_override',
-                                       f"Reason: {reason.strip()}; final verification blockers: "
-                                       + '; '.join(final['verification']['reasons']), [])
-                    refs = [ref for ref in refs if ref not in verification['accepted_ids']]
-                    summary += '; final lead verification OVERRIDDEN: ' + '; '.join(final['verification']['reasons'])
-            self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
-            stored = self._task(task)
-            final['revision'], final['updated_at'] = stored['revision'], stored['updated_at']
-            return final
+                reasons += done_blockers(view)
+            if reasons:
+                raise CloseRefusedError(task, reasons)
+            if status == "open":
+                self._set_status_locked(task, to="in_progress", actor=actor, summary="started by close",
+                                        force=False, reason="")
+            if status != "review":
+                view = self._set_status_locked(task, to="review", actor=actor, summary=summary, force=False, reason="")
+            if to == "done":
+                view = self._set_status_locked(task, to="done", actor=actor, summary=summary, force=False, reason="")
+            return view
+
+    def _set_status_locked(
+        self, task: str, *, to: str, actor: str, summary: str, force: bool, reason: str,
+    ) -> TaskView:
+        current = self._task(task)
+        previous = current["status"]
+        if to not in TRANSITIONS[previous]:
+            allowed = ', '.join(sorted(TRANSITIONS[previous])) or 'none (terminal)'
+            hint = f"; hipson task close --task {task} verifies and closes in one step" if to == 'done' else ''
+            raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}")
+        refs: list[str] = []
+        view = self._view(task)
+        verification = view['verification']
+        blockers = []
+        if to in ('review', 'done') and not verification['passing']:
+            blockers.extend(verification['reasons'])
+        if to == "done":
+            active = [item for item in view["assignments"] if item["status"] == "active"]
+            severe = [item for item in view["findings"] if item["severity"] in ("blocking", "major")]
+            unread = [item for item in view['assignments'] if item['ack_state'] == 'unacknowledged']
+            blockers += [f"active assignment {item['id']} ({item['mode']})" for item in active]
+            blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
+            blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
+            blockers += [f"unacknowledged result {item['id']}" for item in unread]
+            if force:
+                blocker_refs = list(dict.fromkeys([
+                    *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
+                    *[item["id"] for item in severe],
+                    *[item['id'] for item in unread],
+                ]))
+                self._append_event(task, actor, "done_override",
+                                   f"Reason: {reason.strip()}; blockers: " + ("; ".join(blockers) or "none"),
+                                   blocker_refs)
+            remaining = [item for item in view["findings"] if item["severity"] in ("minor", "info")]
+            refs += [item["id"] for item in remaining]
+            summary = f"{previous} -> done" + (f": {summary}" if summary else "")
+            summary += "; remaining minor/info findings: " + (
+                "; ".join(f"{item['id']} [{item['severity']}]: {item['title']}" for item in remaining) or "none"
+            )
+        if to in ('review', 'done'):
+            if blockers and not force:
+                hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
+                        f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
+                        if not verification['passing'] else '')
+                raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint)
+            if force and to == 'review':
+                self._append_event(task, actor, 'review_override',
+                                   f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
+            accepted_ids = verification['accepted_ids']
+            refs.extend(accepted_ids)
+            summary = summary or f'{previous} -> {to}'
+            summary += '; lead verification: ' + (', '.join(accepted_ids)
+                                                  or 'OVERRIDDEN: ' + '; '.join(verification['reasons']))
+            summary += '; acceptance checks: ' + checks_text(view['checks'])
+        self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
+        if to == 'cancelled':
+            summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
+        final = self._view(task)
+        if to in ('review', 'done') and not final['verification']['passing']:
+            if not force:
+                raise LedgerError(f"Cannot mark {task} {to}: " + '; '.join(final['verification']['reasons']))
+            if final['verification']['reasons'] != verification['reasons']:
+                self._append_event(task, actor, to + '_override',
+                                   f"Reason: {reason.strip()}; final verification blockers: "
+                                   + '; '.join(final['verification']['reasons']), [])
+                refs = [ref for ref in refs if ref not in verification['accepted_ids']]
+                summary += '; final lead verification OVERRIDDEN: ' + '; '.join(final['verification']['reasons'])
+        self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
+        stored = self._task(task)
+        final['revision'], final['updated_at'] = stored['revision'], stored['updated_at']
+        return final
 
     def show(self, task: str) -> TaskView:
         with self._transaction(write=False):
