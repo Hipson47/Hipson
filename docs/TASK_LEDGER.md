@@ -160,15 +160,18 @@ execution, confirmed process cleanup, and execution after the latest finished bu
 (including failed/reaped builders). `review` and `done` require the latest record to pass and be fresh;
 a later failed check cannot reuse an older pass.
 Missing, failing or stale evidence refuses the transition without events or status changes, naming
-HEAD movement, changed paths with before/after content/index hashes, or a later builder finish. Both transitions permit `--force --reason`;
+HEAD movement, changed paths with before/after content hashes, or a later builder finish. Both transitions permit `--force --reason`;
 a `review_override` or `done_override` event records the missing evidence and other blockers.
 The final snapshot is checked again inside the status write transaction; a stale or failing final
 snapshot rolls back both status and events. Status events reference the accepted verification ID. Other lifecycle guards, acknowledgement and
 path-claim invariants still apply. Existing done tasks stay done when a store is migrated.
 
-The fingerprint is captured before the command starts. It covers raw tracked content relative to HEAD,
-index entries (including staged-only changes), modes and symlink targets, and existing untracked
-path/content hashes. Within the content budget, every tracked file is read directly regardless of
+The fingerprint is captured before the command starts. It covers file paths, raw working-tree bytes,
+modes and symlink targets, including covered untracked files. Staging alone, with identical covered
+paths and content, preserves freshness, including when an untracked source file becomes staged.
+Staging after a content change remains stale; a commit invalidates verification because HEAD moved.
+Index-entry hashes and tracked flags remain diagnostic observations, not freshness inputs; the dirty
+flag still reports staged changes. Within the content budget, every tracked file is read directly regardless of
 Git's cached size/mtime, including same-size edits with restored timestamps and an index newer than
 the edit. Git's built-in text/EOL normalization is used only for the dirty flag, so a clean CRLF
 checkout stays clean while line-ending changes still invalidate raw-byte freshness. The record retains
@@ -183,8 +186,8 @@ SQLite sidecars are excluded from fingerprints to avoid invalidation by their ow
 
 Content hashing has a **16 MiB per-file limit and 128 MiB total raw-content budget** per snapshot,
 in sorted repository-path order, for Git and non-Git projects alike. Files exceeding either limit
-use a metadata fallback: file mode, size, modification/change times, device/inode identity and index
-entry remain bound, but content is not read. A file skipped for size does not consume the budget;
+use a metadata fallback: file mode, size, modification/change times and device/inode identity
+remain bound, but content is not read. A file skipped for size does not consume the budget;
 later smaller files can still be hashed. In the verification record and current state's `files`
 inventory, fallback entries report `MODE:metadata:REASON:file_limit_bytes=...:total_limit_bytes=...`
 followed by named metadata values. Each entry identifies the path, reason (`file_limit` or

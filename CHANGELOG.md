@@ -3,12 +3,14 @@
 ## Unreleased
 
 - Require fresh passing lead-run verification for `review` and `done`, bound to full HEAD,
-  raw working-tree/index/untracked content and the latest builder finish. Add `task verify`
+  raw working-tree/untracked content and the latest builder finish. Add `task verify`
   and approved MCP `task.verify` with shell-free contained execution, timeouts, timing, redacted
   bounded output and immutable v6 ledger evidence. Explicit force reasons preserve exceptions.
 - Keep verification bound to its pre-command candidate; new non-cache untracked files require a rerun.
-  Report changed paths with before/after content/index hashes;
+  Report changed paths with before/after content hashes;
   a newer failed verification cannot reuse an older pass.
+- Preserve verification freshness when staging identical covered content, including untracked source.
+  Keep index metadata diagnostic; content edits and HEAD movement still invalidate verification.
 - Reject CLI/MCP verification in known worker contexts and retain actor/context provenance;
   only evidence attributed to the task lead satisfies closure. Recheck the final status snapshot
   inside the transaction and roll back status and events if freshness changed.

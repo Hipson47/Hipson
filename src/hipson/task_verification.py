@@ -42,29 +42,25 @@ def _walk_error(error: OSError) -> None:
 
 
 def _fingerprint(files: list[dict[str, Any]]) -> str:
-    digest = hashlib.sha256(b'hipson-raw-tree-v2\0')
+    """Bind covered paths and working-tree content; index fields are observations only."""
+    digest = hashlib.sha256(b'hipson-raw-tree-v3\0')
     for item in files:
-        digest.update(os.fsencode(item['path']) + b'\0' + item['state'].encode() + b'\0'
-                      + (item['index'] or '-').encode() + b'\0' + str(item['tracked']).encode() + b'\0')
+        digest.update(os.fsencode(item['path']) + b'\0' + item['state'].encode() + b'\0')
     return digest.hexdigest()
 
 
 def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
-    """Describe every covered content/index change, including command-created source."""
+    """Describe covered path/content changes, including command-created source."""
     old = {item['path']: item for item in before['files']}
     new = {item['path']: item for item in after['files']}
     changes = []
     for path in sorted(old.keys() | new.keys()):
         left, right = old.get(path), new.get(path)
-        if left == right:
+        previous, current = left['state'] if left else None, right['state'] if right else None
+        if previous == current:
             continue
-        details = []
-        for field in ('state', 'index', 'tracked'):
-            previous, current = left.get(field) if left else None, right.get(field) if right else None
-            if previous != current:
-                details.append(f'{field} before={previous} after={current}')
         display_path = escape_display_controls(task_activity.safe_text(path)).replace('<', '&lt;').replace('>', '&gt;')
-        changes.append(f'{display_path}: ' + ', '.join(details))
+        changes.append(f'{display_path}: state before={previous} after={current}')
     return changes
 
 

@@ -288,7 +288,7 @@ def test_verify_records_real_command_exit_timing_revision_and_redacted_tail(tmp_
             raise AssertionError('Verification history must be immutable')
 
 
-def test_verify_stale_head_index_tracked_untracked_and_builder_finish(tmp_path):
+def test_verify_stale_head_tracked_untracked_and_builder_finish(tmp_path):
     project = _project(tmp_path)
     db = tmp_path / 'ledger.sqlite'
     with closing(ledger.Ledger(db)) as store:
@@ -300,10 +300,9 @@ def test_verify_stale_head_index_tracked_untracked_and_builder_finish(tmp_path):
         file.write_text('value = 2\n')
         os.utime(file, ns=(old.st_atime_ns, old.st_mtime_ns))
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'working tree changed')
-        verify_fixture(store, task)
+        staged = verify_fixture(store, task)
         _git(project, 'add', '.')
-        _error(lambda: store.set_status(task, to='done', actor='lead'), 'working tree changed')
-        verify_fixture(store, task)
+        assert store.show(task)['verification']['accepted'] == staged['id']
         (project / 'new.py').write_text('new = True\n')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'working tree changed')
         verify_fixture(store, task)
@@ -319,6 +318,49 @@ def test_verify_stale_head_index_tracked_untracked_and_builder_finish(tmp_path):
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'latest finished builder assignment')
         verify_fixture(store, task)
         assert store.set_status(task, to='done', actor='lead')['status'] == 'done'
+
+
+def test_verify_staging_identical_content_is_fresh_but_staging_edited_content_is_stale(tmp_path):
+    for name in ('source.py', 'candidate.py'):
+        fixture = tmp_path / name
+        fixture.mkdir()
+        project = _project(fixture)
+        source = project / name
+        source.write_bytes(b'value = 2\n')
+        with closing(ledger.Ledger(fixture / 'ledger.sqlite')) as store:
+            task = _task(store, project)
+            record = verify_fixture(store, task)
+            _git(project, 'add', name)
+            current = store.show(task)['verification']
+            before_file = next(item for item in record['files'] if item['path'] == name)
+            after_file = next(item for item in current['current']['files'] if item['path'] == name)
+            assert before_file['index'] != after_file['index']  # Deterministic index-only change.
+            assert before_file['state'] == after_file['state']
+            assert current['current']['fingerprint'] == record['fingerprint']
+            assert store.set_status(task, to='review', actor='lead')['verification']['accepted'] == record['id']
+            source.write_bytes(b'value = 3\n')
+            _git(project, 'add', name)
+            before = _rows(store)
+            _error(lambda task=task: store.set_status(task, to='done', actor='lead'), name + ': state before=')
+            assert _rows(store) == before
+            current = store.show(task)['verification']
+            assert current['current']['revision'] == record['revision']
+            assert current['current']['fingerprint'] != record['fingerprint']
+            assert current['freshness'] == 'stale' and current['accepted'] is None
+            fresh = verify_fixture(store, task)
+            assert store.set_status(task, to='done', actor='lead')['verification']['accepted'] == fresh['id']
+
+
+def test_verify_staging_during_command_preserves_content_evidence(tmp_path):
+    project = _project(tmp_path)
+    (project / 'source.py').write_bytes(b'value = 2\n')
+    (project / 'candidate.py').write_bytes(b'new = True\n')
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = task_verification.run(store.path, task, ['git', 'add', 'source.py', 'candidate.py'])
+        assert record['exit_code'] == 0 and not record['state_changed'] and record['changes'] == [], record
+        assert store.set_status(task, to='review', actor='lead')['verification']['accepted'] == record['id']
+        assert store.set_status(task, to='done', actor='lead')['verification']['accepted'] == record['id']
 
 
 def test_verify_rehashes_tracked_bytes_when_git_trusts_same_size_and_restored_mtime(tmp_path):
@@ -656,7 +698,7 @@ def test_verify_preexisting_untracked_and_tracked_changes_have_precise_reasons(t
             _error(lambda task=task: store.set_status(task, to='review', actor='lead'), name + ': state before=')
 
 
-def test_generated_artifacts_becoming_tracked_require_new_verification(tmp_path):
+def test_generated_source_requires_verification_but_staging_it_preserves_freshness(tmp_path):
     project = _project(tmp_path)
     with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
         task = _task(store, project)
@@ -664,10 +706,10 @@ def test_generated_artifacts_becoming_tracked_require_new_verification(tmp_path)
             'from pathlib import Path; Path("generated.txt").write_text("artifact")'])
         assert record['generated_files'] == [] and record['state_changed']
         _error(lambda: store.set_status(task, to='review', actor='lead'), 'generated.txt:')
-        verify_fixture(store, task)
+        verified = verify_fixture(store, task)
         store.set_status(task, to='review', actor='lead')
         _git(project, 'add', 'generated.txt')
-        _error(lambda: store.set_status(task, to='done', actor='lead'), 'generated.txt:')
+        assert store.set_status(task, to='done', actor='lead')['verification']['accepted'] == verified['id']
 
 
 def test_latest_failed_verification_cannot_reuse_an_older_pass(tmp_path):
@@ -852,11 +894,17 @@ def test_normalization_refuses_unavailable_filter_configuration(tmp_path):
 def test_verification_dirty_flag_includes_index_only_changes(tmp_path):
     project = _project(tmp_path)
     file = project / 'source.py'
-    file.write_text('value = 2\n')
-    _git(project, 'add', 'source.py')
-    file.write_text('value = 1\n')  # Worktree matches HEAD, but staged content differs.
-    state = task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')
-    assert state['fingerprint'] and state['dirty'] is True, state
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        original = file.read_bytes()
+        file.write_bytes(original.replace(b'1', b'2'))
+        _git(project, 'add', 'source.py')
+        file.write_bytes(original)  # Worktree matches HEAD, but staged content differs.
+        state = task_verification.project_state(str(project), store.path)
+        assert state['fingerprint'] == record['fingerprint'] and state['dirty'] is True, state
+        assert store.set_status(task, to='review', actor='lead')['verification']['accepted'] == record['id']
+        assert store.set_status(task, to='done', actor='lead')['verification']['accepted'] == record['id']
 
 
 def test_crlf_checkout_is_clean_but_raw_line_ending_changes_stale_verification(tmp_path):
