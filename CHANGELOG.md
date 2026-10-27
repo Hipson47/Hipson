@@ -8,10 +8,15 @@
   decisions, failures, findings, verification revision freshness and project Git state. Text is bounded
   to 4,096 UTF-8 bytes with untrusted evidence boundaries and explicit omissions. Open work comes
   first; terminal tasks collapse to a count with cleanup IDs (`--all` / MCP `all: true` expands them).
-  `--all --json` retains the full view. Pre-v5 finished assignments and closed-task deliveries require
-  no acknowledgment, preventing old history from flooding pending results or blocking closure.
+  `--all --json` retains the full view. Pre-v5 finished assignments and deliveries predating task closure
+  require no acknowledgment; deliveries arriving after closure remain pending in default views.
   Add an offline resume mission with reference and broken solutions for acknowledgement, live-scope
   preservation and finding repair.
+- Harden lead views against Git clean/process filters and SQLite sidecar writes: use Git index/stat
+  observations and in-memory ledger snapshots, refusing WAL/journal states until their writable owner
+  completes recovery and checkpoints/closes. Reserve text space for atomic pending-result, severe-finding
+  and held-scope records before descriptions. Cover both helper types, CLI/MCP filesystem preservation,
+  late deliveries and the executable README quick start; acknowledge results in the platform smoke lifecycle.
 - Record bounded, redacted assignment activity and progress-file observations in `task run`,
   with exit journals for missing/rejected results and unknown-outcome journals after owner death.
   Activity never releases claims. Add `task activity` and explicit `task ack` (also MCP tools);

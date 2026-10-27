@@ -553,8 +553,12 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
     return _sidecar_read_only_connection(path, deadline)
 
 
-def _sidecar_read_only_connection(path: Path, deadline: float) -> sqlite3.Connection:
-    """Read a store in a non-writable directory without creating WAL sidecars."""
+def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: bool = False) -> sqlite3.Connection:
+    """Read without sidecar creation; strict views also forbid existing SHM writes.
+
+    sidecar_free uses only an immutable source copied into memory, rejecting
+    nonempty WALs and journals. It never opens a native SQLite WAL connection.
+    """
     wal = Path(f"{path}-wal")
     journal = Path(f"{path}-journal")
     # A concurrent writer can change the file between checks; retry with a short backoff for up to the
@@ -569,7 +573,11 @@ def _sidecar_read_only_connection(path: Path, deadline: float) -> sqlite3.Connec
     while time.monotonic() < deadline:
         if journal.exists():
             raise LedgerError("Task ledger has a rollback journal; retry after its writable owner completes recovery")
-        if wal.exists():
+        wal_before = wal.stat() if sidecar_free and wal.exists() else None
+        if wal_before is not None and wal_before.st_size:
+            raise LedgerError('Task ledger has a nonempty WAL; retry after its writable owner completes recovery '
+                              'and checkpoints/closes the store (sidecar-free read refused)')
+        if wal.exists() and not sidecar_free:
             try:
                 return _open_read_only(path, "&readonly_shm=1", deadline)
             except sqlite3.OperationalError as exc:
@@ -578,7 +586,8 @@ def _sidecar_read_only_connection(path: Path, deadline: float) -> sqlite3.Connec
                 if wal.exists() or not _sidecar_access_error(exc):
                     raise
         else:
-            # immutable is confined to copying a journal-free file into memory, never a live WAL view.
+            # A zero-byte WAL has no frames to recover. Keep its identity/stat
+            # stable across the copy as well as the database's; never open it.
             before = path.stat()
             with closing(sqlite3.connect(
                 path.as_uri() + "?mode=ro&immutable=1", uri=True,
@@ -589,9 +598,13 @@ def _sidecar_read_only_connection(path: Path, deadline: float) -> sqlite3.Connec
                     source.backup(snapshot, pages=256, progress=check_budget, sleep=0.005)
                     after = path.stat()
                     identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+                    wal_after = wal.stat() if wal.exists() else None
+                    stable_wal = (wal_before is None and wal_after is None) or (
+                        wal_before is not None and wal_after is not None
+                        and all(getattr(wal_before, key) == getattr(wal_after, key) for key in identity))
                     if (
                         all(getattr(before, key) == getattr(after, key) for key in identity)
-                        and not wal.exists() and not journal.exists()
+                        and stable_wal and not journal.exists()
                     ):
                         snapshot.execute("PRAGMA query_only = ON")
                         return snapshot
@@ -613,6 +626,7 @@ class Ledger:
         *,
         create: bool = True,
         read_only: bool = False,
+        sidecar_free: bool = False,
         hostname: Callable[[], str] = socket.gethostname,
         boot_id: Callable[[], str | None] = _boot_id,
         pid_namespace: Callable[[], str | None] = _pid_namespace,
@@ -623,13 +637,20 @@ class Ledger:
         self._boot_id = boot_id
         self._pid_namespace = pid_namespace
         self._pid_alive = pid_alive
+        if sidecar_free and not read_only:
+            raise LedgerError('A sidecar-free connection requires read_only=True')
         if create and not read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         # mode=rw refuses to create a missing file, even if it disappears after a caller's existence check.
         target = self.path if create else self.path.as_uri() + "?mode=rw"
-        self.connection = _read_only_connection(self.path) if read_only else sqlite3.connect(
-            target, uri=not create, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None,
-        )
+        if sidecar_free:
+            self.connection = _sidecar_read_only_connection(
+                self.path, time.monotonic() + BUSY_TIMEOUT_MS / 1000, sidecar_free=True)
+        elif read_only:
+            self.connection = _read_only_connection(self.path)
+        else:
+            self.connection = sqlite3.connect(
+                target, uri=not create, timeout=BUSY_TIMEOUT_MS / 1000, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
         try:
             self.connection.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
@@ -1097,6 +1118,8 @@ class Ledger:
                     "; ".join(f"{item['id']} [{item['severity']}]: {item['title']}" for item in remaining) or "none"
                 )
             self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
+            if to == 'cancelled':
+                summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
             self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
             return self._view(task)
 
@@ -1213,7 +1236,22 @@ class Ledger:
         acknowledged = row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None
         note = row['ack_note'] if 'ack_note' in row.keys() else ''
         legacy = 'acknowledged_at' not in row.keys() or note == LEGACY_ACK_NOTE
-        terminal = self._task(row['task'])['status'] in ('done', 'cancelled')
+        task_status = self._task(row['task'])['status']
+        terminal = task_status in ('done', 'cancelled')
+        historical = False
+        if terminal and not legacy and not acknowledged and row['status'] != 'active':
+            # Task updated_at changes on delivery, and timestamps may tie. Use event
+            # sequence order to exempt only outcomes already present at closure.
+            # Generic status observations can follow closure; only a recorded
+            # lifecycle transition supplies the historical exemption boundary.
+            closure = next((event['seq'] for event in self.connection.execute(
+                "SELECT seq, summary FROM events WHERE task = ? AND type = 'status' ORDER BY seq DESC",
+                (row['task'],)) if any(event['summary'].startswith(f'{previous} -> {task_status}')
+                                      for previous in STATUSES)), None)
+            delivery = next((event['seq'] for event in self.connection.execute(
+                "SELECT seq, refs FROM events WHERE task = ? AND type IN ('finished', 'reaped') ORDER BY seq DESC",
+                (row['task'],)) if row['id'] in json.loads(event['refs'])), None)
+            historical = closure is not None and delivery is not None and delivery < closure
         return {
             "id": row["id"],
             "task": row["task"],
@@ -1236,7 +1274,7 @@ class Ledger:
             'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
-                          else 'not_required' if legacy or terminal else 'unacknowledged'),
+                          else 'not_required' if legacy or historical else 'unacknowledged'),
         }
 
     @staticmethod

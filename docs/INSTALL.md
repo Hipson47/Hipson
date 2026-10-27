@@ -225,10 +225,15 @@ Restart the lead client to load its MCP config, then open your first real task:
 ```text
 hipson task open --project . --title "My first task" --objective "Describe the change" --json
 hipson task run --task T-0001 --actor worker --role builder --mode rw --scope . -- python -c "print('worker check')"
-hipson task board
+hipson task now
+hipson task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
+hipson task status --task T-0001 --to review --actor lead --summary "verified: worker check passed"
+hipson task status --task T-0001 --to done --actor lead
 ```
 
-Use the returned task id in place of `T-0001`. The setup report prints these next steps using your project
+Use the returned task and assignment ids in place of `T-0001` and `A-0001`. Read the result and independently
+check its evidence before acknowledging it; delivered results must be acknowledged before `done`.
+The setup report prints the initial next steps using your project
 path; setup itself does not add a placeholder task. `hipson init` replaces the old progress-template command;
 existing progress files are untouched.
 

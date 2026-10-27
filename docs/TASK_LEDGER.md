@@ -85,7 +85,8 @@ the latest referenced progress/finish event or assignment start supplies last ac
 Task progress events without refs can supply activity when their actor matches the worker.
 Reading activity never reaps assignments or releases claims. Terminal tasks collapse to one count,
 including the count and IDs of tasks needing cleanup of active assignments or claims. `--all` expands
-terminal tasks after open work. Acknowledgement is an explicit separate action for open tasks.
+terminal tasks after open work. Fresh deliveries arriving after closure remain visible by default
+and require explicit acknowledgement, including on done/cancelled tasks.
 
 `hipson lead resume [--project P] [--all] [--json]` adds each nonterminal task's objective, acceptance,
 recent status/override/acknowledgement decisions, failed attempts, open findings, verification
@@ -93,12 +94,23 @@ freshness and current Git branch, HEAD (full SHA and subject), and dirty file co
 `--db PATH` is supported by both commands. The project filter selects tasks in the central ledger;
 it never selects a different database. Missing ledgers return empty views without creating files.
 Reads neither migrate old stores nor update task revisions, acknowledgements or the Git index.
+Both views use a sidecar-free, in-memory ledger snapshot. They refuse nonempty WALs and rollback
+journals with a recovery message; retry after the writable owner finishes recovery and checkpoints/closes.
+An unchanged zero-byte WAL can be ignored without opening it or its SHM. Source identity, size,
+modification/change times and WAL/journal state are checked across the copy. These views never use
+native SQLite WAL reads, even in writable directories. The ordinary read paths below retain native WAL support.
+Git dirty state counts index changes, untracked paths and tracked stat mismatches. It does not hash
+tracked content or inspect submodule contents; matching metadata is not proof of clean content.
+This avoids Git clean/process filters entirely. Hooks, fsmonitor, external diffs and lazy fetching
+are disabled or avoided, and Git output stays in memory.
 
 Text is capped at **4,096 UTF-8 bytes**, including evidence delimiters, the closing footer and
 the CLI's final newline. The budget is displayed, including with `--all`. Space is reserved for
-open-task headings before sharing detail space between tasks; held claims and open findings precede
-historical deliveries. It shows up to five active assignments, pending results and findings per task,
-three recent decisions, failures and commit references. Omitted blocks and detail lines are counted;
+atomic records for pending results, blocking/major findings and held write scopes before descriptions.
+Each action category gets a turn before another category's backlog, and each record includes its task
+and assignment/finding identity. Active records include last activity; descriptive assignment lines repeat
+their identity. Remaining space goes to task headings and descriptions, including up to three recent
+decisions, failures and commit references. Omitted action records, blocks and detail lines are counted;
 truncated fields are marked. Use `task show --task T --json` / `task events --task T --json`, a narrower
 project filter, or `--all --json` for complete history.
 JSON retains complete structured results/journals for visible tasks and a `terminal_tasks` count/cleanup
@@ -264,8 +276,11 @@ has `ack_state=unacknowledged` until `hipson task ack --assignment A [--note TEX
 before v5 get `ack_state=not_required`: read-only legacy views infer this from the old schema, and
 the v5 migration preserves the exemption in `ack_note` without fabricating an acknowledgment event
 or timestamp. On already-migrated v5 stores, open-task results retain their acknowledgment requirement
-because migration provenance was not recorded. Unacknowledged ended assignments on done/cancelled
-tasks also show `not_required`; closed history never creates pending deliveries. Explicitly acknowledged
+because migration provenance was not recorded. Unacknowledged ended assignments delivered before
+done/cancelled closure show `not_required`; sequence ordering distinguishes these from new deliveries
+arriving after closure, which remain unacknowledged and visible by default. If an older custom
+cancellation event has no identifiable lifecycle transition, its outcomes conservatively remain pending
+until acknowledged. Explicitly acknowledged
 results retain `acknowledged`. Exempt results do not block `done`. Reads never
 acknowledge a delivery. Acknowledgement is atomic, idempotent, records the task's lead label,
 timestamp and bounded redacted note, and appends one `acknowledged` event. It refuses active

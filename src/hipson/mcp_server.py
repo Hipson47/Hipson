@@ -681,7 +681,9 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
             raise ledger.LedgerError(f"Task not found: {arguments['task']}")
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
-    with closing(ledger.Ledger(db, create=create, read_only=not create)) as store:
+    connection = (ledger.Ledger(db, create=False, read_only=True, sidecar_free=True)
+                  if name in ('task.now', 'lead.resume') else ledger.Ledger(db, create=create, read_only=not create))
+    with closing(connection) as store:
         if name in ('task.now', 'lead.resume'):
             return lead_context.build(store, project=arguments.get('project'), resume=name == 'lead.resume',
                                       include_all=arguments.get('all', False))

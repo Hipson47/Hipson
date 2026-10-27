@@ -213,7 +213,9 @@ hipson task events --task T-0001
 Use `hipson task now --project .` for pending results, activity ages, blockers, review decisions
 and cleanup. After context loss, `hipson lead resume --project .` restores objectives, acceptance,
 decisions, failed attempts, findings, verification freshness and Git state in bounded text.
-Both are read-only; add `--json` for the full view. Use the assignment id printed by your runner
+Both use sidecar-free ledger snapshots and refuse stores with a nonempty WAL or rollback journal until the
+writable owner checkpoints/closes the store. Git dirty state uses index/stat observations; tracked
+content and submodule contents are not inspected. Add `--json` for the full view. Use the assignment id printed by your runner
 in place of `A-0001` when acknowledging its result.
 
 Wrap real workers so the ledger fills itself:

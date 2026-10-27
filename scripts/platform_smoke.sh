@@ -76,6 +76,7 @@ check "task open" "$H" task open --project . --title "Fix parser" --objective "P
 check "task assign (rw claim)" "$H" task assign --task T-0001 --actor codex --role builder --mode rw --scope src/parser
 check "task board" "$H" task board
 check "task finish" "$H" task finish --assignment A-0001 --result passed --summary "worker exited 0" --ref runs/report.md
+check "task ack" "$H" task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
 check "task status -> review" "$H" task status --task T-0001 --to review --actor lead --summary "verified: tests pass"
 check "task status -> done" "$H" task status --task T-0001 --to done --actor lead
 check "task brief" "$H" task brief --task T-0001 --role reviewer

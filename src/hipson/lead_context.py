@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
-import tempfile
 from datetime import UTC, datetime
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any
 
@@ -26,15 +27,13 @@ PRIORITIES = ('pending_results', 'blocked', 'active', 'review', 'cleanup', 'open
 def _git(project: str, *args: str) -> bytes | None:
     # No inherited worktree/index/config overrides, optional index locks, hooks or pager.
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith('GIT_')}
+    env.update(GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0')
     try:
-        with tempfile.TemporaryFile() as output:
-            result = subprocess.run(
-                ['git', '--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false',
-                 '-C', project, *args], env=env, stdout=output, stderr=subprocess.DEVNULL,
-                timeout=5, check=False,
-            )
-            output.seek(0)
-            data = output.read(GIT_READ_LIMIT + 1)
+        result = subprocess.run(
+            ['git', '--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false',
+             '-c', 'protocol.allow=never', '-C', project, *args], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        data = result.stdout
         return data if result.returncode == 0 and len(data) <= GIT_READ_LIMIT else None
     except (OSError, subprocess.SubprocessError):
         return None
@@ -54,19 +53,52 @@ def _commit(project: str, ref: str) -> dict[str, Any]:
 def _project_state(project: str) -> dict[str, Any]:
     head = _git(project, 'rev-parse', '--verify', 'HEAD')
     branch = _git(project, 'symbolic-ref', '--quiet', '--short', 'HEAD')
-    status = _git(project, 'status', '--porcelain=v1', '-z', '--untracked-files=all')
-    dirty = None
-    if status is not None:
-        # Rename/copy records have two NUL-separated paths but represent one file.
-        records = iter(status.split(b'\0')[:-1])
-        dirty = 0
-        for record in records:
-            dirty += 1
-            if b'R' in record[:2] or b'C' in record[:2]:
-                next(records, None)
+    dirty = _stat_dirty(project)
     return {'project': project, 'branch': branch.decode('utf-8', errors='replace').strip() if branch else None,
             'head': _commit(project, head.decode().strip()) if head else {'ref': 'HEAD', 'sha': None, 'subject': None},
-            'dirty_files': dirty, 'available': status is not None}
+            'dirty_files': dirty, 'available': dirty is not None,
+            'dirty_basis': 'Index/stat observation only; tracked content and submodule contents are not inspected.'}
+
+
+def _stat_dirty(project: str) -> int | None:
+    """Observe metadata without content hashing, filters, diff drivers or submodule helpers.
+
+    Even status/diff-files with optional locks disabled can run clean/process filters
+    when cached stats are stale. Only list the index and compare lstat metadata here.
+    Git's debug layout is not porcelain: an unknown layout fails closed to unavailable.
+    """
+    staged = _git(project, 'diff-index', '--cached', '--name-only', '-z', '--no-renames',
+                  '--no-ext-diff', '--no-textconv', '--ignore-submodules=all', 'HEAD', '--')
+    untracked = _git(project, 'ls-files', '--others', '--exclude-standard', '-z')
+    cached = _git(project, 'ls-files', '--cached', '--stage', '--debug', '-z')
+    if staged is None or untracked is None or cached is None:
+        return None
+    paths = set(staged.split(b'\0')[:-1]) | set(untracked.split(b'\0')[:-1])
+    pattern = re.compile(rb'([0-7]+) [0-9a-f]+ ([0-3])\t([^\0]*)\0'
+                         rb'  ctime: (\d+):(\d+)\n  mtime: (\d+):(\d+)\n'
+                         rb'  dev: \d+\tino: \d+\n  uid: \d+\tgid: \d+\n'
+                         rb'  size: (\d+)\tflags: ([0-9a-f]+)\n')
+    offset = 0
+    while offset < len(cached):
+        match = pattern.match(cached, offset)
+        if match is None:
+            return None
+        mode, stage, path, csec, cnsec, msec, mnsec, size, flags = match.groups()
+        offset = match.end()
+        # Skip sparse entries and gitlinks: their worktrees need separate observation.
+        if int(mode, 8) == 0o160000 or int(flags, 16) & 0x40000000:
+            continue
+        try:
+            info = (Path(project) / os.fsdecode(path)).lstat()
+            modified = (info.st_size != int(size) or info.st_mtime_ns != int(msec) * 10**9 + int(mnsec)
+                        or info.st_ctime_ns != int(csec) * 10**9 + int(cnsec)
+                        or stat.S_IFMT(info.st_mode) != stat.S_IFMT(int(mode, 8))
+                        or (os.name == 'posix' and bool(info.st_mode & stat.S_IXUSR) != bool(int(mode, 8) & stat.S_IXUSR)))
+        except OSError:
+            modified = True
+        if stage != b'0' or modified:
+            paths.add(path)
+    return len(paths)
 
 
 def _date(value: str) -> datetime | None:
@@ -110,7 +142,8 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
     terminal_summary = {'count': len(terminal_tasks), 'cleanup': [task['id'] for task in terminal_tasks
                         if task['claims'] or any(item['status'] == 'active' for item in task['assignments'])]}
     visible = [(task, events) for task, events in snapshot
-               if include_all or task['status'] not in ('done', 'cancelled')]
+               if include_all or task['status'] not in ('done', 'cancelled')
+               or any(item['ack_state'] == 'unacknowledged' for item in task['assignments'])]
     projects = sorted({task['project'] for task, _ in visible})
     states = {path: _project_state(path) for path in projects} if resume else {}
     commits: dict[tuple[str, str], dict[str, Any]] = {}
@@ -163,7 +196,8 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
                           'verification': {'freshness': freshness, 'event': verification, 'head': head,
                                            'dirty_files': states[task['project']]['dirty_files'],
                                            'note': 'Revision comparison only; event text is not proof that checks passed.'}})
-    entries.sort(key=lambda item: (item['status'] in ('done', 'cancelled'), item['priority'], item['task']))
+    entries.sort(key=lambda item: (item['status'] in ('done', 'cancelled') and not item['pending_results'],
+                                   item['priority'], item['task']))
     order = {item['task']: index for index, item in enumerate(entries)}
     tasks.sort(key=lambda item: order[item['id']])
     now = {'kind': 'task.now', 'as_of': as_of.isoformat(), 'age_basis': 'ledger_watermark' if resume else 'wall_clock',
@@ -186,22 +220,23 @@ def _commit_text(item: dict[str, Any]) -> str:
 
 
 def _assignment_lines(item: dict[str, Any]) -> list[str]:
-    lines = [f"  {item['id']} {_text(item['actor'])} {item['role']}/{item['mode']} {item['status']} "
-             f"{item['ack_state']} scope={_text(', '.join(item['scope']))}",
-             f"    last={item['last_activity']} age={item['age_seconds']}s progress={_text(item['last_progress'], 120)}"]
+    identity = f"  {item['task']} {item['id']}"
+    lines = [f"{identity} {_text(item['actor'], 40)} {item['role']}/{item['mode']} {item['status']} "
+             f"{item['ack_state']} scope={_text(', '.join(item['scope']), 160)}",
+             f"{identity} last={item['last_activity']} age={item['age_seconds']}s progress={_text(item['last_progress'], 120)}"]
     if item['summary']:
-        lines.append(f"    result: {_text(item['summary'], 160)}")
+        lines.append(f"{identity} result: {_text(item['summary'], 160)}")
     if item['result']:
         report = item['result']
-        lines.append(f"    report={report['status']} files={len(report['files_changed'])} "
+        lines.append(f"{identity} report={report['status']} files={len(report['files_changed'])} "
                      f"commands={len(report['commands'])} risks={_text(report['risks'], 120)} (details: task show --json)")
     if item['failure_journal']:
-        lines.append(f"    journal: {_text(json.dumps(item['failure_journal'], ensure_ascii=False), 900)}")
+        lines.append(f"{identity} journal: {_text(json.dumps(item['failure_journal'], ensure_ascii=False), 320)}")
     return lines
 
 
 def render(view: dict[str, Any]) -> str:
-    """Bound UTF-8 output, reserving room for task headings and explicit omissions."""
+    """Reserve the byte budget for atomic action records before descriptive context."""
     resume = view['kind'] == 'lead.resume'
     now = view['now'] if resume else view
     lines = [('Lead resume' if resume else 'Task now') + f' (budget: {TEXT_LIMIT} UTF-8 bytes).',
@@ -216,27 +251,33 @@ def render(view: dict[str, Any]) -> str:
     terminal_line = (f"Terminal tasks: {terminal['count']} (--all to expand); "
                      f"cleanup={len(terminal['cleanup'])} {_text(', '.join(terminal['cleanup']), 180)}")
     blocks: list[list[str]] = []
+    # Each record carries task and assignment/finding identity even if its task's
+    # descriptive heading cannot fit. Never emit an orphan continuation line.
+    pending: list[str] = []
+    severe: list[str] = []
+    held: list[str] = []
+    active: list[str] = []
 
     details = {task['id']: task for task in view['tasks']} if resume else {}
     for entry in now['tasks']:
         block = [f"{entry['task']} [{entry['status']}] {','.join(entry['needs'])}: {_text(entry['title'])}",
                  f"  pending={len(entry['pending_results'])} active={len(entry['active_assignments'])} "
                  f"project={_text(entry['project'])}"]
-        if entry['claims']:
-            block.append(f"  held claims: {_text(json.dumps(entry['claims']), 240)}")
-        for item in entry['active_assignments'][:ITEM_LIMIT]:
-            block.extend(_assignment_lines(item))
-        for finding in entry['open_findings'][:ITEM_LIMIT]:
-            block.append(f"  {finding['id']} [{finding['severity']}] {_text(finding['title'], 120)} "
-                         f"at {_text(finding['location'], 80)}: {_text(finding['detail'], 160)}")
-        if len(entry['open_findings']) > ITEM_LIMIT:
-            block.append(f"  Findings omitted: {len(entry['open_findings']) - ITEM_LIMIT}")
-        for item in entry['pending_results'][:ITEM_LIMIT]:
-            block.extend(_assignment_lines(item))
-        total = len(entry['pending_results']) + len(entry['active_assignments'])
-        shown = min(len(entry['pending_results']), ITEM_LIMIT) + min(len(entry['active_assignments']), ITEM_LIMIT)
-        if total > shown:
-            block.append(f'  Assignments omitted: {total - shown}')
+        for item in entry['pending_results']:
+            pending.append(f"  {entry['task']} [{entry['status']}] {item['id']} {item['status']} "
+                           f"unacknowledged result: {_text(item['summary'], 100)}")
+        for finding in entry['open_findings']:
+            record = (f"  {entry['task']} {finding['id']} [{finding['severity']}] {_text(finding['title'], 100)} "
+                      f"at {_text(finding['location'], 80)}")
+            if finding['severity'] in ('blocking', 'major'):
+                severe.append(record)
+            else:
+                block.append(record)
+            block.append(f"  {entry['task']} {finding['id']} detail: {_text(finding['detail'], 160)}")
+        for claim in entry['claims']:
+            held.append(f"  {entry['task']} {claim['assignment']} held write scope={_text(claim['path'], 180)}")
+        for item in entry['active_assignments']:
+            active.append(_assignment_lines(item)[0] + f" last={item['last_activity']} age={item['age_seconds']}s")
         for commit in entry['commits'][-3:]:
             block.append('  commit: ' + _commit_text(commit))
         if len(entry['commits']) > 3:
@@ -259,41 +300,70 @@ def render(view: dict[str, Any]) -> str:
                 block.extend(_assignment_lines(item))
             if len(task['failed_attempts']) > 3:
                 block.append(f"  Failed attempts omitted: {len(task['failed_attempts']) - 3}")
+        for item in (entry['pending_results'] + entry['active_assignments'])[:ITEM_LIMIT * 2]:
+            block.extend(_assignment_lines(item)[1:])
         blocks.append(block)
     if not now['tasks']:
         blocks.append(['No tasks need lead attention.'])
     for state in view.get('projects', []):
         blocks.append([f"Git {_text(state['project'])}: branch={_text(state['branch'] or '(detached/unavailable)')} "
-                       f"HEAD={_commit_text(state['head'])} dirty={state['dirty_files']}"])
+                       f"HEAD={_commit_text(state['head'])} dirty={state['dirty_files']} (index/stat only)"])
 
     def size(line: str) -> int:
         return len(line.encode('utf-8')) + 1
 
-    # Half the available space is reserved for headings, so a verbose first task
-    # cannot hide later open work. Split the rest fairly between visible blocks.
+    # Mandatory framing and omission accounting always fit. Action records are
+    # compact and indivisible; descriptions can only spend what they leave behind.
     available = TEXT_LIMIT - sum(size(line) for line in lines) - size(terminal_line) - size(tail) - 180
-    selected: list[list[str]] = []
-    heading_bytes = 0
-    for block in blocks:
-        cost = size(block[0])
-        if heading_bytes + cost > available // 2:
-            break
-        selected.append(block)
-        heading_bytes += cost
-    detail_budget = (available - heading_bytes) // max(1, len(selected))
+    # Reserve a turn for each action category before consuming the remainder on
+    # another category's backlog (for example, many unread deliveries).
+    actions = [record for group in zip_longest(pending, severe, held) for record in group if record is not None]
+    omitted_actions = 0
+    for record in actions:
+        cost = size(record)
+        if cost <= available:
+            lines.append(record)
+            available -= cost
+        else:
+            omitted_actions += 1
+    # If action records overflow, descriptive text cannot displace their omissions.
+    if omitted_actions:
+        omitted_actions += len(active)
+        active = []
+    for record in active:
+        cost = size(record)
+        if cost <= available:
+            lines.append(record)
+            available -= cost
+        else:
+            omitted_actions += 1
+    selected: dict[int, list[str]] = {}
     omitted_lines = 0
-    for block in selected:
-        lines.append(block[0])
-        used = 0
-        for line in block[1:]:
-            cost = size(line)
-            if used + cost <= detail_budget:
-                lines.append(line)
-                used += cost
-            else:
-                omitted_lines += 1
+    if not omitted_actions:
+        for index, block in enumerate(blocks):
+            cost = size(block[0])
+            if cost <= available:
+                selected[index] = [block[0]]
+                available -= cost
+        # Round-robin descriptions, but do not donate unused space to a later
+        # description while a preceding record in its block is still missing.
+        exhausted = set()
+        for depth in range(1, max((len(block) for block in blocks), default=1)):
+            for index, output in selected.items():
+                if index in exhausted or depth >= len(blocks[index]):
+                    continue
+                line = blocks[index][depth]
+                cost = size(line)
+                if cost <= available:
+                    output.append(line)
+                    available -= cost
+                else:
+                    exhausted.add(index)
+    for output in selected.values():
+        lines.extend(output)
+    omitted_lines = sum(len(block) for block in blocks) - sum(len(output) for output in selected.values())
     lines.append(terminal_line)
-    if omitted_lines or len(selected) < len(blocks):
+    if omitted_actions or omitted_lines or len(selected) < len(blocks):
         lines.append(f'Omitted task/project blocks: {len(blocks) - len(selected)}; detail lines: {omitted_lines}. '
-                     'Use --all --json or task show/events for full data.')
+                     f'Action records omitted: {omitted_actions}. Use --all --json or task show/events for full data.')
     return '\n'.join(lines) + tail

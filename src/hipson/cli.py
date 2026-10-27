@@ -1793,7 +1793,7 @@ def command_lead_view(args: argparse.Namespace) -> int:
     try:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if db.exists():
-            with closing(ledger.Ledger(db, read_only=True)) as store:
+            with closing(ledger.Ledger(db, read_only=True, sidecar_free=True)) as store:
                 payload = lead_context.build(store, project=args.project, resume=args.command == 'lead', include_all=args.all)
         else:
             payload = lead_context.build(None, project=args.project, resume=args.command == 'lead', include_all=args.all)

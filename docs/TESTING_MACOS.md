@@ -32,7 +32,7 @@ and checks, in order:
 
 - the CLI starts and `hipson doctor` passes;
 - the macOS boot identity used for crash recovery is readable;
-- the README quick start (open, assign, board, finish, review, done) and `hipson task brief`;
+- the task lifecycle (open, assign, board, finish, acknowledge, review, done) and `hipson task brief`;
 - the worker wrapper: a second writer on a busy path is refused with exit code 75, a live worker
   survives `hipson task reap`, and a killed worker's claim is released;
 - the MCP server answers `initialize`, `tools/list` and a read tool over stdio;

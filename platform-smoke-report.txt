@@ -1,11 +1,11 @@
-Hipson platform smoke test - 2026-10-26T19:45:35Z
+Hipson platform smoke test - 2026-10-27T00:35:53Z
 system:  Linux 6.6.87.2-microsoft-standard-WSL2 x86_64
 bash:    5.2.21(1)-release
-git rev: 05dd4c6 (feat/init)
+git rev: b339dbe (feat/lead-visibility)
 uv:      uv 0.10.0
 
 PASS  uv sync --all-extras (install from this checkout)
-python:  3.13.12 sqlite 3.50.4
+python:  3.12.3 sqlite 3.45.1
 
 PASS  hipson --help
 PASS  hipson doctor
@@ -15,6 +15,7 @@ PASS  task open
 PASS  task assign (rw claim)
 PASS  task board
 PASS  task finish
+PASS  task ack
 PASS  task status -> review
 PASS  task status -> done
 PASS  task brief
@@ -31,4 +32,4 @@ PASS  native runner preserves failed child code (exit 9)
 PASS  native runner binds project (exit 76)
 PASS  MCP stdio initialize, tools/list, task.board
 
-RESULT: 24 passed, 0 failed
+RESULT: 25 passed, 0 failed
