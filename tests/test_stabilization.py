@@ -206,9 +206,12 @@ def test_read_only_git_reads_disable_configured_filter_drivers(tmp_path):
     _git(project, 'config', 'filter.mark.clean', 'touch marker')
     _git(project, 'config', 'filter.mark.process', 'touch marker')
     overrides = git_filter_overrides(project)
-    assert overrides == ['-c', 'filter.mark.clean=', '-c', 'filter.mark.process=']
+    # Global drivers (git-lfs on CI runners) are disabled too, so check inclusion, not the exact list.
+    pairs = list(zip(overrides[::2], overrides[1::2], strict=True))
+    assert ('-c', 'filter.mark.clean=') in pairs and ('-c', 'filter.mark.process=') in pairs
+    assert all(flag == '-c' and value.startswith('filter.') for flag, value in pairs)
     argv, _ = prepare_read_only_command(['git', 'status', '--porcelain'], cwd=project)
-    assert argv[argv.index('status') - 4:argv.index('status')] == overrides
+    assert argv[argv.index('status') - len(overrides):argv.index('status')] == overrides
     assert git_filter_overrides(tmp_path / 'missing') == []
 
 

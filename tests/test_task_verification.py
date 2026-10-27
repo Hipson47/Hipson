@@ -309,6 +309,9 @@ def test_verify_stale_head_tracked_untracked_and_builder_finish(tmp_path):
         (project / 'new.py').write_text('new = False\n')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'working tree changed')
         verify_fixture(store, task)
+        # Stage new.py too: Git for Windows may not restage the same-size, restored-mtime edit, and an
+        # empty commit would fail. Staging alone never changes freshness.
+        _git(project, 'add', 'new.py')
         _git(project, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'Later candidate')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'HEAD moved')
         verify_fixture(store, task)

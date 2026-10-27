@@ -37,18 +37,23 @@ Status: **fixed** (with test), **mitigated** (partial fix, follow-up named), **o
 | ID | Finding | Status |
 |---|---|---|
 | C1 | Read-only Git calls (scan, work, contract) could run filter drivers | fixed for scan/read paths (`prepare_read_only_command(cwd=...)`) |
-| C2 | Workflow MCP tools read any path, e.g. `quality.report` sidecar `.env` | fixed: paths contained to the served project or the work plan's project; sensitive files refused |
+| C2 | Workflow MCP tools read any path, e.g. `quality.report` sidecar `.env` | fixed: every path and a work plan's own `project` must resolve inside the served project (plan contents never widen it); run artifacts must be regular files in their run; sensitive files refused. Behavior change: one MCP server per project (`hipson init` already registers it that way) |
 | C3 | Skill lookup and scans followed symlinks out of the root | fixed |
 | C4 | Sensitive tracked-file diff bodies stayed in scans/packets (= D02) | fixed: whole per-file sections omitted |
 | C5 | Truncation before redaction could expose private-key bodies | fixed: redact before truncate, bounded reads |
 | C6 | Provider redirects resent the Authorization header to another host or HTTP | fixed: provider HTTP never follows redirects |
 | C7 | Stale quality artifacts can override failed verification and human gates (= D01) | open: see decision below |
-| C8 | Verification commands inherited `GIT_DIR`/`GIT_WORK_TREE` and could check another tree | fixed: no inherited `GIT_*` for checks; workers lose repository-location variables |
+| C8 | Verification commands inherited `GIT_DIR`/`GIT_WORK_TREE` and could check another tree | fixed: checks and workers lose repository-selecting and config-injecting variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG*`, ...); identity and transport (`GIT_AUTHOR_*`, `GIT_SSH_COMMAND`) stay |
 | C9 | Session persistence skipped structured credential redaction | fixed |
 | C10 | Agent installers can overwrite a concurrent user edit | open: reuse init's snapshot/lock/atomic replace |
-| C11 | Malformed workflow MCP arguments terminated the server | fixed: errors stay per request (full schema validation for workflow tools is open) |
+| C11 | Malformed workflow MCP arguments terminated the server | fixed: type, key and arithmetic errors (e.g. `1e309`) stay per request; full schema validation for workflow tools is open |
 | C12 | Packet preflight read files unbounded, including FIFOs | fixed |
 | C13 | Skill content could close its `untrusted_data` block | fixed for skills; sidecar `</packet>` framing open |
+
+A first fix-verification review of the branch found eight incomplete fixes (forged work-plan projects and
+linked run artifacts for C2, keys longer than the bounded read for C5, `1e309` for C11, identity variables for
+C8, skill validation for C3, file names with spaces for C4, negative limits for C12); all eight were fixed
+with regression tests before the second verification.
 
 ## D. Workflow layer, CLI, tests and docs
 
