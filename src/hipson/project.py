@@ -22,6 +22,7 @@ from hipson.paths import package_root
 from hipson.redaction import (
     drop_sensitive_diff_sections,
     is_sensitive_path,
+    redact_incomplete_private_keys,
     redact_sensitive_paths,
     redact_text,
     sanitize_path,
@@ -363,7 +364,7 @@ def embedded_untracked_content(project: Path, root: Path | None) -> str:
                 text = stream.read(MAX_UNTRACKED_FILE_CHARS * 2)  # Bounded read; redaction needs some context.
         except OSError:
             continue
-        body = truncate(redact_text(text), min(MAX_UNTRACKED_FILE_CHARS, budget))
+        body = truncate(redact_incomplete_private_keys(redact_text(text)), min(MAX_UNTRACKED_FILE_CHARS, budget))
         budget -= len(body)
         chunks.extend([f"### Untracked file: `{file_name}`", "```text", body, "```", ""])
     return "\n".join(chunks).strip()

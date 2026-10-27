@@ -171,7 +171,7 @@ def build_handoff(run_path: str | Path) -> dict[str, Any]:
     work = _load_optional_json(run_dir / RUN_ARTIFACTS["work"])
     audit = _load_optional_json(run_dir / RUN_ARTIFACTS["audit"])
     summary_path = run_dir / RUN_ARTIFACTS["summary"]
-    summary_text = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+    summary_text = _inside_run(summary_path).read_text(encoding="utf-8") if summary_path.exists() else ""
     latest_record = _latest_evidence_record(run_dir)
     gates = audit.get("latest_gates", {}) if isinstance(audit, dict) else {}
     claims = latest_record.get("claims", {}) if isinstance(latest_record, dict) else {}
@@ -199,7 +199,7 @@ def write_handoff(run_dir: Path, handoff: dict[str, Any]) -> dict[str, str]:
     json_path = run_dir / RUN_ARTIFACTS["handoff_json"]
     markdown_path = run_dir / RUN_ARTIFACTS["handoff"]
     _write_json(json_path, handoff)
-    markdown_path.write_text(render_handoff(handoff), encoding="utf-8")
+    _inside_run(markdown_path).write_text(render_handoff(handoff), encoding="utf-8")
     return {"json": str(json_path), "markdown": str(markdown_path)}
 
 
@@ -312,19 +312,29 @@ def _next_agent_step(gates: dict[str, Any], unknowns: object) -> str:
 
 
 def _latest_evidence_record(run_dir: Path) -> dict[str, Any]:
+    ledger = run_dir / LEDGER_FILE
+    if ledger.exists():
+        _inside_run(ledger)
     records = read_records(run_dir)
     return records[-1] if records else {}
 
 
+def _inside_run(path: Path) -> Path:
+    """Run artifacts are regular files in their run directory: a symlink must not read or write elsewhere."""
+    if path.is_symlink() or not path.resolve().is_relative_to(path.parent.resolve()):
+        raise SystemExit(f"{path}: run artifacts must be regular files inside the run directory, not links")
+    return path
+
+
 def _load_optional_json(path: Path) -> dict[str, Any]:
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return {}
     return _load_json(path)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(_inside_run(path).read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise SystemExit(f"{path}: {exc}") from None
     if not isinstance(payload, dict):
@@ -334,7 +344,7 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    _inside_run(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
 
 
 def _human_decision_gate(decision: str) -> str:

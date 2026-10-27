@@ -602,7 +602,7 @@ def _handle_request(line: str, *, project: Path) -> dict[str, Any] | None:
         return _tool_error(request_id, str(exc))
     except (OSError, json.JSONDecodeError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return _tool_error(request_id, str(exc))
-    except (TypeError, KeyError, AttributeError) as exc:
+    except (TypeError, KeyError, AttributeError, ArithmeticError) as exc:  # e.g. int(1e309) -> OverflowError
         # Malformed arguments for a tool without a strict schema must fail one request, not the server.
         return _tool_error(request_id, f"Invalid arguments for {method}: {type(exc).__name__}: {exc}")
     return _error(request_id, -32601, f"Unknown method: {method}")
@@ -645,36 +645,34 @@ WORKFLOW_PATH_ARGUMENTS = ("project", "work", "verify", "sidecar", "path", "run"
 
 
 def _contained_arguments(name: str, arguments: dict[str, Any], project: Path) -> dict[str, Any]:
-    """Workflow tools read and write files the caller names: keep them inside known projects, off secrets.
+    """Workflow tools read, write and run things the caller names: keep all of it in the served project.
 
-    Allowed roots are the served project and, once `work` parses as a Hipson work plan, that plan's
-    project. Paths resolve symlinks first; sensitive files (.env, keys, credentials) are never used.
+    Every path argument, and the project a work plan names (it selects where verification runs and where
+    evidence is written), must resolve inside the project this server was started for; plan contents are
+    never trusted to widen that. Paths resolve symlinks first; sensitive files are never used.
     """
     checked = dict(arguments)
-    roots = [project.resolve()]
+    root = project.resolve()
 
-    def contained(key: str, value: object, *, any_location: bool = False) -> Path:
+    def contained(key: str, value: object) -> Path:
         if not isinstance(value, str):
             raise ValueError(f"{name}: {key} must be a path string")
         path = Path(value).expanduser()
-        resolved = (path if path.is_absolute() else roots[0] / path).resolve()
-        base = next((root for root in roots if resolved == root or resolved.is_relative_to(root)), None)
-        if base is None and not any_location:
-            raise ValueError(f"{name}: {key} must stay inside the served project {roots[0]}"
-                             + (f" or the work plan's project {roots[1]}" if len(roots) > 1 else ""))
-        if is_sensitive_path(resolved.relative_to(base) if base else Path(resolved.name)):
+        resolved = (path if path.is_absolute() else root / path).resolve()
+        if resolved != root and not resolved.is_relative_to(root):
+            raise ValueError(f"{name}: {key} must stay inside the served project {root}; start "
+                             "`hipson mcp serve --project` for that project instead")
+        if resolved != root and is_sensitive_path(resolved.relative_to(root)):
             raise ValueError(f"{name}: {key} names a sensitive file; it is never read or written through MCP")
         return resolved
 
-    if arguments.get("work"):
-        work = contained("work", arguments["work"], any_location=True)
-        plan = verification.load_work_plan(str(work))  # Only a real work plan may name another project.
-        if plan.get("project") and plan.get("artifact_kind") == "hipson.work_plan":
-            roots.append(Path(str(plan["project"])).resolve())
-        checked["work"] = str(work)
     for key in WORKFLOW_PATH_ARGUMENTS:
-        if key != "work" and arguments.get(key) not in (None, ""):
+        if arguments.get(key) not in (None, ""):
             checked[key] = str(contained(key, arguments[key]))
+    if checked.get("work"):
+        plan = verification.load_work_plan(checked["work"])
+        if plan.get("project") not in (None, ""):
+            contained("work plan project", plan["project"])
     return checked
 
 

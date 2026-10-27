@@ -24,7 +24,10 @@ class SkillLookupError(ValueError):
 
 def find_skill_files(root: Path) -> list[Path]:
     ignored = {".git", "build", "dist", "mutants", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
-    return sorted(path for path in root.rglob("SKILL.md") if not ignored.intersection(path.parts))
+    resolved_root = root.resolve()
+    # Listing, lookup and validation all start here: a SKILL.md link out of the root is never read.
+    return sorted(path for path in root.rglob("SKILL.md") if not ignored.intersection(path.parts)
+                  and path.resolve().is_relative_to(resolved_root))
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], list[str]]:

@@ -30,7 +30,14 @@ REMAINDER_COMMANDS = ("hipson task run", "hipson task verify", "hipson task clos
 GIT_LOCATION_VARIABLES = frozenset({
     "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_ATTR_SOURCE", "GIT_REPLACE_REF_BASE", "GIT_NO_REPLACE_OBJECTS",
 })
+
+
+def git_redirecting_variable(key: str) -> bool:
+    """Variables that select a repository or inject configuration (GIT_CONFIG*, GIT_CONFIG_KEY_n, ...)."""
+    name = key.upper()
+    return name in GIT_LOCATION_VARIABLES or name.startswith("GIT_CONFIG")
 
 
 def supervise(command: list[str], *, cwd: str | None = None, capture: bool = False,
@@ -325,10 +332,10 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
         if not verifying:
             with closing(ledger.Ledger(db)) as store:
                 store.observe(assignment, snapshot)
-        # Verification runs against the same Git view as its fingerprint (no inherited GIT_* at all);
-        # workers at least cannot be redirected to another repository, index or object store.
-        inherited = {key: value for key, value in os.environ.items()
-                     if not (key.upper().startswith('GIT_') if verifying else key.upper() in GIT_LOCATION_VARIABLES)}
+        # Checks and workers see the same repository as the fingerprint: no inherited variable may select
+        # another repository, index or object store, or inject configuration. Identity (GIT_AUTHOR_*) and
+        # transport (GIT_SSH_COMMAND) settings stay, so checks that commit fixtures or fetch still work.
+        inherited = {key: value for key, value in os.environ.items() if not git_redirecting_variable(key)}
         env = inherited if verifying else {**inherited, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
                'HIPSON_PROGRESS_FILE': str(progress_path)}

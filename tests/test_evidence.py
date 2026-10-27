@@ -380,12 +380,11 @@ def test_release_claim_copies_redacted_for_allowed_and_blocked(tmp_path: Path):
         assert claim["extra"]["access_key"] == {"raw": "added-after-build"}
 
 
-def test_mcp_evidence_and_audit_use_work_project_and_filter_task(tmp_path: Path):
+def test_mcp_evidence_and_audit_stay_in_the_served_project_and_filter_task(tmp_path: Path):
     project = tmp_path / "target"
-    server_project = tmp_path / "server"
-    server_project.mkdir()
     work = _work_file(project)
-    artifact = project / "runs" / "verification.json"  # MCP paths stay inside the served or the work project.
+    server_project = project  # One server per project: workflow tools never reach outside it.
+    artifact = project / "runs" / "verification.json"
     secret = "sk-mcp-secret12345678901234"
     artifact.write_text(json.dumps({"status": "passed", "nested": [secret]}), encoding="utf-8")
     appended = _tool(server_project, "evidence.append", work=str(work), verification=str(artifact), quality_report=str(artifact),
@@ -396,7 +395,6 @@ def test_mcp_evidence_and_audit_use_work_project_and_filter_task(tmp_path: Path)
     _append(project, task_id="T-0004")
     audit = _tool(server_project, "audit.show", work=str(work), task_id="T-0003")
     assert audit["evidence_records"] == [appended["record"]]
-    assert not (server_project / "runs").exists()
     override = project / "explicit-ledger"
     appended = _tool(server_project, "evidence.append", work=str(work), approved=True, actor="reviewer", ledger_root=str(override))
     audit = _tool(server_project, "audit.show", work=str(work), ledger_root=str(override))
@@ -416,6 +414,12 @@ def test_mcp_evidence_and_audit_use_work_project_and_filter_task(tmp_path: Path)
         assert result["isError"] is True and message in result["content"][0]["text"], result
     report = call("quality.report", work=str(work), sidecar=str(project / ".env"))
     assert report["isError"] is True and "DATABASE_URL" not in json.dumps(report)
+    other = _work_file(tmp_path / "other")  # A real work plan of another project is still out of reach.
+    assert "must stay inside" in call("audit.show", work=str(other))["content"][0]["text"]
+    forged = project / "runs" / "forged.json"  # Plan contents never widen the served project.
+    forged.write_text(json.dumps({"artifact_kind": "hipson.work_plan", "project": "/"}), encoding="utf-8")
+    result = call("quality.report", work=str(forged), sidecar=str(artifact))
+    assert result["isError"] is True and "work plan project" in result["content"][0]["text"], result
     schemas = mcp_server.MCP_INPUT_SCHEMAS
     assert schemas["evidence.append"]["properties"]["actor"]["type"] == "string"
     assert schemas["evidence.append"]["properties"]["task_id"]["pattern"] == evidence.TASK_ID_PATTERN

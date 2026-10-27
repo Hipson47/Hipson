@@ -14,6 +14,8 @@ MAX_PACKET_CHARS = 120_000
 
 
 def preflight_packet(path: str | Path, *, max_chars: int = MAX_PACKET_CHARS) -> dict[str, Any]:
+    if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 0:
+        raise ValueError("max_chars must be a nonnegative integer")  # read(-1) would be unbounded.
     packet_path = Path(path).expanduser().resolve()
     errors: list[str] = []
     warnings: list[str] = []

@@ -110,24 +110,53 @@ def redact_sensitive_paths(text: str) -> str:
     return "\n".join(lines)
 
 
+def redact_incomplete_private_keys(text: str) -> str:
+    """A bounded read can cut off a key's END marker; redact from any surviving BEGIN to the end."""
+    return re.sub(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*", REDACTION, text, flags=re.DOTALL)
+
+
 def drop_sensitive_diff_sections(diff: str) -> str:
     """Omit every per-file section of a unified diff whose old or new path is sensitive.
 
     Line filtering alone removes headers but keeps hunk bodies, i.e. the secret values themselves.
     """
-    lines: list[str] = []
-    skipping = False
+    sections: list[list[str]] = [[]]
     for line in diff.splitlines():
-        if line.startswith("diff --git ") or line.startswith("diff --cc ") or line.startswith("diff --combined "):
-            tokens = [token.strip('"') for token in line.split()[2:]]
-            paths = [token[2:] if token[:2] in ("a/", "b/") else token for token in tokens]
-            skipping = any(is_sensitive_path(path) for path in paths if path)
-            if skipping:
-                lines.append(SKIPPED + " (sensitive file diff omitted)")
-                continue
-        if not skipping:
-            lines.append(line)
+        if line.startswith(("diff --git ", "diff --cc ", "diff --combined ")):
+            sections.append([])
+        sections[-1].append(line)
+    lines: list[str] = []
+    for section in sections:
+        if section and section[0].startswith("diff ") and any(is_sensitive_path(path) for path in _diff_paths(section)):
+            lines.append(SKIPPED + " (sensitive file diff omitted)")
+        else:
+            lines.extend(section)
     return "\n".join(lines)
+
+
+def _diff_paths(section: list[str]) -> list[str]:
+    """Complete old/new paths of one diff section; whitespace inside a file name is kept intact."""
+    def unquote(path: str) -> str:
+        path = path.split("\t", 1)[0]
+        return path[1:-1] if len(path) > 1 and path[0] == path[-1] == '"' else path
+
+    paths: list[str] = []
+    rest = section[0].split(" ", 2)[2] if section[0].count(" ") >= 2 else ""
+    size = (len(rest) - 5) // 2
+    if not rest.startswith('"') and size > 0 and rest == f"a/{rest[2:2 + size]} b/{rest[2:2 + size]}":
+        paths.append(rest[2:2 + size])
+    for line in section[1:]:
+        if line.startswith("@@"):
+            break  # Hunk lines are content: "--- a/x" there is a removed line, not a header.
+        if line.startswith(("--- ", "+++ ")):
+            value = unquote(line[4:])
+            paths.append(value[2:] if value[:2] in ("a/", "b/") else value)
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            paths.append(unquote(line.split(" ", 2)[2]))
+    if not paths:  # Unparseable header: fall back to conservative token checks.
+        paths = [token.strip('"')[2:] if token.strip('"')[:2] in ("a/", "b/") else token.strip('"')
+                 for token in rest.split()]
+    return [path for path in paths if path and path != "/dev/null"]
 
 
 def redact_metadata(value: str) -> str:

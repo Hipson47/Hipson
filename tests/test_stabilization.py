@@ -32,6 +32,79 @@ def test_sensitive_file_diffs_are_omitted_whole_and_secrets_redacted_before_trun
     safe = safe_diff(diff)
     assert 'opaque-audit-canary' not in safe and '+a = 2' in safe and 'sensitive file diff omitted' in safe
     assert 'AAAA' not in safe_diff('diff --git a/k.txt b/k.txt\n+' + PEM.replace('\n', '\n+'))
+    # Whole names, not whitespace fragments: an ordinary file with a space keeps its diff...
+    spaced = 'diff --git a/docs/.env example.md b/docs/.env example.md\n--- a/docs/.env example.md\n' \
+             '+++ b/docs/.env example.md\n@@ -1 +1 @@\n-old line\n+new line\n'
+    assert '+new line' in safe_diff(spaced)
+    # ...while renames into a sensitive name and hunk lines that look like headers are judged correctly.
+    renamed = 'diff --git a/notes.txt b/.env\nsimilarity index 90%\nrename from notes.txt\nrename to .env\n' \
+              '@@ -1 +1 @@\n-x\n+TOKEN_VALUE=opaque-rename-canary\n'
+    assert 'opaque-rename-canary' not in safe_diff(renamed)
+    content = 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n--- a/.env\n+kept\n'
+    assert '+kept' in safe_diff(content)
+
+
+def test_bounded_reads_never_leave_a_private_key_body_behind(tmp_path):
+    from hipson import project as project_mod
+    repo = _project(tmp_path)
+    long_key = '-----BEGIN PRIVATE KEY-----\n' + ('B' * 76 + '\n') * 500 + '-----END PRIVATE KEY-----\n'
+    (repo / 'key-notes.txt').write_text(long_key)
+    assert 'BBBB' not in project_mod.embedded_untracked_content(repo, repo)
+
+
+def test_workflow_mcp_errors_stay_per_request_even_for_overflowing_numbers(tmp_path):
+    lines = [json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+                         'params': {'name': 'work.create', 'arguments': {'diff_lines': 1e309}}}),
+             json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'})]
+    output = io.StringIO()
+    mcp_server.serve_stdio(project_path=tmp_path, stdin=io.StringIO('\n'.join(lines) + '\n'), stdout=output)
+    replies = [json.loads(line) for line in output.getvalue().splitlines()]
+    assert [reply['id'] for reply in replies] == [1, 2] and replies[0]['result']['isError'] is True
+
+
+def test_checks_keep_git_identity_and_transport_but_never_repository_redirects(tmp_path):
+    from hipson.task_runner import git_redirecting_variable
+    for name in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_PARAMETERS',
+                 'GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'git_dir'):
+        assert git_redirecting_variable(name), name
+    for name in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_SSH_COMMAND', 'GIT_TERMINAL_PROMPT'):
+        assert not git_redirecting_variable(name), name
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _open(store, project)
+    probe = [PY, '-c', 'import os, sys; sys.exit(0 if os.environ.get("GIT_AUTHOR_NAME") == "Fixture" '
+                         'and "GIT_DIR" not in os.environ else 5)']
+    with patch.dict(os.environ, GIT_AUTHOR_NAME='Fixture', GIT_DIR=str(tmp_path / 'elsewhere')):
+        assert task_verification.run(tmp_path / 'ledger.sqlite', task, probe)['exit_code'] == 0
+
+
+def test_run_artifacts_must_be_regular_files_in_their_run(tmp_path):
+    from hipson import run_control
+    run = tmp_path / 'runs' / 'work_1'
+    run.mkdir(parents=True)
+    secret = tmp_path / 'secret.json'
+    secret.write_text(json.dumps({'latest_gates': {'token': 'LEAKED-CANARY'}}))
+    try:
+        (run / 'audit.json').symlink_to(secret)
+    except OSError as exc:
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from exc
+    _error(lambda: run_control.build_handoff(run), 'not links', SystemExit)
+
+
+def test_preflight_refuses_negative_limits_and_validation_skips_escaping_skills(tmp_path):
+    from hipson import skills
+    from hipson.packet_preflight import preflight_packet
+    packet = tmp_path / 'packet.md'
+    packet.write_text('x')
+    _error(lambda: preflight_packet(packet, max_chars=-2), 'nonnegative', ValueError)
+    root = tmp_path / 'skills'
+    (root / 'leak').mkdir(parents=True)
+    (tmp_path / 'outside.md').write_text('no frontmatter OUTSIDE-LINE\n')
+    try:
+        (root / 'leak' / 'SKILL.md').symlink_to(tmp_path / 'outside.md')
+    except OSError as exc:
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from exc
+    assert skills.validate_skills(root) == [] and skills.find_skill_files(root) == []
 
 
 def test_untracked_content_redacts_before_truncating_and_skips_escaping_links(tmp_path):
@@ -265,3 +338,13 @@ def test_verification_inventory_redacts_paths_but_keeps_freshness_identity(tmp_p
         reasons = store.show(task)['verification']['reasons']
         assert any('stale: working tree changed' in reason for reason in reasons)
         assert 'review_dummy_value_1234567890' not in ' '.join(reasons)
+
+
+def test_release_publishes_only_from_the_tag_after_ci_passes_on_it():
+    root = Path(__file__).resolve().parents[1] / '.github' / 'workflows'
+    release, ci = (root / 'release.yml').read_text(), (root / 'ci.yml').read_text()
+    assert '  workflow_call:' in ci
+    assert 'uses: ./.github/workflows/ci.yml' in release
+    assert 'needs: [build, ci]' in release.split('  publish:', 1)[1].split('steps:', 1)[0]
+    assert 'test "$GITHUB_REF" = "refs/tags/$TAG"' in release
+    assert 'ref: ${{ env.TAG }}' not in release  # Builds the tagged commit the workflow runs on, nothing else.
