@@ -19,7 +19,10 @@ def batch_command(argv: list[str], env: dict[str, str], prefix: str) -> tuple[st
     argument travels in its own environment variable, expanded exactly once inside quotes with delayed
     expansion off. Non-batch targets are returned unchanged.
     """
-    resolved = shutil.which(argv[0]) or argv[0]
+    try:
+        resolved = shutil.which(argv[0]) or argv[0]
+    except (AttributeError, OSError):  # Simulated win32 on POSIX has no _winapi lookup helpers.
+        resolved = argv[0]
     if Path(resolved).suffix.lower() not in (".cmd", ".bat"):
         return argv, env
     if any('"' in arg or "\n" in arg or "\r" in arg for arg in argv):
