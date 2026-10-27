@@ -183,7 +183,8 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     steps = report["next_steps"]
     assert len(steps) == 6 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
     assert "--check" in steps[2] and "--start" in steps[2]
-    assert "task run" in steps[3] and steps[4] == "hipson task now" and "task close" in steps[5]
+    for index, words in ((3, ("task", "run")), (4, ("task", "now")), (5, ("task", "close"))):
+        assert all(word in steps[index] for word in words), steps[index]  # POSIX or PowerShell quoting.
     assert len(second["next_steps"]) == 5  # Nothing new to approve once registered.
 
 
