@@ -88,6 +88,7 @@ def test_agent_e2e_broken_solutions(tmp_path):
         ('false-green', 'false-green.sh', 'must not close'),
         ('altered-tests', 'altered-tests.sh', 'altered acceptance tests'),
         ('stale-verify', 'stale-verify.sh', 'fresh verification'),
+        ('stale-verify', 'stale-verify-cross-task.sh', 'ordered'),
         ('resume', 'resume-no-ack.sh', 'explicitly acknowledge'),
         ('resume', 'resume-second-writer.sh', 'second writer'),
         ('resume', 'resume-ignore-finding.sh', 'major finding'),
@@ -105,6 +106,8 @@ def test_agent_e2e_broken_solutions(tmp_path):
             assert not run["failures"], "Invalid recording must not be attributed to the agent"
             continue
         assert run["measurement_valid"] and any(message in f for f in run["failures"]), run
+        if script == 'stale-verify-cross-task.sh':
+            assert run['exit_code'] == 0, 'The decoy must close the scenario task without a driver error'
         if name == "lead-flow":
             assert any("set to done before scenario acceptance" in f for f in run["failures"]), run
 
@@ -142,6 +145,33 @@ def test_agent_e2e_outcomes_allow_different_discovery_commands_and_actor_labels(
             assert observations['used_lead_resume'] is True
             assert observations['first_hipson_command'] == 'task show'
             assert observations['task_history_lookups'] == 2
+
+
+@_linux_harness
+def test_stale_verify_oracle_accepts_parent_options_and_equals_flags(tmp_path):
+    reference = (harness.SCENARIOS / 'stale-verify/solution.sh').read_text()
+    reference = reference.replace('hipson task verify --task T-0001', 'hipson task --json verify --task=T-0001')
+    reference = reference.replace('hipson task status --task T-0001', 'hipson task --json status --task=T-0001')
+    script = tmp_path / 'normalized.sh'
+    script.write_text(reference)
+    run = harness.run_scenario('stale-verify', tmp_path / 'run', solution=script)
+    assert run['measurement_valid'] and run['passed'], run
+
+
+@_linux_harness
+def test_stale_verify_historical_closure_cannot_use_later_audit(tmp_path):
+    saved = tmp_path / 'run'
+    assert harness.run_scenario('stale-verify', saved)['passed']
+    audit = harness.read_jsonl(saved / 'cli.jsonl')
+    first_pass = next(entry for entry in audit if entry['args'][:2] == ['task', 'verify'])
+    historical = copy.deepcopy(first_pass['after'])
+    historical['tasks'][0]['status'] = 'done'
+    seed = json.loads((saved / 'seed.json').read_text())
+    # Universal checks pass historical state together with the complete final audit.
+    ctx = harness.Context(saved, saved / 'ledger', harness.Transcript(), historical,
+                          json.loads((saved / 'initial.json').read_text()), audit, seed)
+    oracle = harness.load_module(harness.SCENARIOS / 'stale-verify/oracle.py')
+    assert any('ordered' in failure for failure in oracle.check(ctx))
 
 
 @_linux_harness

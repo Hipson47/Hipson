@@ -341,6 +341,7 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "task": {"type": "string"},
             "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
             "label": {"type": "string"},
+            "actor": {"type": "string"},
             "timeout": {"type": "integer", "minimum": 1, "maximum": 86400},
             "approved": {"type": "boolean"},
         },
@@ -686,7 +687,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     if name == 'task.verify':
         from hipson.task_verification import run
         return run(db, arguments['task'], arguments['command'], label=arguments.get('label', ''),
-                   timeout=arguments.get('timeout', 300))
+                   timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
     dry_run = name == "task.reap" and arguments.get("dry_run", False)
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
@@ -815,7 +816,10 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
     if name == "task.assign":
         ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
     if name == 'task.verify':
-        from hipson.task_verification import validate
+        from hipson.task_verification import invocation_context, validate
+        invocation_context()
+        if 'actor' in arguments:
+            ledger.require_text(arguments['actor'], 'actor')
         validate(arguments['command'], arguments.get('timeout', 300))
     if name == "task.status":
         ledger.validate_status_override(to=arguments["to"], force=arguments.get("force", False),

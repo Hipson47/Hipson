@@ -6,9 +6,12 @@
   raw working-tree/index/untracked content and the latest builder finish. Add `task verify`
   and approved MCP `task.verify` with shell-free contained execution, timeouts, timing, redacted
   bounded output and immutable v6 ledger evidence. Explicit force reasons preserve exceptions.
-- Keep verification bound to its pre-command candidate, recording generated untracked artifacts
-  without invalidating passing checks. Report changed paths with before/after content/index hashes;
+- Keep verification bound to its pre-command candidate; new non-cache untracked files require a rerun.
+  Report changed paths with before/after content/index hashes;
   a newer failed verification cannot reuse an older pass.
+- Reject CLI/MCP verification in known worker contexts and retain actor/context provenance;
+  only evidence attributed to the task lead satisfies closure. Recheck the final status snapshot
+  inside the transaction and roll back status and events if freshness changed.
 - Exclude known untracked tool caches even without Git ignore rules, so failed-check bytecode
   cannot stale a later passing verification. Keep tracked files and non-cache source covered;
   `build/` and `target/` require Git ignore rules to exclude their untracked contents.
@@ -18,10 +21,14 @@
   and freeze activity ages for CLI/MCP equality checks on slower runners.
 - Rehash tracked content independently of Git's stat cache, with a deterministic same-size/restored-mtime
   regression and a newer index. Bound raw reads to 16 MiB per file and 128 MiB per snapshot, recording
-  metadata fallback paths and limits in verification evidence; preserve clean CRLF detection and helper isolation.
+  metadata fallback paths and limits in verification evidence; partial coverage requires an audited
+  force reason to close. Validate fallback states against the published schema. Preserve clean CRLF
+  detection and helper isolation.
 - Show verification freshness in task/lead views and reviewer briefs. Add offline false-green,
   altered-tests and stale-verification missions with reference and broken solutions; retain
   executable README and platform smoke lifecycles with an explicit verification step.
+- Bind the stale-verification oracle to the scenario task and ordered pass/change/refusal/rerun/closure;
+  normalize parent CLI options, reject cross-task decoys and keep future evidence out of historical closure checks.
 
 ## 1.4.0 - 2026-10-27
 

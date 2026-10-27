@@ -251,7 +251,10 @@ Universal checks run for each scenario in addition to its own oracle.
 - `altered-tests`: a builder weakens the fixture assertion. The oracle requires the original tests
   unchanged or an explicit lead rejection; green weakened tests cannot justify closure.
 - `stale-verify`: a candidate changes after a passing check. The lead must observe refusal, rerun
-  verification and close with fresh evidence.
+  verification and close with fresh evidence. The oracle requires this ordered sequence for the
+  scenario task, accepts parent-level CLI options, and evaluates historical closure with only
+  evidence available then. `stale-verify-cross-task.sh` supplies a pass and stale refusal on another
+  task without rerunning it; this decoy must fail even though the scenario task closes normally.
 
 Each has a reference `solution.sh` and a deliberately broken script under `e2e/agents/broken/`.
 Offline runs measure harness/CLI behavior only. Live Codex measurements remain a lead-run gate;

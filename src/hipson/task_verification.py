@@ -49,11 +49,10 @@ def _fingerprint(files: list[dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
-def _changes(before: dict[str, Any], after: dict[str, Any], generated: set[str]) -> list[str]:
-    """Describe content/index changes; command-created untracked paths are observations."""
+def _changes(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    """Describe every covered content/index change, including command-created source."""
     old = {item['path']: item for item in before['files']}
-    new = {item['path']: item for item in after['files']
-           if item['path'] not in generated or item['tracked']}
+    new = {item['path']: item for item in after['files']}
     changes = []
     for path in sorted(old.keys() | new.keys()):
         left, right = old.get(path), new.get(path)
@@ -84,8 +83,7 @@ def _filter_overrides(project: str) -> list[str]:
     return overrides
 
 
-def project_state(project: str, db: Path, *, generated: set[str] | None = None,
-                  covered: set[str] | None = None) -> dict[str, Any]:
+def project_state(project: str, db: Path) -> dict[str, Any]:
     """Bind raw content; use Git's built-in normalization only for the dirty flag.
 
     A raw content inventory is used instead of `git diff HEAD`: even --no-textconv
@@ -177,12 +175,6 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
             filename = os.fsdecode(name)
             if not tracked and _is_tool_cache(relative):
                 continue  # Earlier test runs' caches must not become covered project content.
-            if not tracked and ((covered is not None and filename not in covered)
-                                or (generated is not None and filename in generated)):
-                # Observe artifacts without opening them: FIFOs, unreadable output,
-                # and artifacts still being written cannot affect covered content.
-                result['generated_files'].append(filename)
-                continue
             # A tracked directory can have been replaced by a symlink to outside the tree.
             if any(parent.is_symlink() for parent in path.parents if parent != root and parent.is_relative_to(root)):
                 raise ValueError('Directory symlink prevents contained project fingerprinting')
@@ -266,11 +258,36 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
     return result
 
 
-def verification_state(records: list[dict[str, Any]], current: dict[str, Any], builder_seq: int) -> dict[str, Any]:
+def _fallback_paths(state: dict[str, Any]) -> list[str]:
+    return sorted(item['path'] for item in state.get('files', []) if ':metadata:' in item['state'])
+
+
+def _worker_context(context: dict[str, Any]) -> bool:
+    return str(context.get('role') or '').strip().lower() == 'worker' or context.get('assignment') is not None
+
+
+def invocation_context() -> dict[str, Any]:
+    context = {key: os.environ.get('HIPSON_' + key.upper()) for key in ('role', 'assignment', 'task')}
+    if _worker_context(context):
+        raise ledger.LedgerError('Lead verification is unavailable in a known worker context (HIPSON_ROLE/HIPSON_ASSIGNMENT)')
+    return {key: task_activity.safe_text(value) if value is not None else None for key, value in context.items()}
+
+
+def verification_state(records: list[dict[str, Any]], current: dict[str, Any], builder_seq: int,
+                       lead: str) -> dict[str, Any]:
     def reasons(item: dict[str, Any]) -> list[str]:
         errors = []
+        context = item.get('context')
+        if (item.get('actor') != lead or not isinstance(context, dict)
+                or set(context) != {'role', 'assignment', 'task'} or _worker_context(context)):
+            errors.append('verification was not recorded by the task lead in a lead context')
         if item['exit_code'] != 0:
             errors.append(f"failing verification: exit {item['exit_code']}")
+        fallback = sorted(set(_fallback_paths(item) + _fallback_paths(current) + item.get('metadata_fallback_paths', [])))
+        if fallback or item.get('coverage') == 'partial':
+            errors.append('partial content coverage (metadata fallback): ' + '; '.join(
+                escape_display_controls(task_activity.safe_text(path)).replace('<', '&lt;').replace('>', '&gt;')
+                for path in fallback))
         if item['builder_finished_seq'] < builder_seq:
             errors.append('stale: verification predates latest finished builder assignment')
         if item['revision'] != current['revision']:
@@ -279,7 +296,7 @@ def verification_state(records: list[dict[str, Any]], current: dict[str, Any], b
             errors.append('unavailable working-tree fingerprint: ' +
                           (current.get('error') or item.get('error') or 'unknown'))
         elif 'files' in item:
-            changes = _changes(item, current, set(item.get('generated_files', [])))
+            changes = _changes(item, current)
             if changes:
                 errors.append('stale: working tree changed since verification: ' + '; '.join(changes[:20])
                               + (f'; {len(changes) - 20} more changed paths' if len(changes) > 20 else ''))
@@ -296,10 +313,12 @@ def verification_state(records: list[dict[str, Any]], current: dict[str, Any], b
     accepted = latest if latest and not reasons(latest) else None
     errors = [] if accepted else reasons(latest) if latest else ['missing lead verification; run hipson task verify']
     freshness = ('current' if accepted else 'missing' if latest is None else 'stale'
-                 if any('stale:' in reason for reason in errors) else 'failing' if latest['exit_code'] != 0 else 'unknown')
+                 if any(reason.startswith('stale:') for reason in errors) else 'failing' if latest['exit_code'] != 0
+                 else 'partial' if any(reason.startswith('partial content coverage') for reason in errors) else 'unknown')
     return {'freshness': freshness, 'passing': accepted is not None, 'reasons': errors,
             'accepted': accepted['id'] if accepted else None, 'latest': latest, 'current': current,
-            'untrusted_fields': ['latest.command', 'latest.label', 'latest.subject', 'latest.output_tail',
+            'untrusted_fields': ['latest.actor', 'latest.context', 'latest.metadata_fallback_paths',
+                                 'latest.command', 'latest.label', 'latest.subject', 'latest.output_tail',
                                  'latest.files', 'latest.generated_files', 'latest.changes', 'current.subject',
                                  'current.files', 'current.generated_files']}
 
@@ -308,6 +327,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(func=command)
     parser.add_argument('--task', required=True)
     parser.add_argument('--label', default='')
+    parser.add_argument('--actor', help='Invoking actor label (default: task lead); not authenticated')
     parser.add_argument('--timeout', type=float, default=300)
     parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- COMMAND [ARGS...] (no shell)')
 
@@ -322,13 +342,19 @@ def validate(command: list[str], timeout: float) -> None:
 def command(args: argparse.Namespace) -> int:
     from hipson import task_runner
     try:
+        args.verification_context = invocation_context()
+        if args.actor is not None:
+            args.actor = task_activity.safe_text(ledger.require_text(args.actor, 'actor'))
         if not args.worker_command or args.worker_command[0] != '--':
             raise ledger.LedgerError('A verification command after -- is required')
         argv = args.worker_command[1:]
         validate(argv, args.timeout)
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
-            project = store.show(args.task)['project']
+            task = store.show(args.task)
+            project = task['project']
+            if args.actor is None:
+                args.actor = task['lead']
         # Use the worker runner's private supervisor and cross-platform containment.
         args.verification_id = 'V-' + uuid.uuid4().hex
         args.label = task_activity.safe_text(args.label)
@@ -352,11 +378,16 @@ def command(args: argparse.Namespace) -> int:
         return 1
 
 
-def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: float = 300) -> dict[str, Any]:
+def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: float = 300,
+        actor: str | None = None) -> dict[str, Any]:
     """MCP uses a private CLI supervisor too, without changing its server process group."""
+    invocation_context()
+    if actor is not None:
+        ledger.require_text(actor, 'actor')
     validate(command, timeout)
     invocation = [sys.executable, '-m', 'hipson.cli', 'task', 'verify', '--db', str(db), '--task', task,
-                  '--label', label, '--timeout', str(timeout), '--json', '--', *command]
+                  '--label', label, '--timeout', str(timeout), '--json',
+                  *(['--actor', actor] if actor is not None else []), '--', *command]
     try:
         process = subprocess.run(invocation, capture_output=True, timeout=timeout + 30, check=False)
     except subprocess.SubprocessError as exc:
@@ -370,22 +401,24 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
 
 def finish(db: Path, args: argparse.Namespace, code: int, started_at: str, started: float,
            before: dict[str, Any], builder_seq: int, snapshot: dict[str, Any], project: str, safe: bool) -> None:
-    covered = {item['path'] for item in before['files']}
-    after = project_state(project, db, covered=covered)
-    generated = set(after['generated_files'])
-    changes = _changes(before, after, generated)
+    after = project_state(project, db)
+    changes = _changes(before, after)
     if before['revision'] != after['revision']:
         changes.append(f"HEAD before={before['revision']} after={after['revision']}")
     if not before['fingerprint'] or not after['fingerprint']:
         changes.append(f"fingerprint unavailable; before={before['error']} after={after['error']}")
     output = '\n'.join(item['text'] for item in snapshot.get('observations', []))
     output = task_activity.safe_text(output, 65536)[-OUTPUT_LIMIT:]
+    fallback = sorted(set(_fallback_paths(before) + _fallback_paths(after)))
     record = {'id': args.verification_id, 'task': args.task, 'label': args.label,
+              'actor': args.actor, 'context': args.verification_context,
+              'coverage': 'partial' if fallback else 'complete', 'metadata_fallback_paths': fallback,
               'command': [task_activity.safe_text(arg, 4096) for arg in args.worker_command[1:]],
               'exit_code': code, 'duration_seconds': max(0, time.monotonic() - started),
               'started_at': started_at, 'finished_at': ledger._timestamp(),
               **before, 'state_changed': bool(changes), 'builder_finished_seq': builder_seq, 'output_tail': output,
-              'generated_files': sorted(generated), 'changes': changes, 'cleanup_confirmed': safe,
-              'untrusted_fields': ['label', 'command', 'subject', 'output_tail', 'error', 'files', 'generated_files', 'changes']}
+              'generated_files': [], 'changes': changes, 'cleanup_confirmed': safe,
+              'untrusted_fields': ['actor', 'context', 'metadata_fallback_paths', 'label', 'command', 'subject',
+                                   'output_tail', 'error', 'files', 'generated_files', 'changes']}
     with closing(ledger.Ledger(db, create=False)) as store:
         store._record_verification(record)

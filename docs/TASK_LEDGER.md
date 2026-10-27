@@ -132,7 +132,7 @@ for wall-clock activity ages. Git and ledger are separate observations, not an a
 
 ## Revision-bound lead verification (1.5)
 
-Run `hipson task verify --task T [--label NAME] [--timeout SECONDS] -- COMMAND [ARGS...]`.
+Run `hipson task verify --task T [--actor LABEL] [--label NAME] [--timeout SECONDS] -- COMMAND [ARGS...]`.
 The lead chooses an acceptance command and reviews its output and the diff. Commands run as an
 argv vector without a shell, in the registered task project, using the native runner's private
 supervisor and process containment. Timeout defaults to 300 seconds (maximum 86400); the CLI
@@ -140,6 +140,12 @@ returns the command's exit code, 124 on timeout, 127 for a missing executable, 1
 executable, or 128 + signal on POSIX cancellation. Descendants are cleaned up before evidence is
 recorded. CLI output contains only the bounded redacted record/tail (`--json` returns the record).
 Verification creates no worker assignment and never acknowledges a worker result.
+CLI and MCP refuse known worker contexts before execution: `HIPSON_ROLE=worker` (case-insensitive)
+or any set `HIPSON_ASSIGNMENT`, including an empty value. Records retain the invoking actor label
+(default: the task's configured lead; explicit `--actor` or MCP `actor` is preserved) and the
+`HIPSON_ROLE`, `HIPSON_ASSIGNMENT` and `HIPSON_TASK` context. These labels are not authentication.
+Only the task lead's records with captured non-worker context can satisfy freshness; older records
+without this provenance require another run.
 
 Each immutable record includes argv, label, exit code, duration, start/end timestamps, full Git HEAD,
 commit subject as an untrusted observation, dirty flag, a SHA-256 working-tree fingerprint, the
@@ -156,7 +162,8 @@ a later failed check cannot reuse an older pass.
 Missing, failing or stale evidence refuses the transition without events or status changes, naming
 HEAD movement, changed paths with before/after content/index hashes, or a later builder finish. Both transitions permit `--force --reason`;
 a `review_override` or `done_override` event records the missing evidence and other blockers.
-Status events reference the accepted verification ID. Other lifecycle guards, acknowledgement and
+The final snapshot is checked again inside the status write transaction; a stale or failing final
+snapshot rolls back both status and events. Status events reference the accepted verification ID. Other lifecycle guards, acknowledgement and
 path-claim invariants still apply. Existing done tasks stay done when a store is migrated.
 
 The fingerprint is captured before the command starts. It covers raw tracked content relative to HEAD,
@@ -181,19 +188,20 @@ entry remain bound, but content is not read. A file skipped for size does not co
 later smaller files can still be hashed. In the verification record and current state's `files`
 inventory, fallback entries report `MODE:metadata:REASON:file_limit_bytes=...:total_limit_bytes=...`
 followed by named metadata values. Each entry identifies the path, reason (`file_limit` or
-`total_limit`) and applied limits. Fallback coverage is weaker: same-size edits that also
-preserve all recorded metadata can go undetected. Inspect these observations before accepting large
-trees. Git normalization never reads a fallback file; it may reread content-covered files once
+`total_limit`) and applied limits. Any fallback records `coverage: "partial"` and
+`metadata_fallback_paths`; it never supplies passing closure evidence, even with exit zero and
+matching metadata. Same-size edits can preserve this metadata, especially Windows creation times.
+Closing requires `--force --reason`, with fallback paths recorded in the override, or another run
+with full content coverage. Git normalization never reads a fallback file; it may reread content-covered files once
 (up to another 128 MiB) through the hardened Git path. If fallback prevents establishing a clean
 checkout, the dirty flag is `null` unless another change already proves it dirty. These bounds do
 not rely on Git stat-cache accuracy and do not enable repository-configured helpers.
 
-New untracked files observed after execution are recorded in `generated_files`, not added to the
-verified candidate. They never invalidate that check while untracked, even if they later change or
-disappear; this permits Python bytecode, test caches and build output. Staging one of those files
-requires new verification. Pre-existing untracked content stays covered, as do new untracked files
-first appearing after verification. Git-ignored untracked files never count. A lead must inspect
-generated-file observations: a command that creates new source has not verified that source.
+Only known untracked tool caches and Git-ignored untracked files are excluded. Every other new or
+changed untracked file observed after execution makes the check stale (`state_changed: true`) and
+requires a new run. That next run includes the file, and later edits invalidate it. Special files
+fail closed. `generated_files` is retained as an empty compatibility field; legacy values grant no
+exclusion. Build output needs Git ignore rules to remain outside the candidate.
 This is a filesystem observation, not an atomic lock against external writers; a lead must keep
 candidate changes quiescent during checks and closure. It proves the recorded command's outcome,
 not that the selected command covers every acceptance criterion or that tests were not weakened.

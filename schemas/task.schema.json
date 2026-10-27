@@ -23,7 +23,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["freshness", "passing", "reasons", "accepted", "latest", "current", "untrusted_fields"],
       "properties": {
-        "freshness": {"enum": ["missing", "current", "stale", "failing", "unknown"]},
+        "freshness": {"enum": ["missing", "current", "stale", "failing", "partial", "unknown"]},
         "passing": {"type": "boolean"},
         "reasons": {"type": "array", "items": {"type": "string"}},
         "accepted": {"type": ["string", "null"], "pattern": "^V-[0-9a-f]{32}$"},
@@ -64,7 +64,7 @@
       "required": ["path", "state", "index", "tracked"],
       "properties": {
         "path": {"type": "string"},
-        "state": {"type": "string", "pattern": "^(missing|[0-9]{6}:[0-9a-f]{64})$"},
+        "state": {"type": "string", "pattern": "^(missing|[0-9]{6}:([0-9a-f]{64}|metadata:(file_limit|total_limit):file_limit_bytes=[0-9]+:total_limit_bytes=[0-9]+:dev=[0-9]+:ino=[0-9]+:size=[0-9]+:mtime_ns=-?[0-9]+:ctime_ns=-?[0-9]+))$"},
         "index": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "tracked": {"type": "boolean"}
       }
@@ -76,6 +76,18 @@
         "id": {"type": "string", "pattern": "^V-[0-9a-f]{32}$"},
         "task": {"type": "string", "pattern": "^T-[0-9]{4,}$"},
         "label": {"type": "string", "maxLength": 1024},
+        "actor": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "context": {
+          "type": "object", "additionalProperties": false,
+          "required": ["role", "assignment", "task"],
+          "properties": {
+            "role": {"type": ["string", "null"], "maxLength": 1024},
+            "assignment": {"type": ["string", "null"], "maxLength": 1024},
+            "task": {"type": ["string", "null"], "maxLength": 1024}
+          }
+        },
+        "coverage": {"enum": ["complete", "partial"]},
+        "metadata_fallback_paths": {"type": "array", "items": {"type": "string"}},
         "command": {"type": "array", "items": {"type": "string", "maxLength": 4096}},
         "exit_code": {"type": "integer"},
         "duration_seconds": {"type": "number", "minimum": 0},

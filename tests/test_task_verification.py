@@ -8,12 +8,13 @@ import sqlite3
 import subprocess
 import sys
 import time
+from argparse import Namespace
 from contextlib import closing
 from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
 
-from hipson import lead_context, ledger, task_context, task_verification
+from hipson import lead_context, ledger, task_context, task_runner, task_verification
 from tests.test_hipson_helpers import run_cli
 from tests.test_ledger import _error, _rows, assert_strict_schema
 from tests.test_ledger_mcp import _assert_error, _call, _payload
@@ -49,6 +50,186 @@ def _task(store, project):
     task = store.open_task(project=project, title='Candidate', objective='Require independent current evidence')['id']
     store.set_status(task, to='in_progress', actor='lead')
     return task
+
+
+def test_verify_rejects_known_workers_before_cli_or_mcp_execution(tmp_path):
+    project = _project(tmp_path)
+    db = tmp_path / 'ledger.sqlite'
+    with closing(ledger.Ledger(db)) as store:
+        task = _task(store, project)
+        before = _rows(store)
+        for context in ({'HIPSON_ROLE': 'worker'}, {'HIPSON_ROLE': ' WORKER '}, {'HIPSON_ASSIGNMENT': 'A-1234'},
+                        {'HIPSON_ASSIGNMENT': ''}):
+            with patch.dict(os.environ, context), \
+                    patch.object(task_runner, '_execute') as execute, \
+                    patch.object(task_verification.subprocess, 'run') as spawn:
+                args = Namespace(db=str(db), task=task, label='', timeout=10, json=True,
+                                 actor='lead', worker_command=['--', sys.executable, '-c', 'pass'])
+                assert task_verification.command(args) == 1
+                _error(lambda: task_verification.run(db, task, [sys.executable, '-c', 'pass']),
+                       'worker context')
+                _assert_error(_call(tmp_path, 'task.verify', ledger_db=db, task=task,
+                                    command=[sys.executable, '-c', 'pass'], approved=True), 'worker context')
+                execute.assert_not_called()
+                spawn.assert_not_called()
+            assert _rows(store) == before and not store.verifications(task)
+
+
+def test_verification_preserves_actor_and_context_and_requires_task_lead(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = store.open_task(project=project, title='Actor', objective='Independent lead', lead='claude')['id']
+        store.set_status(task, to='in_progress', actor='claude')
+        record = task_verification.run(store.path, task, [sys.executable, '-c', 'pass'], actor='other')
+        assert record['actor'] == 'other'
+        assert record['context'] == {'role': None, 'assignment': None, 'task': None}
+        assert store.events(task)[-1]['actor'] == 'other'
+        _error(lambda: store.set_status(task, to='review', actor='worker'), 'task lead')
+        with patch.dict(os.environ, HIPSON_ROLE='lead', HIPSON_TASK=task):
+            record = _payload(_call(tmp_path, 'task.verify', ledger_db=store.path, task=task,
+                                    command=[sys.executable, '-c', 'pass'], actor='claude', approved=True))
+        assert record['actor'] == 'claude' and record['context']['role'] == 'lead'
+        assert record['context']['task'] == task and store.events(task)[-1]['actor'] == 'claude'
+        assert store.set_status(task, to='review', actor='claude')['verification']['passing']
+        legacy = {key: value for key, value in record.items() if key not in ('actor', 'context')}
+        legacy['id'] = 'V-' + 'b' * 32
+        store._record_verification(legacy)
+        _error(lambda: store.set_status(task, to='done', actor='claude'), 'task lead')
+        for index, context in enumerate(({'role': 'worker', 'assignment': None, 'task': task}, None, {})):
+            store._record_verification({**record, 'id': 'V-' + str(index) * 32, 'context': context})
+            _error(lambda: store.set_status(task, to='done', actor='claude'), 'task lead')
+
+
+def test_verification_new_source_requires_rerun_and_remains_covered(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = task_verification.run(store.path, task, [sys.executable, '-c',
+            'from pathlib import Path; Path("new.py").write_text("value = 1\\n")'])
+        assert record['exit_code'] == 0 and record['state_changed'], record
+        assert record['generated_files'] == []
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'new.py:')
+        passed = verify_fixture(store, task)
+        assert not passed['state_changed']
+        store.set_status(task, to='review', actor='lead')
+        (project / 'new.py').write_text('value = 2\n')
+        _error(lambda: store.set_status(task, to='done', actor='lead'), 'new.py:')
+
+
+def test_status_rolls_back_when_final_snapshot_is_stale_or_failing(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        verify_fixture(store, task)
+        for target in ('review', 'done'):
+            original = store._view
+            for state in ('stale', 'failing'):
+                before = _rows(store)
+                calls = 0
+
+                def changing_view(*args, original=original, state=state, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    view = original(*args, **kwargs)
+                    if calls == 2:
+                        view['verification'] = {**view['verification'], 'passing': False,
+                                                'freshness': state, 'reasons': [f'{state}: final snapshot']}
+                    return view
+
+                with patch.object(store, '_view', side_effect=changing_view):
+                    _error(lambda target=target: store.set_status(task, to=target, actor='lead'), f'{state}: final snapshot')
+                assert _rows(store) == before
+            if target == 'review':
+                store.set_status(task, to='review', actor='lead')
+
+
+def test_status_final_snapshot_force_records_new_fallback_paths(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        original = store._view
+        calls = 0
+
+        def changing_view(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                with (project / 'huge.py').open('wb') as stream:
+                    stream.truncate(task_verification.FILE_HASH_LIMIT + 1)
+            return original(*args, **kwargs)
+
+        with patch.object(store, '_view', side_effect=changing_view):
+            view = store.set_status(task, to='review', actor='lead', force=True, reason='Inspect final candidate')
+        assert not view['verification']['passing'] and view['verification']['accepted'] is None
+        assert view == store.show(task)
+        events = store.events(task)
+        assert any(event['type'] == 'review_override' and 'huge.py' in event['summary'] for event in events)
+        assert record['id'] not in events[-1]['refs'] and 'final lead verification OVERRIDDEN' in events[-1]['summary']
+
+
+def test_fallback_views_and_records_follow_published_schema(tmp_path):
+    project = _project(tmp_path)
+    (project / 'tiny.txt').write_bytes(b'x')
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store, \
+            patch.object(task_verification, 'FILE_HASH_LIMIT', 1), \
+            patch.object(task_verification, 'TOTAL_HASH_LIMIT', 0):
+        task = _task(store, project)
+        state = task_verification.project_state(str(project), store.path)
+        assert any(':metadata:file_limit:' in item['state'] for item in state['files'])
+        assert any(':metadata:total_limit:' in item['state'] for item in state['files'])
+        # In-process fixture keeps the small cap deterministic on all platforms.
+        task_verification.finish(store.path, Namespace(task=task, actor='lead', verification_context={
+            'role': None, 'assignment': None, 'task': None}, verification_id='V-' + 'c' * 32,
+            label='', worker_command=['--', sys.executable, '-c', 'pass']),
+            0, ledger._timestamp(), time.monotonic(), state, 0, {}, str(project), True)
+        assert_strict_schema('task.schema.json', store.show(task))
+
+
+def test_metadata_fallback_is_partial_and_requires_audited_override(tmp_path):
+    project = _project(tmp_path)
+    large = project / 'padded-source.py'
+    with large.open('wb') as stream:
+        stream.truncate(task_verification.FILE_HASH_LIMIT + 1)
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        assert record['coverage'] == 'partial'
+        assert record['metadata_fallback_paths'] == ['padded-source.py']
+        assert store.show(task)['verification']['freshness'] == 'partial'
+        for target in ('review', 'done'):
+            before = _rows(store)
+            _error(lambda target=target: store.set_status(task, to=target, actor='lead'), 'partial content coverage')
+            assert _rows(store) == before
+            view = store.set_status(task, to=target, actor='lead', force=True, reason='Inspected oversized source')
+            assert not view['verification']['passing'] and view['verification']['accepted'] is None
+            override = next(event for event in reversed(store.events(task)) if event['type'] == target + '_override')
+            assert 'padded-source.py' in override['summary'] and 'partial content coverage' in override['summary']
+
+
+def test_metadata_fallback_cannot_pass_even_when_windows_metadata_hides_edit(tmp_path):
+    project = _project(tmp_path)
+    large = project / 'padded.py'
+    with large.open('wb') as stream:
+        stream.truncate(task_verification.FILE_HASH_LIMIT + 1)
+    original_info = large.lstat()
+    original_lstat = Path.lstat
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        with large.open('r+b') as stream:
+            stream.write(b'# same-size edit')
+        os.utime(large, ns=(original_info.st_atime_ns, original_info.st_mtime_ns))
+
+        def windows_creation_time(path, *args, **kwargs):
+            # Windows st_ctime_ns is creation time: an in-place edit need not change it.
+            return original_info if path == large else original_lstat(path, *args, **kwargs)
+
+        with patch.object(Path, 'lstat', windows_creation_time):
+            view = store.show(task)
+            assert view['verification']['current']['fingerprint'] == record['fingerprint']
+            assert not view['verification']['passing'] and view['verification']['freshness'] == 'partial'
+            _error(lambda: store.set_status(task, to='review', actor='lead'), 'partial content coverage')
 
 
 def test_verification_missing_worker_claims_legacy_events_and_force(tmp_path):
@@ -253,7 +434,9 @@ def test_verification_record_persists_metadata_fallback_and_checks_its_freshness
         assert not any(':metadata:' in states[name] for name in ('.gitignore', 'source.py'))
         assert 'files' in record['untrusted_fields']
         assert store.verifications(task) == [record]
-        assert store.set_status(task, to='review', actor='lead')['verification']['passing']
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'partial content coverage')
+        assert not store.set_status(task, to='review', actor='lead', force=True,
+                                    reason='Inspected large file')['verification']['passing']
         with large.open('ab') as stream:
             stream.write(b'changed')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'large.bin: state before=')
@@ -305,7 +488,7 @@ def test_verify_python_import_artifacts_do_not_invalidate_the_candidate(tmp_path
         assert store.set_status(task, to='done', actor='lead')['verification']['passing']
 
 
-def test_verify_new_untracked_special_artifacts_are_observations(tmp_path):
+def test_verify_new_untracked_special_artifacts_fail_closed(tmp_path):
     if sys.platform == 'win32':
         return  # Native Windows has no os.mkfifo; ordinary artifact coverage runs there.
     project = _project(tmp_path)
@@ -313,11 +496,15 @@ def test_verify_new_untracked_special_artifacts_are_observations(tmp_path):
         task = _task(store, project)
         record = task_verification.run(store.path, task, [sys.executable, '-c',
             'from pathlib import Path; Path("test.pipe").write_text("artifact")'])
-        assert record['generated_files'] == ['test.pipe'] and not record['state_changed']
+        assert record['generated_files'] == [] and record['state_changed']
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'test.pipe:')
+        _git(project, 'add', 'test.pipe')
         (project / 'test.pipe').unlink()
         os.mkfifo(project / 'test.pipe')
-        store.set_status(task, to='review', actor='lead')
-        assert store.set_status(task, to='done', actor='lead')['verification']['passing']
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'Special file prevents')
+        (project / 'test.pipe').unlink()
+        verify_fixture(store, task)
+        assert store.set_status(task, to='review', actor='lead')['verification']['passing']
 
 
 def test_verify_retry_excludes_prior_bytecode_but_keeps_late_source_edits_stale(tmp_path):
@@ -475,7 +662,9 @@ def test_generated_artifacts_becoming_tracked_require_new_verification(tmp_path)
         task = _task(store, project)
         record = task_verification.run(store.path, task, [sys.executable, '-c',
             'from pathlib import Path; Path("generated.txt").write_text("artifact")'])
-        assert record['generated_files'] == ['generated.txt'] and not record['state_changed']
+        assert record['generated_files'] == [] and record['state_changed']
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'generated.txt:')
+        verify_fixture(store, task)
         store.set_status(task, to='review', actor='lead')
         _git(project, 'add', 'generated.txt')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'generated.txt:')

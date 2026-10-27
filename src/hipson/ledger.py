@@ -1152,8 +1152,20 @@ class Ledger:
             self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
             if to == 'cancelled':
                 summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
+            final = self._view(task)
+            if to in ('review', 'done') and not final['verification']['passing']:
+                if not force:
+                    raise LedgerError(f"Cannot mark {task} {to}: " + '; '.join(final['verification']['reasons']))
+                if final['verification']['reasons'] != verification['reasons']:
+                    self._append_event(task, actor, to + '_override',
+                                       f"Reason: {reason.strip()}; final verification blockers: "
+                                       + '; '.join(final['verification']['reasons']), [])
+                    refs = [ref for ref in refs if ref != verification['accepted']]
+                    summary += '; final lead verification OVERRIDDEN: ' + '; '.join(final['verification']['reasons'])
             self._append_event(task, actor, "status", summary or f"{previous} -> {to}", refs)
-            return self._view(task)
+            stored = self._task(task)
+            final['revision'], final['updated_at'] = stored['revision'], stored['updated_at']
+            return final
 
     def show(self, task: str) -> TaskView:
         with self._transaction(write=False):
@@ -1175,10 +1187,10 @@ class Ledger:
     def _record_verification(self, evidence: dict[str, Any]) -> None:
         """Called only by the lead-run command supervisor, never by finish/event ingestion."""
         with self._transaction():
-            task = self._task(evidence['task'])
+            self._task(evidence['task'])
             self.connection.execute('INSERT INTO verifications (id, task, evidence) VALUES (?, ?, ?)',
                                     (evidence['id'], evidence['task'], json.dumps(evidence)))
-            self._append_event(evidence['task'], task['lead'], 'lead_verified',
+            self._append_event(evidence['task'], evidence.get('actor', 'unknown'), 'lead_verified',
                                f"{evidence['id']}: exit={evidence['exit_code']}; revision={evidence['revision']}; "
                                f"fingerprint={evidence['fingerprint']}; changed={evidence['state_changed']}",
                                [evidence['id']])
@@ -1243,9 +1255,8 @@ class Ledger:
         current = self._task(task)
         from hipson.task_verification import project_state, verification_state
         records = self.verifications(task)
-        generated = set(records[-1].get('generated_files', [])) if records else set()
-        verification = verification_state(records, project_state(current['project'], self.path, generated=generated),
-                                          self._builder_finished_seq(task))
+        verification = verification_state(records, project_state(current['project'], self.path),
+                                          self._builder_finished_seq(task), current['lead'])
         assignments = [
             self._assignment_dict(row)
             for row in self.connection.execute(
