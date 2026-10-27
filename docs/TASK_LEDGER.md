@@ -161,14 +161,33 @@ path-claim invariants still apply. Existing done tasks stay done when a store is
 
 The fingerprint is captured before the command starts. It covers raw tracked content relative to HEAD,
 index entries (including staged-only changes), modes and symlink targets, and existing untracked
-path/content hashes. The record retains that file inventory for file-level freshness checks. This inventory
-replaces textual `git diff HEAD`, because even `--no-textconv` diff can run clean/process filters.
+path/content hashes. Within the content budget, every tracked file is read directly regardless of
+Git's cached size/mtime, including same-size edits with restored timestamps and an index newer than
+the edit. Git's built-in text/EOL normalization is used only for the dirty flag, so a clean CRLF
+checkout stays clean while line-ending changes still invalidate raw-byte freshness. The record retains
+that file inventory for file-level freshness checks. This inventory replaces textual `git diff HEAD`,
+because even `--no-textconv` diff can run clean/process filters.
 Git reads use the hardened read-only path: no inherited Git overrides, optional locks, hooks,
 filters, pagers, external diffs, replacement objects or lazy fetching. Ignored untracked files are
-excluded. Submodules, covered special/unreadable files, unavailable HEAD and unsafe directory symlinks
-fail closed to unavailable evidence. A non-Git project explicitly records `revision: "none"` and
+excluded. Submodules, covered special files, unreadable content within the read budget, unavailable HEAD
+and unsafe directory symlinks fail closed to unavailable evidence. A non-Git project explicitly records `revision: "none"` and
 hashes its entire project tree without traversing directory symlinks. The ledger database and its
 SQLite sidecars are excluded from fingerprints to avoid invalidation by their own evidence writes.
+
+Content hashing has a **16 MiB per-file limit and 128 MiB total raw-content budget** per snapshot,
+in sorted repository-path order, for Git and non-Git projects alike. Files exceeding either limit
+use a metadata fallback: file mode, size, modification/change times, device/inode identity and index
+entry remain bound, but content is not read. A file skipped for size does not consume the budget;
+later smaller files can still be hashed. In the verification record and current state's `files`
+inventory, fallback entries report `MODE:metadata:REASON:file_limit_bytes=...:total_limit_bytes=...`
+followed by named metadata values. Each entry identifies the path, reason (`file_limit` or
+`total_limit`) and applied limits. Fallback coverage is weaker: same-size edits that also
+preserve all recorded metadata can go undetected. Inspect these observations before accepting large
+trees. Git normalization never reads a fallback file; it may reread content-covered files once
+(up to another 128 MiB) through the hardened Git path. If fallback prevents establishing a clean
+checkout, the dirty flag is `null` unless another change already proves it dirty. These bounds do
+not rely on Git stat-cache accuracy and do not enable repository-configured helpers.
+
 New untracked files observed after execution are recorded in `generated_files`, not added to the
 verified candidate. They never invalidate that check while untracked, even if they later change or
 disappear; this permits Python bytecode, test caches and build output. Staging one of those files

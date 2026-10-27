@@ -140,6 +140,125 @@ def test_verify_stale_head_index_tracked_untracked_and_builder_finish(tmp_path):
         assert store.set_status(task, to='done', actor='lead')['status'] == 'done'
 
 
+def test_verify_rehashes_tracked_bytes_when_git_trusts_same_size_and_restored_mtime(tmp_path):
+    project = _project(tmp_path)
+    _git(project, 'config', 'core.trustctime', 'false')
+    _git(project, 'config', 'core.checkStat', 'minimal')
+    source = project / 'source.py'
+    stamp = 1_600_000_000 * 10**9  # Whole seconds, portable to Git for Windows.
+    os.utime(source, ns=(stamp, stamp))
+    _git(project, 'update-index', '--refresh')
+    original = source.read_bytes()
+    index = project / '.git/index'
+    cached_index = index.read_bytes()
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        store.set_status(task, to='review', actor='lead')
+        source.write_bytes(original.replace(b'1', b'2'))
+        os.utime(source, ns=(stamp, stamp))
+        # Write the index AFTER the edit, with a strictly newer timestamp: no racy-Git
+        # rehash safety net and no scheduling/sleep dependency on either test runner.
+        index.write_bytes(cached_index)
+        os.utime(index, ns=(stamp + 60 * 10**9, stamp + 60 * 10**9))
+        assert source.stat().st_size == len(original) and source.stat().st_mtime_ns == stamp
+        assert index.stat().st_mtime_ns > source.stat().st_mtime_ns
+        assert _git(project, 'diff-files', '--name-only') == ''  # Git trusts its stat cache.
+        before_index = (index.read_bytes(), index.stat().st_mtime_ns)
+        current = task_verification.project_state(str(project), store.path)
+        assert current['fingerprint'] != record['fingerprint'] and current['dirty'] is True, current
+        assert not any(':metadata:' in item['state'] for item in current['files'])
+        _error(lambda: store.set_status(task, to='done', actor='lead'), 'source.py: state before=')
+        store.set_status(task, to='in_progress', actor='lead')
+        _error(lambda: store.set_status(task, to='review', actor='lead'), 'source.py: state before=')
+        assert (index.read_bytes(), index.stat().st_mtime_ns) == before_index
+
+
+def test_fingerprint_bounds_content_reads_and_reports_metadata_fallback(tmp_path):
+    project = _project(tmp_path, gitignore=False)
+    (project / 'a-limit.bin').write_bytes(b'abcd')
+    (project / 'b-large.bin').write_bytes(b'oversize')
+    _git(project, 'add', 'a-limit.bin', 'b-large.bin')
+    (project / 'z-untracked.bin').write_bytes(b'xyz')
+    (project / 'zz-limit.bin').write_bytes(b'ok')
+    (project / 'cache.pyc').write_bytes(b'ignored cache')
+    fallback = {'b-large.bin': 'file_limit', 'source.py': 'file_limit', 'z-untracked.bin': 'total_limit'}
+    original_open = Path.open
+    opened = []
+
+    def bounded_open(path, *args, **kwargs):
+        assert path.name not in fallback, 'Metadata-only files must never be opened for hashing'
+        opened.append(path.name)
+        return original_open(path, *args, **kwargs)
+
+    with patch.object(task_verification, 'FILE_HASH_LIMIT', 4), \
+            patch.object(task_verification, 'TOTAL_HASH_LIMIT', 6), patch.object(Path, 'open', bounded_open):
+        before = task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')
+        assert before['fingerprint'], before
+        assert opened == ['a-limit.bin', 'zz-limit.bin']
+        assert sum((project / name).stat().st_size for name in opened) == 6
+        assert {item['path'] for item in before['files']} == {
+            'a-limit.bin', 'b-large.bin', 'source.py', 'z-untracked.bin', 'zz-limit.bin'}
+        for item in before['files']:
+            if item['path'] in fallback:
+                assert f':metadata:{fallback[item["path"]]}:file_limit_bytes=4:total_limit_bytes=6:' in item['state']
+        assert task_verification.project_state(str(project), tmp_path / 'ledger.sqlite') == before
+        # Within the budget, even a same-size edit with restored mtime is content-covered.
+        source = project / 'a-limit.bin'
+        info = source.stat()
+        source.write_bytes(b'edit')
+        os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns))
+        assert task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')['fingerprint'] != before['fingerprint']
+
+
+def test_fingerprint_budget_also_applies_to_non_git_projects(tmp_path):
+    (tmp_path / 'a.txt').write_bytes(b'abcd')
+    large = tmp_path / 'b.txt'
+    large.write_bytes(b'oversize')
+    (tmp_path / 'c.txt').write_bytes(b'xyz')
+    db = tmp_path / 'ledger.sqlite'
+    with patch.object(task_verification, 'FILE_HASH_LIMIT', 4), patch.object(task_verification, 'TOTAL_HASH_LIMIT', 4):
+        before = task_verification.project_state(str(tmp_path), db)
+        assert before['fingerprint'] and before['revision'] == 'none', before
+        states = {item['path']: item['state'] for item in before['files']}
+        assert ':metadata:' not in states['a.txt']
+        assert ':metadata:file_limit:file_limit_bytes=4:total_limit_bytes=4:' in states['b.txt']
+        assert ':metadata:total_limit:file_limit_bytes=4:total_limit_bytes=4:' in states['c.txt']
+        large.write_bytes(b'changed size')
+        assert task_verification.project_state(str(tmp_path), db)['fingerprint'] != before['fingerprint']
+
+
+def test_metadata_fallback_does_not_claim_clean_tracked_content(tmp_path):
+    project = _project(tmp_path, gitignore=False)
+    with patch.object(task_verification, 'FILE_HASH_LIMIT', 1):
+        state = task_verification.project_state(str(project), tmp_path / 'ledger.sqlite')
+    assert state['fingerprint'] and state['dirty'] is None and state['error'] is None, state
+    assert ':metadata:file_limit:' in state['files'][0]['state']
+
+
+def test_verification_record_persists_metadata_fallback_and_checks_its_freshness(tmp_path):
+    project = _project(tmp_path)
+    # A sparse file crosses the production limit without allocating a huge fixture.
+    large = project / 'large.bin'
+    with large.open('wb') as stream:
+        stream.seek(task_verification.FILE_HASH_LIMIT)
+        stream.write(b'x')
+    with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:
+        task = _task(store, project)
+        record = verify_fixture(store, task)
+        assert not record['state_changed'] and record['exit_code'] == 0, record
+        states = {item['path']: item['state'] for item in record['files']}
+        assert f':metadata:file_limit:file_limit_bytes={task_verification.FILE_HASH_LIMIT}:' in states['large.bin']
+        assert f'total_limit_bytes={task_verification.TOTAL_HASH_LIMIT}:' in states['large.bin']
+        assert not any(':metadata:' in states[name] for name in ('.gitignore', 'source.py'))
+        assert 'files' in record['untrusted_fields']
+        assert store.verifications(task) == [record]
+        assert store.set_status(task, to='review', actor='lead')['verification']['passing']
+        with large.open('ab') as stream:
+            stream.write(b'changed')
+        _error(lambda: store.set_status(task, to='done', actor='lead'), 'large.bin: state before=')
+
+
 def test_verify_command_mutation_timeout_and_bounded_output(tmp_path):
     project = _project(tmp_path)
     with closing(ledger.Ledger(tmp_path / 'ledger.sqlite')) as store:

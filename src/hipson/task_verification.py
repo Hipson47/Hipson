@@ -21,6 +21,8 @@ from hipson import ledger, task_activity
 from hipson.display import escape_display_controls
 
 OUTPUT_LIMIT = 8192
+FILE_HASH_LIMIT = 16 * 1024 * 1024
+TOTAL_HASH_LIMIT = 128 * 1024 * 1024
 _TOOL_CACHE_DIRS = frozenset({
     '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.hypothesis', '.tox', '.nox', '.gradle',
 })
@@ -88,8 +90,9 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
 
     A raw content inventory is used instead of `git diff HEAD`: even --no-textconv
     diff can execute clean/process filters. Disable drivers before asking Git to hash
-    normalized content. Never follow directory symlinks. Gitlinks and unreadable/special
-    files fail closed rather than silently omitting content.
+    normalized content. Content reads are bounded; larger files bind lstat metadata
+    instead, explicitly reported in the file inventory. Never follow directory symlinks.
+    Gitlinks and unreadable/special files fail closed rather than silently omitting content.
     """
     from hipson.lead_context import _git
 
@@ -159,6 +162,8 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                 paths.update(os.fsencode((Path(directory) / name).relative_to(root).as_posix()) for name in walk_files)
         files: list[dict[str, Any]] = []
         dirty = index_dirty
+        content_bytes = 0
+        metadata_fallback = False
         filter_overrides: list[str] | None = None
         excluded = {db, Path(str(db) + '-wal'), Path(str(db) + '-shm'), Path(str(db) + '-journal')}
         for name in sorted(paths):
@@ -199,7 +204,19 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                 mode = b'100755' if os.name == 'posix' and info.st_mode & stat.S_IXUSR else b'100644'
             else:
                 raise ValueError('Special file prevents project fingerprinting')
-            # The acceptance fingerprint always covers raw bytes, including line endings.
+            if size > FILE_HASH_LIMIT or size > TOTAL_HASH_LIMIT - content_bytes:
+                reason = 'file_limit' if size > FILE_HASH_LIMIT else 'total_limit'
+                metadata_fallback = True
+                files.append({'path': filename,
+                              'state': f'{mode.decode()}:metadata:{reason}:file_limit_bytes={FILE_HASH_LIMIT}:'
+                                       f'total_limit_bytes={TOTAL_HASH_LIMIT}:dev={info.st_dev}:ino={info.st_ino}:'
+                                       f'size={info.st_size}:mtime_ns={info.st_mtime_ns}:ctime_ns={info.st_ctime_ns}',
+                              'index': hashlib.sha256(index_entries[name]).hexdigest() if name in index_entries else None,
+                              'tracked': tracked})
+                dirty |= name not in baseline or baseline[name][0] != mode
+                continue  # Do not let hash-object bypass the content read budget either.
+            # Always read content within the budget: Git can trust cached size/mtime
+            # even after a same-size edit with restored timestamps. Keep raw line endings.
             algorithm = 'sha256' if len(str(result['revision'])) == 64 else 'sha1'
             blob_hash = hashlib.new(algorithm, usedforsecurity=False)
             blob_hash.update(f'blob {size}\0'.encode())
@@ -209,9 +226,15 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                 file_hash.update(content)
             else:
                 with path.open('rb') as stream:
-                    while chunk := stream.read(65536):
+                    remaining = size
+                    while remaining:
+                        chunk = stream.read(min(65536, remaining))
+                        if not chunk:
+                            raise ValueError('Project changed while fingerprinting')
                         blob_hash.update(chunk)
                         file_hash.update(chunk)
+                        remaining -= len(chunk)
+            content_bytes += size
             blob = blob_hash.hexdigest().encode()
             if git and mode != b'120000' and name in baseline and baseline[name][0] == mode \
                     and baseline[name][1] != blob:
@@ -232,7 +255,10 @@ def project_state(project: str, db: Path, *, generated: set[str] | None = None,
                           'index': hashlib.sha256(index_entries[name]).hexdigest() if name in index_entries else None,
                           'tracked': tracked})
             dirty |= baseline.get(name) != (mode, blob)
-        result.update(files=files, fingerprint=_fingerprint(files), dirty=dirty if git else bool(files))
+        # Unknown content cannot establish a clean checkout, even when its stats match.
+        clean_or_unknown = None if metadata_fallback else False
+        result.update(files=files, fingerprint=_fingerprint(files),
+                      dirty=(True if dirty else clean_or_unknown) if git else bool(files))
         if git and _git(project, 'rev-parse', '--verify', 'HEAD') != head:
             raise ValueError('HEAD moved while fingerprinting')
     except (OSError, ValueError, UnicodeError) as exc:

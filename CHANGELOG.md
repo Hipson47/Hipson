@@ -16,6 +16,9 @@
   configured filter helpers; verification freshness still covers raw bytes. Compare lead-resume
   index timestamps at Git for Windows' whole-second precision. Make bytecode fixtures explicit
   and freeze activity ages for CLI/MCP equality checks on slower runners.
+- Rehash tracked content independently of Git's stat cache, with a deterministic same-size/restored-mtime
+  regression and a newer index. Bound raw reads to 16 MiB per file and 128 MiB per snapshot, recording
+  metadata fallback paths and limits in verification evidence; preserve clean CRLF detection and helper isolation.
 - Show verification freshness in task/lead views and reviewer briefs. Add offline false-green,
   altered-tests and stale-verification missions with reference and broken solutions; retain
   executable README and platform smoke lifecycles with an explicit verification step.
