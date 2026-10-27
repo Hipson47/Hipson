@@ -45,7 +45,10 @@ DEFAULT_CLI_TIMEOUT = 30
 
 
 def run_git(repo: Path, *args: str) -> None:
-    subprocess.run(["git", *args], cwd=repo, check=True, text=True, capture_output=True, timeout=DEFAULT_CLI_TIMEOUT)
+    # Fixture commits must not depend on the developer's signing keys, hooks or inherited Git overrides.
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", f"core.hooksPath={os.devnull}",
+                    *args], cwd=repo, env=env, check=True, text=True, capture_output=True, timeout=DEFAULT_CLI_TIMEOUT)
 
 
 def init_git_repo(tmp_path: Path) -> Path:
@@ -2379,6 +2382,25 @@ def test_workflow_router_is_provider_free():
     assert all("sidecar run" not in command for command in route["commands"])
 
 
+def _argv(commands):
+    """Compare recommendations as the argv a POSIX shell receives, not by quoting style."""
+    return [shlex.split(command) for command in ([commands] if isinstance(commands, str) else commands)]
+
+
+def test_workflow_router_never_lets_task_text_expand_in_a_shell(tmp_path: Path):
+    route = hipson_router.route_task("implement $(touch EXPANDED) `touch TICKED` $HOME fix")
+    for command in route["commands"]:
+        assert "$(touch EXPANDED)" in " ".join(shlex.split(command)) or "packet" not in command
+    stub = tmp_path / "hipson"
+    stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$(dirname "$0")/argv.txt"\n')
+    stub.chmod(0o755)
+    if os.name == "posix":
+        subprocess.run(["sh", "-c", route["commands"][1]], cwd=tmp_path, env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+                       check=True, timeout=10)
+        assert not (tmp_path / "EXPANDED").exists() and not (tmp_path / "TICKED").exists()
+        assert "implement $(touch EXPANDED) `touch TICKED` $HOME fix" in (tmp_path / "argv.txt").read_text()
+
+
 def test_workflow_router_commands_are_exact_and_ordered():
     review = hipson_router.route_task("security review of auth")
     exec_route = hipson_router.route_task("implement parser fix")
@@ -2387,35 +2409,35 @@ def test_workflow_router_commands_are_exact_and_ordered():
     sidecar = hipson_router.route_task("get sidecar second opinion for auth token")
     memory = hipson_router.route_task("remember parser decision")
 
-    assert review["commands"] == [
+    assert _argv(review["commands"]) == _argv([
         "hipson scan . --include-diff",
         'hipson packet review . --title "security review of auth" --include-diff -o runs/review-packet.md',
-    ]
-    assert exec_route["commands"] == [
+    ])
+    assert _argv(exec_route["commands"]) == _argv([
         "hipson scan . --include-diff",
         (
             'hipson packet exec . --title "implement parser fix" --goal "implement parser fix" '
             '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
             "-o runs/executor-packet.md"
         ),
-    ]
+    ])
     assert verify["commands"] == ["git diff --check", "[run project test/build/typecheck commands]"]
-    assert handoff["commands"] == [
+    assert _argv(handoff["commands"]) == _argv([
         "hipson scan . --include-diff",
         'hipson memory add --scope repo --repo . --kind handoff --summary "[compact handoff]"',
-    ]
-    assert sidecar["commands"] == [
+    ])
+    assert _argv(sidecar["commands"]) == _argv([
         "hipson scan . --include-diff",
         (
             'hipson packet review . --title "get sidecar second opinion for auth token" '
             "--include-diff -o runs/review-packet.md"
         ),
         'hipson sidecar route --task "get sidecar second opinion for auth token" --risk security',
-    ]
-    assert memory["commands"] == [
+    ])
+    assert _argv(memory["commands"]) == _argv([
         'hipson memory search "remember parser decision"',
         'hipson memory add --scope repo --repo . --kind decision --summary "[decision]"',
-    ]
+    ])
 
 
 def test_workflow_router_quotes_normalizes_and_formats_text_contract():
@@ -2430,12 +2452,12 @@ def test_workflow_router_quotes_normalizes_and_formats_text_contract():
     assert empty_route["recommended_skill"] == "repo-delta-scan"
     assert empty_route["reason"] == "empty task; unknown risk"
     assert hipson_router.route_task("status")["commands"] == ["hipson scan . --include-diff"]
-    assert route["commands"][1] == (
+    assert _argv(route["commands"][1]) == _argv(
         'hipson packet exec . --title "implement \\"parser\\" fix" --goal "implement \\"parser\\" fix" '
         '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
         "-o runs/executor-packet.md"
     )
-    assert path_route["commands"][1] == (
+    assert _argv(path_route["commands"][1]) == _argv(
         'hipson packet exec . --title "implement C:\\\\tmp parser fix" --goal "implement C:\\\\tmp parser fix" '
         '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
         "-o runs/executor-packet.md"
@@ -2455,19 +2477,19 @@ def test_workflow_router_exec_placeholder_fallback_is_safe():
     sidecar_command = hipson_router._commands_for("sidecar-review", "unknown", "second opinion")[2]
 
     assert hipson_router._title("x" * 81, "fallback") == "x" * 80
-    assert command == (
+    assert _argv(command) == _argv(
         'hipson packet exec . --title "Implement task" --goal "[goal]" '
         '--allowed-edit "[fill allowed files or directories]" --acceptance "[fill observable success]" '
         "-o runs/executor-packet.md"
     )
-    assert review_command == (
+    assert _argv(review_command) == _argv(
         'hipson packet review . --title "Review task" --include-diff -o runs/review-packet.md'
     )
-    assert sidecar_packet_command == (
+    assert _argv(sidecar_packet_command) == _argv(
         'hipson packet review . --title "Sidecar review" --include-diff -o runs/review-packet.md'
     )
-    assert sidecar_task_command == 'hipson sidecar route --task "[task]" --risk normal'
-    assert sidecar_command == 'hipson sidecar route --task "second opinion" --risk normal'
+    assert _argv(sidecar_task_command) == _argv('hipson sidecar route --task "[task]" --risk normal')
+    assert _argv(sidecar_command) == _argv('hipson sidecar route --task "second opinion" --risk normal')
 
 
 def test_work_plan_builds_provider_free_daily_contract(tmp_path: Path):
@@ -3779,6 +3801,8 @@ def test_review_kit_verify_profile_full_runs_all_planned_commands(tmp_path: Path
         "full",
         "--json",
         timeout=60,
+        # The planned checks run `pytest` by name: resolve it from this interpreter's environment.
+        env={"PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")},
     )
 
     assert result.returncode == 0, result.stderr

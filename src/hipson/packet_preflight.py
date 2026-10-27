@@ -25,7 +25,11 @@ def preflight_packet(path: str | Path, *, max_chars: int = MAX_PACKET_CHARS) -> 
         return _payload(packet_path, "", errors, warnings, max_chars=max_chars)
     if is_sensitive_path(packet_path):
         errors.append("packet path is sensitive")
-    raw = packet_path.read_text(encoding="utf-8", errors="replace")
+    if not packet_path.is_file():  # FIFOs and devices would block or never end.
+        errors.append("packet path is not a regular file")
+        return _payload(packet_path, "", errors, warnings, max_chars=max_chars)
+    with packet_path.open("r", encoding="utf-8", errors="replace") as stream:
+        raw = stream.read(max_chars + 1)  # One extra character proves the limit was exceeded.
     redacted = redact_text(raw)
     if len(raw) > max_chars:
         errors.append(f"packet exceeds max_chars={max_chars}")

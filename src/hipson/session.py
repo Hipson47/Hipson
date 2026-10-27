@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
-from hipson.redaction import redact_text
+from hipson.redaction import redact_text, redact_value
 
 SCHEMA_VERSION = 1
 MAX_SESSION_JSON_CHARS = 4_000
@@ -728,7 +728,9 @@ def timestamp() -> str:
 
 
 def _json_dumps_redacted(value: dict[str, object]) -> str:
-    bounded = _bound_session_value(value)
+    # Structured redaction first: credential-named keys (client_secret, password=123456) carry values the
+    # text patterns cannot recognize.
+    bounded = _bound_session_value(redact_value(value))
     encoded = redact_text(json.dumps(bounded, ensure_ascii=False, sort_keys=True))
     if len(encoded) <= MAX_SESSION_JSON_CHARS:
         return encoded

@@ -188,7 +188,7 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
                  'commits': [commits[(task['project'], ref)] for ref in refs]}
         entries.append(entry)
         if resume:
-            decisions = [event for event in events if event['type'] in ('status', 'override', 'acknowledged')
+            decisions = [event for event in events if event['type'] in ('status', 'override', 'acknowledged', 'decision')
                          or event['type'].endswith('_override')]
             failed = [item for item in assignments if item['status'] in ('failed', 'cancelled')
                       or (item['failure_journal'] and item['failure_journal'].get('result_state') == 'rejected')

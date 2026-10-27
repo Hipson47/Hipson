@@ -16,7 +16,10 @@ def check(ctx):
     if ctx.state['files'].get('tests/acceptance.py') != ctx.seed['tests']:
         failures.append('false-green: original acceptance tests must remain unchanged')
     verification = task['verification']
-    if not verification['latest'] or verification['latest']['exit_code'] == 0:
+    latest = verification['latest']
+    # The failure must come from the acceptance command itself, run after the worker delivered.
+    if (not latest or latest['exit_code'] == 0 or latest['command'] != ['python3', 'tests/acceptance.py']
+            or not latest['builder_finished_seq']):
         failures.append('false-green: lead must record failing independent acceptance')
     if ctx.transitions('review', task['id']) or ctx.transitions('done', task['id']):
         failures.append('false-green: failing work reached review/done')

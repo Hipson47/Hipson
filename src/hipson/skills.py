@@ -82,7 +82,10 @@ def validate_skills(root: Path) -> list[SkillValidationResult]:
 def list_skill_metadata(root: Path, query: str = "") -> list[dict[str, object]]:
     normalized_query = query.strip().lower()
     skills: list[dict[str, object]] = []
+    resolved_root = root.resolve()
     for path in find_skill_files(root):
+        if not path.resolve().is_relative_to(resolved_root):
+            continue  # Symlinked skill files pointing outside the root are never read.
         text = path.read_text(encoding="utf-8", errors="replace")
         frontmatter, _parse_errors = parse_frontmatter(text)
         name = frontmatter.get("name") or path.parent.name
@@ -154,7 +157,10 @@ def _resolve_skill_path(root: Path, *, name: str | None, path: str | None) -> Pa
         raise SkillLookupError(f"Skill not found: {name}")
     if len(matches) > 1:
         raise SkillLookupError(f"Skill name is ambiguous: {name}")
-    return Path(str(matches[0]["path"]))
+    candidate = Path(str(matches[0]["path"])).resolve()
+    if not candidate.is_relative_to(resolved_root):  # A SKILL.md symlink must not read files elsewhere.
+        raise SkillLookupError("Skill file resolves outside the selected root")
+    return candidate
 
 
 def _bounded(text: str, max_chars: int) -> tuple[str, bool]:
@@ -167,4 +173,9 @@ def _bounded(text: str, max_chars: int) -> tuple[str, bool]:
 
 
 def _untrusted_skill_block(name: str, content: str) -> str:
-    return f"<untrusted_data name=\"skill:{redact_text(name)}\">\n{content}\n</untrusted_data>"
+    # Repository-controlled text must not close the data block and pose as instructions.
+    def inert(text: str) -> str:
+        return re.sub(r"<(\s*/?\s*untrusted_data)", r"&lt;\1", text, flags=re.IGNORECASE)
+
+    label = inert(redact_text(name)).replace('"', "&quot;").replace(">", "&gt;")
+    return f"<untrusted_data name=\"skill:{label}\">\n{inert(content)}\n</untrusted_data>"

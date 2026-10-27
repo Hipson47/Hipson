@@ -24,7 +24,7 @@ from hipson import (
 )
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import resolve_project
-from hipson.redaction import redact_text
+from hipson.redaction import is_sensitive_path, redact_text
 
 MCP_TOOL_NAMES = (
     'task.now',
@@ -640,9 +640,50 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": False}
 
 
+WORKFLOW_PATH_ARGUMENTS = ("project", "work", "verify", "sidecar", "path", "run", "ledger_root", "output",
+                           "verification", "quality_report", "quality_eval")
+
+
+def _contained_arguments(name: str, arguments: dict[str, Any], project: Path) -> dict[str, Any]:
+    """Workflow tools read and write files the caller names: keep them inside known projects, off secrets.
+
+    Allowed roots are the served project and, once `work` parses as a Hipson work plan, that plan's
+    project. Paths resolve symlinks first; sensitive files (.env, keys, credentials) are never used.
+    """
+    checked = dict(arguments)
+    roots = [project.resolve()]
+
+    def contained(key: str, value: object, *, any_location: bool = False) -> Path:
+        if not isinstance(value, str):
+            raise ValueError(f"{name}: {key} must be a path string")
+        path = Path(value).expanduser()
+        resolved = (path if path.is_absolute() else roots[0] / path).resolve()
+        base = next((root for root in roots if resolved == root or resolved.is_relative_to(root)), None)
+        if base is None and not any_location:
+            raise ValueError(f"{name}: {key} must stay inside the served project {roots[0]}"
+                             + (f" or the work plan's project {roots[1]}" if len(roots) > 1 else ""))
+        if is_sensitive_path(resolved.relative_to(base) if base else Path(resolved.name)):
+            raise ValueError(f"{name}: {key} names a sensitive file; it is never read or written through MCP")
+        return resolved
+
+    if arguments.get("work"):
+        work = contained("work", arguments["work"], any_location=True)
+        plan = verification.load_work_plan(str(work))  # Only a real work plan may name another project.
+        if plan.get("project") and plan.get("artifact_kind") == "hipson.work_plan":
+            roots.append(Path(str(plan["project"])).resolve())
+        checked["work"] = str(work)
+    for key in WORKFLOW_PATH_ARGUMENTS:
+        if key != "work" and arguments.get(key) not in (None, ""):
+            checked[key] = str(contained(key, arguments[key]))
+    return checked
+
+
 def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> object:
     if (name.startswith("task.") or name == 'lead.resume') and name in MCP_INPUT_SCHEMAS:
         return _task_tool_payload(name, arguments)
+    if name in MCP_GATED_TOOLS:
+        _require_mcp_approval(arguments, name)  # Before any path argument is opened.
+    arguments = _contained_arguments(name, arguments, project)
     if name == "contract.show":
         return agent_contract.build_agent_contract(arguments.get("project", project))
     if name == "policy.show":

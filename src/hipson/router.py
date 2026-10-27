@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Literal, TypedDict
 
@@ -188,5 +189,5 @@ def _title(task: str, fallback: str) -> str:
 
 
 def _quote(value: str) -> str:
-    safe = " ".join(value.split()).replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{safe}"'
+    # Single quotes: no $(...), backticks or variable expansion when a lead runs the recommendation.
+    return shlex.quote(" ".join(value.split()))

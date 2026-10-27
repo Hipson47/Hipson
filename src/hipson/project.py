@@ -20,6 +20,7 @@ from hipson.home import detect_codex_home
 from hipson.packets import compile_executor_packet, compile_review_packet, csv_items
 from hipson.paths import package_root
 from hipson.redaction import (
+    drop_sensitive_diff_sections,
     is_sensitive_path,
     redact_sensitive_paths,
     redact_text,
@@ -31,6 +32,12 @@ from hipson.sandbox import is_allowlisted_read_only_command, prepare_read_only_c
 DEFAULT_TIMEOUT = 20
 MAX_EMBEDDED_DIFF_CHARS = 60000
 MAX_UNTRACKED_FILE_CHARS = 12000
+MAX_UNTRACKED_TOTAL_CHARS = 60000
+
+
+def safe_diff(text: str) -> str:
+    """Sensitive files leave whole sections; secrets are redacted before any truncation can split them."""
+    return redact_text(redact_sensitive_paths(drop_sensitive_diff_sections(text)))
 PACKAGE_ROOT = package_root()
 
 
@@ -331,6 +338,8 @@ def embedded_untracked_content(project: Path, root: Path | None) -> str:
         return ""
 
     chunks = []
+    budget = MAX_UNTRACKED_TOTAL_CHARS
+    resolved_root = root.resolve()
     for file_name in untracked_files(project, root):
         if is_sensitive_path(file_name):
             chunks.extend(["### Untracked file: [sensitive]", summarize_sensitive_path(file_name), ""])
@@ -338,21 +347,25 @@ def embedded_untracked_content(project: Path, root: Path | None) -> str:
         if not should_embed_file(file_name):
             continue
         path = root / file_name
-        if not path.is_file():
+        target = path.resolve()
+        # A symlink is judged by what it points to: outside the repository or at a secret, never read.
+        if not target.is_relative_to(resolved_root) or is_sensitive_path(target.relative_to(resolved_root)):
+            chunks.extend([f"### Untracked file: `{file_name}`", "[skipped: link target outside the repository "
+                           "or sensitive]", ""])
+            continue
+        if not target.is_file():
+            continue
+        if budget <= 0:
+            chunks.append(f"### Untracked file: `{file_name}` [omitted: {MAX_UNTRACKED_TOTAL_CHARS} char budget used]")
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            with target.open("r", encoding="utf-8", errors="replace") as stream:
+                text = stream.read(MAX_UNTRACKED_FILE_CHARS * 2)  # Bounded read; redaction needs some context.
         except OSError:
             continue
-        chunks.extend(
-            [
-                f"### Untracked file: `{file_name}`",
-                "```text",
-                redact_text(truncate(text, MAX_UNTRACKED_FILE_CHARS)),
-                "```",
-                "",
-            ]
-        )
+        body = truncate(redact_text(text), min(MAX_UNTRACKED_FILE_CHARS, budget))
+        budget -= len(body)
+        chunks.extend([f"### Untracked file: `{file_name}`", "```text", body, "```", ""])
     return "\n".join(chunks).strip()
 
 
@@ -429,8 +442,8 @@ def build_scan(project: Path, include_diff: bool, diff_lines: int) -> str:
         unstaged_diff = run(["git", "diff", f"--unified={diff_lines}", *scope_args], scan_cwd, timeout=60)
         staged_diff = run(["git", "diff", "--cached", f"--unified={diff_lines}", *scope_args], scan_cwd, timeout=60)
         untracked = embedded_untracked_content(project, root)
-        unstaged_body = truncate(redact_sensitive_paths(unstaged_diff.stdout) if unstaged_diff.stdout else "none", MAX_EMBEDDED_DIFF_CHARS)
-        staged_body = truncate(redact_sensitive_paths(staged_diff.stdout) if staged_diff.stdout else "none", MAX_EMBEDDED_DIFF_CHARS)
+        unstaged_body = truncate(safe_diff(unstaged_diff.stdout) if unstaged_diff.stdout else "none", MAX_EMBEDDED_DIFF_CHARS)
+        staged_body = truncate(safe_diff(staged_diff.stdout) if staged_diff.stdout else "none", MAX_EMBEDDED_DIFF_CHARS)
         lines.extend(["", "## Untracked File Contents", untracked or "none"])
         lines.extend(["", "## Unstaged Diff", "```diff", unstaged_body, "```"])
         lines.extend(["", "## Staged Diff", "```diff", staged_body, "```"])
@@ -476,8 +489,8 @@ def build_scan_record(repo: dict[str, object], include_diff: bool = False) -> di
         "unstaged_diff_stat": redact_text(redact_sensitive_paths(unstaged_stat.stdout if unstaged_stat else "")),
         "staged_diff_stat": redact_text(redact_sensitive_paths(staged_stat.stdout if staged_stat else "")),
         "recent_commits": redact_text(log.stdout if log else ""),
-        "unstaged_diff": redact_text(redact_sensitive_paths(unstaged_diff.stdout if unstaged_diff else "")),
-        "staged_diff": redact_text(redact_sensitive_paths(staged_diff.stdout if staged_diff else "")),
+        "unstaged_diff": safe_diff(unstaged_diff.stdout if unstaged_diff else ""),
+        "staged_diff": safe_diff(staged_diff.stdout if staged_diff else ""),
         "untracked_content": embedded_untracked_content(project, root) if include_diff and root else "",
     }
 

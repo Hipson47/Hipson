@@ -91,6 +91,13 @@ hipson task reap --dry-run --json
 hipson task reap --task T-0001 --json
 ```
 
+`task event` records free-form events such as `progress`, `note` or `decision`; `lead resume` lists
+`decision` events with the task's decisions, so a lead can leave itself the next step before context runs
+out. Types the ledger itself writes and later trusts (`opened`, `assigned`, `status`, `finished`, `reaped`,
+`acknowledged`, `lead_verified`, `checks_set`, `claim_conflict`, `reopened`, `override`, `finding_*` and
+`*_override`, except the runner's `project_mismatch_override`) are refused, so free text cannot forge a
+lifecycle transition.
+
 ## Lead visibility and context recovery
 
 `hipson task now [--project P] [--all] [--json]` reads one consistent ledger snapshot and sorts open

@@ -10,6 +10,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from hipson.http_client import urlopen_no_redirect
 from hipson.providers.base import ProviderError, ProviderRequest, ProviderResponse, ProviderToolCall
 from hipson.redaction import redact_text
 
@@ -125,7 +126,7 @@ def validate_base_url(raw_url: str, *, allow_local_http: bool = False) -> str:
 
 def _default_transport(url: str, headers: dict[str, str], body: bytes, timeout: float) -> bytes:
     request = urllib.request.Request(url, data=body, method="POST", headers=headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310 - URL policy is validated above.
+    with urlopen_no_redirect(request, timeout=timeout) as response:  # URL policy is validated above.
         return response.read()
 
 

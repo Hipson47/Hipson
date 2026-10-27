@@ -110,5 +110,25 @@ def redact_sensitive_paths(text: str) -> str:
     return "\n".join(lines)
 
 
+def drop_sensitive_diff_sections(diff: str) -> str:
+    """Omit every per-file section of a unified diff whose old or new path is sensitive.
+
+    Line filtering alone removes headers but keeps hunk bodies, i.e. the secret values themselves.
+    """
+    lines: list[str] = []
+    skipping = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git ") or line.startswith("diff --cc ") or line.startswith("diff --combined "):
+            tokens = [token.strip('"') for token in line.split()[2:]]
+            paths = [token[2:] if token[:2] in ("a/", "b/") else token for token in tokens]
+            skipping = any(is_sensitive_path(path) for path in paths if path)
+            if skipping:
+                lines.append(SKIPPED + " (sensitive file diff omitted)")
+                continue
+        if not skipping:
+            lines.append(line)
+    return "\n".join(lines)
+
+
 def redact_metadata(value: str) -> str:
     return sanitize_path(redact_text(value))

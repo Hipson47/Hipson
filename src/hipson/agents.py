@@ -20,6 +20,7 @@ from typing import Any
 
 from hipson.assets import runtime_asset
 from hipson.home import detect_hipson_home
+from hipson.http_client import urlopen_no_redirect
 from hipson.paths import package_root
 from hipson.redaction import is_sensitive_path, redact_text, sanitize_path
 
@@ -252,7 +253,7 @@ def provider_chat(provider: dict[str, Any], payload: dict[str, Any], *, timeout:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # nosec B310
+        with urlopen_no_redirect(request, timeout=timeout) as response:
             body = response.read().decode("utf-8", errors="replace")
             try:
                 return json.loads(body)

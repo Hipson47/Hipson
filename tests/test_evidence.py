@@ -385,7 +385,7 @@ def test_mcp_evidence_and_audit_use_work_project_and_filter_task(tmp_path: Path)
     server_project = tmp_path / "server"
     server_project.mkdir()
     work = _work_file(project)
-    artifact = tmp_path / "verification.json"
+    artifact = project / "runs" / "verification.json"  # MCP paths stay inside the served or the work project.
     secret = "sk-mcp-secret12345678901234"
     artifact.write_text(json.dumps({"status": "passed", "nested": [secret]}), encoding="utf-8")
     appended = _tool(server_project, "evidence.append", work=str(work), verification=str(artifact), quality_report=str(artifact),
@@ -397,11 +397,25 @@ def test_mcp_evidence_and_audit_use_work_project_and_filter_task(tmp_path: Path)
     audit = _tool(server_project, "audit.show", work=str(work), task_id="T-0003")
     assert audit["evidence_records"] == [appended["record"]]
     assert not (server_project / "runs").exists()
-    override = tmp_path / "explicit-ledger"
+    override = project / "explicit-ledger"
     appended = _tool(server_project, "evidence.append", work=str(work), approved=True, actor="reviewer", ledger_root=str(override))
     audit = _tool(server_project, "audit.show", work=str(work), ledger_root=str(override))
     assert audit["evidence_records"] == [appended["record"]]
     assert "task_id" not in appended["record"]
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"status": "passed"}), encoding="utf-8")
+    (project / ".env").write_text("DATABASE_URL=postgres://user:pw@db/x\n", encoding="utf-8")
+    def call(name, **arguments):
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
+        return mcp_server._handle_request(json.dumps(request), project=server_project)["result"]
+
+    for arguments, message in (({"verification": str(outside)}, "must stay inside"),
+                               ({"ledger_root": str(tmp_path / "elsewhere")}, "must stay inside"),
+                               ({"verification": str(project / ".env")}, "sensitive file")):
+        result = call("evidence.append", work=str(work), approved=True, **arguments)
+        assert result["isError"] is True and message in result["content"][0]["text"], result
+    report = call("quality.report", work=str(work), sidecar=str(project / ".env"))
+    assert report["isError"] is True and "DATABASE_URL" not in json.dumps(report)
     schemas = mcp_server.MCP_INPUT_SCHEMAS
     assert schemas["evidence.append"]["properties"]["actor"]["type"] == "string"
     assert schemas["evidence.append"]["properties"]["task_id"]["pattern"] == evidence.TASK_ID_PATTERN

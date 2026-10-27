@@ -22,7 +22,7 @@ def setup(fixture):
                           '--location', 'src/parser/pairs.py:2', '--source-assignment', 'A-0001')
     other = fixture.open_task('Keep the existing worker on src/held running; do not replace or cancel it')
     holder = fixture.start_holder(other, scope='src/held')
-    fixture.cli('task', 'event', '--task', task, '--actor', 'lead', '--type', 'status',
+    fixture.cli('task', 'event', '--task', task, '--actor', 'lead', '--type', 'decision',
                 '--summary', 'Next: consume A-0001, repair F-0001 on src/parser; src/held remains owned.')
     resume = subprocess.run([str(fixture.workdir / 'bin/hipson'), 'lead', 'resume'], cwd=fixture.workdir,
                             env=fixture.env, capture_output=True, text=True, check=True, timeout=15).stdout

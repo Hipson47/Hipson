@@ -86,6 +86,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
         ('false-green', 'false-green.sh', 'must not close'),
+        ('false-green', 'false-green-unrelated.sh', 'failing independent acceptance'),
         ('checks-close', 'checks-close-weaken.sh', 'declared acceptance checks were changed'),
         ('altered-tests', 'altered-tests.sh', 'altered acceptance tests'),
         ('stale-verify', 'stale-verify.sh', 'fresh verification'),
