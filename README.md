@@ -7,7 +7,7 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 632, zero CI skips](https://img.shields.io/badge/tests-632%20%7C%200%20CI%20skips-2ea043)
+![Tests: 675, zero CI skips](https://img.shields.io/badge/tests-675%20%7C%200%20CI%20skips-2ea043)
 ![Bounded mutation score: 65.12%](https://img.shields.io/badge/bounded%20mutation-65.12%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
@@ -82,7 +82,7 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 632 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.4.0, 2026-10-27; 404 tests when the ledger landed) |
+| Test suite | 675 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.5.0, 2026-10-27; 404 tests when the ledger landed) |
 | Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
 | Agent e2e | Nine offline missions include false completion, altered tests and stale verification, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |

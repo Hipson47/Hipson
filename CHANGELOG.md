@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 1.5.0 - 2026-10-27
+
+Release notes: [docs/release-1.5.md](docs/release-1.5.md).
+
 - Require fresh passing lead-run verification for `review` and `done`, bound to full HEAD,
   raw working-tree/untracked content and the latest builder finish. Add `task verify`
   and approved MCP `task.verify` with shell-free contained execution, timeouts, timing, redacted
