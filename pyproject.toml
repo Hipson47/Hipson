@@ -105,6 +105,7 @@ source_paths = [
 ]
 pytest_add_cli_args_test_selection = [
     "tests/test_approvals.py",
+    "tests/test_redaction_contracts.py",
     "tests/test_evidence.py",
     "tests/test_mcp.py",
     "tests/test_prompt.py",
