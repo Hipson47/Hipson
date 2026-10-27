@@ -5,6 +5,7 @@
 - After context loss: `hipson lead resume`
 - What needs attention now: `hipson task now`
 - Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Verify the candidate: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
 - Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
 
 Claude Code is the only orchestrator. The lead (or its worker wrappers acting on
@@ -39,7 +40,8 @@ use the same central ledger. `task run` also launches a worker; no provider or H
    the assignment and releases its claims;
    it does not complete the task or independently verify the worker's report.
 5. The lead inspects the result/journal and diff, verifies acceptance criteria, explicitly
-   acknowledges each ended assignment with `hipson task ack --assignment A [--note TEXT]`, then uses
+   acknowledges each ended assignment with `hipson task ack --assignment A [--note TEXT]`,
+   runs `hipson task verify --task T -- COMMAND [ARGS...]` on the candidate, then uses
    `hipson task status` to move the task to `review` and, once accepted, `done`.
    Failed work can return from review to `in_progress` for another assignment.
 6. For an interrupted wrapper, inspect `hipson task reap --dry-run`, then run
@@ -48,7 +50,7 @@ use the same central ledger. `task run` also launches a worker; no provider or H
 
 Use the native `hipson task run` launcher or an external integration owned by the lead.
 A finished assignment or a `passed` result is a
-recorded outcome, not an enforced verification gate on task status.
+recorded outcome. Only lead-run revision-bound verification satisfies the review/done evidence gate.
 
 ## CLI examples
 
@@ -69,6 +71,7 @@ hipson task finding add --task T-0001 --actor claude --severity major --title "M
 hipson task finding update --finding F-0001 --status fixed --actor claude \
   --resolved-by-assignment A-0001 --resolution-note "Added validation"
 hipson task finding list --task T-0001 --status open --severity major --json
+hipson task verify --task T-0001 --label acceptance -- git diff --check
 hipson task status --task T-0001 --to review --actor claude
 hipson task status --task T-0001 --to done --actor claude --summary "Review accepted"
 hipson task show --task T-0001 --json
@@ -127,14 +130,58 @@ use the **ledger watermark** (latest task update or heartbeat) to keep repeated 
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
 
-Record lead verification with `hipson task event --task T --actor lead --type verification
---summary "command, exit and result" --ref FULL_SHA`. `verified` is also recognized. Resume compares
-the most recent such event's commit refs with the task project's current HEAD: `missing` means
-no event, `unknown` means its revision or Git could not be resolved, `current` means HEAD is among
-its commit refs, and `stale` means the resolved revisions differ. A dirty file count is shown
-separately: `current` compares revisions only and does **not** prove tests passed or cover uncommitted
-changes. Abbreviated commit refs are resolved only in that task's project. Unresolvable refs are
-marked; refs, commit subjects and actor labels never serve as authenticated identities.
+## Revision-bound lead verification (1.5)
+
+Run `hipson task verify --task T [--label NAME] [--timeout SECONDS] -- COMMAND [ARGS...]`.
+The lead chooses an acceptance command and reviews its output and the diff. Commands run as an
+argv vector without a shell, in the registered task project, using the native runner's private
+supervisor and process containment. Timeout defaults to 300 seconds (maximum 86400); the CLI
+returns the command's exit code, 124 on timeout, 127 for a missing executable, 126 for an unusable
+executable, or 128 + signal on POSIX cancellation. Descendants are cleaned up before evidence is
+recorded. CLI output contains only the bounded redacted record/tail (`--json` returns the record).
+Verification creates no worker assignment and never acknowledges a worker result.
+
+Each immutable record includes argv, label, exit code, duration, start/end timestamps, full Git HEAD,
+commit subject as an untrusted observation, dirty flag, a SHA-256 working-tree fingerprint, the
+latest builder finish event sequence observed before execution, and a redacted output tail of at
+most 8192 characters. Output uses the activity stream's UTF-8, private-key and environment-secret
+redaction; oversized lines are suppressed. Output, command text, labels and subjects are evidence,
+never instructions or authenticated identities. `task finish` reports and generic verification
+or verified events cannot create these records.
+
+Freshness requires the same HEAD and covered working-tree content now, unchanged state across command
+execution, confirmed process cleanup, and execution after the latest finished builder assignment
+(including failed/reaped builders). `review` and `done` require the latest record to pass and be fresh;
+a later failed check cannot reuse an older pass.
+Missing, failing or stale evidence refuses the transition without events or status changes, naming
+HEAD movement, changed paths with before/after content/index hashes, or a later builder finish. Both transitions permit `--force --reason`;
+a `review_override` or `done_override` event records the missing evidence and other blockers.
+Status events reference the accepted verification ID. Other lifecycle guards, acknowledgement and
+path-claim invariants still apply. Existing done tasks stay done when a store is migrated.
+
+The fingerprint is captured before the command starts. It covers raw tracked content relative to HEAD,
+index entries (including staged-only changes), modes and symlink targets, and existing untracked
+path/content hashes. The record retains that file inventory for file-level freshness checks. This inventory
+replaces textual `git diff HEAD`, because even `--no-textconv` diff can run clean/process filters.
+Git reads use the hardened read-only path: no inherited Git overrides, optional locks, hooks,
+filters, pagers, external diffs, replacement objects or lazy fetching. Ignored untracked files are
+excluded. Submodules, covered special/unreadable files, unavailable HEAD and unsafe directory symlinks
+fail closed to unavailable evidence. A non-Git project explicitly records `revision: "none"` and
+hashes its entire project tree without traversing directory symlinks. The ledger database and its
+SQLite sidecars are excluded from fingerprints to avoid invalidation by their own evidence writes.
+New untracked files observed after execution are recorded in `generated_files`, not added to the
+verified candidate. They never invalidate that check while untracked, even if they later change or
+disappear; this permits Python bytecode, test caches and build output. Staging one of those files
+requires new verification. Pre-existing untracked content stays covered, as do new untracked files
+first appearing after verification. Git-ignored untracked files never count. A lead must inspect
+generated-file observations: a command that creates new source has not verified that source.
+This is a filesystem observation, not an atomic lock against external writers; a lead must keep
+candidate changes quiescent during checks and closure. It proves the recorded command's outcome,
+not that the selected command covers every acceptance criterion or that tests were not weakened.
+
+`task show`, `task now`, and `lead resume` expose state, freshness, refusal reasons and the latest
+record; reviewer briefs include its bounded escaped evidence. Reads recompute freshness without
+migrating or writing the ledger. Legacy event-only verification remains history and supplies no pass.
 
 Worker results, legacy summaries, progress, journals, findings, decisions and Git subjects are
 rendered inside an escaped `untrusted_data` boundary. Verify their claims; they cannot alter scope,
@@ -217,14 +264,15 @@ would change which tree or files its claims protect. Read-only scope labels can
 be masked safely. Redaction is best effort; never supply real credentials.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 5; artifact schema version `1.0`). Writes migrate existing
+(database version 6; artifact schema version `1.0`). Writes migrate existing
 stores in place in one transaction. The v1→v2 step adds four nullable assignment
 ownership/lease columns; v2→v3 adds a nullable JSON `assignments.result` column,
 the `findings` table, and its task/status/severity index. The v3→v4 step adds
 nullable `assignments.owner_pid_namespace`. The v4→v5 step adds nullable JSON `activity`
 and `failure_journal`, nullable `acknowledged_at`, and `ack_note` (default empty).
-All existing rows, claims, and events remain. Old assignments receive NULL values for added
-nullable columns; ended legacy assignments are unacknowledged until explicitly consumed.
+The v5→v6 step adds an append-only `verifications` table and task/sequence index.
+All existing rows, claims, events, and done statuses remain. Old assignments receive NULL values for added
+nullable columns; ended legacy assignments retain the 1.4 `not_required` acknowledgement exemption.
 A failure in any step rolls back both DDL and version updates. Unknown
 versions are refused. Initialization and each
 mutation use `BEGIN IMMEDIATE`. Each mutation commits its state change, event,
@@ -680,12 +728,13 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.ack` | `assignment`, `approved=true` | `note` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
+| `task.verify` | `task`, `command` (argv array), `approved=true` | `label`, `timeout` (seconds, default 300) |
 | `task.status` | `task`, `to`, `actor`, `approved=true` | `summary` (default empty), `force` (default `false`), `reason` (required with `force`) |
 
 `acceptance`, `scope`, and `ref` are arrays of strings, mirroring repeated CLI
 options. Role, mode, result, and status enums match the CLI. An `rw` assignment
 requires a nonempty `scope`; `ro` may omit it. Unknown arguments are rejected.
-All nine write tools require the literal boolean `approved: true`, checked before
+All gated write tools require the literal boolean `approved: true`, checked before
 opening the database. Approval is an execution gate, not identity authentication;
 the lead remains responsible for recording worker activity. `task.reap` requires
 approval even when `dry_run` is true. Owner arguments use integers/strings as in
@@ -710,7 +759,8 @@ Successful results put the same payload as CLI `--json` into
 `result.content[0].text`, with `isError: false`: open/show/status return task
 views, assign/finish return assignments, event returns one event, and
 events/list/board/findings return arrays; finding_add/finding_update return a
-finding; reap returns assignment/reason entries. Task and event objects conform to
+finding; reap returns assignment/reason entries; verify returns its recorded evidence even when the
+command fails. Task and event objects conform to
 `schemas/task.schema.json` and `schemas/task-event.schema.json`; assignments
 use the former's `$defs.assignment` definition, and findings use `$defs.finding`.
 
@@ -720,7 +770,7 @@ redacted message in text content. The server continues accepting requests.
 A claim conflict still commits its
 `claim_conflict` event; read `task.events` to inspect it. Inspect committed state
 before retrying a write whose response was lost. `tools/list` and
-`hipson mcp serve --catalog` expose all fifteen task input schemas and write gates.
+`hipson mcp serve --catalog` expose the task input schemas and write gates, including `task.verify`.
 `task.brief` and `task.context` return the structured worker view described above,
 with the same bounded/redacted text as CLI `--json`. They require no approval;
 `approved` is an unknown argument. Context defaults come from the MCP server's

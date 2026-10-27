@@ -9,5 +9,6 @@ hipson task event --task T-0002 --actor lead --type progress --summary "Busy wit
 wait "$runner"
 hipson task board --json
 hipson task show --task T-0001 --json
+hipson task verify --task T-0001 -- python3 -c "from src.parser.pairs import parse_pair; assert parse_pair('a:b') == ('a', 'b')"
 hipson task status --task T-0001 --to review --actor lead
 hipson task status --task T-0001 --to done --actor lead --force --reason "Assume delivery was consumed"

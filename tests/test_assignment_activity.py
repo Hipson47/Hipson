@@ -14,7 +14,7 @@ from unittest.mock import patch
 from hipson import ledger, task_activity, task_context
 from tests import test_agent_run as bash
 from tests.test_hipson_helpers import run_cli_inprocess
-from tests.test_ledger import _assign, _error, _open, _rows, assert_strict_schema
+from tests.test_ledger import _assign, _error, _open, _rows, _verify, assert_strict_schema
 from tests.test_ledger_mcp import _assert_error, _call, _payload
 from tests.test_ledger_recovery import _v1_file, _v3_file
 from tests.test_task_runner import _case
@@ -44,7 +44,7 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
             assert connection.execute('SELECT version FROM schema_version').fetchone()[0] == version
             assert _rows(SimpleNamespace(connection=connection)) == before
         with closing(ledger.Ledger(db)) as store:
-            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 5
+            assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 6
             after = _rows(store)
             extra = {1: 10, 3: 5, 4: 4}[version]
             assert [row[:-extra] for row in after['assignments']] == before['assignments']
@@ -66,6 +66,7 @@ def test_ack_is_explicit_idempotent_blocks_done_and_preserves_terminal_visibilit
         assert store.activity(assignment)['ack_state'] == 'unacknowledged'
         assert store.board()[0]['assignments'][0]['id'] == assignment
         assert task_context.brief(store, task, role='builder')['unacknowledged'][0]['id'] == assignment
+        _verify(store, task)
         store.set_status(task, to='review', actor='lead')
         _error(lambda: store.set_status(task, to='done', actor='lead'), 'unacknowledged result')
         store.set_status(task, to='done', actor='lead', force=True, reason='Explicit exceptional closure')

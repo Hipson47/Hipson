@@ -97,13 +97,20 @@ def snapshot(ledger: Path, workdir: Path) -> dict[str, Any]:
         tasks = [store.show(task["id"]) for task in store.list_tasks()]
         events = sorted((event for task in tasks for event in store.events(task["id"])), key=lambda e: e["seq"])
         findings = store.findings()
-    return {"tasks": tasks, "events": events, "findings": findings,
+        verifications = [item for task in tasks for item in store.verifications(task['id'])]
+    return {"tasks": tasks, "events": events, "findings": findings, 'verifications': verifications,
             "files": {str(p.relative_to(workdir)): p.read_text(encoding="utf-8")
-                      for p in sorted((workdir / "src").rglob("*.py")) if not p.is_symlink()}}
+                      for directory in ('src', 'tests') for p in sorted((workdir / directory).rglob("*.py"))
+                      if not p.is_symlink()}}
 
 
 def ledger_state(state: dict[str, Any]) -> dict[str, Any]:
-    return {key: state[key] for key in ("tasks", "events", "findings")}
+    # Freshness is a live filesystem observation, not a ledger mutation. Keep the
+    # persisted evidence in continuity checks so evidence tampering is still caught.
+    tasks = [{**{key: value for key, value in task.items() if key != 'verification'},
+              'verification': (task.get('verification') or {}).get('latest')} for task in state['tasks']]
+    return {'tasks': tasks, 'events': state['events'], 'findings': state['findings'],
+            'verifications': state.get('verifications', [])}
 
 
 def hipson_proxy(workdir: str, expected_ledger: str) -> int:
@@ -503,6 +510,10 @@ def prepare_fixture(workdir: Path) -> Fixture:
                PYTHONPATH=str(ROOT / "src") + os.pathsep + str(ROOT), HIPSON_LEDGER=str(ledger),
                HIPSON_HOME=str(workdir / ".hipson"), HIPSON_BIN=str(proxy),
                TMPDIR=str(workdir / ".tmp"), AGENT_RUN_GRACE_SECONDS="1")
+    (workdir / '.gitignore').write_text('.harness/\n.hipson/\n.tmp/\n__pycache__/\n*.json\n.holder-ready\n.release-holder\n.lead-busy\n.worker-ready\n')
+    subprocess.run(['git', 'add', '.'], cwd=workdir, env=env, check=True, capture_output=True, timeout=10)
+    subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.com',
+                    'commit', '-qm', 'Initial fixture'], cwd=workdir, env=env, check=True, capture_output=True, timeout=10)
     return Fixture(workdir, ledger, env)
 
 

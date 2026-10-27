@@ -8,4 +8,5 @@ hipson task run --task T-0001 --actor replacement --role builder --mode rw --sco
   --result-file replacement.json -- bin/fake-worker build replacement.json
 python3 -c "from src.parser.pairs import parse_pair; assert parse_pair('a:b') == ('a', 'b')"
 hipson task ack --assignment A-0002 --note "Verified colon parsing"
+hipson task verify --task T-0001 -- python3 -c "from src.parser.pairs import parse_pair; assert parse_pair('a:b') == ('a', 'b')"
 hipson task status --task T-0001 --to review --actor lead

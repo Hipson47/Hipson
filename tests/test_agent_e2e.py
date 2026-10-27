@@ -51,7 +51,7 @@ def test_agent_e2e_reference_solutions(tmp_path):
                     HIPSON_LEDGER=str(sentinel)):
         runs = [harness.run_scenario(name, tmp_path / name, keep=True) for name in harness.scenario_names()]
     assert sentinel.read_text() == "owner state must be untouched"
-    assert len(runs) == 6
+    assert len(runs) == 9
     for run in runs:
         assert run["passed"], run
         assert run["metrics"]["hipson_invocations"] > 0
@@ -85,6 +85,9 @@ def test_agent_e2e_reference_solutions(tmp_path):
 @_linux_harness
 def test_agent_e2e_broken_solutions(tmp_path):
     for name, script, message in (
+        ('false-green', 'false-green.sh', 'must not close'),
+        ('altered-tests', 'altered-tests.sh', 'altered acceptance tests'),
+        ('stale-verify', 'stale-verify.sh', 'fresh verification'),
         ('resume', 'resume-no-ack.sh', 'explicitly acknowledge'),
         ('resume', 'resume-second-writer.sh', 'second writer'),
         ('resume', 'resume-ignore-finding.sh', 'major finding'),
@@ -223,7 +226,7 @@ def test_agent_e2e_premature_done_cannot_be_repaired_afterwards(tmp_path):
     script = tmp_path / "premature.sh"
     script.write_text(reference.replace(close, 'cp src/parser/pairs.py saved.py\n'
                       'printf "def parse_pair(text): return ()\\n" > src/parser/pairs.py\n'
-                      + close + '\ncp saved.py src/parser/pairs.py'))
+                      + close + ' --force --reason oracle-test\ncp saved.py src/parser/pairs.py'))
     run = harness.run_scenario("lead-flow", tmp_path / "run", solution=script)
     assert not run["passed"], run
     assert any("set to done before scenario acceptance" in f for f in run["failures"]), run
@@ -270,7 +273,8 @@ def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
         "hipson task ack --assignment A-0001\n"
         "hipson task ack --assignment A-0002\n")
     reviewed = tmp_path / "reviewed.sh"
-    reviewed.write_text(wait + "hipson task status --task T-0001 --to review --actor lead --summary verified\n"
+    reviewed.write_text(wait + "hipson task verify --task T-0001 -- git diff --check\n"
+                        "hipson task status --task T-0001 --to review --actor lead --summary verified\n"
                         "hipson task status --task T-0001 --to done --actor lead --summary accepted\n")
     run = harness.run_scenario("conflict", tmp_path / "ok", solution=reviewed)
     assert run["passed"], run
@@ -278,7 +282,7 @@ def test_agent_e2e_conflict_close_after_wait_needs_review(tmp_path):
     early = tmp_path / "early.sh"
     early.write_text((harness.SCENARIOS / "conflict/solution.sh").read_text()
                      + "hipson task status --task T-0001 --to in_progress --actor lead --summary resume\n"
-                     "hipson task status --task T-0001 --to review --actor lead --summary looks-fine\n"
+                     "hipson task status --task T-0001 --to review --actor lead --summary looks-fine --force --reason oracle-test\n"
                      "hipson task status --task T-0001 --to done --actor lead --summary closed "
                      "--force --reason 'Deliberately premature closure for oracle test'\n")
     run = harness.run_scenario("conflict", tmp_path / "bad", solution=early)

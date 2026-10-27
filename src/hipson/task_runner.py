@@ -30,15 +30,15 @@ from hipson.task_windows import Job
 class RunParser(argparse.ArgumentParser):
     def parse_known_args(self, args=None, namespace=None):
         parsed, unknown = super().parse_known_args(args, namespace)
-        if self.prog == "hipson task run" and unknown:
+        if self.prog in ("hipson task run", "hipson task verify") and unknown:
             self.error(f"unrecognized arguments: {' '.join(unknown)}")
         return parsed, unknown
 
     def error(self, message: str) -> NoReturn:
-        if self.prog != "hipson task run":
+        if self.prog not in ("hipson task run", "hipson task verify"):
             super().error(message)
         self.print_usage(sys.stderr)
-        self.exit(64, f"hipson task run: {message}\n")
+        self.exit(64, f"{self.prog}: {message}\n")
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
@@ -216,6 +216,7 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
 def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], mismatch: bool,
                    check: dict[str, object], grace: float, mask: set[int | signal.Signals] | None = None) -> int:
     windows = sys.platform == "win32"
+    verifying = hasattr(args, 'verification_id')
     signum = 0
 
     def interrupted(number: int, frame: object) -> None:
@@ -241,26 +242,37 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
     child_signal = 0
     snapshot: dict = {}
     next_heartbeat = 0.0
+    verify_started = time.monotonic()
+    verify_stamp = ledger._timestamp()
+    verify_before: dict = {}
+    builder_seq = 0
     try:
         if not windows:
             tree = ProcessTree()
         with closing(ledger.Ledger(db)) as store:
-            assignment = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
+            if verifying:
+                from hipson.task_verification import project_state
+                builder_seq = store._builder_finished_seq(args.task)
+                verify_before = project_state(str(check['expected']), db)
+            else:
+                assignment = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
                                       owner_pid=os.getpid(), owner_host=socket.gethostname(),
                                       owner_boot_id=ledger._boot_id(), owner_pid_namespace=ledger._pid_namespace(),
                                       lease_seconds=args.lease_seconds)["id"]
             if mismatch:
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
-        _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
+        if not verifying:
+            _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
         progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         progress_path = Path(progress_dir.name) / 'progress'
         progress = progress_path.open('w+b', buffering=0)
         activity = task_activity.Activity(progress)
         snapshot = activity.snapshot()
-        with closing(ledger.Ledger(db)) as store:
-            store.observe(assignment, snapshot)
-        env = {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
+        if not verifying:
+            with closing(ledger.Ledger(db)) as store:
+                store.observe(assignment, snapshot)
+        env = dict(os.environ) if verifying else {**os.environ, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
                'HIPSON_PROGRESS_FILE': str(progress_path)}
         with tempfile.TemporaryFile() as brief:
@@ -289,6 +301,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     job.protect_runner()
                 launching = True
                 child = subprocess.Popen(command, env=env, stdin=brief if args.rollout else None,
+                                         cwd=str(check['expected']) if verifying else None,
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]  # CREATE_SUSPENDED
                 launching = False
@@ -304,23 +317,26 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         raise
                 if child.stdout is None or child.stderr is None:
                     raise OSError('worker output pipes are unavailable')
-                activity.relay(child.stdout, 'stdout', sys.stdout.fileno())
-                activity.relay(child.stderr, 'stderr', sys.stderr.fileno())
+                activity.relay(child.stdout, 'stdout', None if verifying else sys.stdout.fileno())
+                activity.relay(child.stderr, 'stderr', None if verifying else sys.stderr.fileno())
                 while child.poll() is None and not signum:
+                    if verifying and time.monotonic() - verify_started >= args.timeout:
+                        note = '; verification timed out'
+                        break
                     if tree:
                         tree.members()
-                    if time.monotonic() >= next_heartbeat:
+                    if not verifying and time.monotonic() >= next_heartbeat:
                         snapshot = activity.snapshot()
                         with closing(ledger.Ledger(db)) as store:
                             store.observe(assignment, snapshot)
                         next_heartbeat = time.monotonic() + task_activity.HEARTBEAT_SECONDS
                     time.sleep(0.05)
                 outcome = child.poll()
-                code = outcome if outcome is not None else 0
+                code = outcome if outcome is not None else 124 if verifying else 0
                 if code < 0:
                     child_signal = -code
                     code = 128 - code  # Shell-compatible status for a child killed by a signal.
-                if signum or _active(job, tree):
+                if signum or outcome is None or _active(job, tree):
                     if not signum:
                         note = "; leftover processes stopped"
                         _message("worker left processes running; stopping them before finishing")
@@ -352,11 +368,16 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             activity.join()
             try:
                 snapshot = activity.snapshot(final=True)
-                with closing(ledger.Ledger(db)) as store:
-                    store.observe(assignment, snapshot)
+                if not verifying:
+                    with closing(ledger.Ledger(db)) as store:
+                        store.observe(assignment, snapshot)
             except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
                 _message(f'could not record final activity: {exc}')
-        if assignment and safe:
+        if verifying and verify_before:
+            from hipson.task_verification import finish
+            finish(db, args, code, verify_stamp, verify_started, verify_before, builder_seq,
+                   snapshot, str(check['expected']), safe)
+        elif assignment and safe:
             _finish(db, args, assignment, code, signum, note, nonce, started, snapshot,
                     str(check['expected']), child_signal)
         elif assignment:

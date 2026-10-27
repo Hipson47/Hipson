@@ -16,7 +16,7 @@ explicitly skip on macOS and native Windows. This limit does not apply to the
 macOS CLI or worker wrapper. Linux CI continues to require zero skipped tests.
 
 ```sh
-# Offline: execute all six reference solutions, without invoking Codex.
+# Offline: execute all nine reference solutions, without invoking Codex.
 .venv/bin/python scripts/agent_e2e.py --scenario all --driver fake
 
 # On demand: authenticated Codex CLI on PATH, explicit model and effort.
@@ -243,3 +243,16 @@ Create `e2e/agents/scenarios/<name>/` with:
 
 Scenario discovery is automatic for directories containing `mission.md`.
 Universal checks run for each scenario in addition to its own oracle.
+
+## False completion missions (1.5)
+
+- `false-green`: a zero-exit builder returns a valid completed result while the fixture assertion
+  fails. The lead must record failed independent verification and withhold review/done.
+- `altered-tests`: a builder weakens the fixture assertion. The oracle requires the original tests
+  unchanged or an explicit lead rejection; green weakened tests cannot justify closure.
+- `stale-verify`: a candidate changes after a passing check. The lead must observe refusal, rerun
+  verification and close with fresh evidence.
+
+Each has a reference `solution.sh` and a deliberately broken script under `e2e/agents/broken/`.
+Offline runs measure harness/CLI behavior only. Live Codex measurements remain a lead-run gate;
+no live result for these missions is claimed by the implementation worker.

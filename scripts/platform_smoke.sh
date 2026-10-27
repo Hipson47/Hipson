@@ -7,8 +7,11 @@
 set -u
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-REPORT="$ROOT/platform-smoke-report.txt"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/hipson-smoke.XXXXXX")
+FINAL_REPORT="$ROOT/platform-smoke-report.txt"
+# Logging into the candidate tree between verification and closure would make
+# the evidence stale. Publish the report only after all lifecycle checks finish.
+REPORT="$WORK/report.txt"
 export HIPSON_LEDGER="$WORK/ledger.sqlite"
 unset HIPSON_ROLE HIPSON_TASK HIPSON_ASSIGNMENT
 PASS=0
@@ -18,6 +21,7 @@ BG=""
 
 cleanup() {
   for pid in $BG; do kill -9 "-$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null; done
+  [ ! -f "$REPORT" ] || cp "$REPORT" "$FINAL_REPORT"
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -77,6 +81,7 @@ check "task assign (rw claim)" "$H" task assign --task T-0001 --actor codex --ro
 check "task board" "$H" task board
 check "task finish" "$H" task finish --assignment A-0001 --result passed --summary "worker exited 0" --ref runs/report.md
 check "task ack" "$H" task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
+check "task verify" "$H" task verify --task T-0001 -- git diff --check
 check "task status -> review" "$H" task status --task T-0001 --to review --actor lead --summary "verified: tests pass"
 check "task status -> done" "$H" task status --task T-0001 --to done --actor lead
 check "task brief" "$H" task brief --task T-0001 --role reviewer
@@ -172,5 +177,5 @@ fi
 log ""
 log "RESULT: $PASS passed, $FAIL failed"
 if [ "$FAIL" -gt 0 ]; then log "Failed checks:$FAILED"; fi
-printf 'Report: %s\n' "$REPORT"  # Terminal only: the absolute path names the user's home.
+printf 'Report: %s\n' "$FINAL_REPORT"  # Terminal only: the absolute path names the user's home.
 [ "$FAIL" -eq 0 ]

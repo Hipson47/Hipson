@@ -19,6 +19,19 @@
     "revision": { "type": "integer", "minimum": 1 },
     "assignments": { "type": "array", "items": { "$ref": "#/$defs/assignment" } },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Open findings only; use task.findings for resolved history." },
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["freshness", "passing", "reasons", "accepted", "latest", "current", "untrusted_fields"],
+      "properties": {
+        "freshness": {"enum": ["missing", "current", "stale", "failing", "unknown"]},
+        "passing": {"type": "boolean"},
+        "reasons": {"type": "array", "items": {"type": "string"}},
+        "accepted": {"type": ["string", "null"], "pattern": "^V-[0-9a-f]{32}$"},
+        "latest": {"$ref": "#/$defs/verification"},
+        "current": {"$ref": "#/$defs/project_state"},
+        "untrusted_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "claims": {
       "type": "array",
       "items": {
@@ -33,6 +46,56 @@
     }
   },
   "$defs": {
+    "project_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision", "subject", "fingerprint", "dirty", "error"],
+      "properties": {
+        "revision": {"type": "string", "pattern": "^(none|[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "subject": {"type": ["string", "null"], "maxLength": 1024},
+        "fingerprint": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "dirty": {"type": ["boolean", "null"]},
+        "error": {"type": ["string", "null"], "maxLength": 1024},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/verification_file"}},
+        "generated_files": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "verification_file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "state", "index", "tracked"],
+      "properties": {
+        "path": {"type": "string"},
+        "state": {"type": "string", "pattern": "^(missing|[0-9]{6}:[0-9a-f]{64})$"},
+        "index": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "tracked": {"type": "boolean"}
+      }
+    },
+    "verification": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["id", "task", "label", "command", "exit_code", "duration_seconds", "started_at", "finished_at", "revision", "subject", "fingerprint", "dirty", "error", "state_changed", "builder_finished_seq", "output_tail", "untrusted_fields"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^V-[0-9a-f]{32}$"},
+        "task": {"type": "string", "pattern": "^T-[0-9]{4,}$"},
+        "label": {"type": "string", "maxLength": 1024},
+        "command": {"type": "array", "items": {"type": "string", "maxLength": 4096}},
+        "exit_code": {"type": "integer"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "revision": {"type": "string", "pattern": "^(none|[0-9a-f]{40}|[0-9a-f]{64})$"},
+        "subject": {"type": ["string", "null"], "maxLength": 1024},
+        "fingerprint": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "dirty": {"type": ["boolean", "null"]},
+        "error": {"type": ["string", "null"], "maxLength": 1024},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/verification_file"}},
+        "generated_files": {"type": "array", "items": {"type": "string"}},
+        "changes": {"type": "array", "items": {"type": "string"}},
+        "cleanup_confirmed": {"type": "boolean"},
+        "state_changed": {"type": "boolean"},
+        "builder_finished_seq": {"type": "integer", "minimum": 0},
+        "output_tail": {"type": "string", "maxLength": 8192},
+        "untrusted_fields": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "assignment": {
       "type": "object",
       "additionalProperties": false,

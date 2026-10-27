@@ -30,7 +30,8 @@ def _git(project: str, *args: str) -> bytes | None:
     env.update(GIT_NO_LAZY_FETCH='1', GIT_TERMINAL_PROMPT='0')
     try:
         result = subprocess.run(
-            ['git', '--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false',
+            ['git', '--no-pager', '--no-optional-locks', '--no-replace-objects', '-c', 'core.fsmonitor=false',
+             '-c', 'core.hooksPath=/dev/null',
              '-c', 'protocol.allow=never', '-C', project, *args], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
         data = result.stdout
@@ -178,6 +179,7 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
                  'active_assignments': active,
                  'open_findings': sorted(task['findings'], key=lambda item: (ledger.FINDING_SEVERITIES.index(item['severity']), item['id'])),
                  'claims': task['claims'],
+                 'verification': task['verification'],
                  'commits': [commits[(task['project'], ref)] for ref in refs]}
         entries.append(entry)
         if resume:
@@ -186,16 +188,7 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
             failed = [item for item in assignments if item['status'] in ('failed', 'cancelled')
                       or (item['failure_journal'] and item['failure_journal'].get('result_state') != 'valid')
                       or (item['result'] and item['result']['status'] != 'completed')]
-            verification = next((event for event in reversed(events) if event['type'] in ('verification', 'verified')), None)
-            verified = [commits[(task['project'], ref)]['sha'] for ref in verification['refs']
-                        if (task['project'], ref) in commits] if verification else []
-            head = states[task['project']]['head']['sha']
-            freshness = ('missing' if verification is None else 'unknown' if not head or not any(verified)
-                         else 'current' if head in verified else 'stale')
-            tasks.append({**task, 'assignments': assignments, 'decisions': decisions, 'failed_attempts': failed,
-                          'verification': {'freshness': freshness, 'event': verification, 'head': head,
-                                           'dirty_files': states[task['project']]['dirty_files'],
-                                           'note': 'Revision comparison only; event text is not proof that checks passed.'}})
+            tasks.append({**task, 'assignments': assignments, 'decisions': decisions, 'failed_attempts': failed})
     entries.sort(key=lambda item: (item['status'] in ('done', 'cancelled') and not item['pending_results'],
                                    item['priority'], item['task']))
     order = {item['task']: index for index, item in enumerate(entries)}
@@ -262,7 +255,8 @@ def render(view: dict[str, Any]) -> str:
     for entry in now['tasks']:
         block = [f"{entry['task']} [{entry['status']}] {','.join(entry['needs'])}: {_text(entry['title'])}",
                  f"  pending={len(entry['pending_results'])} active={len(entry['active_assignments'])} "
-                 f"project={_text(entry['project'])}"]
+                 f"project={_text(entry['project'])}",
+                 f"  verification: {entry['verification']['freshness']} {_text(entry['verification']['reasons'])}"]
         for item in entry['pending_results']:
             pending.append(f"  {entry['task']} [{entry['status']}] {item['id']} {item['status']} "
                            f"unacknowledged result: {_text(item['summary'], 100)}")
@@ -286,11 +280,11 @@ def render(view: dict[str, Any]) -> str:
         if task:
             block += [f"  objective: {_text(task['objective'], 480)}",
                       f"  acceptance: {_text('; '.join(task['acceptance']), 700)}",
-                      f"  verification: {task['verification']['freshness']} vs HEAD={task['verification']['head']} "
-                      f"dirty={task['verification']['dirty_files']} (revision comparison only)"]
-            if task['verification']['event']:
-                event = task['verification']['event']
-                block.append(f"    {event['timestamp']} {_text(event['summary'], 480)} refs={_text(event['refs'])}")
+                      f"  revision: {task['verification']['current']['revision']} "
+                      f"dirty={task['verification']['current']['dirty']}"]
+            if task['verification']['latest']:
+                record = task['verification']['latest']
+                block.append(f"    {record['id']} exit={record['exit_code']} {_text(record['command'], 320)}")
             for event in task['decisions'][-3:]:
                 block.append(f"  decision #{event['seq']} {_text(event['type'])} {event['timestamp']}: {_text(event['summary'], 480)}")
             if len(task['decisions']) > 3:

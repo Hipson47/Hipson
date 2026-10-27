@@ -20,6 +20,7 @@
 - After context loss: `hipson lead resume`
 - What needs attention now: `hipson task now`
 - Acknowledge deliveries: `hipson task ack --assignment A-0001`
+- Verify the candidate: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
 - Run workers: `hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src -- COMMAND [ARGS...]`
 
 <table>
@@ -83,7 +84,7 @@ branch `feat/task-ledger`, 2026-10-25:
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
 | Test suite | 632 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (1.4.0, 2026-10-27; 404 tests when the ledger landed) |
 | Mutation gate | 65.12%: 1,331 / 2,044 mutants killed across four modules (1.2.0); the committed baseline (60.82% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression |
-| Agent e2e | A real Codex agent (gpt-6.1-sol) is given a natural-language mission and must reach it with Hipson alone; oracles check the resulting ledger, not the agent's report. 3 scenarios (lead flow, claim conflict, crash recovery). Latest live run 3/3; the first run found a real bug (claims reaped across PID namespaces), now fixed. Local and on demand: [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
+| Agent e2e | Nine offline missions include false completion, altered tests and stale verification, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
 
@@ -212,7 +213,8 @@ hipson task open --project . --title "Fix parser" --objective "Parser accepts tr
 hipson task run --task T-0001 --actor codex --role builder --mode rw --scope src/parser -- python -c "print('worker check')"
 hipson task now
 hipson task ack --assignment A-0001 --note "Read worker outcome and independently checked the change"
-hipson task status --task T-0001 --to review --actor lead --summary "verified: tests pass"
+hipson task verify --task T-0001 -- git diff --check
+hipson task status --task T-0001 --to review --actor lead --summary "Lead verification passed"
 hipson task status --task T-0001 --to done --actor lead
 hipson task events --task T-0001
 ```
@@ -267,6 +269,7 @@ The ledger sits on top of Hipson's existing local workflow layer:
 |---|---|
 | Work planning | `hipson work`, `hipson route`, `hipson contract show` |
 | Bounded packets for agents | `hipson packet review / exec`, `hipson packet preflight` |
+| Revision-bound task verification | `hipson task verify --task T -- COMMAND [ARGS...]` |
 | Local verification and evidence | `hipson verify run`, `hipson evidence append / show / verify`, `hipson audit show` |
 | Run bundles and release gates | `hipson kit review`, `hipson autopilot`, `hipson run status / validate / handoff`, `hipson release claim` |
 | Memory and sessions | `hipson memory`, `hipson session`, `hipson learn` (approval-gated) |

@@ -14,6 +14,7 @@ from hipson import lead_context, mcp_server
 from hipson.ledger import Ledger, LedgerError
 from tests.support import hipson_cli
 from tests.test_lead_context import _assign, _cli, _git, _open, _repo
+from tests.test_ledger import _verify
 
 
 def _files(root):
@@ -78,6 +79,7 @@ def test_post_closure_deliveries_remain_pending_in_default_cli_and_mcp_views(tmp
             # Equal timestamps must not obscure the ordering of closure and delivery.
             with patch('hipson.ledger._timestamp', return_value='2026-01-01T00:00:00+00:00'):
                 if terminal == 'done':
+                    _verify(store, task)
                     store.set_status(task, to='review', actor='lead')
                 store.set_status(task, to=terminal, actor='lead', force=terminal == 'done',
                                  reason='Close with running worker' if terminal == 'done' else '')
@@ -208,6 +210,9 @@ def _run_task_example(tmp_path, commands):
     env = {**os.environ, 'HIPSON_LEDGER': str(tmp_path / 'ledger.sqlite')}
     for key in ('HIPSON_ROLE', 'HIPSON_TASK', 'HIPSON_ASSIGNMENT'):
         env.pop(key, None)
+    subprocess.run(['git', 'init', '-q', str(tmp_path)], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(tmp_path), '-c', 'user.name=Test', '-c', 'user.email=test@example.com',
+                    'commit', '--allow-empty', '-qm', 'Example'], check=True, capture_output=True)
     executable = hipson_cli()
     assert executable, 'Installed hipson CLI required'
     for args in commands:

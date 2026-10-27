@@ -24,7 +24,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -195,6 +195,21 @@ MIGRATION_V4_TO_V5 = (
     "UPDATE assignments SET ack_note = 'legacy: finished before v5 acknowledgement tracking' WHERE status <> 'active'",
     "UPDATE schema_version SET version = 5 WHERE singleton = 1",
 )
+VERIFICATIONS_DDL = (
+    """CREATE TABLE verifications (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL UNIQUE,
+        task TEXT NOT NULL REFERENCES tasks(id),
+        evidence TEXT NOT NULL
+    )""",
+    "CREATE INDEX idx_verifications_task_seq ON verifications(task, seq)",
+    """CREATE TRIGGER verifications_no_update BEFORE UPDATE ON verifications
+        BEGIN SELECT RAISE(ABORT, 'verifications are append-only'); END""",
+    """CREATE TRIGGER verifications_no_delete BEFORE DELETE ON verifications
+        BEGIN SELECT RAISE(ABORT, 'verifications are append-only'); END""",
+)
+SCHEMA = (*SCHEMA, *VERIFICATIONS_DDL)
+MIGRATION_V5_TO_V6 = (*VERIFICATIONS_DDL, "UPDATE schema_version SET version = 6 WHERE singleton = 1")
 
 
 class Task(TypedDict):
@@ -291,6 +306,7 @@ class TaskView(Task):
     assignments: list[Assignment]
     claims: list[Claim]
     findings: list[Finding]
+    verification: dict[str, Any]
 
 
 class TaskEvent(TypedDict):
@@ -354,8 +370,8 @@ def validate_status_override(*, to: str, force: bool, reason: str) -> None:
         raise LedgerError("force must be boolean and reason must be text")
     if force:
         require_text(reason, "Override reason")
-        if to != "done":
-            raise LedgerError("--force and --reason apply only to done")
+        if to not in ("review", "done"):
+            raise LedgerError("--force and --reason apply only to review or done")
     elif reason:
         raise LedgerError("--reason requires --force")
 
@@ -665,7 +681,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -680,6 +696,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2, 3, 4):
                         for statement in MIGRATION_V4_TO_V5:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5):
+                        for statement in MIGRATION_V5_TO_V6:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -1091,17 +1110,19 @@ class Ledger:
             if to not in TRANSITIONS[previous]:
                 raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to}")
             refs: list[str] = []
+            view = self._view(task)
+            verification = view['verification']
+            blockers = []
+            if to in ('review', 'done') and not verification['passing']:
+                blockers.extend(verification['reasons'])
             if to == "done":
-                view = self._view(task)
                 active = [item for item in view["assignments"] if item["status"] == "active"]
                 severe = [item for item in view["findings"] if item["severity"] in ("blocking", "major")]
                 unread = [item for item in view['assignments'] if item['ack_state'] == 'unacknowledged']
-                blockers = [f"active assignment {item['id']} ({item['mode']})" for item in active]
+                blockers += [f"active assignment {item['id']} ({item['mode']})" for item in active]
                 blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
                 blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
                 blockers += [f"unacknowledged result {item['id']}" for item in unread]
-                if blockers and not force:
-                    raise LedgerError(f"Cannot mark {task} done: " + "; ".join(blockers))
                 if force:
                     blocker_refs = list(dict.fromkeys([
                         *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
@@ -1112,11 +1133,22 @@ class Ledger:
                                        f"Reason: {reason.strip()}; blockers: " + ("; ".join(blockers) or "none"),
                                        blocker_refs)
                 remaining = [item for item in view["findings"] if item["severity"] in ("minor", "info")]
-                refs = [item["id"] for item in remaining]
+                refs += [item["id"] for item in remaining]
                 summary = f"{previous} -> done" + (f": {summary}" if summary else "")
                 summary += "; remaining minor/info findings: " + (
                     "; ".join(f"{item['id']} [{item['severity']}]: {item['title']}" for item in remaining) or "none"
                 )
+            if to in ('review', 'done'):
+                if blockers and not force:
+                    raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers))
+                if force and to == 'review':
+                    self._append_event(task, actor, 'review_override',
+                                       f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
+                accepted = verification['accepted']
+                if accepted:
+                    refs.append(accepted)
+                summary = summary or f'{previous} -> {to}'
+                summary += '; lead verification: ' + (accepted or 'OVERRIDDEN: ' + '; '.join(verification['reasons']))
             self.connection.execute("UPDATE tasks SET status = ? WHERE id = ?", (to, task))
             if to == 'cancelled':
                 summary = f'{previous} -> cancelled' + (f': {summary}' if summary else '')
@@ -1126,6 +1158,30 @@ class Ledger:
     def show(self, task: str) -> TaskView:
         with self._transaction(write=False):
             return self._view(task)
+
+    def _builder_finished_seq(self, task: str) -> int:
+        builders = {row['id'] for row in self.connection.execute(
+            "SELECT id FROM assignments WHERE task = ? AND role = 'builder' AND status <> 'active'", (task,))}
+        return max((row['seq'] for row in self.connection.execute(
+            "SELECT seq, refs FROM events WHERE task = ? AND type IN ('finished', 'reaped')", (task,))
+                    if builders.intersection(json.loads(row['refs']))), default=0)
+
+    def verifications(self, task: str) -> list[dict[str, Any]]:
+        # Read old stores without migrating them or inventing evidence from legacy events.
+        exists = self.connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'verifications'").fetchone()
+        return [json.loads(row['evidence']) for row in self.connection.execute(
+            'SELECT evidence FROM verifications WHERE task = ? ORDER BY seq', (task,))] if exists else []
+
+    def _record_verification(self, evidence: dict[str, Any]) -> None:
+        """Called only by the lead-run command supervisor, never by finish/event ingestion."""
+        with self._transaction():
+            task = self._task(evidence['task'])
+            self.connection.execute('INSERT INTO verifications (id, task, evidence) VALUES (?, ?, ?)',
+                                    (evidence['id'], evidence['task'], json.dumps(evidence)))
+            self._append_event(evidence['task'], task['lead'], 'lead_verified',
+                               f"{evidence['id']}: exit={evidence['exit_code']}; revision={evidence['revision']}; "
+                               f"fingerprint={evidence['fingerprint']}; changed={evidence['state_changed']}",
+                               [evidence['id']])
 
     def events(self, task: str, *, after: int = 0) -> list[TaskEvent]:
         if after < 0 or after > SQLITE_MAX_INTEGER:
@@ -1185,6 +1241,11 @@ class Ledger:
 
     def _view(self, task: str, *, active_only: bool = False) -> TaskView:
         current = self._task(task)
+        from hipson.task_verification import project_state, verification_state
+        records = self.verifications(task)
+        generated = set(records[-1].get('generated_files', [])) if records else set()
+        verification = verification_state(records, project_state(current['project'], self.path, generated=generated),
+                                          self._builder_finished_seq(task))
         assignments = [
             self._assignment_dict(row)
             for row in self.connection.execute(
@@ -1203,7 +1264,8 @@ class Ledger:
             )
         ]
         return cast(TaskView, redact_value({**current, "assignments": assignments, "claims": claims,
-                                          "findings": self._findings(task=task, status="open")}))
+                                          "findings": self._findings(task=task, status="open"),
+                                          "verification": verification}))
 
     def _append_event(self, task: str, actor: str, type: str, summary: str, refs: Sequence[str]) -> TaskEvent:
         now = _timestamp()

@@ -14,6 +14,7 @@ from unittest.mock import patch
 from hipson import cli, lead_context, mcp_server
 from hipson.ledger import Ledger
 from tests.test_assignment_activity import _v4_file
+from tests.test_ledger import _verify
 
 
 def _open(store, project, title='Parser'):
@@ -55,6 +56,7 @@ def test_now_attention_priority_pending_blocked_active_review_cleanup_open(tmp_p
         store.set_status(cleanup, to='cancelled', actor='lead')
         review = _open(store, tmp_path, 'Review')
         store.set_status(review, to='in_progress', actor='lead')
+        _verify(store, review)
         store.set_status(review, to='review', actor='lead')
         active = _open(store, tmp_path, 'Active')
         _assign(store, active, 'active')
@@ -154,6 +156,7 @@ def test_lead_views_are_read_only_deterministic_filtered_and_no_git_index_write(
         store.finish(assignment, result='passed', summary='Delivered', refs=[sha[:10]])
         _open(store, tmp_path / 'other', 'Excluded project')
         store.ack(assignment, note='Result inspected')
+        _verify(store, task)
         store.set_status(task, to='review', actor='lead', summary='Checks reviewed')
     before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in (db, project / '.git/index')}
     with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
@@ -165,7 +168,7 @@ def test_lead_views_are_read_only_deterministic_filtered_and_no_git_index_write(
         assert len(view['tasks']) == 1
         assert view == mcp_server._tool_payload('lead.resume', {'project': str(project)}, project=tmp_path)
         assert view['now']['tasks'][0]['commits'][0] == {'ref': sha[:10], 'sha': sha, 'subject': 'Initial parser'}
-        assert view['tasks'][0]['decisions'][-1]['summary'] == 'Checks reviewed'
+        assert view['tasks'][0]['decisions'][-1]['summary'].startswith('Checks reviewed; lead verification: V-')
         assert any(event['type'] == 'acknowledged' for event in view['tasks'][0]['decisions'])
         assert view['projects'][0]['head']['sha'] == sha and view['projects'][0]['dirty_files'] == 0
         assert len(_cli('task', 'now', '--project', str(project), '--json')[1]) > 0
@@ -184,9 +187,10 @@ def test_resume_verification_freshness_and_git_overrides_ignored(tmp_path):
         task = _open(store, project)
         assert lead_context.build(store, resume=True)['tasks'][0]['verification']['freshness'] == 'missing'
         store.add_event(task, actor='lead', type='verification', summary='Tests ran without a revision')
-        assert lead_context.build(store, resume=True)['tasks'][0]['verification']['freshness'] == 'unknown'
+        assert lead_context.build(store, resume=True)['tasks'][0]['verification']['freshness'] == 'missing'
         store.add_event(task, actor='lead', type='verification', summary='Checks on candidate', refs=[sha])
         (project / 'file.txt').write_text('edited\n')
+        _verify(store, task)
         with patch.dict(os.environ, GIT_DIR=str(decoy / '.git'), GIT_WORK_TREE=str(decoy),
                         GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='alias.status', GIT_CONFIG_VALUE_0='!exit 9'):
             view = lead_context.build(store, resume=True)
@@ -209,7 +213,7 @@ def test_resume_unavailable_git_and_noncommit_refs_are_not_executed(tmp_path):
         view = lead_context.build(store, resume=True)
         assert view['projects'][0]['head']['sha'] is None
         assert view['projects'][0]['dirty_files'] is None
-        assert view['tasks'][0]['verification']['freshness'] == 'unknown'
+        assert view['tasks'][0]['verification']['freshness'] == 'missing'
         assert view['now']['tasks'][0]['commits'] == [{'ref': 'deadbeef', 'sha': None, 'subject': None}]
         assert '(unresolved)' in lead_context.render(view)
 
@@ -286,7 +290,8 @@ def test_copied_multitask_v4_ledger_no_legacy_pending_and_compact_open_first(tmp
             assert all(task['status'] not in ('done', 'cancelled') for task in view['tasks'])
             assert not any(entry['pending_results'] for entry in view['now']['tasks'])
             if not read_only:
-                store.set_status('T-0020', to='done', actor='lead')
+                store.set_status('T-0020', to='done', actor='lead', force=True,
+                                 reason='Historical acknowledgement fixture has no runnable project')
                 # New deliveries on an open task still require the lead's acknowledgment.
                 assignment = store.assign('T-0021', actor='worker', role='reviewer', mode='ro', scope=['.'])['id']
                 store.finish(assignment, result='passed', summary='New delivery')

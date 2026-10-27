@@ -24,6 +24,14 @@ def _open(store, project, title="Ledger"):
     )
 
 
+def _verify(store, task):
+    # These lifecycle tests exercise other guards; new evidence acceptance tests
+    # independently check failing/stale commands and worker false completion.
+    from hipson.task_verification import run
+    Path(store.show(task)['project']).mkdir(parents=True, exist_ok=True)
+    return run(store.path, task, [sys.executable, '-c', 'pass'])
+
+
 def _assign(store, task, scope=("src",), mode="rw", actor="codex", **owner):
     return store.assign(task, actor=actor, role="builder", mode=mode, scope=scope, **owner)
 
@@ -99,14 +107,17 @@ def test_ledger_full_lifecycle_and_revision(tmp_path: Path):
         assert task["status"] == "open" and task["lead"] == "claude"
         assert task["revision"] == 1
         states = ["in_progress", "blocked", "in_progress", "review", "in_progress", "review", "done"]
-        for revision, state in enumerate(states, start=2):
+        for state in states:
+            if state == 'review':
+                _verify(store, task["id"])
+            revision = store.show(task["id"])["revision"] + 1
             task = store.set_status(task["id"], to=state, actor="claude")
             assert task["status"] == state and task["revision"] == revision
             assert datetime.fromisoformat(task["updated_at"]).utcoffset().total_seconds() == 0
         events = store.events(task["id"])
         assert len(events) == task["revision"]
         assert events[0]["type"] == "opened"
-        assert all(event["type"] == "status" for event in events[1:])
+        assert all(event["type"] in ("status", "lead_verified") for event in events[1:])
         assert task["created_at"] <= task["updated_at"]
         assert store.board() == []
         assert_schema_valid("task.schema.json", task)
@@ -123,6 +134,7 @@ def test_ledger_invalid_and_terminal_transitions_are_atomic(tmp_path: Path):
             current = _open(store, tmp_path)["id"]
             if terminal == "done":
                 store.set_status(current, to="in_progress", actor="claude")
+                _verify(store, current)
                 store.set_status(current, to="review", actor="claude")
             store.set_status(current, to=terminal, actor="claude")
             for target in ("open", "in_progress", "blocked", "review", "done", "cancelled"):
@@ -142,6 +154,8 @@ def test_ledger_cancel_from_every_nonterminal_state(tmp_path: Path):
             if state != "open":
                 store.set_status(task, to="in_progress", actor="claude")
             if state in ("blocked", "review"):
+                if state == 'review':
+                    _verify(store, task)
                 store.set_status(task, to=state, actor="claude")
             assert store.set_status(task, to="cancelled", actor="claude")["status"] == "cancelled"
 
@@ -266,6 +280,7 @@ def test_ledger_redacts_before_persistence(tmp_path: Path):
         )["id"]
         assigned = _assign(store, task)
         store.add_event(task, actor="codex", type="progress", summary=f"token={secret}")
+        _verify(store, task)
         store.set_status(task, to="review", actor="claude", summary=f"Review {secret}")
         store.finish(assigned["id"], result="passed", summary=f"Finished {secret}")
         raw = json.dumps(_rows(store))
@@ -282,6 +297,7 @@ def test_ledger_mutations_roll_back_when_event_insert_fails(tmp_path: Path):
     with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
         task = _open(store, tmp_path)["id"]
         assigned = _assign(store, task)
+        _verify(store, task)
         store.connection.execute("""CREATE TEMP TRIGGER fail_event BEFORE INSERT ON events
             BEGIN SELECT RAISE(ABORT, 'injected event failure'); END""")
         operations = (
@@ -307,7 +323,7 @@ def test_ledger_schema_version_wal_and_append_only_events(tmp_path: Path):
         assert store.connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert store.connection.execute("PRAGMA busy_timeout").fetchone()[0] == BUSY_TIMEOUT_MS
         assert store.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         for sql in ("UPDATE events SET summary = 'changed'", "DELETE FROM events"):
             _error(lambda sql=sql: store.connection.execute(sql), "append-only", sqlite3.IntegrityError)
         assert len(store.events(task)) == 1 and store.show(task)["revision"] == 1
@@ -439,7 +455,7 @@ def test_ledger_cli_json_each_subcommand(tmp_path: Path):
     db = tmp_path / "ledger.sqlite"
 
     def command(name, *args):
-        result = run_cli(tmp_path, "task", name, *args, "--db", str(db), "--json")
+        result = run_cli(tmp_path, "task", name, "--db", str(db), "--json", *args)
         assert result.returncode == 0, result.stderr
         return json.loads(result.stdout)
 
@@ -507,10 +523,11 @@ def test_ledger_cli_json_each_subcommand(tmp_path: Path):
         )["status"]
         == "passed"
     )
+    command("verify", "--task", task_id, "--", sys.executable, "-c", "pass")
     status = command("status", "--task", task_id, "--to", "review", "--actor", "claude")
     assert status["status"] == "review" and status["claims"] == []
     events = command("events", "--task", task_id, "--after", str(event["seq"]))
-    assert [item["type"] for item in events] == ["finished", "status"]
+    assert [item["type"] for item in events] == ["finished", "lead_verified", "status"]
     assert_schema_valid("task.schema.json", status)
     assert_schema_valid("task-event.schema.json", event)
     assert_strict_schema("task.schema.json", status)

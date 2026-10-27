@@ -14,7 +14,7 @@ from hipson import ledger
 from hipson.ledger import Ledger, load_task_result, validate_task_result
 from hipson.redaction import REDACTION
 from tests.test_hipson_helpers import run_cli_inprocess
-from tests.test_ledger import SCHEMAS, _assign, _error, _open, _rows, assert_strict_schema
+from tests.test_ledger import SCHEMAS, _assign, _error, _open, _rows, _verify, assert_strict_schema
 from tests.test_ledger_mcp import _assert_error, _call, _payload
 from tests.test_ledger_recovery import _v1_file
 
@@ -39,6 +39,8 @@ def _snapshot(store):
 def _done_task(store, project):
     task = _open(store, project)["id"]
     for status in ("in_progress", "review", "done"):
+        if status == 'review':
+            _verify(store, task)
         store.set_status(task, to=status, actor="lead")
     return task
 
@@ -71,6 +73,7 @@ def test_finding_reopening_changes_only_done_tasks_with_severe_findings(tmp_path
                 finding = store.add_finding(task, actor="lead", severity=severity, title="Original issue")
                 store.update_finding(finding["id"], status="fixed", actor="lead")
                 store.set_status(task, to="in_progress", actor="lead")
+                _verify(store, task)
                 store.set_status(task, to="review", actor="lead")
                 if status != "review":
                     store.set_status(task, to=status, actor="lead")
@@ -91,6 +94,7 @@ def test_reviewer_result_reopens_forced_done_task(tmp_path: Path):
     with closing(Ledger(tmp_path / "ledger.sqlite")) as store:
         task = _open(store, tmp_path)["id"]
         assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")
+        _verify(store, task)
         store.set_status(task, to="review", actor="lead")
         store.set_status(task, to="done", actor="lead", force=True, reason="Review still running")
         store.finish(assignment["id"], result="passed", summary="Review complete", worker_result=_result())
@@ -106,6 +110,8 @@ def test_finding_and_task_reopening_rollback_together(tmp_path: Path):
         resolved = store.add_finding(task, actor="lead", severity="major", title="Resolved issue")
         store.update_finding(resolved["id"], status="fixed", actor="lead")
         for status in ("in_progress", "review", "done"):
+            if status == 'review':
+                _verify(store, task)
             store.set_status(task, to=status, actor="lead")
         before = _snapshot(store)
         store.connection.execute("""CREATE TRIGGER reject_reopen BEFORE INSERT ON events WHEN NEW.type = 'reopened'
@@ -124,6 +130,7 @@ def test_finding_waiting_for_closure_reopens_after_commit(tmp_path: Path):
     with closing(Ledger(db)) as store:
         task = _open(store, tmp_path)["id"]
         store.set_status(task, to="in_progress", actor="lead")
+        _verify(store, task)
         store.set_status(task, to="review", actor="lead")
     closing_task = threading.Event()
     finding_ready = threading.Event()
@@ -175,6 +182,8 @@ def test_cli_and_mcp_severe_findings_reopen_done_tasks(tmp_path: Path):
                     finding = store.add_finding(task, actor="lead", severity="major", title="Old issue")
                     store.update_finding(finding["id"], status="fixed", actor="lead")
                 for status in ("in_progress", "review", "done"):
+                    if status == 'review':
+                        _verify(store, task)
                     store.set_status(task, to=status, actor="lead")
             if interface == "cli":
                 arguments = (["add", "--task", task, "--severity", "major", "--title", "Late issue"]
@@ -473,7 +482,7 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'findings'").fetchall() == []
         assert _rows(SimpleNamespace(connection=connection)) == before
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         after = _rows(store)
         for table in ("tasks", "events", "claims"):
             assert after[table] == before[table]

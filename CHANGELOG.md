@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Require fresh passing lead-run verification for `review` and `done`, bound to full HEAD,
+  raw working-tree/index/untracked content and the latest builder finish. Add `task verify`
+  and approved MCP `task.verify` with shell-free contained execution, timeouts, timing, redacted
+  bounded output and immutable v6 ledger evidence. Explicit force reasons preserve exceptions.
+- Keep verification bound to its pre-command candidate, recording generated untracked artifacts
+  without invalidating passing checks. Report changed paths with before/after content/index hashes;
+  a newer failed verification cannot reuse an older pass.
+- Exclude known untracked tool caches even without Git ignore rules, so failed-check bytecode
+  cannot stale a later passing verification. Keep tracked files and non-cache source covered;
+  `build/` and `target/` require Git ignore rules to exclude their untracked contents.
+- Show verification freshness in task/lead views and reviewer briefs. Add offline false-green,
+  altered-tests and stale-verification missions with reference and broken solutions; retain
+  executable README and platform smoke lifecycles with an explicit verification step.
+
 ## 1.4.0 - 2026-10-27
 
 Release notes: [docs/release-1.4.md](docs/release-1.4.md).

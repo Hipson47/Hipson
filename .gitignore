@@ -40,3 +40,6 @@ memory/*.jsonl
 
 # Optional third-party skills, fetched by scripts/fetch_external_skills.py (not redistributed)
 skills/external/*/
+
+# Written by scripts/platform_smoke.sh for testers to send back; never commit it.
+platform-smoke-report.txt

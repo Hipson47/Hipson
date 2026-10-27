@@ -489,6 +489,23 @@ sending them to external providers.
 Invalid scan paths fail with a non-zero exit and a clear error instead of
 producing a misleading clean scan.
 
+## Task verification cache policy
+
+`hipson task verify` excludes Git-ignored untracked files and these built-in tool caches
+from its working-tree fingerprint, including caches left by earlier failed checks:
+
+- `__pycache__/`, `*.pyc`, `*.pyo`;
+- `.pytest_cache/`, `.mypy_cache/`, `.ruff_cache/`, `.hypothesis/`, `.coverage`;
+- `.tox/`, `.nox/`, `node_modules/.cache/`, `.gradle/`.
+
+These patterns apply at any project depth, including projects without Git. Tracked or staged
+content always remains covered. Other pre-existing untracked files and new non-cache files
+first appearing after verification still invalidate evidence when they change the candidate.
+`target/` and `build/` have no built-in exclusion: Git must ignore them to exclude their
+untracked contents. The same applies to ordinary files elsewhere under `node_modules/`.
+See [revision-bound lead verification](TASK_LEDGER.md#revision-bound-lead-verification-15)
+for generated-file observations and the review/done gate.
+
 ## Development
 
 ```bash

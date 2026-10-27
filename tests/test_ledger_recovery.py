@@ -41,7 +41,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
     with closing(sqlite3.connect(db)) as connection:
         before = _rows(SimpleNamespace(connection=connection))
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         after = _rows(store)
         assert len(after["tasks"]) == 2 and len(after["assignments"]) == 3 and len(after["events"]) == 6
         for table in ("tasks", "claims", "events"):
@@ -154,7 +154,7 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 3
     assert db.read_bytes() == original
     with closing(Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         after = _rows(store)
         for table in ("tasks", "claims", "events"):
             assert after[table] == before[table]
@@ -181,7 +181,7 @@ def test_ledger_v4_migration_failure_rolls_back_all_steps(tmp_path: Path):
             assert _rows(SimpleNamespace(connection=connection)) == before
             assert "owner_pid_namespace" not in [r[1] for r in connection.execute("PRAGMA table_info(assignments)")]
         with closing(Ledger(db)) as store:
-            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+            assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 6
 
 
 def test_ledger_never_probes_pid_or_group_across_namespaces(tmp_path: Path):

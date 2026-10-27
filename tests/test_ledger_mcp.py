@@ -17,6 +17,7 @@ from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
+    "task.verify": ({"task", "command", "approved"}, {"label", "timeout"}),
     'lead.resume': (set(), {'project', 'all'}),
     'task.now': (set(), {'project', 'all'}),
     "task.activity": ({"assignment"}, set()),
@@ -41,6 +42,7 @@ TASK_TOOLS = {
     "task.status": ({"task", "to", "actor", "approved"}, {"summary", "force", "reason"}),
 }
 WRITE_ARGUMENTS = {
+    "task.verify": {"task": "T-0001", "command": [sys.executable, "-c", "pass"]},
     "task.ack": {"assignment": "A-0001"},
     "task.open": {"project": ".", "title": "Ledger", "objective": "Track ownership"},
     "task.assign": {"task": "T-0001", "actor": "codex", "role": "builder", "mode": "rw", "scope": ["src"]},
@@ -172,13 +174,14 @@ def test_ledger_mcp_full_lifecycle_and_strict_payloads(tmp_path: Path):
     _assert_assignment(finished)
     assert finished["status"] == "passed" and finished["ended_at"]
     command("task.ack", assignment=assigned["id"], approved=True)
+    command("task.verify", task=task, command=[sys.executable, "-c", "pass"], approved=True)
     for state in ("review", "done"):
         view = command("task.status", task=task, to=state, actor="claude", approved=True)
         assert_strict_schema("task.schema.json", view)
         assert view["status"] == state and view["claims"] == []
     assert command("task.board") == []
     events = command("task.events", task=task)
-    assert [item["type"] for item in events] == ["opened", "assigned", "progress", "finished", "acknowledged", "status", "status"]
+    assert [item["type"] for item in events] == ["opened", "assigned", "progress", "finished", "acknowledged", "lead_verified", "status", "status"]
     assert view["revision"] == len(events)
     for item in events:
         assert_strict_schema("task-event.schema.json", item)
@@ -375,7 +378,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
         assert not home.exists()
         assert _payload(_call(server_project, "task.show", task=env_task["id"])) == env_task
         assert _payload(_call(server_project, "task.list")) == [
-            {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings")}
+            {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings", "verification")}
         ]
         assert _payload(_call(server_project, "task.board")) == [env_task]
         assert _payload(_call(server_project, "task.list", project=str(server_project))) == []

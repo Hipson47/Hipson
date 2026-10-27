@@ -57,12 +57,13 @@ MCP_TOOL_NAMES = (
     "task.reap",
     "task.event",
     "task.status",
+    "task.verify",
 )
 
 MCP_GATED_TOOLS = {
     "verify.run", "evidence.append", "handoff.create", "release.claim",
     "task.open", "task.assign", "task.finish", "task.reap", "task.event", "task.status",
-    "task.finding_add", "task.finding_update", "task.ack",
+    "task.finding_add", "task.finding_update", "task.ack", "task.verify",
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     'task.now': {
@@ -334,6 +335,17 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         "additionalProperties": False,
     },
+    "task.verify": {
+        "type": "object", "required": ["task", "command", "approved"],
+        "properties": {
+            "task": {"type": "string"},
+            "command": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "label": {"type": "string"},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 86400},
+            "approved": {"type": "boolean"},
+        },
+        "additionalProperties": False,
+    },
     "task.status": {
         "type": "object",
         "required": ["task", "to", "actor", "approved"],
@@ -435,6 +447,7 @@ def _description(name: str) -> str:
         'task.ack': 'Explicitly acknowledge a delivered assignment result or failure journal on behalf of the lead.',
         "task.reap": "Cancel orphaned assignments and release claims, or preview with dry_run.",
         "task.event": "Append a lead-recorded task event on behalf of a worker.",
+        "task.verify": "Run contained lead verification and bind command evidence to HEAD and working-tree content.",
         "task.status": "Transition a task's lifecycle status on behalf of the lead.",
     }
     return descriptions[name]
@@ -472,6 +485,7 @@ def _fallback_command(name: str) -> str:
         'task.ack': 'hipson task ack --assignment A-0001 --json',
         "task.reap": "hipson task reap --dry-run --json",
         "task.event": "hipson task event --task T-0001 --actor codex --type progress --summary \"...\" --json",
+        "task.verify": "hipson task verify --task T-0001 --json -- git diff --check",
         "task.status": "hipson task status --task T-0001 --to review --actor claude --json",
     }
     return commands[name]
@@ -669,6 +683,10 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
     # The ledger is central: never derive its DB or project filters from --project.
     db = ledger.default_ledger_db()
+    if name == 'task.verify':
+        from hipson.task_verification import run
+        return run(db, arguments['task'], arguments['command'], label=arguments.get('label', ''),
+                   timeout=arguments.get('timeout', 300))
     dry_run = name == "task.reap" and arguments.get("dry_run", False)
     create = name in MCP_GATED_TOOLS and not dry_run
     if not create and not db.exists():
@@ -796,6 +814,9 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments[key], key)
     if name == "task.assign":
         ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
+    if name == 'task.verify':
+        from hipson.task_verification import validate
+        validate(arguments['command'], arguments.get('timeout', 300))
     if name == "task.status":
         ledger.validate_status_override(to=arguments["to"], force=arguments.get("force", False),
                                         reason=arguments.get("reason", ""))

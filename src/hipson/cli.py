@@ -32,6 +32,7 @@ from hipson import (
     run_control,
     task_context,
     task_runner,
+    task_verification,
     verification,
     workflow,
 )
@@ -1886,6 +1887,8 @@ def command_task(args: argparse.Namespace) -> int:
                 if not args.json:
                     print(f"{view['id']} [{view['status']}] {_bounded_cli(view['title'], limit=120, escape_controls=True)}")
                     print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
+                    print(f"Verification: {view['verification']['freshness']}; "
+                          f"{_bounded_json(view['verification']['reasons'], escape_controls=True)}")
                     for item in view["assignments"]:
                         actor = _bounded_cli(item["actor"], escape_controls=True)
                         heartbeat = _bounded_cli((item['activity'] or {}).get('heartbeat_at') or 'unknown', escape_controls=True)
@@ -1942,6 +1945,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  After context loss: hipson lead resume\n"
         "  What needs attention now: hipson task now\n"
         "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
+        "  Verify candidate: hipson task verify --task T-0001 -- COMMAND [ARGS...]\n"
         "  Run workers: hipson task run --task T-0001 --actor codex --role builder "
         "--mode rw --scope src -- COMMAND [ARGS...]"
     )
@@ -1961,6 +1965,7 @@ def build_parser() -> argparse.ArgumentParser:
             ("open", "Open a task"),
             ("assign", "Assign a worker and claim write scope"),
             ("run", "Run and record a worker on Linux, macOS or Windows"),
+            ('verify', 'Run lead verification bound to the current revision and working tree'),
             ("finish", "Finish an assignment and release its claims"),
             ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
             ('ack', 'Acknowledge an ended assignment result or failure journal'),
@@ -1989,6 +1994,7 @@ def build_parser() -> argparse.ArgumentParser:
             task_parser.add_argument("--summary", required=True)
             task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
     task_runner.configure(task_parsers["run"])
+    task_verification.configure(task_parsers['verify'])
     task_parsers["open"].add_argument("--project", required=True)
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)
@@ -2039,7 +2045,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["event"].add_argument("--type", required=True)
     task_parsers["status"].add_argument("--to", choices=ledger.STATUSES, required=True)
     task_parsers["status"].add_argument("--summary", default="")
-    task_parsers["status"].add_argument("--force", action="store_true", help="Override done blockers with an audit event")
+    task_parsers["status"].add_argument("--force", action="store_true", help="Override review/done blockers with an audit event")
     task_parsers["status"].add_argument("--reason", default="", help="Required explanation for --force")
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")

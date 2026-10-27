@@ -126,7 +126,7 @@ class Activity:
             self.last[source] = text
             self.observations.append({'timestamp': datetime.now(UTC).isoformat(), 'source': source, 'text': text})
 
-    def relay(self, pipe: IO[bytes], source: str, target: int) -> None:
+    def relay(self, pipe: IO[bytes], source: str, target: int | None) -> None:
         def consume() -> None:
             lines = Lines()
             try:
@@ -135,7 +135,7 @@ class Activity:
                         self.record(source, line)
                     try:
                         view = memoryview(chunk)
-                        while view:
+                        while view and target is not None:
                             view = view[os.write(target, view):]
                     except OSError:
                         pass  # Continue draining even if the lead's output consumer closes.

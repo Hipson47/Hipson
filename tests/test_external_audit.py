@@ -11,7 +11,7 @@ from hipson import agent_install, codex_install
 from hipson.ledger import ClaimConflictError, Ledger
 from hipson.redaction import redact_text
 from tests.test_hipson_helpers import run_cli_inprocess
-from tests.test_ledger import _assign, _error, _open, _rows
+from tests.test_ledger import _assign, _error, _open, _rows, _verify
 from tests.test_ledger_mcp import _assert_error, _call, _payload
 
 
@@ -33,6 +33,7 @@ def _blocked_task(store, root, kind):
     else:
         store.set_status(task, to="in_progress", actor="lead")
         store.add_finding(task, actor="reviewer", severity=kind, title="Unresolved defect")
+    _verify(store, task)
     store.set_status(task, to="review", actor="lead")
     return task
 
@@ -132,8 +133,10 @@ def test_audit_h01_claims_alone_block_done_and_override_cannot_skip_lifecycle(tm
         _error(lambda: store.set_status(task, to="done", actor="lead", force=True, reason="Exception"),
                "Invalid task transition")
         assert _rows(store) == before
-        for options in ({"force": True, "reason": "Exception"}, {"reason": "Exception"}):
-            _error(lambda options=options: store.set_status(task, to="review", actor="lead", **options), "reason")
+        _error(lambda: store.set_status(task, to="review", actor="lead", reason="Exception"), "reason")
+        # 1.5 permits reasoned evidence overrides for review as well as done.
+        store.set_status(task, to="review", actor="lead", force=True, reason="Exception")
+        assert store.events(task)[-2]['type'] == 'review_override'
 
 
 def test_audit_h02_verified_live_owner_outlives_lease(tmp_path: Path):
