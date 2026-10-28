@@ -52,7 +52,8 @@ def supervise(command: list[str], *, cwd: str | None = None, capture: bool = Fal
     other children. Existing task supervisors already provide their own containment.
     """
     if contain:
-        command = [sys.executable, '-c',
+        # -P: the command runs in the project directory, whose modules must not shadow the stdlib.
+        command = [sys.executable, '-P', '-c',
                    'import sys; from hipson.task_runner import supervise_command; '
                    'sys.exit(supervise_command(sys.argv[1:]))', *command]
     pipe = subprocess.PIPE if capture else None

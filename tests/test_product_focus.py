@@ -14,7 +14,17 @@ from unittest.mock import patch
 
 import pytest
 
-from hipson import agent_bootstrap, agent_contract, cli, ledger, mcp_server, task_context, task_flow, task_verification
+from hipson import (
+    agent_bootstrap,
+    agent_contract,
+    cli,
+    ledger,
+    mcp_server,
+    task_context,
+    task_flow,
+    task_verification,
+    verification,
+)
 from tests.test_gate_contracts import STATE
 from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_cli_inprocess
 
@@ -119,6 +129,8 @@ def test_task_verify_and_do_ignore_project_modules_that_shadow_the_stdlib(tmp_pa
     assert verified.returncode == 0 and "SHADOWED" not in verified.stdout + verified.stderr, verified.stderr
     done = run("do", "--title", "D", "--check", "git status", "--actor", "probe", "--mode", "ro", "--", "git", "--version")
     assert done.returncode == 0 and "SHADOWED" not in done.stdout + done.stderr, done.stderr
+    legacy = verification._run_one(command="git --version", cwd=project, timeout=60)  # verify run's supervisor.
+    assert legacy["exit_code"] == 0 and "SHADOWED" not in legacy["stdout"] + legacy["stderr"], legacy
 
 
 def test_close_refusal_names_the_timeout_when_a_check_runs_out_of_time(tmp_path: Path):
