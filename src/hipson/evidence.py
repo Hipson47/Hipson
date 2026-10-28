@@ -223,13 +223,20 @@ def build_evidence_record(
     verification_payload = verification or {}
     quality_report_payload = quality_report or {}
     quality_eval_payload = quality_eval or {}
+    work_id = str(work_plan.get("work_id", ""))
+    report_errors = _quality_report_errors(work_id, verification_payload, quality_report_payload)
+    effective_report = {} if report_errors else quality_report_payload
     provider_used = bool(sidecar_report or _ai_quality_enabled(work_plan))
     gates = _gate_summary(
         verification_payload,
-        quality_report_payload,
+        effective_report,
         quality_eval_payload,
         human_decision=human_decision,
+        work_id=work_id,
     )
+    if report_errors:
+        gates["sidecar_eval_gate"] = "blocked"
+        gates["release_claim_gate"] = "blocked"
     record: dict[str, Any] = {
         "artifact_kind": "hipson.evidence_record",
         "schema_version": SCHEMA_VERSION,
@@ -250,11 +257,11 @@ def build_evidence_record(
         },
         "gates": gates,
         "claims": {
-            "safe": _safe_claims(work_plan, verification_payload, quality_report_payload, quality_eval_payload, gates),
+            "safe": _safe_claims(work_plan, verification_payload, effective_report, quality_eval_payload, gates),
             "unsafe": _unsafe_claims(work_plan, verification_payload, quality_report_payload, quality_eval_payload, gates),
             "evidence_refs": [],
         },
-        "unknowns": _unknowns(work_plan, verification_payload, quality_report_payload, quality_eval_payload, gates),
+        "unknowns": _unknowns(work_plan, verification_payload, effective_report, quality_eval_payload, gates) + report_errors,
         "human_decision": {"required": True, "outcome": redact_text(human_decision)},
     }
     if actor is not None:
@@ -384,9 +391,9 @@ def _safe_claims(
     claims = ["work plan generated locally"]
     if not _ai_quality_enabled(work_plan):
         claims.append("provider-free work planning")
-    if verification.get("status") == "passed":
+    if gates.get("verification_gate") == "passed":
         claims.append("listed verification commands passed")
-    if gates.get("verification_gate") == "passed" or quality_report.get("quality_gate") == "passed":
+    if gates.get("verification_gate") == "passed":
         claims.append("verification gate passed")
     if quality_eval.get("ok") is True:
         claims.append("sidecar eval passed without local evidence conflicts")
@@ -469,33 +476,48 @@ def _gate_summary(
     quality_eval: dict[str, Any],
     *,
     human_decision: str,
+    work_id: str = "",
 ) -> dict[str, str]:
-    verification_gate = str(
-        quality_report.get(
-            "verification_gate",
-            "passed" if verification.get("status") == "passed" else "blocked",
-        )
+    results = verification.get("results", [])
+    verification_ok = (
+        verification.get("status") == "passed"
+        and verification.get("work_id", work_id) == work_id
+        and isinstance(results, list)
+        and all(isinstance(result, dict) and result.get("exit_code") == 0 for result in results)
     )
+    verification_gate = "passed" if verification_ok else "blocked"
     sidecar_eval_gate = str(quality_report.get("sidecar_eval_gate", "not_applicable"))
-    if quality_eval and quality_eval.get("ok") is not True and sidecar_eval_gate == "not_applicable":
+    if quality_eval and quality_eval.get("ok") is not True:
         sidecar_eval_gate = "blocked"
-    human_decision_gate = str(quality_report.get("human_decision_gate", _human_decision_gate(human_decision)))
-    release_claim_gate = str(
-        quality_report.get(
-            "release_claim_gate",
-            "passed"
-            if verification_gate == "passed"
-            and sidecar_eval_gate in {"passed", "not_applicable"}
-            and human_decision_gate == "passed"
-            else "blocked",
-        )
-    )
+    human_decision_gate = _human_decision_gate(human_decision)
+    release_claim_gate = "passed" if (
+        verification_gate == "passed"
+        and sidecar_eval_gate in {"passed", "not_applicable"}
+        and human_decision_gate == "passed"
+    ) else "blocked"
     return {
         "verification_gate": verification_gate,
         "sidecar_eval_gate": sidecar_eval_gate,
         "human_decision_gate": human_decision_gate,
         "release_claim_gate": release_claim_gate,
     }
+
+
+def _quality_report_errors(
+    work_id: str, verification: dict[str, Any], report: dict[str, Any],
+) -> list[str]:
+    if not report:
+        return []
+    errors = []
+    if report.get("work_id") != work_id:
+        errors.append("Quality report ignored: work_id does not match this work.")
+    if "verification_status" in report and report["verification_status"] != verification.get("status"):
+        errors.append("Quality report ignored: verification_status does not match current verification.")
+    if "verification_id" in report and report["verification_id"] != verification.get("verification_id"):
+        errors.append("Quality report ignored: verification_id does not match current verification.")
+    if "verification_sha256" in report and report["verification_sha256"] != stable_hash(verification):
+        errors.append("Quality report ignored: verification_sha256 does not match current verification.")
+    return errors
 
 
 def _human_decision_gate(decision: str) -> str:

@@ -133,10 +133,16 @@ class SessionStore:
     path: Path
     connection: sqlite3.Connection
     fts_enabled: bool = False
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
+        if self.read_only:
+            self.connection.execute("PRAGMA query_only = ON")
+            tables = {row[0] for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            self.fts_enabled = {"messages_fts", "memories_fts"}.issubset(tables)
+            return
         self._migrate()
         self.fts_enabled = self._setup_fts()
 
@@ -234,6 +240,10 @@ class SessionStore:
         job_id: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, object]]:
+        if self.read_only and not self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approval_records'"
+        ).fetchone():
+            return []
         if session_id is not None:
             rows = self.connection.execute(
                 """
@@ -280,7 +290,7 @@ class SessionStore:
                 INSERT INTO messages (id, session_id, role, content, metadata_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, session_id, role, redact_text(content), _json_dumps_redacted(metadata or {}), now),
+                (message_id, session_id, role, _bound_session_string(content), _json_dumps_redacted(metadata or {}), now),
             )
             self._touch_session(session_id, now)
         return message_id
@@ -710,12 +720,15 @@ class SessionStore:
         self.connection.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (updated_at, session_id))
 
 
-def open_session_store(path: str | Path) -> SessionStore:
+def open_session_store(path: str | Path, *, read_only: bool = False) -> SessionStore:
     db_path = Path(path).expanduser().resolve()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
+    if read_only:
+        connection = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
+    else:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(db_path)
     try:
-        return SessionStore(path=db_path, connection=connection)
+        return SessionStore(path=db_path, connection=connection, read_only=read_only)
     except BaseException:
         # SQLite's transaction context manager does not close a connection.
         # Failed schema/FTS setup must release the file handle too (notably on Windows).

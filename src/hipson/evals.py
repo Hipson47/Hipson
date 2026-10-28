@@ -13,7 +13,7 @@ from hipson.project import discover_commands, resolve_project
 from hipson.redaction import redact_text, sanitize_path
 
 MAX_EVAL_TEXT_CHARS = 60_000
-FILE_REF_RE = re.compile(r"(?<!://)\b([A-Za-z0-9_./-]+\.(?:py|md|json|toml|ya?ml|ts|tsx|js|jsx|css|html|sh))\b")
+FILE_REF_RE = re.compile(r"(?<![A-Za-z0-9_./:\\-])((?:[A-Za-z]:[\\/])?[A-Za-z0-9_./\\-]+\.(?:py|md|json|toml|ya?ml|ts|tsx|js|jsx|css|html|sh))\b")
 COMMAND_REF_RE = re.compile(r"`([^`\n]{2,180})`")
 
 
@@ -165,15 +165,13 @@ def _hallucinated_files(text: str, project: Path) -> list[str]:
     missing = []
     seen: set[str] = set()
     for raw in FILE_REF_RE.findall(text):
-        candidate = raw.strip().lstrip("./")
+        path = (project / raw.strip()).resolve()
+        inside = path.is_relative_to(project.resolve())
+        candidate = path.relative_to(project.resolve()).as_posix() if inside else str(path)
         if not candidate or candidate in seen or candidate.startswith((".venv/", "build/", "dist/")):
             continue
         seen.add(candidate)
-        path = Path(candidate)
-        if path.is_absolute():
-            exists = path.exists()
-        else:
-            exists = (project / path).exists()
+        exists = inside and path.exists()
         if not exists:
             missing.append(sanitize_path(candidate))
     return missing

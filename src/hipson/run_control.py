@@ -237,8 +237,10 @@ def build_release_claim(run_path: str | Path, *, claim: str, human_decision: str
     human_gate = _human_decision_gate(human_decision)
     release_gate = str(gates.get("release_claim_gate", "no-evidence")) if isinstance(gates, dict) else "no-evidence"
     verification_gate = str(gates.get("verification_gate", "no-evidence")) if isinstance(gates, dict) else "no-evidence"
-    allowed = release_gate == "passed" and verification_gate == "passed" and human_gate == "passed"
+    allowed = status.get("status") == "passed" and release_gate == "passed" and verification_gate == "passed" and human_gate == "passed"
     reasons: list[str] = []
+    if status.get("status") != "passed":
+        reasons.append(f"run status is {status.get('status')}, not passed")
     if verification_gate != "passed":
         reasons.append("verification_gate is not passed")
     if release_gate != "passed":

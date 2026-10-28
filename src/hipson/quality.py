@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from hipson import output_policy
-from hipson.contracts import sha256_text, timestamp
+from hipson.contracts import sha256_text, stable_hash, timestamp
 from hipson.redaction import redact_text, sanitize_path
 from hipson.verification import load_work_plan
 
@@ -54,6 +54,7 @@ def build_quality_report(
         "release_claim_gate": gate_summary["release_claim_gate"],
         "gates": gate_summary,
         "verification_status": verification_status,
+        "verification_sha256": stable_hash(verification or {}),
         "sidecar_present": sidecar_present,
         "ai_quality": _ai_quality_summary(work),
         "sidecar_metadata": sidecar.get("metadata", {}) if sidecar else {},
