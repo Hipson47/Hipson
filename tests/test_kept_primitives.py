@@ -42,6 +42,9 @@ def _plan(project_path):
     }
 
 
+PASSED = {"work_id": "work_current", "status": "passed", "results": [{"exit_code": 0}]}
+
+
 def _passing_report(**overrides):
     return {
         "work_id": "work_current",
@@ -80,7 +83,7 @@ def test_d01_human_decision_overrides_quality_report(tmp_path):
     for decision, gate in [("rejected", "blocked"), ("pending", "pending")]:
         record = evidence.build_evidence_record(
             work_plan=_plan(tmp_path),
-            verification={"status": "passed"},
+            verification=PASSED,
             quality_report=_passing_report(),
             human_decision=decision,
             ledger_root=tmp_path,
@@ -94,11 +97,11 @@ def test_d01_mismatched_quality_report_is_flagged(tmp_path):
     for overrides, diagnostic in [
         ({"work_id": "work_other"}, "work_id"),
         ({"verification_id": "older"}, "verification_id"),
-        ({"verification_sha256": stable_hash({"status": "passed"})}, "verification_sha256"),
+        ({"verification_sha256": stable_hash(PASSED)}, "verification_sha256"),
     ]:
         record = evidence.build_evidence_record(
             work_plan=_plan(tmp_path),
-            verification={"status": "passed", "verification_id": "current"},
+            verification={**PASSED, "verification_id": "current"},
             quality_report=_passing_report(**overrides),
             human_decision="approved",
             ledger_root=tmp_path,
@@ -109,8 +112,11 @@ def test_d01_mismatched_quality_report_is_flagged(tmp_path):
 
 def test_d01_inconsistent_verification_cannot_pass(tmp_path):
     for verification_result in [
-        {"status": "passed", "work_id": "work_other"},
-        {"status": "passed", "results": [{"exit_code": 1}]},
+        {**PASSED, "work_id": "work_other"},
+        {**PASSED, "results": [{"exit_code": 1}]},
+        {"status": "passed"},  # No work id and no command evidence.
+        {**PASSED, "results": []},
+        {"status": "passed", "results": [{"exit_code": 0}]},
     ]:
         record = evidence.build_evidence_record(
             work_plan=_plan(tmp_path), verification=verification_result, human_decision="approved", ledger_root=tmp_path
@@ -123,7 +129,7 @@ def test_d01_quality_report_binds_verification_identity(tmp_path):
     work = tmp_path / "work.json"
     work.write_text(json.dumps(_plan(tmp_path)))
     verify = tmp_path / "verify.json"
-    first = {"work_id": "work_current", "status": "passed", "created_at_utc": "first"}
+    first = {**PASSED, "created_at_utc": "first"}
     verify.write_text(json.dumps(first))
     report = quality.build_quality_report(work_path=work, verification_path=verify, decision="approved")
     assert report["verification_sha256"] == stable_hash(first)
@@ -148,7 +154,7 @@ def test_d01_quality_report_binds_verification_identity(tmp_path):
 def test_d01_failed_eval_overrides_passing_sidecar_gate(tmp_path):
     record = evidence.build_evidence_record(
         work_plan=_plan(tmp_path),
-        verification={"status": "passed"},
+        verification=PASSED,
         quality_report=_passing_report(sidecar_eval_gate="passed"),
         quality_eval={"ok": False},
         human_decision="approved",
@@ -167,6 +173,20 @@ def test_d01_release_claim_refuses_blocked_or_incomplete_bundle(tmp_path):
             claim = run_control.build_release_claim(tmp_path, claim="ready", human_decision="approved")
         assert claim["allowed"] is False
         assert any(run_status in reason for reason in claim["reasons"])
+
+
+def test_kit_review_enforces_project_denied_paths_on_run_and_resume(tmp_path):
+    repo = init_git_repo(tmp_path)
+    result = review_kit.run_review_kit(project_path=repo)
+    (repo / ".hipson").mkdir()
+    (repo / ".hipson" / "policy.json").write_text(json.dumps({"denied_paths": ["tracked.txt"]}))
+    (repo / "tracked.txt").write_text("protected change\n")
+    runs_before = sorted((repo / "runs").iterdir())
+    with _raises(SystemExit, match="denied paths changed: tracked.txt"):
+        review_kit.run_review_kit(project_path=repo)
+    with _raises(SystemExit, match="denied paths changed: tracked.txt"):
+        review_kit.resume_review_kit(run_path=result["run_dir"], rerun_steps=["verify"])
+    assert sorted((repo / "runs").iterdir()) == runs_before
 
 
 def test_d05_review_preflight_blocks_provider_and_success_bundle(tmp_path):
@@ -203,6 +223,16 @@ def test_d05_resume_checks_preflight_before_provider(tmp_path):
                 review_kit.resume_review_kit(run_path=run_dir, run_sidecar=True)
         provider.assert_not_called()
         assert json.loads((run_dir / "preflight.json").read_text())["ok"] is False
+        # The older audit must not keep the run green once the current preflight failed.
+        status = run_control.build_status(run_dir)
+        assert status["status"] == "blocked" and status["preflight_ok"] is False
+        assert status["recommended_next_command"].startswith("hipson packet preflight ")
+
+
+def test_run_status_recommends_only_supported_commands(tmp_path):
+    for gates in ({"release_claim_gate": "passed", "verification_gate": "passed"}, {"verification_gate": "blocked"}, {}):
+        command = run_control._recommended_next_command(tmp_path, gates)
+        assert command.split()[1] not in ("release", "autopilot"), command
 
 
 def test_d19_resume_recomputes_decision_and_dependent_artifacts(tmp_path):
@@ -253,6 +283,37 @@ def test_d06_timeout_stops_descendants_and_retains_output(tmp_path):
         if child_pid is not None:
             try:
                 os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_d06_supervisor_stops_the_command_when_process_inspection_fails(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("requires POSIX process inspection for verification descendant cleanup")
+    pid_file = tmp_path / "command.pid"
+    command = [sys.executable, "-c", f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
+               "time.sleep(60)"]
+    # Inspection works until the command is running, then fails as if ps disappeared.
+    harness = (
+        "import os, sys\nfrom unittest.mock import patch\nfrom hipson import task_runner\n"
+        "original = task_runner.ProcessTree.members\n"
+        f"def members(self):\n    if os.path.exists({str(pid_file)!r}):\n        raise OSError('ps unavailable')\n"
+        "    return original(self)\n"
+        "with patch.object(task_runner.ProcessTree, 'members', members):\n"
+        "    sys.exit(task_runner.supervise_command(sys.argv[1:]))\n"
+    )
+    pid = None
+    try:
+        finished = subprocess.run([sys.executable, "-P", "-c", harness, *command], capture_output=True, text=True,
+                                  timeout=60)
+        assert finished.returncode != 0, finished
+        pid = int(pid_file.read_text())
+        with _raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if pid is not None:
+            try:
+                os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
 

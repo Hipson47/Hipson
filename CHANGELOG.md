@@ -13,6 +13,19 @@
 - A `task close` refusal for a check that ran out of time names the per-check timeout and `--timeout`.
 - Worker briefs show a readable gate summary (one line per acceptance check) instead of raw verification
   JSON; CLI JSON and MCP keep the full `verification` field and add `verification_summary`.
+- Fix the kept workflow primitives from the 1.6 stabilization review ([docs/STABILIZATION-1.6.md](docs/STABILIZATION-1.6.md)):
+  evidence and audit gates derive from the work's own command results and the human decision (a bare
+  `status: passed`, another work's verification or an old quality report no longer pass); `run status` is
+  blocked after a failed packet preflight and recommends only supported commands; `kit review` (and resume)
+  applies the project policy's `denied_paths` and approvals and enforces packet preflight before a sidecar;
+  resume records a changed decision; legacy `verify run` contains the process tree, keeps timeout output and
+  accepts quoted shell characters as data; verification profiles never start dev servers; work plans record
+  absolute packet paths; session readers are read-only and message bodies bounded; clearer packet/scan errors;
+  evals keep hidden and absolute paths; provider doctor needs a configured provider and agent.
+- Setup: config writes keep a concurrent editor save (rename-aside compare, no-clobber install, an interrupted
+  write is reported instead of a missing config); `install agents` / `install codex` use the same locked
+  atomic write; the Claude registration records `HIPSON_LEDGER`, `HIPSON_HOME` and `XDG_CONFIG_HOME`
+  overrides; sidecar packets cannot close their `<packet>` frame.
 
 ## 1.6.0 - 2026-10-27
 

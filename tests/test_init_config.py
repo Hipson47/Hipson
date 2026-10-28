@@ -2,8 +2,9 @@
 
 import hashlib
 import os
+import sys
 from pathlib import Path
-from unittest import TestCase
+from unittest import SkipTest, TestCase
 from unittest.mock import patch
 
 from hipson import init_config
@@ -101,25 +102,55 @@ def test_atomic_write_retains_edit_after_final_check(tmp_path):
         _retains_edit_after_final_check(root, edit)
 
 
-def test_atomic_write_without_hard_links_still_installs_and_never_strands_the_config(tmp_path):
+def test_atomic_write_without_hard_links_replaces_in_place_and_never_strands_the_config(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("POSIX no-clobber placement only; Windows rename refuses an existing destination")
     path = tmp_path / "config.toml"
     path.write_bytes(b'model = "before"\n')
     expected = init_config.snapshot(path)
-    with patch.object(init_config.os, "link", side_effect=PermissionError("links unsupported")):
+    replace = os.replace
+
+    def replace_while_present(source, destination):
+        assert Path(destination) != path or path.exists()  # The config is never moved away without links.
+        replace(source, destination)
+
+    with (patch.object(init_config.os, "link", side_effect=PermissionError("links unsupported")),
+          patch.object(init_config.os, "replace", side_effect=replace_while_present)):
         init_config.atomic_write(path, b'model = "after"\n', expected)
-        assert path.read_bytes() == b'model = "after"\n'
-        newer = init_config.snapshot(path)
-        check = init_config.unchanged
-
-        def save_after_check(target, original):
-            check(target, original)
-            target.write_bytes(b"# editor\n")
-
-        with (patch.object(init_config, "unchanged", side_effect=save_after_check),
-              TestCase().assertRaisesRegex(ValueError, "changed since planning")):
-            init_config.atomic_write(path, b"# planned\n", newer)
-    assert path.read_bytes() == b"# editor\n"
+    assert path.read_bytes() == b'model = "after"\n'
     assert list(tmp_path.iterdir()) == [path]
+    # A stale read is still refused before writing.
+    with TestCase().assertRaisesRegex(ValueError, "changed since planning"):
+        init_config.atomic_write(path, b"# planned\n", expected)
+
+
+def test_atomic_write_keeps_a_late_in_place_edit_to_the_displaced_file(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("POSIX no-clobber placement only; Windows rename refuses an existing destination")
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'model = "before"\n')
+    expected = init_config.snapshot(path)
+    place = init_config._place_if_absent
+
+    def editor_writes_old_inode_then_place(source, destination):
+        aside = next(tmp_path.glob(".config.toml.*.aside"))
+        aside.write_bytes(b"# editor wrote through its open descriptor\n")
+        place(source, destination)
+
+    with (patch.object(init_config, "_place_if_absent", side_effect=editor_writes_old_inode_then_place),
+          TestCase().assertRaisesRegex(ValueError, "concurrent edit is kept in")):
+        init_config.atomic_write(path, b"# planned\n", expected)
+    kept = list(tmp_path.glob(".config.toml.*.aside"))
+    assert len(kept) == 1 and kept[0].read_bytes() == b"# editor wrote through its open descriptor\n"
+
+
+def test_snapshot_reports_an_interrupted_write_instead_of_a_missing_config(tmp_path):
+    path = tmp_path / "config.toml"
+    (tmp_path / ".config.toml.abc123.aside").write_bytes(b'model = "original"\n')
+    with TestCase().assertRaisesRegex(ValueError, "interrupted Hipson write left .*abc123.aside"):
+        init_config.snapshot(path)
+    (tmp_path / ".config.toml.abc123.aside").unlink()
+    assert init_config.snapshot(path).content is None
 
 
 def _retains_edit_after_final_check(tmp_path, edit):

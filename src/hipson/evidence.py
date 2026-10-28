@@ -478,11 +478,12 @@ def _gate_summary(
     human_decision: str,
     work_id: str = "",
 ) -> dict[str, str]:
-    results = verification.get("results", [])
+    results = verification.get("results")
+    # Passing needs command evidence for this work: a bare {"status": "passed"} proves nothing.
     verification_ok = (
         verification.get("status") == "passed"
-        and verification.get("work_id", work_id) == work_id
-        and isinstance(results, list)
+        and bool(work_id) and verification.get("work_id") == work_id
+        and isinstance(results, list) and bool(results)
         and all(isinstance(result, dict) and result.get("exit_code") == 0 for result in results)
     )
     verification_gate = "passed" if verification_ok else "blocked"

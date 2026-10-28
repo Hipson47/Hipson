@@ -19,4 +19,7 @@ unchanged); **removed in 2.0**.
 | `hipson learn` | Dropped the end of longer sessions (D16) | `hipson memory add` for durable lessons |
 | `hipson hermes` | Status bridge outside the ledger; mixed JSON output (D20) | The ledger (`task now`, `task events`); the bridge stays callable for existing integrations until 2.0 |
 
-The evidence/audit gate fix (D01/C7) also applies to `audit show` and `kit review`, which stay.
+The evidence/audit gate fix (D01/C7) also applies to `audit show` and `kit review`, which stay. Moving from
+`autopilot review` to `kit review`: both apply the project policy's `denied_paths` and prompt-required operations
+(`--approve-operation`); `kit review` runs a provider sidecar only with explicit `--run-sidecar --ai-profile`,
+whereas autopilot's `local_only` check refused sidecars outright.

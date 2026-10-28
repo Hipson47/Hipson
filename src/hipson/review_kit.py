@@ -16,6 +16,7 @@ from hipson import (
     evidence,
     output_policy,
     packet_preflight,
+    policy,
     quality,
     run_control,
     workflow,
@@ -65,6 +66,7 @@ def run_review_kit(
     decision: str = "pending",
     allow_unsafe_output: bool = False,
     workflow_name: str = "review_kit",
+    approved_operations: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Run the local-first AI Review Control Kit workflow."""
 
@@ -72,6 +74,10 @@ def run_review_kit(
     _validate_verify_profile(verify_profile)
     if run_sidecar and not ai_profile:
         raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+    # Project policy denied_paths and prompt-required operations apply before any artifact. Sidecars stay an
+    # explicit --run-sidecar --ai-profile choice: policy validation pins local_only to true, which would forbid them.
+    policy.enforce_autopilot_policy(project_path=project, operation=workflow_name, run_sidecar=False,
+                                    approved_operations=list(approved_operations))
 
     work_id = contracts.new_id("work")
     root = output_policy.resolve_output_path(
@@ -238,6 +244,7 @@ def resume_review_kit(
     allow_unsafe_output: bool = False,
     rerun_steps: Sequence[str] = (),
     workflow_name: str = "review_kit",
+    approved_operations: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Resume a review kit run by filling missing artifacts only."""
 
@@ -258,6 +265,8 @@ def resume_review_kit(
 
     plan_payload = _load_json(paths["work"])
     project = resolve_project(str(plan_payload.get("project", ".")))
+    policy.enforce_autopilot_policy(project_path=project, operation=workflow_name, run_sidecar=False,
+                                    approved_operations=list(approved_operations))
     output_policy.resolve_output_path(
         run_dir,
         cwd=project,

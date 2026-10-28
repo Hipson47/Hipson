@@ -135,7 +135,12 @@ def supervise_command(command: list[str]) -> int:
     finally:
         try:
             if child is not None:
-                if not _stop(child, job, signal.SIGTERM, 1, tree):
+                try:
+                    stopped = _stop(child, job, signal.SIGTERM, 1, tree)
+                except Exception:  # Tree inspection itself failed (e.g. ps missing): fall back below.
+                    stopped = False
+                if not stopped:
+                    _stop_without_tracking(child)
                     raise OSError('could not confirm verification process cleanup')
                 child.wait(timeout=5)
         finally:
@@ -145,6 +150,23 @@ def supervise_command(command: list[str]) -> int:
                 tree.close()
             for number, handler in previous.items():
                 signal.signal(number, handler)
+
+
+def _stop_without_tracking(child: subprocess.Popen[bytes]) -> None:
+    """Last resort when descendants cannot be enumerated: signal this supervisor's own process group."""
+    if sys.platform != 'win32':
+        # supervise_command leads its session, so the group is the command and its non-detached descendants.
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, signal.SIG_IGN)
+        try:
+            os.killpg(os.getpgrp(), signal.SIGTERM)
+        except OSError:
+            pass
+    child.kill()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class RunParser(argparse.ArgumentParser):

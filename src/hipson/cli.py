@@ -404,6 +404,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 allow_unsafe_output=args.allow_unsafe_output,
                 rerun_steps=args.rerun_step,
                 workflow_name="review_kit",
+                approved_operations=args.approve_operation,
             )
         else:
             result = review_kit.run_review_kit(
@@ -422,6 +423,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 decision=args.decision,
                 allow_unsafe_output=args.allow_unsafe_output,
                 workflow_name="review_kit",
+                approved_operations=args.approve_operation,
             )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -2175,6 +2177,12 @@ def build_parser() -> argparse.ArgumentParser:
     kit_review.add_argument("--sidecar-config", help="Agent config JSON for --run-sidecar")
     kit_review.add_argument("--sidecar-env", help="Provider env file for --run-sidecar")
     kit_review.add_argument("--decision", default="pending", help="Human decision recorded in evidence")
+    kit_review.add_argument(
+        "--approve-operation",
+        action="append",
+        default=[],
+        help="Explicitly approve a policy prompt-required operation such as provider_call",
+    )
     kit_review.add_argument(
         "--allow-unsafe-output",
         action="store_true",

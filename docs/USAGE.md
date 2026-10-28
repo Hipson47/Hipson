@@ -193,12 +193,10 @@ For implementation work, track the worker in the task ledger instead
 (`hipson task do` or `hipson task open ... --check ... --start` plus `hipson task run`); the deprecated
 `hipson autopilot implement` only prepared a packet and launched no worker.
 
-Project policy is enforced before kit runs. `denied_paths` block runs when
-the current diff touches protected files, `local_only` blocks provider-backed
-sidecars, and prompt-required operations must be explicitly approved.
-For implementation runs, `--allowed-edit` is checked against project policy:
-`denied_paths` always block, and non-empty `allowed_paths` define the permitted
-write scope.
+Project policy applies before `kit review` and `kit review resume` write anything: `denied_paths` block the
+run when the current diff touches protected files, an invalid policy file blocks it, and an operation listed in
+`prompt_required_operations` needs `--approve-operation`. A provider-backed sidecar runs only when you pass
+both `--run-sidecar` and `--ai-profile`, and only after the packet preflight passes.
 
 Every kit review run also writes run-control artifacts:
 

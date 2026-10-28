@@ -21,11 +21,24 @@ class Snapshot:
     digest: bytes = b""
 
 
+def _displaced_copies(path: Path) -> list[Path]:
+    """Files atomic_write moved aside; one beside a missing config means a write was interrupted."""
+    try:
+        return sorted(item for item in path.parent.iterdir()
+                      if item.name.startswith(f".{path.name}.") and item.name.endswith(".aside"))
+    except OSError:
+        return []
+
+
 def snapshot(path: Path) -> Snapshot:
     """Bind bytes to the file identity; refuse links and unstable reads."""
     try:
         info = path.lstat()
     except FileNotFoundError:
+        leftovers = _displaced_copies(path)
+        if leftovers:
+            raise ValueError(f"An interrupted Hipson write left {leftovers[0]} while {path} is missing; move it back "
+                             f"to {path} (or delete it if it is not needed) and rerun hipson init.") from None
         return Snapshot(None)
     if not stat.S_ISREG(info.st_mode):
         raise ValueError(f"Config must be a regular file, not a link: {path}")
@@ -106,26 +119,37 @@ def _place_if_absent(source: Path, destination: Path) -> None:
         # Unlike POSIX rename, Windows rename refuses an existing destination.
         os.rename(source, destination)
     else:
-        try:
-            os.link(source, destination, follow_symlinks=False)
-        except FileExistsError:
-            raise
-        except OSError:
-            # No hard links on this filesystem: rename stays atomic, only the no-clobber check is best effort.
-            if os.path.lexists(destination):
-                raise FileExistsError(destination) from None
-            os.rename(source, destination)
-            return
+        os.link(source, destination, follow_symlinks=False)
         source.unlink()
 
 
+def _no_clobber_supported(staged: Path) -> bool:
+    """POSIX no-clobber placement needs hard links; probe the target filesystem with the staged file."""
+    if sys.platform == "win32":
+        return True
+    probe = staged.with_name(staged.name + ".link")
+    try:
+        os.link(staged, probe, follow_symlinks=False)
+    except OSError:
+        return False
+    probe.unlink()
+    return True
+
+
 def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | None = None) -> Snapshot:
-    """Compare the atomically displaced source before installing staged bytes."""
+    """Compare the atomically displaced source before installing staged bytes.
+
+    The destination is moved aside, compared with the planned snapshot and replaced only if nothing recreated it
+    meanwhile, so a concurrent editor save is kept. A crash in between leaves the original beside the missing
+    config, which snapshot() reports. Filesystems without hard links fall back to a plain atomic replace after
+    the comparison (the destination is never missing, the narrow check-to-replace window remains).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     staged = Path(temporary)
     aside = None
     displaced = False
+    placed = False
     retain_aside = False
     try:
         with os.fdopen(descriptor, "wb") as destination:
@@ -135,7 +159,10 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
         staged.chmod(mode if mode is not None else stat.S_IMODE(expected.identity[2]) if expected.identity else 0o600)
         identity = staged.stat()
         unchanged(path, expected)
-        if expected.content is not None:
+        if not _no_clobber_supported(staged):
+            os.replace(staged, path)
+            placed = True
+        elif expected.content is not None:
             descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".aside", dir=path.parent)
             os.close(descriptor)
             aside = Path(temporary)
@@ -148,16 +175,28 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
             # Renaming can change ctime; the remaining identity and bytes must match.
             if moved.content != expected.content or moved.identity[:-1] != expected.identity[:-1]:
                 raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.")
-        try:
-            _place_if_absent(staged, path)
-        except FileExistsError:
-            raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
+        if not placed:
+            try:
+                _place_if_absent(staged, path)
+            except FileExistsError:
+                raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
+            placed = True
+        if aside is not None:
+            # An editor holding the old file open may have written to it after the comparison: keep that edit.
+            try:
+                late = snapshot(aside).content
+            except ValueError:
+                late = None
+            if late != expected.content:
+                retain_aside = True
+                raise ValueError(f"Configuration changed during atomic replacement: {path}; the concurrent edit is "
+                                 f"kept in {aside}.")
         written = snapshot(path)
         if written.content != content or written.identity[:2] != (identity.st_dev, identity.st_ino):
             raise ValueError(f"Configuration changed during atomic replacement: {path}")
         return written
     except BaseException:
-        if displaced and aside is not None:
+        if displaced and not placed and aside is not None:
             try:
                 _place_if_absent(aside, path)
             except OSError as exc:

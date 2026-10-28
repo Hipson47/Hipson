@@ -111,15 +111,19 @@ def build_status(run_path: str | Path) -> dict[str, Any]:
     work = _load_optional_json(run_dir / RUN_ARTIFACTS["work"])
     audit = _load_optional_json(run_dir / RUN_ARTIFACTS["audit"])
     manifest = _load_optional_json(run_dir / RUN_ARTIFACTS["manifest"])
+    preflight = _load_optional_json(run_dir / RUN_ARTIFACTS["preflight"])
     gates = audit.get("latest_gates", {}) if isinstance(audit, dict) else {}
     validation = build_validation(run_dir)
+    # A failed current preflight outranks an older audit written before the packet changed.
+    preflight_failed = isinstance(preflight, dict) and preflight.get("ok") is not True
     return {
         "artifact_kind": "hipson.run_status",
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": timestamp(),
         "work_id": str(work.get("work_id", "")) if work else run_dir.name,
         "run_dir": str(run_dir),
-        "status": _run_status(audit, validation),
+        "status": "blocked" if preflight_failed and validation.get("ok") else _run_status(audit, validation),
+        "preflight_ok": not preflight_failed if preflight is not None else None,
         "workflow": str(manifest.get("workflow", "")) if manifest else "",
         "mode": str(manifest.get("mode", "")) if manifest else "",
         "gates": gates if isinstance(gates, dict) else {},
@@ -127,7 +131,8 @@ def build_status(run_path: str | Path) -> dict[str, Any]:
         "release_claim_gate": str(audit.get("latest_release_claim_gate", "no-audit")) if audit else "no-audit",
         "missing_required": validation["missing_required"],
         "artifacts": artifact_snapshot(run_dir),
-        "recommended_next_command": _recommended_next_command(run_dir, gates if isinstance(gates, dict) else {}),
+        "recommended_next_command": _recommended_next_command(run_dir, gates if isinstance(gates, dict) else {},
+                                                              preflight_failed=preflight_failed),
     }
 
 
@@ -296,11 +301,12 @@ def _run_status(audit: dict[str, Any] | None, validation: dict[str, Any]) -> str
     return latest_status
 
 
-def _recommended_next_command(run_dir: Path, gates: dict[str, Any]) -> str:
-    if gates.get("release_claim_gate") == "passed":
-        return f"hipson release claim --run {run_dir} --claim \"release readiness\" --human-decision approved --json"
+def _recommended_next_command(run_dir: Path, gates: dict[str, Any], *, preflight_failed: bool = False) -> str:
+    # Only supported commands: the deprecated release/autopilot surfaces are never recommended.
+    if preflight_failed:
+        return f"hipson packet preflight {run_dir / RUN_ARTIFACTS['packet']} --json"
     if gates.get("verification_gate") != "passed":
-        return f"hipson autopilot resume --run {run_dir} --rerun-step verify --json"
+        return f"hipson kit review resume --run {run_dir} --rerun-step verify --json"
     return f"hipson run handoff --run {run_dir} --json"
 
 
@@ -309,7 +315,7 @@ def _next_agent_step(gates: dict[str, Any], unknowns: object) -> str:
     if values:
         return f"Resolve the first unknown: {values[0]}"
     if gates.get("release_claim_gate") == "passed":
-        return "Ask for a final human release decision, then record a release claim if approved."
+        return "Ask for the final human decision; track the change to done with hipson task close."
     return "Rerun verification or append evidence until blocked gates are resolved."
 
 
