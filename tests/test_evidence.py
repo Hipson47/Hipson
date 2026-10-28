@@ -655,3 +655,92 @@ def test_mcp_latest_audit_isolates_corrupt_candidates_and_keeps_serving(tmp_path
     payload = _resource(tmp_path)
     assert payload["latest_status"] == "no-evidence" and len(payload["candidate_errors"]) == 2
     assert not _schema_errors(payload, "audit-bundle.schema.json")
+
+
+# Exact contracts for gate derivation (1.7, D01/C7): the mutation gate covers evidence.py through these.
+_PASSED = {"work_id": "work_evidence", "status": "passed", "results": [{"exit_code": 0}, {"exit_code": 0}]}
+
+
+def _gates(verification, *, report=None, quality_eval=None, decision="approved", work_id="work_evidence"):
+    return evidence._gate_summary(verification, report or {}, quality_eval or {}, human_decision=decision,
+                                  work_id=work_id)
+
+
+def test_gate_summary_passes_only_with_this_works_passing_command_results():
+    assert _gates(_PASSED) == {"verification_gate": "passed", "sidecar_eval_gate": "not_applicable",
+                               "human_decision_gate": "passed", "release_claim_gate": "passed"}
+    for verification, work_id in [
+        ({**_PASSED, "status": "failed"}, "work_evidence"),
+        ({**_PASSED, "work_id": "work_other"}, "work_evidence"),
+        ({key: value for key, value in _PASSED.items() if key != "work_id"}, "work_evidence"),
+        (_PASSED, ""),  # A plan without an id can never match.
+        ({**_PASSED, "results": []}, "work_evidence"),
+        ({**_PASSED, "results": None}, "work_evidence"),
+        ({**_PASSED, "results": "exit 0"}, "work_evidence"),
+        ({**_PASSED, "results": [{"exit_code": 0}, {"exit_code": 1}]}, "work_evidence"),
+        ({**_PASSED, "results": [{"exit_code": 0}, "ok"]}, "work_evidence"),
+        ({**_PASSED, "results": [{"exit_code": None}]}, "work_evidence"),
+        ({"status": "passed"}, "work_evidence"),
+    ]:
+        gates = _gates(verification, work_id=work_id)
+        assert gates["verification_gate"] == "blocked", verification
+        assert gates["release_claim_gate"] == "blocked", verification
+
+
+def test_gate_summary_sidecar_and_human_gates_are_exact():
+    assert _gates(_PASSED, report={"sidecar_eval_gate": "passed"})["sidecar_eval_gate"] == "passed"
+    assert _gates(_PASSED, report={"sidecar_eval_gate": "blocked"})["release_claim_gate"] == "blocked"
+    assert _gates(_PASSED, report={"sidecar_eval_gate": "pending"})["release_claim_gate"] == "blocked"
+    failed_eval = _gates(_PASSED, report={"sidecar_eval_gate": "passed"}, quality_eval={"ok": False})
+    assert failed_eval["sidecar_eval_gate"] == "blocked" and failed_eval["release_claim_gate"] == "blocked"
+    assert _gates(_PASSED, quality_eval={"ok": True})["sidecar_eval_gate"] == "not_applicable"
+    assert _gates(_PASSED, quality_eval={"note": "x"})["sidecar_eval_gate"] == "blocked"  # ok missing is not ok.
+    for decision, gate in [("approved", "passed"), (" Merged ", "passed"), ("release", "passed"),
+                           ("rejected", "blocked"), ("FAIL", "blocked"), ("pending", "pending"), ("", "pending")]:
+        gates = _gates(_PASSED, decision=decision)
+        assert gates["human_decision_gate"] == gate, decision
+        assert gates["release_claim_gate"] == ("passed" if gate == "passed" else "blocked"), decision
+    # A quality report can no longer override verification or the decision.
+    stale = {"verification_gate": "passed", "human_decision_gate": "passed", "release_claim_gate": "passed"}
+    assert _gates({**_PASSED, "status": "failed"}, report=stale)["release_claim_gate"] == "blocked"
+    assert _gates(_PASSED, report=stale, decision="rejected")["human_decision_gate"] == "blocked"
+
+
+def test_quality_report_errors_name_each_mismatch_exactly():
+    verification = {**_PASSED, "verification_id": "V-1"}
+    matching = {"work_id": "work_evidence", "verification_status": "passed", "verification_id": "V-1",
+                "verification_sha256": contracts.stable_hash(verification)}
+    assert evidence._quality_report_errors("work_evidence", verification, {}) == []
+    assert evidence._quality_report_errors("work_evidence", verification, matching) == []
+    assert evidence._quality_report_errors("work_evidence", verification, {"work_id": "work_evidence"}) == []
+    assert evidence._quality_report_errors("work_evidence", verification, {
+        "work_id": "work_old", "verification_status": "failed", "verification_id": "V-0",
+        "verification_sha256": "0" * 64,
+    }) == [
+        "Quality report ignored: work_id does not match this work.",
+        "Quality report ignored: verification_status does not match current verification.",
+        "Quality report ignored: verification_id does not match current verification.",
+        "Quality report ignored: verification_sha256 does not match current verification.",
+    ]
+
+
+def test_evidence_record_ignores_a_mismatched_report_and_blocks_release(tmp_path):
+    report = {"work_id": "work_old", "quality_gate": "passed", "sidecar_eval_gate": "passed",
+              "release_claim_gate": "passed"}
+    record = evidence.build_evidence_record(work_plan=_plan(tmp_path), verification=_PASSED, quality_report=report,
+                                            human_decision="approved", ledger_root=tmp_path)
+    assert record["gates"] == {"verification_gate": "passed", "sidecar_eval_gate": "blocked",
+                               "human_decision_gate": "passed", "release_claim_gate": "blocked"}
+    assert "Quality report ignored: work_id does not match this work." in record["unknowns"]
+    assert record["quality"]["report"] == report  # Kept as evidence, not trusted.
+    assert "release claim gate passed" not in record["claims"]["safe"]
+    assert {"listed verification commands passed", "verification gate passed"} <= set(record["claims"]["safe"])
+    clean = evidence.build_evidence_record(work_plan=_plan(tmp_path), verification=_PASSED,
+                                           quality_report={**report, "work_id": "work_evidence"},
+                                           human_decision="approved", ledger_root=tmp_path)
+    assert clean["gates"]["sidecar_eval_gate"] == "passed" and clean["gates"]["release_claim_gate"] == "passed"
+    assert not any(item.startswith("Quality report ignored") for item in clean["unknowns"])
+    blocked = evidence.build_evidence_record(work_plan=_plan(tmp_path), verification={**_PASSED, "status": "failed"},
+                                             human_decision="approved", ledger_root=tmp_path)
+    assert "listed verification commands passed" not in blocked["claims"]["safe"]
+    assert "verification gate passed" not in blocked["claims"]["safe"]
