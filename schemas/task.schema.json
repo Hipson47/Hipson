@@ -162,12 +162,13 @@
     "changes": {
       "description": "Opt-in post-run filesystem observation (task run --observe); an observation, not attribution.",
       "type": ["object", "null"], "additionalProperties": false,
-      "required": ["status", "observed_at", "mode", "truncated", "files_before", "files_after", "counts", "paths",
-                   "omitted", "concurrent_assignments", "caps", "excluded_dirs", "uncertainty"],
+      "required": ["status", "observed_at", "mode", "truncated", "incomplete_reasons", "files_before", "files_after",
+                   "counts", "paths", "omitted", "concurrent_assignments", "caps", "excluded_dirs", "uncertainty"],
       "properties": {
         "status": {"enum": ["clean", "changes", "incomplete", "unobserved"]},
         "observed_at": {"type": "string"},
         "mode": {"enum": ["ro", "rw"]},
+        "incomplete_reasons": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
         "truncated": {"type": "boolean"},
         "files_before": {"type": "integer", "minimum": 0},
         "files_after": {"type": "integer", "minimum": 0},

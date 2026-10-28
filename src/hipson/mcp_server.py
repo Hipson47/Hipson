@@ -853,7 +853,11 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
                 task=arguments.get("task"), status=arguments.get("status"), severity=arguments.get("severity"),
             )
         if name == "task.reap":
-            return store.reap(task=arguments.get("task"), dry_run=dry_run)
+            reaped = store.reap(task=arguments.get("task"), dry_run=dry_run)
+            if not dry_run:
+                from hipson.task_observation import complete_pending
+                complete_pending(db)
+            return reaped
         if name == "task.event":
             return store.add_event(
                 arguments["task"], actor=arguments["actor"], type=arguments["type"], summary=arguments["summary"],

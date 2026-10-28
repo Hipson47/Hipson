@@ -1891,11 +1891,7 @@ def command_task(args: argparse.Namespace) -> int:
                 payload = store.reap(task=args.task, dry_run=args.dry_run)
                 if not args.dry_run:
                     # Compare reaped (or earlier orphan-recovered) assignments with their stored baselines.
-                    for pending in task_observation.pending(db):
-                        try:
-                            task_observation.complete(db, pending)
-                        except ledger.LedgerError:
-                            continue  # Still active, or not in this ledger.
+                    task_observation.complete_pending(db)
             elif args.task_command == "event":
                 payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
             elif args.task_command == "status":

@@ -1042,21 +1042,29 @@ class Ledger:
                                         source_assignment=assignment)["id"] for item in findings]
             counts = changes.get("counts", {})
             unexpected = sum(counts.get("out_of_scope", {}).values())
+            listed = "; ".join(f"{item['attribution']} {item['change']} {item['path']}"
+                               for item in changes.get("paths", [])[:20])
+            omitted = max(0, len(changes.get("paths", [])) - 20) + int(changes.get("omitted", 0))
             self._append_event(
                 current["task"], "hipson", "observed",
                 f"{assignment}: changes {changes['status']}; {unexpected} outside scope, "
                 f"{sum(counts.get('unattributed', {}).values())} unattributed"
-                + ("; truncated, not a clean result" if changes.get("truncated") else "")
+                + ("; incomplete, not a clean result" if changes["status"] == "incomplete" else "")
+                + (f"; paths: {listed}" if listed else "")
+                + (f" (+{omitted} more in task show --json)" if omitted else "")
                 + (f"; findings {', '.join(ids)}" if ids else ""),
                 [assignment, *ids])
             return cast(Assignment, redact_value(self._assignment(assignment)))
 
-    def overlapping_writers(self, assignment: str) -> list[tuple[str, list[str]]]:
-        """Other rw assignments in the same project whose lifetime overlapped this one, with their scopes."""
+    def overlapping_writers(self, assignment: str, *, until: str | None = None) -> list[tuple[str, list[str]]]:
+        """Other rw assignments in the same project alive during [start, until], with their scopes.
+
+        until is when the final snapshot was taken (default: the end of this assignment, or now).
+        """
         with self._transaction(write=False):
             current = self._assignment(assignment)
             project = self._task(current["task"])["project"]
-            end = current["ended_at"] or _timestamp()
+            end = until or current["ended_at"] or _timestamp()
             rows = self.connection.execute(
                 """SELECT a.id, a.scope FROM assignments a JOIN tasks t ON t.id = a.task
                    WHERE t.project = ? AND a.id <> ? AND a.mode = 'rw' AND a.started_at < ?

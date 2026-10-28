@@ -93,6 +93,9 @@ def test_without_a_hash_a_metadata_change_still_counts(tmp_path):
     record = _observe(_tree(tmp_path), change, caps=Caps(max_hash_bytes=1))
     assert record["paths"] == [{"path": "README.md", "change": "modified", "attribution": "out_of_scope",
                                 "evidence": "metadata"}]
+    # Same-size edits with preserved timestamps would be invisible without hashes: never clean.
+    assert record["status"] == "incomplete"
+    assert record["incomplete_reasons"] == ["hash budget 1 bytes reached"]
 
 
 def test_cap_hit_is_incomplete_and_never_clean(tmp_path):
@@ -100,7 +103,9 @@ def test_cap_hit_is_incomplete_and_never_clean(tmp_path):
     record = _observe(root, lambda root: (root / "zz-after-the-cap.txt").write_text("x"), caps=Caps(max_files=2))
     assert record["truncated"] is True and record["status"] == "incomplete"
     assert record["paths"] == []  # Beyond the cap nothing can be compared: no claim either way.
-    assert "INCOMPLETE" in task_observation.summary(record) and "no changes" not in task_observation.summary(record)
+    assert record["incomplete_reasons"] == ["file cap 2 reached"]
+    assert task_observation.summary(record).startswith("incomplete, not a clean result (file cap 2 reached)")
+    assert "no changes" not in task_observation.summary(record)
     clean = _observe(root, lambda root: None, caps=Caps(max_files=2))
     assert clean["status"] == "incomplete"
 
@@ -121,6 +126,7 @@ def test_git_and_tool_caches_are_excluded_and_listed(tmp_path):
         (root / "src" / "__pycache__" / "app.pyc").write_bytes(b"x")
         (root / ".venv" / "lib").mkdir(parents=True)
         (root / ".venv" / "lib" / "installed.py").write_text("x")
+        (root / "src" / ".git").write_text("gitdir: ../.git/worktrees/x\n")  # Worktree/submodule pointer file.
 
     record = _observe(_tree(tmp_path), change)
     assert record["status"] == "clean"
@@ -131,7 +137,7 @@ def test_secret_files_are_compared_without_any_content_digest(tmp_path):
     root = _tree(tmp_path)
     (root / ".env").write_text("TOKEN=one\n")
     before = take(root)
-    assert before["entries"][".env"][3] is None and before["entries"]["README.md"][3] is not None
+    assert before["entries"][".env"][4] is None and before["entries"]["README.md"][4] is not None
     (root / ".env").write_text("TOKEN=two-longer\n")
     record = classify(before, take(root), mode="rw", scope=["src"], others=[])
     assert record["paths"] == [{"path": ".env", "change": "modified", "attribution": "out_of_scope",
@@ -313,3 +319,170 @@ def test_project_policy_can_opt_in_and_rejects_bad_values(tmp_path):
     issues = policy.load_policy(repo)["issues"]
     assert "observe_changes must be true or false" in issues and "observe_max_bytes must be a positive integer" in issues
     assert task_runner.observation_caps(args, str(repo)) is None  # An invalid policy never enables anything.
+
+
+def test_baseline_never_stores_secret_shaped_names(tmp_path):
+    root = _tree(tmp_path)
+    secret = "ghp_" + "b" * 36
+    (root / "src" / f"{secret}.txt").write_text("x")
+    db = tmp_path / "ledger.sqlite"
+    task_observation.start(db, "A-0001", root, Caps())
+    stored = task_observation.baseline_path(db, "A-0001").read_text(encoding="utf-8")
+    assert secret not in stored and "sha256:" in stored
+    (root / "src" / f"{secret}.txt").write_text("changed")
+    before = json.loads(stored)
+    record = classify(before, take(root), mode="rw", scope=["src"], others=[])
+    assert record["counts"]["in_scope"]["modified"] == 1 and secret not in json.dumps(record)
+
+
+def test_unreadable_directories_make_the_observation_incomplete(tmp_path):
+    root = _tree(tmp_path)
+    scandir = os.scandir
+
+    def failing(path):
+        if str(path).endswith("docs"):
+            raise PermissionError("denied")
+        return scandir(path)
+
+    with patch.object(task_observation.os, "scandir", side_effect=failing):
+        record = _observe(root, lambda root: (root / "docs/guide.md").write_text("hidden edit\n"))
+    assert record["status"] == "incomplete" and record["incomplete_reasons"] == ["unreadable directory: docs"]
+    assert record["paths"] == []  # Nothing under the unreadable directory is claimed either way.
+    before = take(root)
+    with patch.object(task_observation.os, "scandir", side_effect=failing):
+        after = take(root)
+    record = classify(before, after, mode="rw", scope=["src"], others=[])
+    assert record["counts"]["out_of_scope"]["deleted"] == 0 and record["status"] == "incomplete"
+
+
+def test_hashing_reads_exactly_the_stat_ed_regular_file(tmp_path):
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"abc")
+    info = path.lstat()
+    digest, read = task_observation._digest(str(path), info)
+    assert read == 3 and digest is not None
+    path.write_bytes(b"abc and more bytes")  # Grew after stat: no digest, bounded read.
+    assert task_observation._digest(str(path), info) == (None, 0)
+    if sys.platform != "win32" and hasattr(os, "symlink"):
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"abc")
+        path.unlink()
+        os.symlink(outside, path)  # Replaced by a link after stat: never followed.
+        assert task_observation._digest(str(path), info) == (None, 0)
+
+
+def test_traversal_is_bounded_by_entries_and_depth(tmp_path):
+    root = tmp_path / "wide"
+    root.mkdir()
+    for index in range(50):
+        (root / f"f{index:02d}").write_text("x")
+    snapshot = take(root, Caps(max_files=5))
+    assert snapshot["truncated"] and snapshot["entries"] == {} and snapshot["incomplete"] == ["file cap 5 reached"]
+    deep = tmp_path / "deep"
+    current = deep
+    for _ in range(task_observation.MAX_DEPTH + 5):
+        current = current / "d"
+    current.mkdir(parents=True)
+    snapshot = take(deep)
+    assert snapshot["truncated"] and f"depth limit {task_observation.MAX_DEPTH} reached" in snapshot["incomplete"]
+
+
+def test_in_project_ledger_and_baselines_are_never_attributed(tmp_path):
+    project = _tree(tmp_path)
+    db = project / "ledger.sqlite"
+    store, task = _ledger_at(db, project)
+    with closing(store):
+        assignment = store.assign(task, actor="codex", role="reviewer", mode="ro", scope=[])["id"]
+    task_observation.start(db, assignment, project, Caps())
+    with closing(ledger.Ledger(db)) as store:
+        store.add_event(task, actor="claude", type="note", summary="ledger write during the run")
+        store.finish(assignment, result="passed", summary="read only")
+    view = task_observation.complete(db, assignment)
+    assert view is not None and view["changes"]["status"] == "clean", view["changes"]
+    assert set(task_observation.ledger_exclusions(db, project)) == {
+        "ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "ledger.sqlite-journal",
+        ".ledger.sqlite.observations"}
+
+
+def _ledger_at(db: Path, project: Path):
+    store = ledger.Ledger(db)
+    task = store.open_task(project=project, title="Observe", objective="Observe changes")["id"]
+    store.set_status(task, to="in_progress", actor="claude")
+    return store, task
+
+
+def test_ledgers_in_one_directory_keep_separate_baselines(tmp_path):
+    first = task_observation.baseline_path(tmp_path / "a.sqlite", "A-0001")
+    second = task_observation.baseline_path(tmp_path / "b.sqlite", "A-0001")
+    assert first != second and first.parent != second.parent
+
+
+def test_attribution_window_ends_at_the_final_snapshot(tmp_path):
+    root = _tree(tmp_path)
+    store, task = _ledger(tmp_path, root)
+    with closing(store):
+        reader = store.assign(task, actor="claude", role="reviewer", mode="ro", scope=[])["id"]
+        stamp = ledger._timestamp()
+        later = store.assign(task, actor="agy", role="builder", mode="rw", scope=["docs"])["id"]
+        store.finish(reader, result="passed", summary="done")
+        assert store.overlapping_writers(reader, until=stamp) == []  # Started after the snapshot.
+        assert store.overlapping_writers(reader) == [(later, ["docs"])]  # Default: until the reader ended.
+
+
+def test_explicit_observe_keeps_policy_caps(tmp_path):
+    import argparse
+
+    from hipson import task_runner
+    repo = init_git_repo(tmp_path)
+    (repo / ".hipson").mkdir()
+    (repo / ".hipson" / "policy.json").write_text(json.dumps({"observe_max_files": 7, "observe_max_bytes": 9}))
+    args = argparse.Namespace(observe=True, observe_max_files=None, observe_max_bytes=None)
+    assert task_runner.observation_caps(args, str(repo)) == Caps(max_files=7, max_hash_bytes=9)
+    args.observe_max_files = 3
+    assert task_runner.observation_caps(args, str(repo)) == Caps(max_files=3, max_hash_bytes=9)
+
+
+def test_observed_event_lists_the_changed_paths(tmp_path):
+    root = _tree(tmp_path)
+    store, task = _ledger(tmp_path, root)
+    with closing(store):
+        assignment = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(assignment, result="passed", summary="done")
+        record = _observe(root, lambda root: (root / "src/new.py").write_text("x"))
+        store.record_changes(assignment, record, findings(record, assignment))
+        assert "paths: in_scope created src/new.py" in store.events(task)[-1]["summary"]
+
+
+def test_a_failed_baseline_is_recorded_as_unobserved(tmp_path):
+    root = _tree(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    store, task = _ledger(tmp_path, root)
+    with closing(store):
+        assignment = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(assignment, result="failed", summary="worker not started")
+    task_observation.start_failed(db, assignment, "baseline failed: PermissionError")
+    view = task_observation.complete(db, assignment)
+    assert view is not None and view["changes"]["status"] == "unobserved"
+    assert view["changes"]["incomplete_reasons"] == ["baseline failed: PermissionError"]
+    assert task_observation.summary(view["changes"]).startswith("unobserved (baseline failed: PermissionError")
+
+
+def test_orphan_recovery_inside_assign_and_mcp_reap_complete_observations(tmp_path):
+    from hipson import mcp_server
+    root = _tree(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    store, task = _ledger(tmp_path, root)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    with closing(store):
+        orphan = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"], owner_pid=gone.pid,
+                              owner_host=store._hostname(), owner_boot_id=ledger._boot_id(),
+                              owner_pid_namespace=ledger._pid_namespace())["id"]
+    task_observation.start(db, orphan, root, Caps())
+    (root / "stray.txt").write_text("x")
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        mcp_server._tool_payload("task.reap", {"approved": True}, project=root)
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        item = store.activity(orphan)
+    assert item["status"] == "cancelled" and item["changes"]["counts"]["out_of_scope"]["created"] == 1
+    assert task_observation.pending(db) == []

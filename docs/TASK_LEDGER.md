@@ -151,26 +151,34 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
 `"observe_changes": true` in the project's `.hipson/policy.json`.
 
 - Before launch, after the claim, the runner snapshots the project tree: path, size, `mtime_ns` and a
-  SHA-256 of each file within the hashing budget. It never stores file contents, and sensitive files such
-  as `.env` or keys are compared by size and mtime only, without a digest. `.git`, local environments
-  (`.venv`, `venv`, `node_modules`) and known tool caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`,
-  ...) are excluded and listed in the result. Caps:
-  `--observe-max-files` (default 20000) and `--observe-max-bytes` of content hashing (default 256 MiB), or
-  `observe_max_files` / `observe_max_bytes` in the policy. The baseline is kept privately beside the
-  ledger (`observations/A-....json`), so it survives a dead supervisor.
-- After the worker exits, on every path (success, failure, cancellation), the runner compares a second
-  snapshot. A file whose content hash is unchanged is not a change, even with a new mtime (edit then
-  revert); without a hash, a size or mtime change counts and is marked `evidence: metadata`.
-  `hipson task reap` completes the comparison for reaped assignments.
+  SHA-256 of each file within the hashing budget, read from the exact regular file that was stat()ed
+  (links are never followed). It never stores file contents; sensitive files such as `.env` or keys are
+  compared by size and mtime only, without a digest; secret-shaped path names are stored only as digests.
+  `.git` (directory or worktree pointer file), local environments (`.venv`, `venv`, `node_modules`), known
+  tool caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`, ...) and the active ledger with its SQLite
+  sidecars and baselines (when the ledger lives inside the project) are excluded and listed in the result.
+  Caps: `--observe-max-files` (directory entries visited, default 20000) and `--observe-max-bytes` of
+  content hashing (default 256 MiB), or `observe_max_files` / `observe_max_bytes` in the policy (they apply
+  with `--observe` too); the walk also stops below 64 directory levels. The baseline is kept privately
+  beside the ledger (`.<ledger file>.observations/A-....json`), so it survives a dead supervisor. If it
+  cannot be taken, the worker does not start and the assignment records `unobserved` with the reason.
+- After the worker stops, on every path (success, failure, cancellation), the runner takes the final
+  snapshot while the assignment still holds its claims, then compares. A file whose content hash is
+  unchanged is not a change, even with a new mtime (edit then revert); without a hash, a size or mtime change
+  counts and is marked `evidence: metadata`. For reaped assignments, including orphans recovered while a new
+  assignment starts, the comparison is completed by `hipson task reap` (CLI or MCP) or the next `task run`.
 - Each created, modified or deleted path is classified: `in_scope` (inside the `rw` assignment's claimed
-  scope), `unattributed` (inside the scope of another `rw` assignment in the same project whose lifetime
-  overlapped this one; never blamed on this worker), or `out_of_scope`. A read-only (`ro`) assignment has
-  no write scope, so every change outside other writers' claimed paths counts as `out_of_scope`.
+  scope), `unattributed` (inside the scope of another `rw` assignment in the same project that was alive
+  between this assignment's start and its final snapshot; never blamed on this worker), or `out_of_scope`.
+  A read-only (`ro`) assignment has no write scope, so every change outside other writers' claimed paths
+  counts as `out_of_scope`.
 - `out_of_scope` changes raise one `major` finding per kind (created, modified, deleted) on the task,
   listing the paths. Like any major finding it blocks `done` until it is resolved: `fixed` after reverting,
-  or `wontfix` with a reason when the change was expected. An `observed` event records the counts.
-- When a cap is reached the result is `truncated: true` with status `incomplete`, and only paths before the
-  cap are compared. An incomplete observation never reads as clean.
+  or `wontfix` with a reason when the change was expected. An `observed` event records the counts and a
+  bounded list of changed paths.
+- Status `incomplete` (with `incomplete_reasons`) when a cap is reached (`truncated: true`; only paths before
+  the cap are compared), a directory or file cannot be read (nothing under it is compared), the hashing budget
+  runs out, or a file changes while it is hashed. An incomplete observation never reads as clean.
 
 The result is stored on the assignment as `changes` (in `task show`, `task now`, `lead resume` and the
 MCP JSON). It is an observation of the filesystem, not attribution: the lead or another process may also

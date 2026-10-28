@@ -212,17 +212,14 @@ def add_observe_arguments(parser: argparse.ArgumentParser) -> None:
 
 def observation_caps(args: argparse.Namespace, project: str) -> task_observation.Caps | None:
     """Opt-in: --observe, or observe_changes in a valid project policy. None means no observation."""
-    observe = bool(getattr(args, "observe", False))
-    policy: dict[str, Any] = {}
-    if not observe:
-        from hipson.policy import load_policy
-        try:
-            payload = load_policy(project)
-        except (SystemExit, OSError, ValueError):
-            payload = {}
-        policy = payload.get("policy", {}) if payload.get("valid") else {}
-        observe = policy.get("observe_changes") is True
-    if not observe:
+    from hipson.policy import load_policy
+    try:
+        payload = load_policy(project)
+    except (SystemExit, OSError, ValueError):
+        payload = {}
+    # Policy caps apply whether the policy or --observe enables observation; an invalid policy enables nothing.
+    policy: dict[str, Any] = payload.get("policy", {}) if payload.get("valid") else {}
+    if not (getattr(args, "observe", False) or policy.get("observe_changes") is True):
         return None
     files = getattr(args, "observe_max_files", None) or policy.get("observe_max_files") or task_observation.MAX_FILES
     budget = getattr(args, "observe_max_bytes", None) or policy.get("observe_max_bytes") or task_observation.MAX_HASH_BYTES
@@ -288,6 +285,13 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
             _message(f"result file rejected ({type(exc).__name__})")
             summary += "; result file rejected"
             result_state = 'rejected'
+    try:
+        # The final snapshot is taken while this assignment still owns its claims, so writers that start after
+        # it ends cannot leak into what is attributed to it.
+        after = task_observation.capture_after(db, assignment)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _message(f"could not take the final observation snapshot: {type(exc).__name__}")
+        after = None
     journal = {
         **task_activity.project_changes(project), 'result_state': result_state,
         'exit_code': code, 'signal': signum or child_signal or None,
@@ -310,7 +314,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         _message(f"could not finish {assignment}: {exc}; run 'hipson task reap'")
         return
     try:
-        observed = task_observation.complete(db, assignment)
+        observed = task_observation.complete(db, assignment, after=after)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not record observed changes for {assignment}: {exc}; run 'hipson task reap'")
         return
@@ -452,7 +456,14 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             caps = observation_caps(args, str(check['expected']))
             if caps is not None:
                 # Before launch and after the claim: the baseline is what this worker starts from.
-                task_observation.start(db, assignment, str(check['expected']), caps)
+                try:
+                    task_observation.start(db, assignment, str(check['expected']), caps)
+                except (OSError, ValueError) as exc:
+                    # Requested but impossible: never launch unobserved, and record why instead of nothing.
+                    task_observation.start_failed(db, assignment, f"baseline failed: {type(exc).__name__}")
+                    raise OSError(f"could not take the observation baseline: {exc}") from exc
+            # assign() may have recovered orphans; finish their observations now rather than at the next reap.
+            task_observation.complete_pending(db)
         progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         progress_path = Path(progress_dir.name) / 'progress'
         progress = progress_path.open('w+b', buffering=0)
