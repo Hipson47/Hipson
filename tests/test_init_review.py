@@ -7,6 +7,8 @@ import subprocess
 import sys
 import time
 import tomllib
+from contextlib import chdir
+from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
@@ -113,6 +115,80 @@ def test_init_codex_unforwarded_ledger_is_a_conflict_but_explicit_forwarding_mat
         assert report["ok"] == forwarded
         assert report["actions"][1]["status"] == ("skipped" if forwarded else "conflict")
         assert setup.snapshots() == before
+
+
+def test_init_claude_records_ledger_overrides_for_a_fresh_client(tmp_path):
+    for selector, scope in product(("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME"), ("project", "user")):
+        _claude_records_ledger_overrides(tmp_path / f"{selector}-{scope}", selector, scope)
+
+
+def _claude_records_ledger_overrides(tmp_path, selector, scope):
+    setup = _Setup(tmp_path)
+    for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME"):
+        setup.env.pop(key, None)
+    setup.env[selector] = "relative path with spaces-é"
+    setup.env["INIT_UNFORWARDED_SECRET"] = "do-not-store"
+    with chdir(setup.root), patch.dict(os.environ, setup.env, clear=True):
+        plan = init_setup.build_plan(project_path=str(setup.project), client="claude", scope=scope, dry_run=False)
+        assert plan.report["ok"], plan.report
+        db = plan.report["checks"]["ledger"]
+        init_setup.apply_plan(plan)
+    assert plan.report["ok"], plan.report
+    path = setup.project / ".mcp.json" if scope == "project" else setup.claude_config
+    entry = json.loads(path.read_bytes())["mcpServers"]["hipson"]
+    expected_env = {selector: setup.env[selector], "HIPSON_LEDGER": db}
+    assert entry["env"] == expected_env
+    argv = setup.calls()[0]["args"]
+    for key, value in expected_env.items():
+        assert any(argv[index:index + 2] == ["-e", f"{key}={value}"] for index in range(len(argv)))
+    assert "do-not-store" not in json.dumps(entry) + json.dumps(argv)
+    assert not plan.report["checks"].get("warnings")
+    # Launch as a new client without the setup shell's ledger selection.
+    fresh_env = {key: value for key, value in setup.env.items() if key not in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME")}
+    fresh_env.update(entry["env"])
+    probe = subprocess.run([sys.executable, "-c", "from hipson.ledger import default_ledger_db; print(default_ledger_db())"],
+                           cwd=setup.project, env=fresh_env, capture_output=True, text=True, encoding="utf-8", timeout=10)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == db
+
+
+def test_init_claude_rejects_registration_that_does_not_retain_environment(tmp_path):
+    for variant in ("missing", "changed", "extra"):
+        _claude_rejects_altered_environment(tmp_path / variant, variant)
+
+
+def _claude_rejects_altered_environment(tmp_path, variant):
+    setup = _Setup(tmp_path)
+    run = init_setup._run
+
+    def altered_registration(argv, project, **kwargs):
+        result = run(argv, project, **kwargs)
+        path = project / ".mcp.json"
+        config = json.loads(path.read_bytes())
+        entry = config["mcpServers"]["hipson"]
+        if variant == "missing":
+            entry.pop("env", None)
+        elif variant == "changed":
+            entry["env"]["HIPSON_LEDGER"] = str(setup.root / "wrong.sqlite")
+        else:
+            entry["env"]["UNEXPECTED_VARIABLE"] = "unexpected"
+        path.write_text(json.dumps(config), encoding="utf-8")
+        return result
+
+    with patch.dict(os.environ, setup.env, clear=True):
+        plan = init_setup.build_plan(project_path=str(setup.project), client="claude", scope="project", dry_run=False)
+        with patch.object(init_setup, "_run", side_effect=altered_registration):
+            init_setup.apply_plan(plan)
+    assert not plan.report["ok"]
+    assert "registration environment" in str(plan.report["errors"])
+
+
+def test_init_warns_when_preserving_claude_registration_without_ledger_override(tmp_path):
+    setup = _Setup(tmp_path)
+    setup.register_claude("project", setup.registration())
+    report = setup.run("--client", "claude", "--dry-run", "--json")
+    assert report["ok"] and report["actions"][1]["status"] == "skipped"
+    assert any("existing Claude Code registration does not record it" in warning for warning in report["checks"]["warnings"])
 
 
 def test_init_codex_cwd_conflicts_are_rejected_before_writes(tmp_path):

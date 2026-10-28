@@ -32,6 +32,9 @@ if args[:2] == ["mcp", "add"]:
     config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     command, *server_args = args[args.index("--") + 1:]
     config.setdefault("mcpServers", {})["hipson"] = {"command": command, "args": server_args}
+    environment = dict(args[index + 1].split("=", 1) for index, arg in enumerate(args[:args.index("--")]) if arg == "-e")
+    if environment:
+        config["mcpServers"]["hipson"]["env"] = environment
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.environ.get("INIT_ADD_PARTIAL"):
         path.write_bytes(b'{"partial":')
@@ -59,7 +62,8 @@ class _Setup:
         self.claude_config = root / "claude-config" / ".claude.json"
         self.db = root / "hipson-home" / "ledger.sqlite"
         self.log = root / "client-log.jsonl"
-        self.cli = hipson_cli()
+        local_cli = Path(sys.executable).with_name("hipson.exe" if sys.platform == "win32" else "hipson")
+        self.cli = str(local_cli) if local_cli.is_file() and not os.environ.get("HIPSON_BIN") else hipson_cli()
         assert self.cli, "installed hipson is required on every CI OS"
         self.env = {
             **os.environ, "HOME": str(self.home), "USERPROFILE": str(self.home),
@@ -131,11 +135,13 @@ def test_init_dry_run_exact_plan_without_setup_writes(tmp_path):
     assert "exclusive" in actions["codex"]["backup_before_edit"]
     claude = actions["claude"]
     assert claude["cwd"] == str(setup.project)
-    assert claude["command"][1:10] == ["mcp", "add", "--transport", "stdio", "--scope", "project", "hipson", "--", report["checks"]["hipson_executable"]]
-    assert claude["command"][10:] == ["mcp", "serve", "--project", str(setup.project), "--stdio"]
+    env_args = [arg for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME") for arg in ("-e", f"{key}={setup.env[key]}")]
+    assert claude["command"][1:-5] == ["mcp", "add", "--transport", "stdio", "--scope", "project", "hipson",
+                                       *env_args, "--", report["checks"]["hipson_executable"]]
+    assert claude["command"][-5:] == ["mcp", "serve", "--project", str(setup.project), "--stdio"]
     appended = tomllib.loads(actions["codex"]["append"])["mcp_servers"]["hipson"]
     assert appended["command"] == report["checks"]["hipson_executable"]
-    assert appended["args"] == claude["command"][10:]
+    assert appended["args"] == claude["command"][-5:]
     assert appended["env"] == {"HIPSON_LEDGER": str(setup.db)}
     text = setup.run("--client", "codex", "--dry-run")
     assert "Append exactly" in text and actions["codex"]["append"].replace("\r\n", "\n") in text
@@ -332,7 +338,9 @@ def test_init_claude_other_project_user_registration_plans_safe_project_override
     assert report["ok"] and report["actions"][1]["status"] == "applied"
     assert setup.claude_config.read_bytes() == user_before
     assert Path(report["actions"][1]["backup"]).read_bytes() == project_before
-    assert json.loads((setup.project / ".mcp.json").read_bytes())["mcpServers"]["hipson"] == setup.registration()
+    assert json.loads((setup.project / ".mcp.json").read_bytes())["mcpServers"]["hipson"] == {
+        **setup.registration(), "env": {key: setup.env[key] for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME")},
+    }
     before = setup.snapshots()
     second = setup.run("--client", "claude", "--json")
     assert second["ok"] and all(action["status"] == "skipped" for action in second["actions"])

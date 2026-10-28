@@ -100,11 +100,33 @@ def config_locks(paths: list[Path]) -> Iterator[None]:
         yield
 
 
+def _place_if_absent(source: Path, destination: Path) -> None:
+    """Install without overwriting an editor's recreation of the destination."""
+    if sys.platform == "win32":
+        # Unlike POSIX rename, Windows rename refuses an existing destination.
+        os.rename(source, destination)
+    else:
+        try:
+            os.link(source, destination, follow_symlinks=False)
+        except FileExistsError:
+            raise
+        except OSError:
+            # No hard links on this filesystem: rename stays atomic, only the no-clobber check is best effort.
+            if os.path.lexists(destination):
+                raise FileExistsError(destination) from None
+            os.rename(source, destination)
+            return
+        source.unlink()
+
+
 def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | None = None) -> Snapshot:
-    """Stage privately beside the destination, then compare identity/hash and replace."""
+    """Compare the atomically displaced source before installing staged bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     staged = Path(temporary)
+    aside = None
+    displaced = False
+    retain_aside = False
     try:
         with os.fdopen(descriptor, "wb") as destination:
             destination.write(content)
@@ -113,13 +135,39 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
         staged.chmod(mode if mode is not None else stat.S_IMODE(expected.identity[2]) if expected.identity else 0o600)
         identity = staged.stat()
         unchanged(path, expected)
-        os.replace(staged, path)
+        if expected.content is not None:
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".aside", dir=path.parent)
+            os.close(descriptor)
+            aside = Path(temporary)
+            try:
+                os.replace(path, aside)
+            except FileNotFoundError:
+                raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
+            displaced = True
+            moved = snapshot(aside)
+            # Renaming can change ctime; the remaining identity and bytes must match.
+            if moved.content != expected.content or moved.identity[:-1] != expected.identity[:-1]:
+                raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.")
+        try:
+            _place_if_absent(staged, path)
+        except FileExistsError:
+            raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
         written = snapshot(path)
         if written.content != content or written.identity[:2] != (identity.st_dev, identity.st_ino):
             raise ValueError(f"Configuration changed during atomic replacement: {path}")
         return written
+    except BaseException:
+        if displaced and aside is not None:
+            try:
+                _place_if_absent(aside, path)
+            except OSError as exc:
+                retain_aside = True
+                raise ValueError(f"Configuration changed since planning: {path}; recover displaced file from {aside}.") from exc
+        raise
     finally:
         staged.unlink(missing_ok=True)
+        if aside is not None and not retain_aside:
+            aside.unlink(missing_ok=True)
 
 
 def restore(path: Path, original: Snapshot, backup: Path | None, *, expected: Snapshot) -> None:

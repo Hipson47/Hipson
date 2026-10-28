@@ -9,6 +9,7 @@ import sys
 import time
 import tomllib
 from pathlib import Path
+from unittest import TestCase
 from unittest.mock import patch
 
 from hipson import codex_install, init_setup
@@ -40,16 +41,18 @@ def test_init_planning_never_connects_even_to_conflicting_claude_servers(tmp_pat
         assert setup.snapshots() == before
 
 
-def test_init_concurrent_processes_cannot_append_duplicate_codex_tables(tmp_path):
+def _concurrent_codex_reports(tmp_path, *, unlocked=False):
     setup = _Setup(tmp_path)
     setup.foreign_configs()
     # Keep the interleaving focused on config writes, with no ledger migration in between.
     setup.run("--client", "none", "--yes", "--json")
     script = setup.root / "concurrent.py"
     script.write_text('''import json, sys, time
+from contextlib import nullcontext
 from pathlib import Path
 from hipson import init_setup
 project, root, worker = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+unlocked = sys.argv[4] == "unlocked"
 def wait(path):
     end = time.monotonic() + 15
     while not path.exists():
@@ -65,6 +68,33 @@ def backup(path):
     wait(root / "release-backups")
     return result
 init_setup.backup_file = backup
+if unlocked:
+    init_setup.config_locks = lambda paths: nullcontext()
+elif worker == "2":
+    # Signal an actual failed nonblocking lock, not a scheduling delay before it.
+    if sys.platform == "win32":
+        import msvcrt
+        locking = msvcrt.locking
+        def observed(fd, mode, count):
+            try:
+                return locking(fd, mode, count)
+            except OSError:
+                if mode == msvcrt.LK_NBLCK:
+                    (root / "contended-2").touch()
+                    wait(root / "release-backups")
+                raise
+        msvcrt.locking = observed
+    else:
+        import fcntl
+        flock = fcntl.flock
+        def observed(fd, operation):
+            try:
+                return flock(fd, operation)
+            except BlockingIOError:
+                (root / "contended-2").touch()
+                wait(root / "release-backups")
+                raise
+        fcntl.flock = observed
 (root / ("ready-" + worker)).touch()
 wait(root / ("start-" + worker))
 init_setup.apply_plan(plan)
@@ -73,33 +103,46 @@ print(json.dumps(plan.report))
     children = []
     try:
         for worker in ("1", "2"):
-            children.append(subprocess.Popen([sys.executable, str(script), str(setup.project), str(setup.root), worker],
+            children.append(subprocess.Popen([sys.executable, str(script), str(setup.project), str(setup.root), worker,
+                                              "unlocked" if unlocked else "locked"],
                                             env=setup.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             _wait(setup.root / f"ready-{worker}")
         (setup.root / "start-1").touch()
         _wait(setup.root / "backup-1")
         (setup.root / "start-2").touch()
-        # Old init lets worker 2 pass validation while worker 1 is copying its backup.
-        deadline = time.monotonic() + 0.6
-        while not (setup.root / "backup-2").exists() and time.monotonic() < deadline:
-            time.sleep(.02)
+        # Worker 1 stays paused until worker 2 demonstrably reaches the boundary.
+        _wait(setup.root / ("backup-2" if unlocked else "contended-2"))
         (setup.root / "release-backups").touch()
         reports = []
         for child in children:
             stdout, stderr = child.communicate(timeout=20)
             assert child.returncode == 0, (stdout, stderr)
             reports.append(json.loads(stdout))
-        parsed = tomllib.loads(setup.codex_config.read_text(encoding="utf-8"))
-        assert parsed["mcp_servers"]["hipson"] == {**setup.registration(), "env": {"HIPSON_LEDGER": str(setup.db)}}
-        assert sum(report["ok"] for report in reports) == 1, reports
-        assert any("changed since planning" in str(report["errors"]) for report in reports)
-        assert len(list(setup.codex_home.glob("config.toml.backup-*"))) == 1
+        return setup, reports
     finally:
         (setup.root / "release-backups").touch()
         for child in children:
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=5)
+
+
+def _assert_serialized_codex_update(setup, reports):
+    assert len(list(setup.codex_home.glob("config.toml.backup-*"))) == 1, "serialized init must make exactly one backup"
+    parsed = tomllib.loads(setup.codex_config.read_text(encoding="utf-8"))
+    assert parsed["mcp_servers"]["hipson"] == {**setup.registration(), "env": {"HIPSON_LEDGER": str(setup.db)}}
+    assert sum(report["ok"] for report in reports) == 1, reports
+    assert any("changed since planning" in str(report["errors"]) for report in reports)
+
+
+def test_init_concurrent_processes_cannot_append_duplicate_codex_tables(tmp_path):
+    _assert_serialized_codex_update(*_concurrent_codex_reports(tmp_path))
+
+
+def test_init_concurrent_processes_negative_control_without_locks(tmp_path):
+    setup, reports = _concurrent_codex_reports(tmp_path, unlocked=True)
+    with TestCase().assertRaisesRegex(AssertionError, "serialized init must make exactly one backup"):
+        _assert_serialized_codex_update(setup, reports)
 
 
 def test_init_detects_same_bytes_replacement_and_edit_during_backup(tmp_path):

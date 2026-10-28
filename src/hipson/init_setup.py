@@ -315,25 +315,29 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                 claude = clients[name]
                 if claude is None:
                     raise ValueError("Claude Code is not on PATH (including claude.cmd on Windows).")
-                overrides = [key for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME") if os.environ.get(key)]
-                if overrides:
-                    # The Claude registration stores no environment: Claude must be started with the same one.
-                    report["checks"].setdefault("warnings", []).append(
-                        f"{', '.join(overrides)} chose the ledger {db}, but the Claude Code registration does not "
-                        "record it. Start Claude Code with the same environment, or it will use the default ledger.")
+                environment = {key: os.environ[key] for key in ("HIPSON_LEDGER", "HIPSON_HOME", "XDG_CONFIG_HOME") if os.environ.get(key)}
+                if environment:
+                    # Pin the effective absolute ledger even when the selecting override is relative.
+                    environment["HIPSON_LEDGER"] = str(db)
+                env_args = [arg for key, value in environment.items() for arg in ("-e", f"{key}={value}")]
                 config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
                 user_config = (Path(config_dir).expanduser().resolve() if config_dir else Path.home()) / ".claude.json"
                 path = project / ".mcp.json" if scope == "project" else user_config
                 registrations = _claude_registrations(plan, project, user_config)
                 action: dict[str, Any] = {
                     "kind": "claude", "scope": scope, "path": str(path),
-                    "command": [claude, "mcp", "add", "--transport", "stdio", "--scope", scope, "hipson", "--", command, *server_args],
+                    "command": [claude, "mcp", "add", "--transport", "stdio", "--scope", scope, "hipson", *env_args, "--", command, *server_args],
+                    "env": environment,
                     "cwd": str(project), "status": "planned", "detail": "register stdio MCP server",
                 }
                 if registrations:
                     existing_scope, existing = registrations[0]
                     if existing_scope == scope and _registration_matches(existing, command, server_args, project):
                         action.update(status="skipped", detail="already configured")
+                        if environment and existing.get("env", {}).get("HIPSON_LEDGER") != str(db):
+                            report["checks"].setdefault("warnings", []).append(
+                                f"{', '.join(environment)} chose the ledger {db}, but the existing Claude Code registration does not "
+                                "record it. Start Claude Code with the same environment, or it will use the default ledger.")
                     else:
                         desired = {"command": command, "args": server_args}
                         conflict = (
@@ -346,12 +350,12 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                             action.update(status="conflict", detail=conflict + " Remove or rename the conflicting registration explicitly before rerunning; setup never replaces it.")
                             report["errors"].append(action["detail"])
                 actions.append(action)
-                effective = registrations[0][1] if action["status"] == "skipped" else {"command": command, "args": server_args}
+                effective = registrations[0][1] if action["status"] == "skipped" else {"command": command, "args": server_args, "env": environment}
                 if action["status"] != "conflict":
                     plan.verifications.append(_verification(effective, project))
             elif name == "codex":
                 home, warnings = detect_codex_home()
-                report["checks"]["warnings"] = warnings
+                report["checks"].setdefault("warnings", []).extend(warnings)
                 path = home / "config.toml"
                 parsed = _codex_config(plan, path)
                 original = plan.snapshots[path].content
@@ -490,6 +494,8 @@ def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None
                 raise ValueError(f"Claude MCP registration failed (exit {result.returncode}).")
             parsed = json.loads(path.read_bytes())
             entry = parsed.get("mcpServers", {}).get("hipson")
+            if not isinstance(entry, dict) or entry.get("env", {}) != action["env"]:
+                raise ValueError("Invalid claude registration environment after update")
         command = plan.report["checks"]["hipson_executable"]
         args = ["mcp", "serve", "--project", str(project), "--stdio"]
         if not _registration_matches(entry, command, args, project, codex=action["kind"] == "codex"):
