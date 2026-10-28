@@ -33,6 +33,7 @@ from hipson import (
     run_control,
     task_context,
     task_flow,
+    task_observation,
     task_runner,
     task_verification,
     verification,
@@ -1888,6 +1889,13 @@ def command_task(args: argparse.Namespace) -> int:
                     payload = store.findings(task=args.task, status=args.status, severity=args.severity)
             elif args.task_command == "reap":
                 payload = store.reap(task=args.task, dry_run=args.dry_run)
+                if not args.dry_run:
+                    # Compare reaped (or earlier orphan-recovered) assignments with their stored baselines.
+                    for pending in task_observation.pending(db):
+                        try:
+                            task_observation.complete(db, pending)
+                        except ledger.LedgerError:
+                            continue  # Still active, or not in this ledger.
             elif args.task_command == "event":
                 payload = store.add_event(args.task, actor=args.actor, type=args.type, summary=args.summary, refs=args.ref)
             elif args.task_command == "status":
@@ -1919,6 +1927,12 @@ def command_task(args: argparse.Namespace) -> int:
                               f"{item['ack_state']}; last activity={heartbeat}")
                         if item['failure_journal']:
                             print(f"    Journal: {_bounded_json(item['failure_journal'], limit=800, escape_controls=True)}")
+                        if item['changes']:
+                            print(f"    Changes {_bounded_cli(task_observation.summary(item['changes']), limit=400, escape_controls=True)}")
+                            for change in [entry for entry in item['changes']['paths']
+                                           if entry['attribution'] != 'in_scope'][:10]:
+                                print(f"      {change['attribution']} {change['change']}: "
+                                      f"{_bounded_cli(change['path'], limit=200, escape_controls=True)}")
                         result = item["result"]
                         if result is not None:
                             print(

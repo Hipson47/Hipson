@@ -144,6 +144,38 @@ use the **ledger watermark** (latest task update or heartbeat) to keep repeated 
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
 
+## Change observation against scope (opt-in, 1.7)
+
+Claims stop two writers from starting on the same paths; change observation checks afterwards what
+actually changed. It is opt-in: `hipson task run --observe` (also `task do --observe`), or
+`"observe_changes": true` in the project's `.hipson/policy.json`.
+
+- Before launch, after the claim, the runner snapshots the project tree: path, size, `mtime_ns` and a
+  SHA-256 of each file within the hashing budget. It never stores file contents, and sensitive files such
+  as `.env` or keys are compared by size and mtime only, without a digest. `.git`, local environments
+  (`.venv`, `venv`, `node_modules`) and known tool caches (`__pycache__`, `.pytest_cache`, `.mypy_cache`,
+  ...) are excluded and listed in the result. Caps:
+  `--observe-max-files` (default 20000) and `--observe-max-bytes` of content hashing (default 256 MiB), or
+  `observe_max_files` / `observe_max_bytes` in the policy. The baseline is kept privately beside the
+  ledger (`observations/A-....json`), so it survives a dead supervisor.
+- After the worker exits, on every path (success, failure, cancellation), the runner compares a second
+  snapshot. A file whose content hash is unchanged is not a change, even with a new mtime (edit then
+  revert); without a hash, a size or mtime change counts and is marked `evidence: metadata`.
+  `hipson task reap` completes the comparison for reaped assignments.
+- Each created, modified or deleted path is classified: `in_scope` (inside the `rw` assignment's claimed
+  scope), `unattributed` (inside the scope of another `rw` assignment in the same project whose lifetime
+  overlapped this one; never blamed on this worker), or `out_of_scope`. A read-only (`ro`) assignment has
+  no write scope, so every change outside other writers' claimed paths counts as `out_of_scope`.
+- `out_of_scope` changes raise one `major` finding per kind (created, modified, deleted) on the task,
+  listing the paths. Like any major finding it blocks `done` until it is resolved: `fixed` after reverting,
+  or `wontfix` with a reason when the change was expected. An `observed` event records the counts.
+- When a cap is reached the result is `truncated: true` with status `incomplete`, and only paths before the
+  cap are compared. An incomplete observation never reads as clean.
+
+The result is stored on the assignment as `changes` (in `task show`, `task now`, `lead resume` and the
+MCP JSON). It is an observation of the filesystem, not attribution: the lead or another process may also
+have written during the run, and paths are untrusted text. Secret-shaped path names are redacted.
+
 ## Acceptance checks and short flows (1.6)
 
 A task can declare acceptance checks: exact commands that prove its acceptance criteria. Declare them

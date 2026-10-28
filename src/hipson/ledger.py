@@ -25,7 +25,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -125,6 +125,7 @@ SCHEMA: tuple[str, ...] = (
         failure_journal TEXT,
         acknowledged_at TEXT,
         ack_note TEXT NOT NULL DEFAULT '',
+        changes TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -216,6 +217,10 @@ MIGRATION_V6_TO_V7 = (
     "ALTER TABLE tasks ADD COLUMN checks TEXT NOT NULL DEFAULT '[]'",
     "UPDATE schema_version SET version = 7 WHERE singleton = 1",
 )
+MIGRATION_V7_TO_V8 = (
+    "ALTER TABLE assignments ADD COLUMN changes TEXT",
+    "UPDATE schema_version SET version = 8 WHERE singleton = 1",
+)
 MAX_CHECKS = 16
 MAX_CHECK_ARGS = 64
 CHECK_ARG_LIMIT = 4096
@@ -300,6 +305,7 @@ class Assignment(TypedDict):
     acknowledged_at: str | None
     ack_note: str
     ack_state: str
+    changes: dict[str, Any] | None
 
 
 class ReapedAssignment(TypedDict):
@@ -345,7 +351,7 @@ class CloseRefusedError(LedgerError):
 
 RESERVED_EVENT_TYPES = frozenset({
     "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
-    "claim_conflict", "reopened", "override",
+    "claim_conflict", "reopened", "override", "observed",
 })
 
 
@@ -763,7 +769,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -784,6 +790,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2, 3, 4, 5, 6):
                         for statement in MIGRATION_V6_TO_V7:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5, 6, 7):
+                        for statement in MIGRATION_V7_TO_V8:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -1014,6 +1023,46 @@ class Ledger:
         self.connection.execute("DELETE FROM claims WHERE assignment = ?", (item["id"],))
         self._append_event(item["task"], item["actor"], "reaped", f"{item['id']}: {journal['reason']}", [item["id"]])
         return self._assignment(item["id"])
+
+    def record_changes(self, assignment: str, changes: dict[str, Any],
+                       findings: Sequence[dict[str, str]] = ()) -> Assignment:
+        """Record a post-run change observation once, with its findings and an 'observed' event, atomically."""
+        if not isinstance(changes, dict) or changes.get("status") not in ("clean", "changes", "incomplete", "unobserved"):
+            raise LedgerError("Change observation must be an object with a known status")
+        with self._transaction():
+            current = self._assignment(assignment)
+            if current["status"] == "active":
+                raise LedgerError(f"Assignment {assignment} is still active")
+            if current["changes"] is not None:
+                raise LedgerError(f"Assignment {assignment} already has a change observation")
+            self.connection.execute("UPDATE assignments SET changes = ? WHERE id = ?",
+                                    (json.dumps(redact_value(changes)), assignment))
+            ids = [self._insert_finding(current["task"], actor="hipson", severity="major", title=item["title"],
+                                        detail=item["detail"], location=item["location"],
+                                        source_assignment=assignment)["id"] for item in findings]
+            counts = changes.get("counts", {})
+            unexpected = sum(counts.get("out_of_scope", {}).values())
+            self._append_event(
+                current["task"], "hipson", "observed",
+                f"{assignment}: changes {changes['status']}; {unexpected} outside scope, "
+                f"{sum(counts.get('unattributed', {}).values())} unattributed"
+                + ("; truncated, not a clean result" if changes.get("truncated") else "")
+                + (f"; findings {', '.join(ids)}" if ids else ""),
+                [assignment, *ids])
+            return cast(Assignment, redact_value(self._assignment(assignment)))
+
+    def overlapping_writers(self, assignment: str) -> list[tuple[str, list[str]]]:
+        """Other rw assignments in the same project whose lifetime overlapped this one, with their scopes."""
+        with self._transaction(write=False):
+            current = self._assignment(assignment)
+            project = self._task(current["task"])["project"]
+            end = current["ended_at"] or _timestamp()
+            rows = self.connection.execute(
+                """SELECT a.id, a.scope FROM assignments a JOIN tasks t ON t.id = a.task
+                   WHERE t.project = ? AND a.id <> ? AND a.mode = 'rw' AND a.started_at < ?
+                   AND (a.ended_at IS NULL OR a.ended_at > ?) ORDER BY a.id""",
+                (project, assignment, end, current["started_at"])).fetchall()
+        return [(row["id"], json.loads(row["scope"])) for row in rows]
 
     def observe(self, assignment: str, activity: dict[str, Any]) -> None:
         """Runner observations never renew leases, reap owners, or release claims."""
@@ -1495,6 +1544,7 @@ class Ledger:
             'failure_journal': json.loads(row['failure_journal']) if 'failure_journal' in row.keys() and row['failure_journal'] else None,
             'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
+            'changes': json.loads(row['changes']) if 'changes' in row.keys() and row['changes'] else None,
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
                           else 'not_required' if legacy or historical else 'unacknowledged'),
         }

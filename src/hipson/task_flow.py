@@ -178,7 +178,11 @@ def command_do(args: argparse.Namespace) -> int:
               *[item for path in args.scope for item in ('--scope', path)],
               *(['--lease-seconds', str(args.lease_seconds)] if args.lease_seconds is not None else []),
               *(['--result-file', args.result_file] if args.result_file else []),
-              *(['--rollout', args.rollout] if args.rollout else []), *args.worker_command]
+              *(['--rollout', args.rollout] if args.rollout else []),
+              *(['--observe'] if args.observe else []),
+              *(['--observe-max-files', str(args.observe_max_files)] if args.observe_max_files else []),
+              *(['--observe-max-bytes', str(args.observe_max_bytes)] if args.observe_max_bytes else []),
+              *args.worker_command]
     code = _run_worker(worker, project)
     try:
         with closing(ledger.Ledger(db, create=False)) as store:
@@ -248,6 +252,7 @@ def configure_do(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--lease-seconds', type=int)
     parser.add_argument('--result-file', help='Structured worker result to ingest (schemas/task-result.schema.json)')
     parser.add_argument('--rollout', choices=['codex'])
+    task_runner.add_observe_arguments(parser)
     parser.add_argument('--to', choices=('review', 'done'), default='done')
     parser.add_argument('--timeout', type=float, default=300, help='Per-check timeout in seconds')
     parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- WORKER COMMAND [ARGS...]')

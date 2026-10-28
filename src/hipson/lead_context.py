@@ -132,7 +132,7 @@ def _assignment(item: ledger.Assignment, events: list[ledger.TaskEvent], as_of: 
             'age_seconds': max(0, int((as_of - latest).total_seconds())) if latest else None,
             'last_progress': activity.get('progress') or (progress['summary'] if progress else '')
                              or activity.get('last_stdout') or activity.get('last_stderr') or '',
-            'untrusted_fields': ['summary', 'result', 'activity', 'failure_journal', 'last_progress']}
+            'untrusted_fields': ['summary', 'result', 'activity', 'failure_journal', 'last_progress', 'changes']}
 
 
 def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
@@ -228,6 +228,9 @@ def _assignment_lines(item: dict[str, Any]) -> list[str]:
         report = item['result']
         lines.append(f"{identity} report={report['status']} files={len(report['files_changed'])} "
                      f"commands={len(report['commands'])} risks={_text(report['risks'], 120)} (details: task show --json)")
+    if item.get('changes'):
+        from hipson.task_observation import summary
+        lines.append(f"{identity} observed {_text(summary(item['changes']), 240)}")
     if item['failure_journal']:
         lines.append(f"{identity} journal: {_text(json.dumps(item['failure_journal'], ensure_ascii=False), 320)}")
     return lines

@@ -393,7 +393,7 @@ def test_v7_migration_adds_empty_checks_atomically_and_reads_v6_without_migratin
         assert connection.execute('SELECT version FROM schema_version').fetchone()[0] == 6
         assert 'checks' not in [row[1] for row in connection.execute('PRAGMA table_info(tasks)')]
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 7
+        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
         assert {task['id']: task['checks'] for task in store.list_tasks()} == {'T-0001': [], 'T-0002': []}
 
 

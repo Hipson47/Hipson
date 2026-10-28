@@ -147,7 +147,55 @@
         "failure_journal": { "$ref": "#/$defs/journal" },
         "acknowledged_at": { "type": ["string", "null"], "format": "date-time" },
         "ack_note": { "type": "string", "maxLength": 1024 },
-        "ack_state": { "enum": ["not_required", "unacknowledged", "acknowledged"] }
+        "ack_state": { "enum": ["not_required", "unacknowledged", "acknowledged"] },
+        "changes": { "$ref": "#/$defs/changes" }
+      }
+    },
+    "change_counts": {
+      "type": "object", "additionalProperties": false, "required": ["created", "modified", "deleted"],
+      "properties": {
+        "created": {"type": "integer", "minimum": 0},
+        "modified": {"type": "integer", "minimum": 0},
+        "deleted": {"type": "integer", "minimum": 0}
+      }
+    },
+    "changes": {
+      "description": "Opt-in post-run filesystem observation (task run --observe); an observation, not attribution.",
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["status", "observed_at", "mode", "truncated", "files_before", "files_after", "counts", "paths",
+                   "omitted", "concurrent_assignments", "caps", "excluded_dirs", "uncertainty"],
+      "properties": {
+        "status": {"enum": ["clean", "changes", "incomplete", "unobserved"]},
+        "observed_at": {"type": "string"},
+        "mode": {"enum": ["ro", "rw"]},
+        "truncated": {"type": "boolean"},
+        "files_before": {"type": "integer", "minimum": 0},
+        "files_after": {"type": "integer", "minimum": 0},
+        "counts": {
+          "type": "object", "additionalProperties": false, "required": ["in_scope", "out_of_scope", "unattributed"],
+          "properties": {
+            "in_scope": {"$ref": "#/$defs/change_counts"},
+            "out_of_scope": {"$ref": "#/$defs/change_counts"},
+            "unattributed": {"$ref": "#/$defs/change_counts"}
+          }
+        },
+        "paths": {
+          "type": "array", "maxItems": 200,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["path", "change", "attribution", "evidence"],
+            "properties": {
+              "path": {"type": "string"},
+              "change": {"enum": ["created", "modified", "deleted"]},
+              "attribution": {"enum": ["in_scope", "out_of_scope", "unattributed"]},
+              "evidence": {"enum": ["content", "metadata", "presence"]}
+            }
+          }
+        },
+        "omitted": {"type": "integer", "minimum": 0},
+        "concurrent_assignments": {"type": "array", "items": {"type": "string", "pattern": "^A-[0-9]{4,}$"}},
+        "caps": {"type": "object"},
+        "excluded_dirs": {"type": "array", "items": {"type": "string"}},
+        "uncertainty": {"type": "string"}
       }
     },
     "observation": {

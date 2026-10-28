@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from hipson import ledger, task_activity
+from hipson import ledger, task_activity, task_observation
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job, batch_command
@@ -198,7 +198,35 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--result-file")
     parser.add_argument("--rollout", choices=["codex"])
     parser.add_argument("--allow-project-mismatch", action="store_true")
+    add_observe_arguments(parser)
     parser.add_argument("worker_command", nargs=argparse.REMAINDER, help="-- COMMAND [ARGS...]")
+
+
+def add_observe_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--observe", action="store_true",
+                        help="Snapshot the project before the run and record what changed against --scope/--mode "
+                             "(also enabled by observe_changes in .hipson/policy.json)")
+    parser.add_argument("--observe-max-files", type=int, help="Observation file cap (default 20000)")
+    parser.add_argument("--observe-max-bytes", type=int, help="Observation content-hash budget in bytes (default 256 MiB)")
+
+
+def observation_caps(args: argparse.Namespace, project: str) -> task_observation.Caps | None:
+    """Opt-in: --observe, or observe_changes in a valid project policy. None means no observation."""
+    observe = bool(getattr(args, "observe", False))
+    policy: dict[str, Any] = {}
+    if not observe:
+        from hipson.policy import load_policy
+        try:
+            payload = load_policy(project)
+        except (SystemExit, OSError, ValueError):
+            payload = {}
+        policy = payload.get("policy", {}) if payload.get("valid") else {}
+        observe = policy.get("observe_changes") is True
+    if not observe:
+        return None
+    files = getattr(args, "observe_max_files", None) or policy.get("observe_max_files") or task_observation.MAX_FILES
+    budget = getattr(args, "observe_max_bytes", None) or policy.get("observe_max_bytes") or task_observation.MAX_HASH_BYTES
+    return task_observation.Caps(max_files=files, max_hash_bytes=budget)
 
 
 def _message(text: str) -> None:
@@ -280,6 +308,14 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
                              failure_journal=journal)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not finish {assignment}: {exc}; run 'hipson task reap'")
+        return
+    try:
+        observed = task_observation.complete(db, assignment)
+    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        _message(f"could not record observed changes for {assignment}: {exc}; run 'hipson task reap'")
+        return
+    if observed is not None:
+        _message(f"{assignment} observed changes: {task_observation.summary(observed['changes'])}")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -297,6 +333,10 @@ def run(args: argparse.Namespace) -> int:
         grace = float(os.environ.get("AGENT_RUN_GRACE_SECONDS", "15"))
         if not math.isfinite(grace) or grace < 0:
             raise ValueError("AGENT_RUN_GRACE_SECONDS must be finite and nonnegative")
+        for name in ("observe_max_files", "observe_max_bytes"):
+            value = getattr(args, name, None)
+            if value is not None and value < 1:
+                raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
     except (ValueError, OverflowError, ledger.LedgerError) as exc:
         _message(str(exc))
         return 64
@@ -409,6 +449,10 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
         if not verifying:
             _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
+            caps = observation_caps(args, str(check['expected']))
+            if caps is not None:
+                # Before launch and after the claim: the baseline is what this worker starts from.
+                task_observation.start(db, assignment, str(check['expected']), caps)
         progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         progress_path = Path(progress_dir.name) / 'progress'
         progress = progress_path.open('w+b', buffering=0)

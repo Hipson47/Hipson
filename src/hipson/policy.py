@@ -104,6 +104,11 @@ def validate_policy_payload(policy: dict[str, Any]) -> list[str]:
             issues.append(f"release_gates must include {gate}")
     if policy.get("local_only") is not True:
         issues.append("local_only must remain true by default")
+    if "observe_changes" in policy and type(policy["observe_changes"]) is not bool:
+        issues.append("observe_changes must be true or false")
+    for key in ("observe_max_files", "observe_max_bytes"):
+        if key in policy and (type(policy[key]) is not int or policy[key] < 1):
+            issues.append(f"{key} must be a positive integer")
     return issues
 
 

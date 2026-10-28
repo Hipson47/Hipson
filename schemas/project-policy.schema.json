@@ -27,7 +27,10 @@
         "prompt_required_operations": { "type": "array" },
         "local_only": { "type": "boolean" },
         "release_gates": { "type": "array" },
-        "agent_integration": { "type": "object" }
+        "agent_integration": { "type": "object" },
+        "observe_changes": { "type": "boolean", "description": "Opt-in post-run change observation for hipson task run" },
+        "observe_max_files": { "type": "integer", "minimum": 1 },
+        "observe_max_bytes": { "type": "integer", "minimum": 1 }
       }
     },
     "valid": { "type": "boolean" },

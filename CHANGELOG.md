@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Opt-in change observation for `task run` / `task do` (`--observe`, or `observe_changes` in project policy):
+  a bounded pre-run snapshot of the project tree (path, size, mtime, content hash; never contents) is compared
+  after every exit path, including `task reap`. Changes are classified against the assignment's scope and mode
+  (`in_scope`, `out_of_scope`, `unattributed` for paths claimed by overlapping writers); out-of-scope changes
+  and any write by a read-only assignment raise one major finding per kind, and a capped observation is
+  `incomplete`, never clean. Ledger schema v8 adds `assignments.changes` and the reserved `observed` event;
+  shown in `task show`, `task now`, `lead resume` and the MCP JSON ([docs/TASK_LEDGER.md](docs/TASK_LEDGER.md)).
+
 - Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
   `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,
   removed in 2.0 ([docs/DEPRECATIONS.md](docs/DEPRECATIONS.md)). MCP no longer offers `release.claim`.
