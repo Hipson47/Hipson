@@ -97,15 +97,16 @@ def supervise(command: list[str], *, cwd: str | None = None, capture: bool = Fal
 def supervise_command(command: list[str]) -> int:
     """Internal raw-command supervisor; isolate process ownership from the calling interpreter."""
     windows = sys.platform == 'win32'
-    if not windows:
+    signals: tuple[signal.Signals, ...] = (signal.SIGINT, signal.SIGTERM)
+    if sys.platform != 'win32':  # Spelled out so type checkers narrow the POSIX-only names.
         os.setsid()
+        signals += (signal.SIGHUP,)
     signum = 0
 
     def interrupted(number: int, frame: object) -> None:
         nonlocal signum
         signum = number
 
-    signals = (signal.SIGINT, signal.SIGTERM) if windows else (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     previous = {number: signal.signal(number, interrupted) for number in signals}
     tree: ProcessTree | None = None
     job: Job | None = None
