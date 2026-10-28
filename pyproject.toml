@@ -202,7 +202,8 @@ max_timeout = 0
 
 # Second bounded gate: the review/done gates in the ledger core, killed by fast in-process contract tests.
 # CI swaps [tool.mutmut] to this profile with scripts/mutation_profile.py, then restores pyproject.toml.
-# "no tests" counts the rest of these two modules (CLI, runner and Git paths covered by subprocess tests).
+# Only lines these tests execute are mutated (mutate_only_covered_lines); "no tests" counts generated mutants
+# that mutmut could not attribute to any test.
 [tool.hipson.mutation-profiles.ledger-core]
 also_copy = ["src/hipson", "schemas"]
 source_paths = ["src/hipson/ledger.py", "src/hipson/task_verification.py"]

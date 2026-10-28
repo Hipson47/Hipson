@@ -145,6 +145,8 @@ def test_close_to_review_ignores_done_only_blockers_but_not_active_work(tmp_path
                 store.close_task(task, actor=LEAD)
             except ledger.CloseRefusedError as exc:
                 assert str(exc).startswith(f"Cannot close {task}: ") and len(exc.reasons) == 2
+            else:
+                raise AssertionError("close with open findings accepted")
             _error(lambda: store.close_task(task, to="review", actor=LEAD), "close works from open, in_progress or review")
             _error(lambda: store.close_task(task, to="cancelled", actor=LEAD), "Close target must be review or done")
             _error(lambda: store.close_task(task, actor=" "), "actor must not be empty")
@@ -200,6 +202,8 @@ def test_close_task_refuses_unverified_work_with_every_reason_and_closes_from_re
                 store.close_task(task, to="review", actor=LEAD)
             except ledger.CloseRefusedError as exc:
                 assert exc.reasons[-1].startswith(f"active assignment {active}")
+            else:
+                raise AssertionError("close to review with an active assignment accepted")
             store.finish(active, result="passed", summary="ok")
             store.ack(active, note="read")
             _verified(store, task)
@@ -208,6 +212,8 @@ def test_close_task_refuses_unverified_work_with_every_reason_and_closes_from_re
                 store.close_task(task, to="review", actor=LEAD)
             except ledger.CloseRefusedError as exc:
                 assert exc.reasons == [f"{task} is review; close works from open, in_progress or review (use --to done)"]
+            else:
+                raise AssertionError("close review -> review accepted")
             assert store.close_task(task, actor=LEAD)["status"] == "done"  # From review, one transition only.
             assert [event["summary"].split(";")[0] for event in store.events(task) if event["type"] == "status"][-2:] == [
                 "in_progress -> review", "review -> done"]
@@ -215,6 +221,8 @@ def test_close_task_refuses_unverified_work_with_every_reason_and_closes_from_re
                 store.close_task(task, actor=LEAD)
             except ledger.CloseRefusedError as exc:
                 assert exc.reasons == [f"{task} is done; close works from open, in_progress or review"]
+            else:
+                raise AssertionError("close of a done task accepted")
 
 
 def test_done_blockers_exact_texts(tmp_path):
@@ -372,7 +380,7 @@ def test_per_check_freshness_and_messages_are_exact():
         "latest.actor", "latest.context", "latest.metadata_fallback_paths", "latest.command", "latest.label",
         "latest.subject", "latest.output_tail", "latest.files", "latest.generated_files", "latest.changes",
         "current.subject", "current.files", "current.generated_files"]
-    assert _state([_record()])["current"] is STATE
+    assert _state([_record()])["current"] == STATE
 
 
 def test_changes_compare_by_raw_path_key_in_display_order():
@@ -420,10 +428,9 @@ def test_final_snapshot_is_rechecked_for_done_too_and_messages_are_exact(tmp_pat
             _exact(lambda: store.set_checks(task, checks=[], actor=LEAD, reason="x"),
                    f"Cannot change acceptance checks of done task {task}")
             _exact(lambda: store.close_task(task, to="cancelled", actor=LEAD), "Close target must be review or done")
-            try:
-                store.close_task(task, actor=LEAD)
-            except ledger.CloseRefusedError as exc:
-                assert str(exc) == f"Cannot close {task}: {task} is done; close works from open, in_progress or review"
+            _exact(lambda: store.close_task(task, actor=LEAD),
+                   f"Cannot close {task}: {task} is done; close works from open, in_progress or review",
+                   ledger.CloseRefusedError)
             _exact(lambda: ledger.validate_checks([[" "]]), "An acceptance check needs a command name")
             _exact(lambda: ledger.validate_checks([["c", "token=ghp_" + "a" * 36]]),
                    "Acceptance checks must not contain secret-shaped text; pass secrets via the environment")
