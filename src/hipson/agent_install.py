@@ -17,6 +17,7 @@ from hipson.codex_install import (
 )
 from hipson.contracts import SCHEMA_VERSION
 from hipson.home import detect_codex_home, detect_hipson_home
+from hipson.init_config import atomic_write, config_locks, snapshot
 
 AGENT_TARGETS = ("codex", "cursor", "claude", "mcp")
 
@@ -128,14 +129,15 @@ def _install_text_surface(
     block = _managed_block(body)
     actions = [f"ensure directory {path.parent}", f"merge Hipson marker block into {path}"]
     if not dry_run:
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        merged = merge_managed_block(existing, block)
-        if merged != existing:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                backup = backup_file(path)
-                actions.append(f"backed up {path} to {backup}")
-            path.write_text(merged, encoding="utf-8")
+        with config_locks([path]):
+            original = snapshot(path)
+            existing = (original.content or b"").decode("utf-8")
+            merged = merge_managed_block(existing, block)
+            if merged != existing:
+                if original.content is not None:
+                    backup = backup_file(path)
+                    actions.append(f"backed up {path} to {backup}")
+                atomic_write(path, merged.encode("utf-8"), original)
     return {
         "home": str(home),
         "files": [str(path)],
@@ -146,10 +148,14 @@ def _install_text_surface(
 
 
 def _write_preserved_file(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text(encoding="utf-8") != text:
-        backup_file(path)
-    path.write_text(text, encoding="utf-8")
+    with config_locks([path]):
+        original = snapshot(path)
+        content = text.encode("utf-8")
+        if original.content == content:
+            return
+        if original.content is not None:
+            backup_file(path)
+        atomic_write(path, content, original)
 
 
 def _managed_block(body: str) -> str:

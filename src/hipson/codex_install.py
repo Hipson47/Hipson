@@ -10,6 +10,7 @@ from pathlib import Path
 
 from hipson.assets import runtime_asset
 from hipson.home import detect_codex_home
+from hipson.init_config import atomic_write, config_locks, snapshot
 
 START_MARKER = "<!-- hipson:start -->"
 END_MARKER = "<!-- hipson:end -->"
@@ -94,13 +95,15 @@ def install_codex(dry_run: bool = True, codex_home: Path | None = None) -> Insta
     (plan.codex_home / "skills").mkdir(parents=True, exist_ok=True)
 
     block = managed_block()
-    existing = plan.agents_path.read_text(encoding="utf-8") if plan.agents_path.exists() else ""
-    merged = merge_managed_block(existing, block)
-    if merged != existing:
-        if plan.agents_path.exists():
-            backup = backup_file(plan.agents_path)
-            plan.actions.append(f"backed up {plan.agents_path} to {backup}")
-        plan.agents_path.write_text(merged, encoding="utf-8")
+    with config_locks([plan.agents_path]):
+        original = snapshot(plan.agents_path)
+        existing = (original.content or b"").decode("utf-8")
+        merged = merge_managed_block(existing, block)
+        if merged != existing:
+            if original.content is not None:
+                backup = backup_file(plan.agents_path)
+                plan.actions.append(f"backed up {plan.agents_path} to {backup}")
+            atomic_write(plan.agents_path, merged.encode("utf-8"), original)
 
     for source_skill in _packaged_codex_skills():
         skill_target = plan.codex_home / "skills" / source_skill.name

@@ -443,6 +443,7 @@ def is_sensitive_packet_path(path: Path) -> bool:
 
 
 def build_messages(agent: dict[str, Any], packet: str) -> list[dict[str, str]]:
+    packet = re.sub(r"<(\s*/?\s*packet)", r"&lt;\1", packet, flags=re.IGNORECASE)
     return [
         {"role": "system", "content": str(agent["system"])},
         {

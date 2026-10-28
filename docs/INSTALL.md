@@ -154,6 +154,10 @@ the absolute installed Hipson executable and project path. No provider credentia
 - Claude discovery reads `<project>/.mcp.json` and the user/local scopes in `.claude.json` directly.
   Planning never runs `claude mcp get` or `list`, which can connect to existing servers.
   After confirmation, registration uses `claude mcp add --transport stdio --scope ...`.
+  New registrations save the setup shell's `HIPSON_LEDGER`, `HIPSON_HOME` and `XDG_CONFIG_HOME`
+  overrides with `-e`, pinning `HIPSON_LEDGER` to the effective absolute ledger path. No other
+  environment variables are saved. Existing matching entries are preserved; setup warns if they
+  still require Claude to inherit the setup environment to find that ledger.
   Default project scope writes `<project>/.mcp.json`; `--scope user` writes
   `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`). Windows `claude.cmd` is supported.
   See [Claude Code MCP scopes](https://code.claude.com/docs/en/mcp#mcp-installation-scopes).

@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 from hipson import agent_contract as hipson_agent_contract
 from hipson import agent_install as hipson_agent_install
@@ -1694,7 +1695,8 @@ def test_install_codex_apply_preserves_existing_agents_content(tmp_path: Path):
     agents = codex_home / "AGENTS.md"
     agents.write_text("User custom rules\n", encoding="utf-8")
 
-    install_codex(dry_run=False, codex_home=codex_home)
+    with patch.object(Path, "home", return_value=tmp_path):
+        install_codex(dry_run=False, codex_home=codex_home)
 
     text = agents.read_text(encoding="utf-8")
     assert "User custom rules" in text
@@ -1719,7 +1721,8 @@ def test_install_codex_apply_replaces_existing_marker_block(tmp_path: Path):
     agents = codex_home / "AGENTS.md"
     agents.write_text(f"Before\n{START_MARKER}\nold\n{END_MARKER}\nAfter\n", encoding="utf-8")
 
-    install_codex(dry_run=False, codex_home=codex_home)
+    with patch.object(Path, "home", return_value=tmp_path):
+        install_codex(dry_run=False, codex_home=codex_home)
 
     text = agents.read_text(encoding="utf-8")
     assert "Before" in text
@@ -1776,14 +1779,15 @@ Targets:
 
 def test_install_agents_worker_mode_preserves_standalone_workflows(tmp_path: Path):
     homes = {target: tmp_path / target for target in hipson_agent_install.AGENT_TARGETS}
-    payload = hipson_agent_install.install_agents(
-        targets=["all"],
-        dry_run=False,
-        codex_home=homes["codex"],
-        cursor_home=homes["cursor"],
-        claude_home=homes["claude"],
-        mcp_home=homes["mcp"],
-    )
+    with patch.object(Path, "home", return_value=tmp_path):
+        payload = hipson_agent_install.install_agents(
+            targets=["all"],
+            dry_run=False,
+            codex_home=homes["codex"],
+            cursor_home=homes["cursor"],
+            claude_home=homes["claude"],
+            mcp_home=homes["mcp"],
+        )
 
     assert_schema_valid("agent-install.schema.json", payload)
     instructions = {
@@ -1856,13 +1860,14 @@ def test_install_agents_apply_uses_managed_marker_blocks_and_backups(tmp_path: P
     claude_path.write_text("Existing Claude rules\n", encoding="utf-8")
     mcp_path.write_text("Existing MCP notes\n", encoding="utf-8")
 
-    payload = hipson_agent_install.install_agents(
-        targets=["cursor", "claude", "mcp"],
-        dry_run=False,
-        cursor_home=cursor_home,
-        claude_home=claude_home,
-        mcp_home=mcp_home,
-    )
+    with patch.object(Path, "home", return_value=tmp_path):
+        payload = hipson_agent_install.install_agents(
+            targets=["cursor", "claude", "mcp"],
+            dry_run=False,
+            cursor_home=cursor_home,
+            claude_home=claude_home,
+            mcp_home=mcp_home,
+        )
 
     assert_schema_valid("agent-install.schema.json", payload)
     cursor_text = cursor_path.read_text(encoding="utf-8")
@@ -1888,7 +1893,8 @@ def test_install_agents_apply_replaces_managed_marker_blocks(tmp_path: Path):
     cursor_path.parent.mkdir(parents=True)
     cursor_path.write_text(f"Before\n{START_MARKER}\nold\n{END_MARKER}\nAfter\n", encoding="utf-8")
 
-    hipson_agent_install.install_agents(targets=["cursor"], dry_run=False, cursor_home=cursor_home)
+    with patch.object(Path, "home", return_value=tmp_path):
+        hipson_agent_install.install_agents(targets=["cursor"], dry_run=False, cursor_home=cursor_home)
 
     text = cursor_path.read_text(encoding="utf-8")
     assert "Before" in text
@@ -1901,7 +1907,8 @@ def test_install_agents_apply_replaces_managed_marker_blocks(tmp_path: Path):
 def test_install_agents_codex_writes_hook_templates_without_force_enable(tmp_path: Path):
     codex_home = tmp_path / ".codex"
 
-    payload = hipson_agent_install.install_agents(targets=["codex"], dry_run=False, codex_home=codex_home)
+    with patch.object(Path, "home", return_value=tmp_path):
+        payload = hipson_agent_install.install_agents(targets=["codex"], dry_run=False, codex_home=codex_home)
 
     assert_schema_valid("agent-install.schema.json", payload)
     hooks = sorted((codex_home / "hooks").glob("*.template.json"))

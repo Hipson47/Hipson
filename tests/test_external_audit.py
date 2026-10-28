@@ -228,7 +228,8 @@ def test_audit_h04_secret_paths_rejected_without_renaming_claims(tmp_path: Path)
 
 def test_audit_h06_backups_never_overwrite_with_frozen_clock(tmp_path: Path):
     source = tmp_path / "AGENTS.md"
-    with patch.object(codex_install.time, "strftime", return_value="20261026-120000"):
+    with (patch.object(codex_install.time, "strftime", return_value="20261026-120000"),
+          patch.object(Path, "home", return_value=tmp_path)):
         source.write_text("first", encoding="utf-8")
         first = codex_install.backup_file(source)
         source.write_text("second", encoding="utf-8")

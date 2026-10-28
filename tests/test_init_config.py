@@ -3,6 +3,7 @@
 import hashlib
 import os
 from pathlib import Path
+from unittest import TestCase
 from unittest.mock import patch
 
 from hipson import init_config
@@ -91,3 +92,97 @@ def test_snapshot_windows_same_bytes_replacement_with_restored_mtime_is_detected
         assert "changed since planning" in str(exc)
     else:
         raise AssertionError("same-bytes replacement with restored mtime went undetected")
+
+
+def test_atomic_write_retains_edit_after_final_check(tmp_path):
+    for edit in ("in-place", "replacement", "creation"):
+        root = tmp_path / edit
+        root.mkdir()
+        _retains_edit_after_final_check(root, edit)
+
+
+def test_atomic_write_without_hard_links_still_installs_and_never_strands_the_config(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'model = "before"\n')
+    expected = init_config.snapshot(path)
+    with patch.object(init_config.os, "link", side_effect=PermissionError("links unsupported")):
+        init_config.atomic_write(path, b'model = "after"\n', expected)
+        assert path.read_bytes() == b'model = "after"\n'
+        newer = init_config.snapshot(path)
+        check = init_config.unchanged
+
+        def save_after_check(target, original):
+            check(target, original)
+            target.write_bytes(b"# editor\n")
+
+        with (patch.object(init_config, "unchanged", side_effect=save_after_check),
+              TestCase().assertRaisesRegex(ValueError, "changed since planning")):
+            init_config.atomic_write(path, b"# planned\n", newer)
+    assert path.read_bytes() == b"# editor\n"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def _retains_edit_after_final_check(tmp_path, edit):
+    path = tmp_path / "config.toml"
+    before = b'model = "before"\n'
+    newer = b'# editor saved after the check\n'
+    if edit != "creation":
+        path.write_bytes(before)
+    expected = init_config.snapshot(path)
+    check = init_config.unchanged
+
+    def save_after_check(target, original):
+        check(target, original)
+        if edit == "replacement":
+            replacement = tmp_path / "editor.tmp"
+            replacement.write_bytes(newer)
+            os.replace(replacement, target)
+        else:
+            target.write_bytes(newer)
+
+    with (patch.object(init_config, "unchanged", side_effect=save_after_check),
+          TestCase().assertRaisesRegex(ValueError, "changed since planning")):
+        init_config.atomic_write(path, b'# planned bytes\n', expected)
+    assert path.read_bytes() == newer
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_atomic_write_restores_displaced_file_if_install_fails(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'# original\n')
+    expected = init_config.snapshot(path)
+    place = init_config._place_if_absent
+    calls = 0
+
+    def fail_once(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise PermissionError("injected install failure")
+        place(source, destination)
+
+    with (patch.object(init_config, "_place_if_absent", side_effect=fail_once),
+          TestCase().assertRaisesRegex(PermissionError, "injected install failure")):
+        init_config.atomic_write(path, b'# planned\n', expected)
+    assert path.read_bytes() == expected.content
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_atomic_write_preserves_file_recreated_after_displacement(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_bytes(b'# original\n')
+    expected = init_config.snapshot(path)
+    replace = os.replace
+
+    def recreate(source, destination):
+        replace(source, destination)
+        if source == path:
+            path.write_bytes(b'# recreated by editor\n')
+
+    with (patch.object(init_config.os, "replace", side_effect=recreate),
+          TestCase().assertRaisesRegex(ValueError, "changed since planning.*recover displaced file")):
+        init_config.atomic_write(path, b'# planned\n', expected)
+    assert path.read_bytes() == b'# recreated by editor\n'
+    aside, = tmp_path.glob("*.aside")
+    assert aside.read_bytes() == expected.content
+    assert not list(tmp_path.glob("*.tmp"))
