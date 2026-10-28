@@ -9,6 +9,7 @@ import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
+from unittest import SkipTest
 from unittest.mock import patch
 
 import pytest
@@ -491,7 +492,7 @@ def test_orphan_recovery_inside_assign_and_mcp_reap_complete_observations(tmp_pa
 
 def test_a_literal_name_cannot_collide_with_an_encoded_secret_component(tmp_path):
     if sys.platform == "win32":
-        pytest.skip("Windows file names cannot contain ':'")
+        raise SkipTest("Windows file names cannot contain ':'")
     root = _tree(tmp_path)
     secret = "ghp_" + "c" * 36
     (root / f"{secret}.txt").write_text("one")

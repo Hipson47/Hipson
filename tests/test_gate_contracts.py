@@ -454,3 +454,122 @@ def test_review_and_done_summaries_and_refs_are_exact(tmp_path):
             assert view["revision"] == store.show(task)["revision"] and view["updated_at"] == store.show(task)["updated_at"]
             store.set_status(task, to="cancelled", actor=LEAD)
             assert store.events(task)[-1]["summary"] == "review -> cancelled"
+
+
+# Change observation records (1.7 slice 1): exact contracts so the ledger-core mutation gate covers them.
+def _changes(status="changes", **extra):
+    counts = {group: {"created": 0, "modified": 0, "deleted": 0} for group in ("in_scope", "out_of_scope", "unattributed")}
+    return {"status": status, "counts": counts, "paths": [], "omitted": 0, "truncated": False, **extra}
+
+
+def _record_changes_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        store.set_status(task, to="in_progress", actor=LEAD)
+        assignment = store.assign(task, actor="w", role="builder", mode="rw", scope=["src"])["id"]
+        for bad in ({"status": "fine"}, ["status"], {}):
+            _exact(lambda bad=bad: store.record_changes(assignment, bad),
+                   "Change observation must be an object with a known status")
+        _exact(lambda: store.record_changes(assignment, _changes()), f"Assignment {assignment} is still active")
+        store.finish(assignment, result="passed", summary="ok")
+        record = _changes(paths=[{"path": f"p{index}", "change": "created", "attribution": "out_of_scope",
+                                  "evidence": "presence"} for index in range(22)], omitted=3)
+        record["counts"]["out_of_scope"]["created"] = 22
+        record["counts"]["unattributed"]["modified"] = 2
+        view = store.record_changes(assignment, record, [
+            {"title": "Outside", "detail": "d", "location": "p0"}, {"title": "Second", "detail": "e", "location": ""}])
+        assert view["changes"] == {**record, "incomplete_reasons": []}  # Normalized on read.
+        found = store.findings(task=task)
+        assert [(item["severity"], item["title"], item["source_assignment"])
+                for item in found] == [("major", "Outside", assignment), ("major", "Second", assignment)]
+        event = store.events(task)[-1]
+        listed = "; ".join(f"out_of_scope created p{index}" for index in range(20))
+        assert (event["type"], event["actor"]) == ("observed", "hipson")
+        assert event["summary"] == (f"{assignment}: changes changes; 22 outside scope, 2 unattributed; paths: {listed}"
+                                    f" (+5 more in task show --json); findings {found[0]['id']}, {found[1]['id']}")
+        assert event["refs"] == [assignment, found[0]["id"], found[1]["id"]]
+        _exact(lambda: store.record_changes(assignment, _changes()),
+               f"Assignment {assignment} already has a change observation")
+        other = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
+        store.finish(other, result="passed", summary="ok")
+        store.record_changes(other, _changes("incomplete"))
+        assert store.events(task)[-1]["summary"] == (
+            f"{other}: changes incomplete; 0 outside scope, 0 unattributed; incomplete, not a clean result")
+        third = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
+        store.finish(third, result="passed", summary="ok")
+        store.record_changes(third, _changes("clean"))
+        assert store.events(task)[-1]["summary"] == f"{third}: changes clean; 0 outside scope, 0 unattributed"
+        assert store.events(task)[-1]["refs"] == [third]
+
+
+def _overlapping_writers_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        elsewhere = store.open_task(project=tmp_path / "other", title="Other", objective="Other project", lead=LEAD)["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        store.set_status(elsewhere, to="in_progress", actor=LEAD)
+        mine = store.assign(task, actor="w", role="builder", mode="rw", scope=["src"])["id"]
+        before = store.assign(task, actor="w", role="builder", mode="rw", scope=["a"])["id"]
+        during = store.assign(task, actor="w", role="builder", mode="rw", scope=["b"])["id"]
+        after = store.assign(task, actor="w", role="builder", mode="rw", scope=["c"])["id"]
+        reader = store.assign(task, actor="w", role="reviewer", mode="ro", scope=["d"])["id"]
+        foreign = store.assign(elsewhere, actor="w", role="builder", mode="rw", scope=["e"])["id"]
+        live = store.assign(task, actor="w", role="builder", mode="rw", scope=["f"])["id"]
+        for item in (mine, before, during, after, reader, foreign):
+            store.finish(item, result="passed", summary="ok")
+        stamps = {mine: ("2026-01-01T00:00:10.000000Z", "2026-01-01T00:00:20.000000Z"),
+                  before: ("2026-01-01T00:00:01.000000Z", "2026-01-01T00:00:10.000000Z"),  # Ends exactly at start.
+                  during: ("2026-01-01T00:00:05.000000Z", "2026-01-01T00:00:11.000000Z"),
+                  after: ("2026-01-01T00:00:20.000000Z", "2026-01-01T00:00:30.000000Z"),  # Starts exactly at end.
+                  reader: ("2026-01-01T00:00:12.000000Z", "2026-01-01T00:00:13.000000Z"),
+                  foreign: ("2026-01-01T00:00:12.000000Z", "2026-01-01T00:00:13.000000Z")}
+        for item, (start, end) in stamps.items():
+            store.connection.execute("UPDATE assignments SET started_at = ?, ended_at = ? WHERE id = ?", (start, end, item))
+        store.connection.execute("UPDATE assignments SET started_at = ? WHERE id = ?",
+                                 ("2026-01-01T00:00:15.000000Z", live))
+        assert store.overlapping_writers(mine) == [(during, ["b"]), (live, ["f"])]
+        assert store.overlapping_writers(mine, until="2026-01-01T00:00:15.000000Z") == [(during, ["b"])]
+        assert store.overlapping_writers(mine, until="2026-01-01T00:00:31.000000Z") == [
+            (during, ["b"]), (after, ["c"]), (live, ["f"])]
+
+
+def test_legacy_change_records_gain_empty_incomplete_reasons():
+    assert ledger._changes('{"status": "clean"}') == {"status": "clean", "incomplete_reasons": []}
+    assert ledger._changes('{"status": "clean", "incomplete_reasons": ["x"]}')["incomplete_reasons"] == ["x"]
+    assert ledger._changes("[1]") == [1]
+
+
+def test_record_changes_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):  # In-process like the rest.
+        _record_changes_contract(tmp_path)
+
+
+def test_overlapping_writers_exact_window_project_and_mode(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _overlapping_writers_contract(tmp_path)
+
+
+def _minimal_records_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        store.set_status(task, to="in_progress", actor=LEAD)
+        first = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
+        store.finish(first, result="passed", summary="ok")
+        # Optional fields may be absent: counts, paths and omitted default to empty/zero.
+        store.record_changes(first, {"status": "unobserved"})
+        assert store.events(task)[-1]["summary"] == f"{first}: changes unobserved; 0 outside scope, 0 unattributed"
+        second = store.assign(task, actor="w", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(second, result="passed", summary="ok")
+        store.record_changes(second, {"status": "changes", "paths": [
+            {"path": "x", "change": "created", "attribution": "in_scope", "evidence": "presence"}]},
+            [{"title": "T", "detail": "", "location": ""}])
+        opened = [event for event in store.events(task) if event["type"] == "finding_opened"]
+        assert [event["actor"] for event in opened] == ["hipson"]
+        assert store.events(task)[-1]["summary"] == (
+            f"{second}: changes changes; 0 outside scope, 0 unattributed; paths: in_scope created x; findings "
+            f"{opened[0]['refs'][0]}")
+
+
+def test_minimal_change_records_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _minimal_records_contract(tmp_path)
