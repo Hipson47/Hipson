@@ -666,3 +666,20 @@ def test_ledger_exclusions_ignore_case_on_case_insensitive_filesystems(tmp_path)
     with patch.object(task_observation, "_FOLD", True):
         snapshot = take(project, exclude=task_observation.ledger_exclusions(db, project))
     assert not any("observations" in key.casefold() for key in snapshot["entries"])
+
+
+def test_hashing_starts_where_the_redactor_first_changes_text():
+    path = 'src/token="first-part/private-tail"/app.py'
+    key = task_observation._key(path)
+    assert "first-part" not in key and "private-tail" not in key and key.startswith("src/")
+    assert task_observation._covered(key, ["src"])
+    assert any(task_observation._prefix_of(prefix, key) for prefix in [task_observation._key('src/token="first-part')])
+    pem = "keys/-----BEGIN PRIVATE KEY-----/MIIBVgIBADANBgkqhkiG9w0BAQEFAASC/-----END PRIVATE KEY-----.pem"
+    assert "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC" not in task_observation._key(pem)
+
+
+def test_exclusions_match_hashed_and_plain_spellings_on_case_insensitive_filesystems():
+    name = ".ghp_" + "h" * 36 + ".sqlite.observations"
+    with patch.object(task_observation, "_FOLD", True):
+        assert task_observation._equal(task_observation._key(name), task_observation._key(name.upper()))
+    assert not task_observation._equal(task_observation._key(name), task_observation._key("other"))

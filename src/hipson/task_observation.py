@@ -27,7 +27,7 @@ from hipson import ledger
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.task_verification import _TOOL_CACHE_DIRS
 
-FORMAT = 3
+FORMAT = 4
 MAX_FILES = 20_000
 MAX_HASH_BYTES = 256 * 1024 * 1024
 MAX_DEPTH = 64
@@ -67,17 +67,29 @@ def _digest_text(text: str) -> str:
 def _key(path: str) -> str:
     """Stored identity of a path; plain parts keep their case, so distinct files never share a key.
 
-    Components before the point where the path first looks like a secret stay readable; from that component on,
-    every component becomes its own NUL-marked digest. Nothing of a secret survives (even one spanning
-    separators), and a directory's key is always a prefix of its children's keys, so scope and unreadable-
-    directory matching still work. Detection runs on the original text, before any case folding.
+    Components before the first character the redactor changes stay readable; from the component containing it
+    on, every component becomes its own NUL-marked digest, so nothing of a secret survives, even one spanning
+    separators. Detection runs on the original text, before any case folding. Matching compares components
+    (see _prefix_of), so a key hashed from an earlier component still matches its plain-text ancestors.
     """
-    if redact_text(path) == path:
+    redacted = redact_text(path)
+    if redacted == path:
         return path
+    offset = next((index for index, (left, right) in enumerate(zip(path, redacted, strict=False)) if left != right),
+                  min(len(path), len(redacted)))
     parts = path.split("/")
-    first = next((index for index in range(len(parts)) if redact_text("/".join(parts[:index + 1])) != "/".join(parts[:index + 1])),
-                 0)
+    first = path[:offset].count("/")
     return "/".join([*parts[:first], *(_digest_text(part) for part in parts[first:])])
+
+
+def _prefix_of(prefix: str, key: str) -> bool:
+    """Whether prefix names key or one of its ancestors, comparing component by component."""
+    a, b = prefix.split("/"), key.split("/")
+    return len(a) <= len(b) and all(_same(x, y) for x, y in zip(a, b, strict=False))
+
+
+def _equal(left: str, right: str) -> bool:
+    return left.count("/") == right.count("/") and _prefix_of(left, right)
 
 
 def _hashed(key: str) -> bool:
@@ -113,8 +125,6 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
     """Snapshot paths (never contents) under the project in a bounded, deterministic walk."""
     caps = caps or Caps()
     root = Path(project).resolve()
-    # Exclusions follow the filesystem: case-insensitive where it is (digests are lowercase hex either way).
-    skip = {item.casefold() if _FOLD else item for item in exclude}
     entries: dict[str, list[Any]] = {}
     reasons: list[str] = []
     unreadable: list[str] = []
@@ -151,7 +161,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
             visited += len(items)
             for child in sorted(items, key=lambda item: item.name, reverse=True):
                 candidate = _key(relative + child.name)
-                if child.name in EXCLUDED_NAMES or (candidate.casefold() if _FOLD else candidate) in skip:
+                if child.name in EXCLUDED_NAMES or any(_equal(candidate, item) for item in exclude):
                     continue
                 try:
                     directory = child.is_dir(follow_symlinks=False)
@@ -207,7 +217,7 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
     old, new = before["entries"], after["entries"]
 
     def comparable(key: str) -> bool:
-        if key in hidden or any(key.startswith(prefix + "/") for prefix in hidden):
+        if any(_prefix_of(prefix, key) for prefix in hidden):
             return False
         if not bounds:
             return True
@@ -242,25 +252,17 @@ def _same(left: str, right: str) -> bool:
     # Case-insensitive filesystems (default on Windows and macOS) compare plain components without case.
     if left == right:
         return True
-    if not _FOLD:
-        return False
     if left.startswith(_HASHED) != right.startswith(_HASHED):
-        # Detection is case-sensitive (GHP_... is plain, ghp_... is hashed): compare as digests of folded text.
-        return (_digest_text(right) if left.startswith(_HASHED) else _digest_text(left)) == (
-            left if left.startswith(_HASHED) else right)
-    return not left.startswith(_HASHED) and left.casefold() == right.casefold()
+        # A component hashed in one key and plain in another (hashing starts at different components, or
+        # detection differs by case): compare the plain one's digest.
+        hashed, plain = (left, right) if left.startswith(_HASHED) else (right, left)
+        return _digest_text(plain) == hashed
+    return _FOLD and not left.startswith(_HASHED) and left.casefold() == right.casefold()
 
 
 def _covered(key: str, scope: Sequence[str]) -> bool:
     """Scope match on encoded keys, so redacted text can never stand in for a different real path."""
-    parts = key.split("/")
-    for item in scope:
-        if item == ".":
-            return True
-        claimed = _key(item.rstrip("/")).split("/")
-        if len(claimed) <= len(parts) and all(_same(a, b) for a, b in zip(parts, claimed, strict=False)):
-            return True
-    return False
+    return any(item == "." or _prefix_of(_key(item.rstrip("/")), key) for item in scope)
 
 
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],
