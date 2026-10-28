@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 from contextlib import closing
@@ -13,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hipson import agent_bootstrap, agent_contract, cli, ledger, mcp_server, task_context, task_verification
+from hipson import agent_bootstrap, agent_contract, cli, ledger, mcp_server, task_context, task_flow, task_verification
 from tests.test_gate_contracts import STATE
 from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_cli_inprocess
 
@@ -118,6 +119,21 @@ def test_task_verify_and_do_ignore_project_modules_that_shadow_the_stdlib(tmp_pa
     assert verified.returncode == 0 and "SHADOWED" not in verified.stdout + verified.stderr, verified.stderr
     done = run("do", "--title", "D", "--check", "git status", "--actor", "probe", "--mode", "ro", "--", "git", "--version")
     assert done.returncode == 0 and "SHADOWED" not in done.stdout + done.stderr, done.stderr
+
+
+def test_close_refusal_names_the_timeout_when_a_check_runs_out_of_time(tmp_path: Path):
+    from tests.test_task_flow import _open
+    from tests.test_task_verification import _project
+
+    project = _project(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    slow = [Path(sys.executable).as_posix(), "-c", "import time; time.sleep(30)"]
+    with closing(ledger.Ledger(db)) as store:
+        task = _open(store, project, checks=(slow,))
+    refused = task_flow.close(db, task, timeout=1)
+    assert not refused["closed"] and refused["exit_code"] == 124
+    assert refused["reasons"] == [f"check `{shlex.join(slow)}` failed with exit 124; it hit the 1s per-check timeout, "
+                                  "rerun with --timeout SECONDS"]
 
 
 def test_brief_shows_a_readable_gate_summary_instead_of_raw_json(tmp_path: Path):

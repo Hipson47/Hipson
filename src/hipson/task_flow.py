@@ -76,8 +76,10 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
                                            actor=actor, on_record=on_record) if pending else []
     failed = next((record for record in records if record['exit_code'] != 0), None)
     if failed is not None:
-        return _refused(task, db, [f"check `{shlex.join(failed['command'])}` failed with exit {failed['exit_code']}"],
-                        records, int(failed['exit_code']) or 1)
+        reason = f"check `{shlex.join(failed['command'])}` failed with exit {failed['exit_code']}"
+        if failed['exit_code'] == 124 and failed['duration_seconds'] >= timeout - 1:
+            reason += f"; it hit the {timeout:g}s per-check timeout, rerun with --timeout SECONDS"
+        return _refused(task, db, [reason], records, int(failed['exit_code']) or 1)
     try:
         with closing(ledger.Ledger(db, create=False)) as store:
             view = store.close_task(task, to=to, actor=actor, summary=summary)
