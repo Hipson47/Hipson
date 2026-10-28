@@ -347,3 +347,103 @@ def test_a_final_snapshot_change_inside_the_transaction_is_refused_or_audited(tm
             assert override["summary"].startswith("Reason: moved during close; final verification blockers: stale: HEAD moved")
             assert "final lead verification OVERRIDDEN: stale: HEAD moved" in status["summary"]
             assert "V-" + "9" * 32 not in status["refs"]
+
+
+def _exact(fn, message, error=ledger.LedgerError):
+    try:
+        fn()
+    except error as exc:
+        assert str(exc) == message, str(exc)
+    else:
+        raise AssertionError(f"Expected {error.__name__}: {message}")
+
+
+def test_per_check_freshness_and_messages_are_exact():
+    failing = _state([_record(exit_code=1)], checks=[CHECK])
+    assert failing["checks"][0]["freshness"] == "failing" and failing["freshness"] == "failing"
+    assert failing["reasons"] == ["check `pytest -q`: failing verification: exit 1"]
+    two = _state([_record(metadata_fallback_paths=["b.bin", "a.bin"])])
+    assert two["reasons"] == ["partial content coverage (metadata fallback): a.bin; b.bin"]
+    errored = _state([_record()], current={**STATE, "fingerprint": None, "error": "current broke"})
+    assert errored["reasons"] == ["unavailable working-tree fingerprint: current broke"]
+    unknown = _state([_record()], current={**STATE, "fingerprint": None, "error": None})
+    assert unknown["reasons"] == ["unavailable working-tree fingerprint: unknown"]
+    assert _state([_record()])["untrusted_fields"] == [
+        "latest.actor", "latest.context", "latest.metadata_fallback_paths", "latest.command", "latest.label",
+        "latest.subject", "latest.output_tail", "latest.files", "latest.generated_files", "latest.changes",
+        "current.subject", "current.files", "current.generated_files"]
+    assert _state([_record()])["current"] is STATE
+
+
+def test_changes_compare_by_raw_path_key_in_display_order():
+    def item(path, digit, key=None):
+        entry = {"path": path, "state": "100644:" + digit * 64, "index": None, "tracked": True}
+        return {**entry, "key": key} if key else entry
+    before = {"files": [item("b.py", "1"), item("a.py", "1"), item("[REDACTED].txt", "1", key="k" * 64)]}
+    after = {"files": [item("b.py", "2"), item("a.py", "2"), item("[REDACTED].txt", "1", key="k" * 64)]}
+    assert task_verification._changes(before, after) == [
+        f"a.py: state before=100644:{'1' * 64} after=100644:{'2' * 64}",
+        f"b.py: state before=100644:{'1' * 64} after=100644:{'2' * 64}"]
+    renamed = {"files": [item("[REDACTED].txt", "1", key="j" * 64)]}
+    # Same display path, different raw paths: two changes (their relative order is not part of the contract).
+    assert sorted(task_verification._changes({"files": [item("[REDACTED].txt", "1", key="k" * 64)]}, renamed)) == [
+        "[REDACTED].txt: state before=100644:" + "1" * 64 + " after=None",
+        "[REDACTED].txt: state before=None after=100644:" + "1" * 64]
+    tag = {"files": [item("<b>.py", "1")]}
+    assert task_verification._changes(tag, {"files": []}) == ["&lt;b&gt;.py: state before=100644:" + "1" * 64 + " after=None"]
+
+
+def test_more_changed_paths_note_starts_after_twenty():
+    def files(count, digit):
+        return [{"path": f"f{i:02}.py", "state": "100644:" + digit * 64, "index": None, "tracked": True}
+                for i in range(count)]
+    for count, suffix in ((20, False), (21, True)):
+        reason = _state([_record(files=files(count, "1"))], current={**STATE, "files": files(count, "2")})["reasons"][0]
+        assert reason.endswith("; 1 more changed paths") is suffix and reason.count("state before=") == 20
+
+
+def test_final_snapshot_is_rechecked_for_done_too_and_messages_are_exact(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)) as state:
+        store, task = _store(tmp_path)
+        with closing(store):
+            store.set_status(task, to="in_progress", actor=LEAD)
+            _verified(store, task)
+            store.set_status(task, to="review", actor=LEAD)
+            moved = {**STATE, "revision": "c" * 40}
+            state.side_effect = itertools.chain([dict(STATE)], itertools.repeat(moved))
+            _exact(lambda: store.set_status(task, to="done", actor=LEAD),
+                   f"Cannot mark {task} done: stale: HEAD moved; before={'a' * 40} after={'c' * 40}")
+            assert store.show(task)["status"] == "review"
+            state.side_effect = None
+            state.return_value = dict(STATE)
+            store.set_status(task, to="done", actor=LEAD)
+            _exact(lambda: store.set_checks(task, checks=[], actor=LEAD, reason="x"),
+                   f"Cannot change acceptance checks of done task {task}")
+            _exact(lambda: store.close_task(task, to="cancelled", actor=LEAD), "Close target must be review or done")
+            try:
+                store.close_task(task, actor=LEAD)
+            except ledger.CloseRefusedError as exc:
+                assert str(exc) == f"Cannot close {task}: {task} is done; close works from open, in_progress or review"
+            _exact(lambda: ledger.validate_checks([[" "]]), "An acceptance check needs a command name")
+            _exact(lambda: ledger.validate_checks([["c", "token=ghp_" + "a" * 36]]),
+                   "Acceptance checks must not contain secret-shaped text; pass secrets via the environment")
+
+
+def test_review_and_done_summaries_and_refs_are_exact(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        store, task = _store(tmp_path)
+        with closing(store):
+            store.set_checks(task, checks=[CHECK, ["ruff", "check"]], actor=LEAD)
+            store.set_status(task, to="in_progress", actor=LEAD)
+            seq = store._builder_finished_seq(task)
+            store._record_verification(_record(id="V-" + "4" * 32, task=task, builder_finished_seq=seq))
+            store._record_verification(_record(id="V-" + "5" * 32, task=task, builder_finished_seq=seq,
+                                               command=["ruff", "check"], argv_sha256=argv_identity(["ruff", "check"])))
+            view = store.set_status(task, to="review", actor=LEAD)
+            event = store.events(task)[-1]
+            assert event["summary"] == (f"in_progress -> review; lead verification: V-{'4' * 32}, V-{'5' * 32}; "
+                                        "acceptance checks: pytest -q; ruff check")
+            assert event["refs"] == [f"V-{'4' * 32}", f"V-{'5' * 32}"]
+            assert view["revision"] == store.show(task)["revision"] and view["updated_at"] == store.show(task)["updated_at"]
+            store.set_status(task, to="cancelled", actor=LEAD)
+            assert store.events(task)[-1]["summary"] == "review -> cancelled"

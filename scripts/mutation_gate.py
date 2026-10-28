@@ -52,9 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--stats", type=Path, default=ROOT / "mutants" / "mutmut-cicd-stats.json")
     parser.add_argument("--config", type=Path, default=ROOT / "pyproject.toml")
+    parser.add_argument("--section", default="mutation-gate",
+                        help="Baseline table under [tool.hipson], e.g. mutation-gate-ledger-core")
     args = parser.parse_args(argv)
     try:
-        baseline = tomllib.loads(args.config.read_text(encoding="utf-8"))["tool"]["hipson"]["mutation-gate"]
+        baseline = tomllib.loads(args.config.read_text(encoding="utf-8"))["tool"]["hipson"][args.section]
         stats = json.loads(args.stats.read_text(encoding="utf-8"))
         errors = check_results(stats, baseline)
     except (OSError, ValueError, KeyError, TypeError) as exc:

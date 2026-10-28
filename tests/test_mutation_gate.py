@@ -61,3 +61,39 @@ def test_mutation_gate_cli_fails_closed_on_bad_or_missing_stats(tmp_path: Path):
             stats.write_text(content, encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             assert main(args) == exit_code
+
+
+def test_mutation_gate_reads_a_named_baseline_section(tmp_path: Path):
+    config = tmp_path / "pyproject.toml"
+    config.write_text('[tool.hipson.mutation-gate]\nmeasured_on = "a"\nmin_total = 1000\nmin_killed_percent = 99\n'
+                      'max_survived = 0\nmax_no_tests = 0\nmax_timeout = 0\n'
+                      '[tool.hipson.mutation-gate-other]\nmeasured_on = "b"\nmin_total = 100\nmin_killed_percent = 80\n'
+                      'max_survived = 15\nmax_no_tests = 5\nmax_timeout = 0\n', encoding="utf-8")
+    stats = tmp_path / "stats.json"
+    stats.write_text(json.dumps(STATS), encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+        assert main(["--stats", str(stats), "--config", str(config), "--section", "mutation-gate-other"]) == 0
+    assert "PASS mutation gate (baseline b)" in out.getvalue()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert main(["--stats", str(stats), "--config", str(config)]) == 1
+        assert main(["--stats", str(stats), "--config", str(config), "--section", "missing"]) == 1
+
+
+def test_mutation_profile_swaps_only_the_mutmut_section(tmp_path: Path):
+    import tomllib
+
+    from scripts.mutation_profile import main as profile_main
+    config = tmp_path / "pyproject.toml"
+    config.write_text('[project]\nname = "x"\n\n[tool.mutmut]\nalso_copy = ["a"]\nsource_paths = ["old.py"]\n'
+                      'pytest_add_cli_args_test_selection = [\n    "tests/old.py",\n]\nmutate_only_covered_lines = true\n\n'
+                      '[tool.hipson.mutation-profiles.p]\nalso_copy = ["src"]\nsource_paths = ["src/new.py"]\n'
+                      'tests = ["tests/new.py"]\n', encoding="utf-8")
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert profile_main(["p", "--config", str(config)]) == 0
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert data["tool"]["mutmut"] == {"also_copy": ["src"], "source_paths": ["src/new.py"],
+                                      "pytest_add_cli_args_test_selection": ["tests/new.py"],
+                                      "pytest_add_cli_args": ["-q"], "mutate_only_covered_lines": True}
+    assert data["project"] == {"name": "x"} and data["tool"]["hipson"]["mutation-profiles"]["p"]["tests"] == ["tests/new.py"]
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        assert profile_main(["missing", "--config", str(config)]) == 1

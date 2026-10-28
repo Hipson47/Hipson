@@ -199,3 +199,23 @@ min_total = 2320
 max_survived = 727
 max_no_tests = 0
 max_timeout = 0
+
+# Second bounded gate: the review/done gates in the ledger core, killed by fast in-process contract tests.
+# CI swaps [tool.mutmut] to this profile with scripts/mutation_profile.py, then restores pyproject.toml.
+# "no tests" counts the rest of these two modules (CLI, runner and Git paths covered by subprocess tests).
+[tool.hipson.mutation-profiles.ledger-core]
+also_copy = ["src/hipson", "schemas"]
+source_paths = ["src/hipson/ledger.py", "src/hipson/task_verification.py"]
+tests = ["tests/test_gate_contracts.py"]
+
+[tool.hipson.mutation-gate-ledger-core]
+# Fresh full run: 1780 killed / 2406 total, 619 surviving, 7 without tests (local Python 3.13, 4 children).
+measured_on = "2026-10-28"
+mutmut_version = "3.8.0"
+python_version = "3.13"
+elapsed_seconds = 301
+min_killed_percent = 73.98
+min_total = 2406
+max_survived = 619
+max_no_tests = 7
+max_timeout = 0

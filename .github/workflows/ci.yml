@@ -59,6 +59,19 @@ jobs:
           mutmut export-cicd-stats
           python scripts/mutation_gate.py
         timeout-minutes: 20
+      - name: Mutation testing (ledger core review/done gates)
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: |
+          rm -rf mutants
+          python scripts/mutation_profile.py ledger-core
+          mutmut run --max-children 2
+          mutmut export-cicd-stats
+          git checkout -- pyproject.toml
+          python scripts/mutation_gate.py --section mutation-gate-ledger-core
+        timeout-minutes: 25
+      - name: Restore pyproject.toml after mutation profiles
+        if: always() && runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: git checkout -- pyproject.toml
       - name: Compile Python
         run: python -m compileall src scripts tests
       - name: Build wheel and sdist
