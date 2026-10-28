@@ -181,8 +181,9 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                     directory = False
                 path = relative + child.name
                 stack.append((path + "/", child.path, depth + 1, None) if directory else (path, child.path, depth, child))
-            if relative:
-                last = _key(relative.rstrip("/"))
+            # The truncation bound is the last file seen, never a directory: a file's whole path is what the
+            # redactor judges, while a directory name alone can hold part of a secret. Everything before the last
+            # file in walk order has been seen, so the bound stays sound.
             continue
         try:
             # On Windows DirEntry.stat() reports no inode; lstat() does, and hashing needs that identity.

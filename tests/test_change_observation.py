@@ -710,3 +710,14 @@ def test_distinct_files_under_a_secret_directory_stay_distinct_when_folding(tmp_
         upper, lower = task_observation._key(f"{secret}/A.txt"), task_observation._key(f"{secret}/a.txt")
         assert upper != lower  # Primary identity keeps case even where matching ignores it.
         assert task_observation._match(f"{secret}/A.txt") == task_observation._match(f"{secret}/a.txt")
+
+
+def test_truncation_bound_is_never_a_directory_name(tmp_path):
+    body = tmp_path / "-----BEGIN PRIVATE KEY-----" / "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC"
+    (body / "sub").mkdir(parents=True)
+    (body / "sub" / "a.txt").write_text("x")
+    (body / "sub" / "b.txt").write_text("y")
+    snapshot = take(tmp_path, Caps(max_files=3))
+    # Three directory entries fill the cap before any file: no file was seen, so there is no bound at all.
+    assert snapshot["truncated"] and snapshot["last"] is None and snapshot["entries"] == {}
+    assert "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC" not in json.dumps(snapshot)
