@@ -49,9 +49,9 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-1] for row in after["tasks"]] == before["tasks"]
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-10] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-10:-1] == (None,) * 9 for row in after['assignments'])
-        assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
+        assert [row[:-11] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-11:-2] == (None,) * 9 and row[-1] is None for row in after['assignments'])  # v8: changes
+        assert [row[-2] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -164,9 +164,9 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-1] for row in after["tasks"]] == before["tasks"]
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-5] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-5:-1] == (None,) * 4 for row in after['assignments'])
-        assert [row[-1] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
+        assert [row[:-6] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-6:-2] == (None,) * 4 and row[-1] is None for row in after['assignments'])  # v8: changes
+        assert [row[-2] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)
