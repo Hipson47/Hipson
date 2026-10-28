@@ -59,20 +59,25 @@ class Caps:
 
 
 def _digest_text(text: str) -> str:
-    return _HASHED + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    # Case-insensitive filesystems hash folded text, so a claim spelled in another case still matches.
+    folded = text.casefold() if _FOLD else text
+    return _HASHED + hashlib.sha256(folded.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _key(path: str) -> str:
-    """Stored identity of a path, exact and case-preserving (distinct files never share a key).
+    """Stored identity of a path; plain parts keep their case, so distinct files never share a key.
 
-    Each secret-shaped component becomes a NUL-marked digest, so prefixes (scope, unreadable directories) still
-    match. Detection runs on the original text; a secret spanning separators hashes the whole path.
+    Components before the point where the path first looks like a secret stay readable; from that component on,
+    every component becomes its own NUL-marked digest. Nothing of a secret survives (even one spanning
+    separators), and a directory's key is always a prefix of its children's keys, so scope and unreadable-
+    directory matching still work. Detection runs on the original text, before any case folding.
     """
-    parts = [part if redact_text(part) == part else _digest_text(part) for part in path.split("/")]
-    remainder = "/".join("-" if part.startswith(_HASHED) else part for part in parts)
-    if redact_text(remainder) != remainder:
-        return _digest_text(path)
-    return "/".join(parts)
+    if redact_text(path) == path:
+        return path
+    parts = path.split("/")
+    first = next((index for index in range(len(parts)) if redact_text("/".join(parts[:index + 1])) != "/".join(parts[:index + 1])),
+                 0)
+    return "/".join([*parts[:first], *(_digest_text(part) for part in parts[first:])])
 
 
 def _hashed(key: str) -> bool:
@@ -108,7 +113,8 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
     """Snapshot paths (never contents) under the project in a bounded, deterministic walk."""
     caps = caps or Caps()
     root = Path(project).resolve()
-    skip = set(exclude)
+    # Exclusions follow the filesystem: case-insensitive where it is (digests are lowercase hex either way).
+    skip = {item.casefold() if _FOLD else item for item in exclude}
     entries: dict[str, list[Any]] = {}
     reasons: list[str] = []
     unreadable: list[str] = []
@@ -144,7 +150,8 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                 break
             visited += len(items)
             for child in sorted(items, key=lambda item: item.name, reverse=True):
-                if child.name in EXCLUDED_NAMES or _key(relative + child.name) in skip:
+                candidate = _key(relative + child.name)
+                if child.name in EXCLUDED_NAMES or (candidate.casefold() if _FOLD else candidate) in skip:
                     continue
                 try:
                     directory = child.is_dir(follow_symlinks=False)
@@ -235,7 +242,13 @@ def _same(left: str, right: str) -> bool:
     # Case-insensitive filesystems (default on Windows and macOS) compare plain components without case.
     if left == right:
         return True
-    return _FOLD and not left.startswith(_HASHED) and not right.startswith(_HASHED) and left.casefold() == right.casefold()
+    if not _FOLD:
+        return False
+    if left.startswith(_HASHED) != right.startswith(_HASHED):
+        # Detection is case-sensitive (GHP_... is plain, ghp_... is hashed): compare as digests of folded text.
+        return (_digest_text(right) if left.startswith(_HASHED) else _digest_text(left)) == (
+            left if left.startswith(_HASHED) else right)
+    return not left.startswith(_HASHED) and left.casefold() == right.casefold()
 
 
 def _covered(key: str, scope: Sequence[str]) -> bool:

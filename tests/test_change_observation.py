@@ -604,7 +604,7 @@ def test_secret_detection_runs_before_case_folding_and_across_separators():
     with patch.object(task_observation, "_FOLD", True):
         assert aws not in task_observation._key(f"src/{aws}.db") and aws.lower() not in task_observation._key(aws)
     spanning = task_observation._key("token=/private-value")
-    assert "private-value" not in spanning and spanning.startswith(task_observation._HASHED)
+    assert "private-value" not in spanning and spanning.split("/")[-1].startswith(task_observation._HASHED)
 
 
 def test_keys_preserve_case_so_distinct_files_never_merge():
@@ -632,3 +632,37 @@ def test_truncation_bound_follows_the_walk_order_with_mixed_case(tmp_path):
         record = classify(before, after, mode="ro", scope=[], others=[])
     assert record["counts"]["out_of_scope"]["created"] == 0, record["paths"]
     assert record["status"] == "incomplete"
+
+
+def test_no_part_of_a_separator_spanning_secret_survives():
+    key = task_observation._key("token=first-part/private-tail")
+    assert "first-part" not in key and "private-tail" not in key
+    assert all(part.startswith(task_observation._HASHED) for part in key.split("/"))
+
+
+def test_secret_tails_keep_their_ancestors_for_scope_and_unreadable_prefixes():
+    child = task_observation._key("src/token=/private-value/app.py")
+    parent = task_observation._key("src/token=/private-value")
+    assert child.startswith(parent + "/") and "private-value" not in child
+    assert task_observation._covered(child, ["src"])
+    secret_dir = "src/" + "ghp_" + "g" * 36
+    assert task_observation._key(secret_dir + "/file.py").startswith(task_observation._key(secret_dir) + "/")
+
+
+def test_mixed_case_claims_match_hashed_components_on_case_insensitive_filesystems():
+    lower = "ghp_" + "h" * 36
+    with patch.object(task_observation, "_FOLD", True):
+        key = task_observation._key(f"src/{lower}/file.py")
+        assert task_observation._covered(key, [f"SRC/{lower.upper()}"])
+    with patch.object(task_observation, "_FOLD", False):
+        assert not task_observation._covered(task_observation._key(f"src/{lower}/file.py"), [f"src/{lower.upper()}"])
+
+
+def test_ledger_exclusions_ignore_case_on_case_insensitive_filesystems(tmp_path):
+    project = _tree(tmp_path)
+    (project / ".LEDGER.sqlite.observations").mkdir()
+    (project / ".LEDGER.sqlite.observations" / "A-0001.json").write_text("{}")
+    db = project / "ledger.sqlite"
+    with patch.object(task_observation, "_FOLD", True):
+        snapshot = take(project, exclude=task_observation.ledger_exclusions(db, project))
+    assert not any("observations" in key.casefold() for key in snapshot["entries"])
