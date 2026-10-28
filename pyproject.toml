@@ -188,14 +188,14 @@ pytest_add_cli_args = ["-q"]
 mutate_only_covered_lines = true
 
 [tool.hipson.mutation-gate]
-# Fresh full run: 1129 killed / 1856 total, 727 surviving; all other counters zero.
+# Fresh full run (CI, Python 3.12): 1593 killed / 2320 total, 727 surviving; all other counters zero.
 # See README Development for the reviewed baseline update procedure.
-measured_on = "2026-10-25"
+measured_on = "2026-10-28"
 mutmut_version = "3.8.0"
-python_version = "3.12.3"
-elapsed_seconds = 443.31
-min_killed_percent = 60.82
-min_total = 1856
+python_version = "3.12"
+elapsed_seconds = 462.15
+min_killed_percent = 68.66
+min_total = 2320
 max_survived = 727
 max_no_tests = 0
 max_timeout = 0
