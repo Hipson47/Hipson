@@ -144,6 +144,58 @@ def test_atomic_write_keeps_a_late_in_place_edit_to_the_displaced_file(tmp_path)
     assert len(kept) == 1 and kept[0].read_bytes() == b"# editor wrote through its open descriptor\n"
 
 
+def test_atomic_write_keeps_the_displaced_file_when_its_final_check_is_unsure(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("POSIX no-clobber placement only; Windows rename refuses an existing destination")
+    for case in ("edit during final destination read", "unreadable displaced file"):
+        root = tmp_path / case.replace(" ", "-")
+        root.mkdir()
+        path = root / "config.toml"
+        path.write_bytes(b'model = "before"\n')
+        expected = init_config.snapshot(path)
+        real_snapshot = init_config.snapshot
+
+        def snapshot(target, case=case, path=path, root=root, real_snapshot=real_snapshot):
+            aside = next(root.glob(".config.toml.*.aside"), None)
+            if aside is not None and Path(target) == path and path.read_bytes() == b"# planned\n":
+                if case == "edit during final destination read":
+                    aside.write_bytes(b"# late editor bytes\n")
+            placed = path.exists() and path.read_bytes() == b"# planned\n"
+            if aside is not None and Path(target) == aside and case == "unreadable displaced file" and placed:
+                raise PermissionError("cannot read")
+            return real_snapshot(target)
+
+        with (patch.object(init_config, "snapshot", side_effect=snapshot),
+              TestCase().assertRaisesRegex(ValueError, "kept in")):
+            init_config.atomic_write(path, b"# planned\n", expected)
+        kept = list(root.glob(".config.toml.*.aside"))
+        assert len(kept) == 1, case
+        if case == "edit during final destination read":
+            assert kept[0].read_bytes() == b"# late editor bytes\n"
+
+
+def test_atomic_write_removes_its_link_probe_when_interrupted(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("POSIX no-clobber placement only; Windows rename refuses an existing destination")
+    path = tmp_path / "config.toml"
+    path.write_bytes(b"old\n")
+    expected = init_config.snapshot(path)
+    link = os.link
+
+    def link_then_interrupt(source, destination, **kwargs):
+        link(source, destination, **kwargs)
+        if str(destination).endswith(".link"):
+            raise KeyboardInterrupt
+
+    with patch.object(init_config.os, "link", side_effect=link_then_interrupt):
+        try:
+            init_config.atomic_write(path, b"new\n", expected)
+        except KeyboardInterrupt:
+            pass
+    assert sorted(item.name for item in tmp_path.iterdir()) == ["config.toml"]
+    assert path.read_bytes() == b"old\n"
+
+
 def test_snapshot_reports_an_interrupted_write_instead_of_a_missing_config(tmp_path):
     path = tmp_path / "config.toml"
     (tmp_path / ".config.toml.abc123.aside").write_bytes(b'model = "original"\n')

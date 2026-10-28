@@ -463,6 +463,7 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
             decision=args.decision,
             allow_unsafe_output=args.allow_unsafe_output,
             workflow_name="autopilot_review",
+            approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)
@@ -509,6 +510,7 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
             decision=args.decision,
             allow_unsafe_output=args.allow_unsafe_output,
             workflow_name="autopilot_implement",
+            approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
         print(exc, file=sys.stderr)

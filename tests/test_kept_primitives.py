@@ -7,6 +7,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import chdir, closing
 from pathlib import Path
 from unittest import SkipTest, TestCase
@@ -227,6 +228,19 @@ def test_d05_resume_checks_preflight_before_provider(tmp_path):
         status = run_control.build_status(run_dir)
         assert status["status"] == "blocked" and status["preflight_ok"] is False
         assert status["recommended_next_command"].startswith("hipson packet preflight ")
+        assert run_control.build_handoff(run_dir)["status"] == "blocked"
+
+
+def test_deprecated_autopilot_forwards_its_approvals_to_the_kit_policy_check(tmp_path):
+    repo = init_git_repo(tmp_path)
+    (repo / ".hipson").mkdir()
+    (repo / ".hipson" / "policy.json").write_text(json.dumps(
+        {"prompt_required_operations": ["provider_call", "autopilot_review"]}))
+    args = ("autopilot", "review", "--project", str(repo), "--task", "review", "--no-diff", "--json")
+    refused, _, stderr = run_cli_inprocess(*args)
+    assert refused != 0 and "explicit approval for autopilot_review" in stderr
+    approved, stdout, stderr = run_cli_inprocess(*args, "--approve-operation", "autopilot_review")
+    assert approved in (0, 1) and json.loads(stdout)["artifact_kind"] == "hipson.autopilot_review_run", stderr
 
 
 def test_run_status_recommends_only_supported_commands(tmp_path):
@@ -291,8 +305,11 @@ def test_d06_supervisor_stops_the_command_when_process_inspection_fails(tmp_path
     if sys.platform == "win32":
         raise SkipTest("requires POSIX process inspection for verification descendant cleanup")
     pid_file = tmp_path / "command.pid"
-    command = [sys.executable, "-c", f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); "
-               "time.sleep(60)"]
+    # The command starts a same-group grandchild that ignores SIGTERM, then records both PIDs.
+    stubborn = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+    command = [sys.executable, "-c",
+               f"import os, subprocess, sys, time; g = subprocess.Popen([sys.executable, '-c', {stubborn!r}]); "
+               f"time.sleep(0.3); open({str(pid_file)!r}, 'w').write(f'{{os.getpid()}} {{g.pid}}'); time.sleep(60)"]
     # Inspection works until the command is running, then fails as if ps disappeared.
     harness = (
         "import os, sys\nfrom unittest.mock import patch\nfrom hipson import task_runner\n"
@@ -302,16 +319,24 @@ def test_d06_supervisor_stops_the_command_when_process_inspection_fails(tmp_path
         "with patch.object(task_runner.ProcessTree, 'members', members):\n"
         "    sys.exit(task_runner.supervise_command(sys.argv[1:]))\n"
     )
-    pid = None
+    pids: list[int] = []
     try:
         finished = subprocess.run([sys.executable, "-P", "-c", harness, *command], capture_output=True, text=True,
                                   timeout=60)
         assert finished.returncode != 0, finished
-        pid = int(pid_file.read_text())
-        with _raises(ProcessLookupError):
-            os.kill(pid, 0)
+        pids = [int(value) for value in pid_file.read_text().split()]
+        for pid in pids:
+            deadline = time.monotonic() + 5  # An orphaned zombie is reaped by init shortly after exit.
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            with _raises(ProcessLookupError):
+                os.kill(pid, 0)
     finally:
-        if pid is not None:
+        for pid in pids:
             try:
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:

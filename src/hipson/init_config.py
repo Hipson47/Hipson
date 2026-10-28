@@ -127,13 +127,16 @@ def _no_clobber_supported(staged: Path) -> bool:
     """POSIX no-clobber placement needs hard links; probe the target filesystem with the staged file."""
     if sys.platform == "win32":
         return True
-    probe = staged.with_name(staged.name + ".link")
     try:
-        os.link(staged, probe, follow_symlinks=False)
+        os.link(staged, _link_probe(staged), follow_symlinks=False)
     except OSError:
         return False
-    probe.unlink()
+    _link_probe(staged).unlink()  # atomic_write also removes it if this is interrupted.
     return True
+
+
+def _link_probe(staged: Path) -> Path:
+    return staged.with_name(staged.name + ".link")
 
 
 def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | None = None) -> Snapshot:
@@ -171,6 +174,7 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
             except FileNotFoundError:
                 raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
             displaced = True
+            retain_aside = True  # Until the final comparison proves it holds nothing newer than the plan.
             moved = snapshot(aside)
             # Renaming can change ctime; the remaining identity and bytes must match.
             if moved.content != expected.content or moved.identity[:-1] != expected.identity[:-1]:
@@ -181,30 +185,33 @@ def atomic_write(path: Path, content: bytes, expected: Snapshot, *, mode: int | 
             except FileExistsError:
                 raise ValueError(f"Configuration changed since planning: {path}; rerun hipson init.") from None
             placed = True
-        if aside is not None:
-            # An editor holding the old file open may have written to it after the comparison: keep that edit.
-            try:
-                late = snapshot(aside).content
-            except ValueError:
-                late = None
-            if late != expected.content:
-                retain_aside = True
-                raise ValueError(f"Configuration changed during atomic replacement: {path}; the concurrent edit is "
-                                 f"kept in {aside}.")
         written = snapshot(path)
         if written.content != content or written.identity[:2] != (identity.st_dev, identity.st_ino):
-            raise ValueError(f"Configuration changed during atomic replacement: {path}")
+            raise ValueError(f"Configuration changed during atomic replacement: {path}"
+                             + (f"; the previous file is kept in {aside}." if aside is not None else ""))
+        if aside is not None:
+            # Last step: an editor holding the old file open may have written to it. Any doubt keeps the copy;
+            # a write after this comparison goes to a file the editor no longer shares with the config.
+            try:
+                late = snapshot(aside).content
+            except Exception:
+                late = None
+            if late != expected.content:
+                raise ValueError(f"Configuration changed during atomic replacement: {path}; the concurrent edit is "
+                                 f"kept in {aside}.")
+            retain_aside = False
         return written
     except BaseException:
         if displaced and not placed and aside is not None:
             try:
                 _place_if_absent(aside, path)
             except OSError as exc:
-                retain_aside = True
                 raise ValueError(f"Configuration changed since planning: {path}; recover displaced file from {aside}.") from exc
+            retain_aside = False  # Restored: the aside name no longer exists.
         raise
     finally:
         staged.unlink(missing_ok=True)
+        _link_probe(staged).unlink(missing_ok=True)
         if aside is not None and not retain_aside:
             aside.unlink(missing_ok=True)
 

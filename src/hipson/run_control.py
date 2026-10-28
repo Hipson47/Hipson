@@ -114,15 +114,14 @@ def build_status(run_path: str | Path) -> dict[str, Any]:
     preflight = _load_optional_json(run_dir / RUN_ARTIFACTS["preflight"])
     gates = audit.get("latest_gates", {}) if isinstance(audit, dict) else {}
     validation = build_validation(run_dir)
-    # A failed current preflight outranks an older audit written before the packet changed.
-    preflight_failed = isinstance(preflight, dict) and preflight.get("ok") is not True
+    preflight_failed = _preflight_failed(run_dir)
     return {
         "artifact_kind": "hipson.run_status",
         "schema_version": SCHEMA_VERSION,
         "created_at_utc": timestamp(),
         "work_id": str(work.get("work_id", "")) if work else run_dir.name,
         "run_dir": str(run_dir),
-        "status": "blocked" if preflight_failed and validation.get("ok") else _run_status(audit, validation),
+        "status": _current_status(run_dir, audit, validation),
         "preflight_ok": not preflight_failed if preflight is not None else None,
         "workflow": str(manifest.get("workflow", "")) if manifest else "",
         "mode": str(manifest.get("mode", "")) if manifest else "",
@@ -189,7 +188,7 @@ def build_handoff(run_path: str | Path) -> dict[str, Any]:
         "run_dir": str(run_dir),
         "task": redact_text(str(work.get("task", ""))) if work else "",
         "project": str(work.get("project", "")) if work else "",
-        "status": _run_status(audit, build_validation(run_dir)),
+        "status": _current_status(run_dir, audit, build_validation(run_dir)),
         "gates": gates if isinstance(gates, dict) else {},
         "safe_claims": claims.get("safe", []) if isinstance(claims, dict) else [],
         "unsafe_claims": claims.get("unsafe", []) if isinstance(claims, dict) else [],
@@ -286,6 +285,18 @@ def artifact_snapshot(run_dir: Path) -> dict[str, dict[str, Any]]:
             "size_bytes": path.stat().st_size if path.exists() else 0,
         }
     return snapshot
+
+
+def _preflight_failed(run_dir: Path) -> bool:
+    preflight = _load_optional_json(run_dir / RUN_ARTIFACTS["preflight"])
+    return isinstance(preflight, dict) and preflight.get("ok") is not True
+
+
+def _current_status(run_dir: Path, audit: dict[str, Any] | None, validation: dict[str, Any]) -> str:
+    # A failed current preflight outranks an older audit written before the packet changed.
+    if validation.get("ok") and _preflight_failed(run_dir):
+        return "blocked"
+    return _run_status(audit, validation)
 
 
 def _run_status(audit: dict[str, Any] | None, validation: dict[str, Any]) -> str:

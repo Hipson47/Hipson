@@ -117,9 +117,12 @@ def supervise_command(command: list[str]) -> int:
             job.protect_runner()
         else:
             tree = ProcessTree()
-        launch, env = batch_command(command, dict(os.environ), 'HIPSON_VERIFY_ARG_') if windows else (command, dict(os.environ))
-        child = subprocess.Popen(launch, env=env,
-                                 creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]
+        if sys.platform == 'win32':
+            launch, env = batch_command(command, dict(os.environ), 'HIPSON_VERIFY_ARG_')
+            child = subprocess.Popen(launch, env=env, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | 4)
+        else:
+            # Its own process group lets the fallback stop the command's tree without stopping this supervisor.
+            child = subprocess.Popen(command, env=dict(os.environ), process_group=0)
         if tree:
             tree.child = child
         if job:
@@ -153,15 +156,15 @@ def supervise_command(command: list[str]) -> int:
 
 
 def _stop_without_tracking(child: subprocess.Popen[bytes]) -> None:
-    """Last resort when descendants cannot be enumerated: signal this supervisor's own process group."""
+    """Last resort when descendants cannot be enumerated: stop the command's own process group."""
     if sys.platform != 'win32':
-        # supervise_command leads its session, so the group is the command and its non-detached descendants.
-        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-            signal.signal(number, signal.SIG_IGN)
-        try:
-            os.killpg(os.getpgrp(), signal.SIGTERM)
-        except OSError:
-            pass
+        # The command leads its process group: this reaches its non-detached descendants, never the supervisor.
+        for number, grace in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.0)):
+            try:
+                os.killpg(child.pid, number)
+            except OSError:
+                pass
+            time.sleep(grace)
     child.kill()
     try:
         child.wait(timeout=5)
