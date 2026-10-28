@@ -170,7 +170,8 @@ def command_do(args: argparse.Namespace) -> int:
         print(task_activity.safe_text(exc), file=sys.stderr)
         return 1
     print(f'hipson task do: opened {task} in {project}; checks: {ledger.checks_text(checks)}', file=sys.stderr, flush=True)
-    worker = [sys.executable, '-m', 'hipson.cli', 'task', 'run', '--db', str(db), '--task', task,
+    # -P: the worker runs in the project directory, whose modules must not shadow the stdlib.
+    worker = [sys.executable, '-P', '-m', 'hipson.cli', 'task', 'run', '--db', str(db), '--task', task,
               '--actor', args.actor, '--role', args.role, '--mode', args.mode,
               *[item for path in args.scope for item in ('--scope', path)],
               *(['--lease-seconds', str(args.lease_seconds)] if args.lease_seconds is not None else []),

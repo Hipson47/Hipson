@@ -8,6 +8,8 @@
 - The agent contract and bootstrap lead with the ledger lifecycle (`lead_task_ledger` workflow, first
   command `hipson lead resume`, default policy workflow `lead_task_ledger`); `AGENTS.md` and the
   packaged Codex instructions point at the ledger instead of the Hermes bridge.
+- Fix `task verify`, `task close` and `task do` in projects with a top-level module named like the standard
+  library (e.g. `json.py`): the supervisors Hipson spawns in the project directory now run with `python -P`.
 - Worker briefs show a readable gate summary (one line per acceptance check) instead of raw verification
   JSON; CLI JSON and MCP keep the full `verification` field and add `verification_summary`.
 

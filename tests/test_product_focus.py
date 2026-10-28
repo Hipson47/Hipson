@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
+import sys
 from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +15,7 @@ import pytest
 
 from hipson import agent_bootstrap, agent_contract, cli, ledger, mcp_server, task_context, task_verification
 from tests.test_gate_contracts import STATE
-from tests.test_hipson_helpers import init_git_repo, run_cli_inprocess
+from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_cli_inprocess
 
 DEPRECATED = set(agent_contract.DEPRECATED_COMMANDS)
 
@@ -94,6 +97,27 @@ def test_agent_bootstrap_starts_with_lead_resume(tmp_path: Path):
     assert payload["recommended_first_tool"] == "lead.resume"
     assert payload["policy"]["default_workflow"] == "lead_task_ledger"
     assert payload["fallback_commands"][0] == "hipson task now"
+
+
+def test_task_verify_and_do_ignore_project_modules_that_shadow_the_stdlib(tmp_path: Path):
+    """The supervisors Hipson spawns run in the project directory; a project json.py must not replace the stdlib."""
+    project = init_git_repo(tmp_path)
+    (project / "json.py").write_text('raise SystemExit("SHADOWED: project json.py imported")\n', encoding="utf-8")
+    env = {key: value for key, value in os.environ.items()
+           if key not in ("HIPSON_TASK", "HIPSON_ASSIGNMENT", "HIPSON_ROLE")}
+    env.update(HIPSON_LEDGER=str(tmp_path / "ledger.sqlite"), PYTHONPATH=str(REPO_ROOT / "src"))
+    hipson = [sys.executable, "-P", "-m", "hipson.cli", "task"]  # The test's own launcher must not be shadowed.
+
+    def run(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*hipson, *args], cwd=project, env=env, capture_output=True, text=True, timeout=120)
+
+    opened = run("open", "--project", ".", "--title", "T", "--objective", "O", "--check", "git status", "--start",
+                 "--json")
+    assert opened.returncode == 0, opened.stderr
+    verified = run("verify", "--task", json.loads(opened.stdout)["id"])
+    assert verified.returncode == 0 and "SHADOWED" not in verified.stdout + verified.stderr, verified.stderr
+    done = run("do", "--title", "D", "--check", "git status", "--actor", "probe", "--mode", "ro", "--", "git", "--version")
+    assert done.returncode == 0 and "SHADOWED" not in done.stdout + done.stderr, done.stderr
 
 
 def test_brief_shows_a_readable_gate_summary_instead_of_raw_json(tmp_path: Path):

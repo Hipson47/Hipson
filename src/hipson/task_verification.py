@@ -477,7 +477,8 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
     if actor is not None:
         ledger.require_text(actor, 'actor')
     validate(command, timeout)
-    invocation = [sys.executable, '-m', 'hipson.cli', 'task', 'verify', '--db', str(db), '--task', task,
+    # -P keeps the project directory off sys.path: a project json.py must not shadow the stdlib here.
+    invocation = [sys.executable, '-P', '-m', 'hipson.cli', 'task', 'verify', '--db', str(db), '--task', task,
                   '--label', label, '--timeout', str(timeout), '--json',
                   *(['--actor', actor] if actor is not None else []), '--', *command]
     from hipson.task_runner import supervise
