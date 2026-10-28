@@ -62,7 +62,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-10] == 42  # Reopening never repeats ALTER TABLE.
+        assert _rows(store)["assignments"][-1][-11] == 42  # Reopening never repeats ALTER TABLE (v8: +changes).
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
