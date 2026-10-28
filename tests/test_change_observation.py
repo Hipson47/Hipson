@@ -347,7 +347,7 @@ def test_unreadable_directories_make_the_observation_incomplete(tmp_path):
 
     with patch.object(task_observation.os, "scandir", side_effect=failing):
         record = _observe(root, lambda root: (root / "docs/guide.md").write_text("hidden edit\n"))
-    assert record["status"] == "incomplete" and record["incomplete_reasons"] == ["unreadable directory: docs"]
+    assert record["status"] == "incomplete" and record["incomplete_reasons"] == ["unreadable directory"]
     assert record["paths"] == []  # Nothing under the unreadable directory is claimed either way.
     before = take(root)
     with patch.object(task_observation.os, "scandir", side_effect=failing):
@@ -613,9 +613,9 @@ def test_keys_preserve_case_so_distinct_files_never_merge():
         assert task_observation._key("A.db") == "A.db"
         assert task_observation._covered("Src/app.py", ["src"])  # Scope matching still ignores case there.
         assert not task_observation._covered("srcx/app.py", ["src"])
-    before = {"entries": {"A.db": ["A.db", "file", 1, 1, "x"], "a.db": ["a.db", "file", 1, 1, "y"]},
+    before = {"entries": {"A.db": ["A.db", "file", 1, 1, "x", "A.db"], "a.db": ["a.db", "file", 1, 1, "y", "a.db"]},
               "truncated": False, "last": None, "unreadable": [], "incomplete": [], "caps": {}}
-    after = {**before, "entries": {"A.db": ["A.db", "file", 2, 2, "z"], "a.db": ["a.db", "file", 1, 1, "y"]}}
+    after = {**before, "entries": {"A.db": ["A.db", "file", 2, 2, "z", "A.db"], "a.db": ["a.db", "file", 1, 1, "y", "a.db"]}}
     record = classify(before, after, mode="rw", scope=["src"], others=[])
     assert record["status"] == "changes" and record["counts"]["out_of_scope"]["modified"] == 1
 
@@ -652,10 +652,10 @@ def test_secret_tails_keep_their_ancestors_for_scope_and_unreadable_prefixes():
 def test_mixed_case_claims_match_hashed_components_on_case_insensitive_filesystems():
     lower = "ghp_" + "h" * 36
     with patch.object(task_observation, "_FOLD", True):
-        key = task_observation._key(f"src/{lower}/file.py")
+        key = task_observation._match(f"src/{lower}/file.py")
         assert task_observation._covered(key, [f"SRC/{lower.upper()}"])
     with patch.object(task_observation, "_FOLD", False):
-        assert not task_observation._covered(task_observation._key(f"src/{lower}/file.py"), [f"src/{lower.upper()}"])
+        assert not task_observation._covered(task_observation._match(f"src/{lower}/file.py"), [f"src/{lower.upper()}"])
 
 
 def test_ledger_exclusions_ignore_case_on_case_insensitive_filesystems(tmp_path):
@@ -671,9 +671,10 @@ def test_ledger_exclusions_ignore_case_on_case_insensitive_filesystems(tmp_path)
 def test_hashing_starts_where_the_redactor_first_changes_text():
     path = 'src/token="first-part/private-tail"/app.py'
     key = task_observation._key(path)
+    match = task_observation._match(path)
     assert "first-part" not in key and "private-tail" not in key and key.startswith("src/")
-    assert task_observation._covered(key, ["src"])
-    assert any(task_observation._prefix_of(prefix, key) for prefix in [task_observation._key('src/token="first-part')])
+    assert task_observation._covered(match, ["src"]) and "first-part" not in match
+    assert task_observation._prefix_of(task_observation._match('src/token="first-part'), match)
     pem = "keys/-----BEGIN PRIVATE KEY-----/MIIBVgIBADANBgkqhkiG9w0BAQEFAASC/-----END PRIVATE KEY-----.pem"
     assert "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC" not in task_observation._key(pem)
 
@@ -681,5 +682,31 @@ def test_hashing_starts_where_the_redactor_first_changes_text():
 def test_exclusions_match_hashed_and_plain_spellings_on_case_insensitive_filesystems():
     name = ".ghp_" + "h" * 36 + ".sqlite.observations"
     with patch.object(task_observation, "_FOLD", True):
-        assert task_observation._equal(task_observation._key(name), task_observation._key(name.upper()))
-    assert not task_observation._equal(task_observation._key(name), task_observation._key("other"))
+        assert task_observation._equal(task_observation._match(name), task_observation._match(name.upper()))
+    assert not task_observation._equal(task_observation._match(name), task_observation._match("other"))
+
+
+def test_unreadable_directories_are_stored_opaquely(tmp_path):
+    root = tmp_path / "keys"
+    partial = root / "-----BEGIN PRIVATE KEY-----" / "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC"
+    partial.mkdir(parents=True)
+    (partial / "-----END PRIVATE KEY-----.pem").write_text("x")
+    scandir = os.scandir
+
+    def failing(path):
+        if str(path).endswith("MIIBVgIBADANBgkqhkiG9w0BAQEFAASC"):
+            raise PermissionError("denied")
+        return scandir(path)
+
+    with patch.object(task_observation.os, "scandir", side_effect=failing):
+        snapshot = take(tmp_path)
+    stored = json.dumps(snapshot)
+    assert "MIIBVgIBADANBgkqhkiG9w0BAQEFAASC" not in stored and snapshot["incomplete"] == ["unreadable directory"]
+
+
+def test_distinct_files_under_a_secret_directory_stay_distinct_when_folding(tmp_path):
+    secret = "ghp_" + "k" * 36
+    with patch.object(task_observation, "_FOLD", True):
+        upper, lower = task_observation._key(f"{secret}/A.txt"), task_observation._key(f"{secret}/a.txt")
+        assert upper != lower  # Primary identity keeps case even where matching ignores it.
+        assert task_observation._match(f"{secret}/A.txt") == task_observation._match(f"{secret}/a.txt")

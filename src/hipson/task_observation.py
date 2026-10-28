@@ -27,7 +27,7 @@ from hipson import ledger
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.task_verification import _TOOL_CACHE_DIRS
 
-FORMAT = 4
+FORMAT = 5
 MAX_FILES = 20_000
 MAX_HASH_BYTES = 256 * 1024 * 1024
 MAX_DEPTH = 64
@@ -58,20 +58,15 @@ class Caps:
                 raise ValueError(f"Observation {name} must be a positive integer")
 
 
-def _digest_text(text: str) -> str:
-    # Case-insensitive filesystems hash folded text, so a claim spelled in another case still matches.
-    folded = text.casefold() if _FOLD else text
+def _digest_text(text: str, *, fold: bool = False) -> str:
+    folded = text.casefold() if fold else text
     return _HASHED + hashlib.sha256(folded.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _key(path: str) -> str:
-    """Stored identity of a path; plain parts keep their case, so distinct files never share a key.
-
-    Components before the first character the redactor changes stay readable; from the component containing it
+def _encode(path: str, *, fold: bool) -> str:
+    """Components before the first character the redactor changes stay readable; from the component holding it
     on, every component becomes its own NUL-marked digest, so nothing of a secret survives, even one spanning
-    separators. Detection runs on the original text, before any case folding. Matching compares components
-    (see _prefix_of), so a key hashed from an earlier component still matches its plain-text ancestors.
-    """
+    separators. Detection runs on the original text, before any case folding."""
     redacted = redact_text(path)
     if redacted == path:
         return path
@@ -79,7 +74,24 @@ def _key(path: str) -> str:
                   min(len(path), len(redacted)))
     parts = path.split("/")
     first = path[:offset].count("/")
-    return "/".join([*parts[:first], *(_digest_text(part) for part in parts[first:])])
+    return "/".join([*parts[:first], *(_digest_text(part, fold=fold) for part in parts[first:])])
+
+
+def _key(path: str) -> str:
+    """Stored identity of a path: case-preserving digests, so distinct files never share a key."""
+    return _encode(path, fold=False)
+
+
+def _match(path: str) -> str:
+    """Identity used only for matching scopes, exclusions and unreadable directories: digests of folded text
+    where the filesystem ignores case, so a claim spelled in another case still matches."""
+    return _encode(path, fold=_FOLD)
+
+
+def _opaque(path: str) -> str:
+    """Every component hashed: for directories, whose own text may hold part of a secret the redactor only
+    recognises in a longer path."""
+    return "/".join(_digest_text(part, fold=_FOLD) for part in path.split("/"))
 
 
 def _prefix_of(prefix: str, key: str) -> bool:
@@ -149,8 +161,8 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                             break
             except OSError:
                 if relative:
-                    unreadable.append(_key(relative.rstrip("/")))
-                    reasons.append("unreadable directory: " + redact_text(relative.rstrip("/")))
+                    unreadable.append(_opaque(relative.rstrip("/")))
+                    reasons.append("unreadable directory")  # Its own name may hold part of a secret.
                     continue
                 raise
             if visited + len(items) > caps.max_files:
@@ -160,7 +172,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                 break
             visited += len(items)
             for child in sorted(items, key=lambda item: item.name, reverse=True):
-                candidate = _key(relative + child.name)
+                candidate = _match(relative + child.name)
                 if child.name in EXCLUDED_NAMES or any(_equal(candidate, item) for item in exclude):
                     continue
                 try:
@@ -176,7 +188,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
             # On Windows DirEntry.stat() reports no inode; lstat() does, and hashing needs that identity.
             info = os.lstat(absolute) if sys.platform == "win32" else entry.stat(follow_symlinks=False)
         except OSError:
-            unreadable.append(_key(relative))
+            unreadable.append(_match(relative))
             reasons.append("unreadable file: " + redact_text(relative))
             continue
         digest = None
@@ -202,7 +214,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
         else:
             kind = "other"
         key = _key(relative)
-        entries[key] = [redact_text(relative), kind, info.st_size, info.st_mtime_ns, digest]
+        entries[key] = [redact_text(relative), kind, info.st_size, info.st_mtime_ns, digest, _match(relative)]
         last = key
     return {"format": FORMAT, "root": str(root), "entries": entries, "truncated": truncated,
             "last": last if truncated else None, "unreadable": sorted(set(unreadable)),
@@ -217,7 +229,8 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
     old, new = before["entries"], after["entries"]
 
     def comparable(key: str) -> bool:
-        if any(_prefix_of(prefix, key) for prefix in hidden):
+        match = (old.get(key) or new[key])[5]
+        if any(_prefix_of(prefix, match) for prefix in hidden):
             return False
         if not bounds:
             return True
@@ -235,7 +248,7 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
         elif key not in new:
             changes["deleted"].append(key)
         else:
-            (_, kind, size, mtime, digest), (_, kind2, size2, mtime2, digest2) = old[key], new[key]
+            (_, kind, size, mtime, digest, _), (_, kind2, size2, mtime2, digest2, _) = old[key], new[key]
             if kind != kind2:
                 changes["modified"].append(key)
             elif digest is not None and digest2 is not None:
@@ -256,13 +269,13 @@ def _same(left: str, right: str) -> bool:
         # A component hashed in one key and plain in another (hashing starts at different components, or
         # detection differs by case): compare the plain one's digest.
         hashed, plain = (left, right) if left.startswith(_HASHED) else (right, left)
-        return _digest_text(plain) == hashed
+        return _digest_text(plain, fold=_FOLD) == hashed
     return _FOLD and not left.startswith(_HASHED) and left.casefold() == right.casefold()
 
 
 def _covered(key: str, scope: Sequence[str]) -> bool:
     """Scope match on encoded keys, so redacted text can never stand in for a different real path."""
-    return any(item == "." or _prefix_of(_key(item.rstrip("/")), key) for item in scope)
+    return any(item == "." or _prefix_of(_match(item.rstrip("/")), key) for item in scope)
 
 
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],
@@ -274,9 +287,10 @@ def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope:
     concurrent: set[str] = set()
     for change in CHANGES:
         for key in changes[change]:
-            display = (after["entries"].get(key) or before["entries"][key])[0]
-            holders = [assignment for assignment, claimed in others if _covered(key, claimed)]
-            if mode == "rw" and _covered(key, scope):
+            entry = after["entries"].get(key) or before["entries"][key]
+            display, match = entry[0], entry[5]
+            holders = [assignment for assignment, claimed in others if _covered(match, claimed)]
+            if mode == "rw" and _covered(match, scope):
                 group = "in_scope"
             elif holders:
                 group = "unattributed"
@@ -346,7 +360,7 @@ def ledger_exclusions(db: Path, project: str | Path) -> list[str]:
     excluded = []
     for path in candidates:
         try:
-            excluded.append(_key(path.relative_to(root).as_posix()))
+            excluded.append(_match(path.relative_to(root).as_posix()))
         except ValueError:
             continue
     return excluded
