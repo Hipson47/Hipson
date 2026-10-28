@@ -597,3 +597,38 @@ def test_legacy_records_without_incomplete_reasons_still_render(tmp_path):
         changes = store.activity(assignment)["changes"]
     assert changes["incomplete_reasons"] == []
     assert task_observation.summary(changes).startswith("incomplete, not a clean result")
+
+
+def test_secret_detection_runs_before_case_folding_and_across_separators():
+    aws = "AKIA" + "A" * 16
+    with patch.object(task_observation, "_FOLD", True):
+        assert aws not in task_observation._key(f"src/{aws}.db") and aws.lower() not in task_observation._key(aws)
+    spanning = task_observation._key("token=/private-value")
+    assert "private-value" not in spanning and spanning.startswith(task_observation._HASHED)
+
+
+def test_keys_preserve_case_so_distinct_files_never_merge():
+    assert task_observation._key("A.db") != task_observation._key("a.db")
+    with patch.object(task_observation, "_FOLD", True):
+        assert task_observation._key("A.db") == "A.db"
+        assert task_observation._covered("Src/app.py", ["src"])  # Scope matching still ignores case there.
+        assert not task_observation._covered("srcx/app.py", ["src"])
+    before = {"entries": {"A.db": ["A.db", "file", 1, 1, "x"], "a.db": ["a.db", "file", 1, 1, "y"]},
+              "truncated": False, "last": None, "unreadable": [], "incomplete": [], "caps": {}}
+    after = {**before, "entries": {"A.db": ["A.db", "file", 2, 2, "z"], "a.db": ["a.db", "file", 1, 1, "y"]}}
+    record = classify(before, after, mode="rw", scope=["src"], others=[])
+    assert record["status"] == "changes" and record["counts"]["out_of_scope"]["modified"] == 1
+
+
+def test_truncation_bound_follows_the_walk_order_with_mixed_case(tmp_path):
+    root = tmp_path / "mixed"
+    (root / "a").mkdir(parents=True)
+    (root / "Z.db").write_text("z")
+    (root / "a" / "f.db").write_text("f")
+    with patch.object(task_observation, "_FOLD", True):
+        before = take(root, Caps(max_files=2))
+        (root / "Z.db").unlink()
+        after = take(root, Caps(max_files=2))
+        record = classify(before, after, mode="ro", scope=[], others=[])
+    assert record["counts"]["out_of_scope"]["created"] == 0, record["paths"]
+    assert record["status"] == "incomplete"

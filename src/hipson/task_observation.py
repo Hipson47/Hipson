@@ -58,20 +58,21 @@ class Caps:
                 raise ValueError(f"Observation {name} must be a positive integer")
 
 
-def _fold(path: str) -> str:
-    return path.casefold() if _FOLD else path
-
-
-def _component(part: str) -> str:
-    if redact_text(part) == part:
-        return part
-    return _HASHED + hashlib.sha256(part.encode("utf-8", "surrogatepass")).hexdigest()
+def _digest_text(text: str) -> str:
+    return _HASHED + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def _key(path: str) -> str:
-    """Stored identity of a path: each secret-shaped component becomes a NUL-marked digest, so prefixes (scope,
-    unreadable directories) still match; case-folded where the filesystem is case-insensitive."""
-    return "/".join(_component(part) for part in _fold(path).split("/"))
+    """Stored identity of a path, exact and case-preserving (distinct files never share a key).
+
+    Each secret-shaped component becomes a NUL-marked digest, so prefixes (scope, unreadable directories) still
+    match. Detection runs on the original text; a secret spanning separators hashes the whole path.
+    """
+    parts = [part if redact_text(part) == part else _digest_text(part) for part in path.split("/")]
+    remainder = "/".join("-" if part.startswith(_HASHED) else part for part in parts)
+    if redact_text(remainder) != remainder:
+        return _digest_text(path)
+    return "/".join(parts)
 
 
 def _hashed(key: str) -> bool:
@@ -230,10 +231,23 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
     return changes, metadata, reasons
 
 
+def _same(left: str, right: str) -> bool:
+    # Case-insensitive filesystems (default on Windows and macOS) compare plain components without case.
+    if left == right:
+        return True
+    return _FOLD and not left.startswith(_HASHED) and not right.startswith(_HASHED) and left.casefold() == right.casefold()
+
+
 def _covered(key: str, scope: Sequence[str]) -> bool:
     """Scope match on encoded keys, so redacted text can never stand in for a different real path."""
-    return any(item == "." or key == _key(item.rstrip("/")) or key.startswith(_key(item.rstrip("/")) + "/")
-               for item in scope)
+    parts = key.split("/")
+    for item in scope:
+        if item == ".":
+            return True
+        claimed = _key(item.rstrip("/")).split("/")
+        if len(claimed) <= len(parts) and all(_same(a, b) for a, b in zip(parts, claimed, strict=False)):
+            return True
+    return False
 
 
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],
