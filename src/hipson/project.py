@@ -157,7 +157,7 @@ def discover_package_commands(project: Path) -> list[str]:
         manager = "yarn"
 
     commands = []
-    for name in ("dev", "test", "lint", "typecheck", "build"):
+    for name in ("test", "lint", "typecheck", "build", "check"):
         if name in scripts:
             if manager == "yarn":
                 commands.append(f"yarn {name}")

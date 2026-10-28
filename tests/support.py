@@ -23,6 +23,7 @@ PLATFORM_SKIP_REASONS = {
         "requires POSIX directory mode bits and geteuid; Windows ACL errors are mocked separately",
         "Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege",
         "requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C",
+        "requires POSIX process inspection for verification descendant cleanup",
     },
 }
 

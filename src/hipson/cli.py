@@ -106,7 +106,7 @@ def _open_existing_session_store(args: argparse.Namespace) -> tuple[Path, Sessio
     db_path = _session_db_path(args)
     if not db_path.exists():
         return db_path, None
-    return db_path, open_session_store(db_path)
+    return db_path, open_session_store(db_path, read_only=True)
 
 
 def _positive_limit(value: int, *, default: int = 20, maximum: int = 100) -> int:
@@ -224,6 +224,9 @@ def command_scan_many(args: argparse.Namespace) -> int:
     records = []
     for repo in repos:
         repo = dict(repo)
+        if not isinstance(repo.get("path"), str) or not str(repo["path"]).strip():
+            print(f"Invalid registry entry {repo.get('name', '<unnamed>')!r}: path is required", file=sys.stderr)
+            return 1
         repo["path"] = str(resolve_project_from_registry(str(repo["path"]), registry))
         records.append(build_scan_record(repo, include_diff=args.include_diff))
     write_output(render_multi_scan(records), args.output)
@@ -1174,6 +1177,8 @@ def command_packet_review(args: argparse.Namespace) -> int:
         project_mod.command_review_packet(args)
         return 0
     except SystemExit as exc:
+        if exc.code is not None and not isinstance(exc.code, int):
+            print(exc, file=sys.stderr)
         return int(exc.code or 0) if isinstance(exc.code, int) else 1
 
 
@@ -1182,6 +1187,8 @@ def command_packet_exec(args: argparse.Namespace) -> int:
         project_mod.command_executor_packet(args)
         return 0
     except SystemExit as exc:
+        if exc.code is not None and not isinstance(exc.code, int):
+            print(exc, file=sys.stderr)
         return int(exc.code or 0) if isinstance(exc.code, int) else 1
 
 

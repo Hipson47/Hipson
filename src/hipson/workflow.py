@@ -112,7 +112,7 @@ def build_work_plan(
         verification=verification_commands[0],
         allow_unsafe_output=allow_unsafe_output,
     )
-    preflight_plan = _packet_preflight_plan(packet_plan["path"])
+    preflight_plan = _packet_preflight_plan(packet_plan["path"], project=project)
     quality_plan = _ai_quality_plan(
         enabled=ai_quality or ai_free or bool(ai_agent) or bool(ai_model) or bool(ai_profile),
         free=ai_free,
@@ -350,7 +350,9 @@ def _packet_plan(
     mode = route["mode"]
     packet_mode = _packet_mode(mode)
     default_output = "runs/review-packet.md" if packet_mode == "review" else "runs/executor-packet.md"
-    output = packet_output or default_output
+    raw_output = packet_output or default_output
+    output_path = Path(raw_output).expanduser()
+    output = str((project / output_path).resolve())
     command = _packet_command(
         packet_mode=packet_mode,
         project=project,
@@ -379,7 +381,7 @@ def _packet_plan(
             acceptance=acceptance,
             verification=verification,
         )
-        _write_packet(output, packet_text, cwd=project, allow_unsafe_output=allow_unsafe_output)
+        _write_packet(raw_output, packet_text, cwd=project, allow_unsafe_output=allow_unsafe_output)
         written = True
         reason = "packet written locally"
     return {
@@ -391,11 +393,11 @@ def _packet_plan(
     }
 
 
-def _packet_preflight_plan(packet_path: str) -> PacketPreflightPlan:
+def _packet_preflight_plan(packet_path: str, *, project: Path) -> PacketPreflightPlan:
     path = Path(packet_path)
     output = str(path.with_suffix(".preflight.json")) if path.suffix else f"{packet_path}.preflight.json"
     return {
-        "command": _command("hipson", "packet", "preflight", packet_path, "-o", output, "--json"),
+        "command": f"cd {shlex.quote(str(project))} && " + _command("hipson", "packet", "preflight", packet_path, "-o", output, "--json"),
         "output": output,
         "required_before_sidecar": True,
         "reason": "Local packet safety gate before any provider-backed sidecar call.",

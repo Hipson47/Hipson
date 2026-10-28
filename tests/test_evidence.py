@@ -9,9 +9,9 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-from hipson import contracts, evidence, hermes, mcp_server, memory, run_control, workflow
+from hipson import contracts, evidence, hermes, mcp_server, memory, review_kit, run_control, workflow
 from hipson.redaction import REDACTION, redact_value
-from tests.test_hipson_helpers import REPO_ROOT, run_cli, run_cli_inprocess
+from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_cli, run_cli_inprocess
 from tests.test_ledger import _strict_errors
 
 
@@ -362,9 +362,13 @@ def test_work_output_redacts_task_commands_and_nested_fields(tmp_path: Path):
 
 
 def test_release_claim_copies_redacted_for_allowed_and_blocked(tmp_path: Path):
+    repo = init_git_repo(tmp_path)
+    tmp_path = Path(review_kit.run_review_kit(project_path=repo)["run_dir"])
+    # Claim redaction is exercised on a complete, passing bundle; missing artifacts block claims.
+    audit_base = json.loads((tmp_path / "audit.json").read_text(encoding="utf-8"))
     secret = "sk-claim-secret123456789012"
     for allowed in (True, False):
-        audit = {"latest_gates": {"release_claim_gate": "passed" if allowed else "blocked", "verification_gate": "passed",
+        audit = {**audit_base, "latest_gates": {"release_claim_gate": "passed" if allowed else "blocked", "verification_gate": "passed",
                                   "auth": {"credentials": ["short-claim-secret"], "cookie": None}}}
         (tmp_path / "audit.json").write_text(json.dumps(audit), encoding="utf-8")
         claim = run_control.build_release_claim(tmp_path, claim=f"Ready {secret}", human_decision="approved")

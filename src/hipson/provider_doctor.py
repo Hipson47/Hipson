@@ -20,7 +20,7 @@ def doctor_payload(*, config_path: str | None = None, env_path: str | None = Non
             continue
         provider_results[str(name)] = _provider_status(provider)
     agent_results = _agent_results(config)
-    config_ok = all(item.get("ok") for item in provider_results.values()) and all(item.get("ok") for item in agent_results.values())
+    config_ok = bool(provider_results and agent_results) and all(item.get("ok") for item in provider_results.values()) and all(item.get("ok") for item in agent_results.values())
     ready_for_real_run = config_ok and all(item.get("api_key_present") for item in provider_results.values())
     return {
         "ok": config_ok,
@@ -92,6 +92,8 @@ def _recommendations(
     agent_results: dict[str, dict[str, Any]],
 ) -> list[str]:
     recommendations = []
+    if not provider_results or not agent_results:
+        recommendations.append("Configure at least one provider and one agent before attempting real sidecar runs.")
     if any(not provider.get("api_key_present") for provider in provider_results.values()):
         recommendations.append("Provider API keys are optional, but real sidecar runs need the configured env var.")
     if any(not provider.get("url_ok") for provider in provider_results.values()):

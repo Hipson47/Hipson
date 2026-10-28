@@ -38,6 +38,11 @@ RERUN_STEPS = (
 )
 
 
+def _require_preflight(preflight: dict[str, Any]) -> None:
+    if preflight.get("ok") is not True:
+        raise SystemExit(f"Packet preflight failed: {'; '.join(str(error) for error in preflight.get('errors', []))}")
+
+
 def run_review_kit(
     *,
     task: str = "review current diff",
@@ -109,6 +114,7 @@ def run_review_kit(
         cwd=project,
         allow_unsafe_output=allow_unsafe_output,
     )
+    _require_preflight(preflight)
 
     sidecar_status = _sidecar_status(plan_payload, run_sidecar=run_sidecar)
     sidecar_path: Path | None = None
@@ -267,9 +273,12 @@ def resume_review_kit(
         _write_json(paths["contract"], agent_contract.build_agent_contract(project))
         (updated if contract_exists else created).append(paths["contract"].name)
 
-    if "preflight" in rerun or not paths["preflight"].exists():
+    preflight = packet_preflight.preflight_packet(paths["packet"])
+    previous_preflight = _load_json(paths["preflight"]) if paths["preflight"].exists() else {}
+    if "preflight" in rerun or not previous_preflight or any(
+        previous_preflight.get(key) != preflight.get(key) for key in ("sha256", "ok", "errors", "max_chars")
+    ):
         preflight_exists = paths["preflight"].exists()
-        preflight = packet_preflight.preflight_packet(paths["packet"])
         packet_preflight.write_preflight(
             preflight,
             paths["preflight"],
@@ -277,6 +286,7 @@ def resume_review_kit(
             allow_unsafe_output=allow_unsafe_output,
         )
         (updated if preflight_exists else created).append(paths["preflight"].name)
+    _require_preflight(preflight)
 
     sidecar_status = _sidecar_status(plan_payload, run_sidecar=run_sidecar)
     sidecar_path = paths["sidecar"] if paths["sidecar"].exists() else None
@@ -318,7 +328,9 @@ def resume_review_kit(
 
     quality_exists = paths["quality"].exists()
     quality_changed = False
-    if "quality" in rerun or not quality_exists or verification_changed or sidecar_created:
+    previous_quality = _load_json(paths["quality"]) if quality_exists else {}
+    decision_changed = previous_quality.get("decision") != decision
+    if "quality" in rerun or not quality_exists or verification_changed or sidecar_created or decision_changed:
         quality_report = quality.build_quality_report(
             work_path=paths["work"],
             verification_path=paths["verification"],
@@ -334,7 +346,7 @@ def resume_review_kit(
         (updated if quality_exists else created).append(paths["quality"].name)
         quality_changed = True
     else:
-        quality_report = _load_json(paths["quality"])
+        quality_report = previous_quality
 
     quality_eval_exists = paths["quality_eval"].exists()
     quality_eval_changed = False

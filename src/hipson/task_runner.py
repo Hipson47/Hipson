@@ -41,14 +41,20 @@ def git_redirecting_variable(key: str) -> bool:
 
 
 def supervise(command: list[str], *, cwd: str | None = None, capture: bool = False,
-              timeout: float | None = None) -> tuple[int, bytes, bytes]:
+              timeout: float | None = None, contain: bool = False) -> tuple[int, bytes, bytes]:
     """Run a Hipson supervisor (task run / task verify) and let it clean up on cancellation.
 
     On POSIX the supervisor leads its own session, so terminal signals reach only this caller: forward
     them instead of letting Python kill the supervisor and orphan its tree. On Windows it shares the
     console and receives Ctrl+C itself, so keep waiting for its cleanup. A timeout asks the supervisor
     to stop (SIGTERM / terminate), allows a grace period, then kills it and raises TimeoutExpired.
+    Raw commands opt into a dedicated supervisor so descendant tracking never includes the caller's
+    other children. Existing task supervisors already provide their own containment.
     """
+    if contain:
+        command = [sys.executable, '-c',
+                   'import sys; from hipson.task_runner import supervise_command; '
+                   'sys.exit(supervise_command(sys.argv[1:]))', *command]
     pipe = subprocess.PIPE if capture else None
     child = subprocess.Popen(command, cwd=cwd, stdout=pipe, stderr=pipe)
 
@@ -85,6 +91,58 @@ def supervise(command: list[str], *, cwd: str | None = None, capture: bool = Fal
     finally:
         for number, handler in previous.items():
             signal.signal(number, handler)
+
+
+def supervise_command(command: list[str]) -> int:
+    """Internal raw-command supervisor; isolate process ownership from the calling interpreter."""
+    windows = sys.platform == 'win32'
+    if not windows:
+        os.setsid()
+    signum = 0
+
+    def interrupted(number: int, frame: object) -> None:
+        nonlocal signum
+        signum = number
+
+    signals = (signal.SIGINT, signal.SIGTERM) if windows else (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    previous = {number: signal.signal(number, interrupted) for number in signals}
+    tree: ProcessTree | None = None
+    job: Job | None = None
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        if windows:
+            job = Job()
+            job.protect_runner()
+        else:
+            tree = ProcessTree()
+        launch, env = batch_command(command, dict(os.environ), 'HIPSON_VERIFY_ARG_') if windows else (command, dict(os.environ))
+        child = subprocess.Popen(launch, env=env,
+                                 creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]
+        if tree:
+            tree.child = child
+        if job:
+            job.attach(child)
+        while child.poll() is None and not signum:
+            if tree:
+                tree.members()
+            time.sleep(0.05)
+        return 128 + signum if signum else int(child.returncode or 0)
+    except FileNotFoundError as exc:
+        print(exc, file=sys.stderr)
+        return 127
+    finally:
+        try:
+            if child is not None:
+                if not _stop(child, job, signal.SIGTERM, 1, tree):
+                    raise OSError('could not confirm verification process cleanup')
+                child.wait(timeout=5)
+        finally:
+            if job:
+                job.close()
+            if tree:
+                tree.close()
+            for number, handler in previous.items():
+                signal.signal(number, handler)
 
 
 class RunParser(argparse.ArgumentParser):

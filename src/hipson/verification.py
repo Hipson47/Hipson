@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 import time
@@ -12,10 +13,12 @@ from typing import Any
 from hipson import output_policy
 from hipson.contracts import VerificationResult, sha256_text, timestamp
 from hipson.redaction import redact_text
+from hipson.task_runner import supervise
 
 MAX_OUTPUT_CHARS = 12000
 DEFAULT_TIMEOUT = 120
-DISALLOWED_TOKENS = {";", "&&", "||", "|", ">", ">>", "<", "$(", "`"}
+# Tokenize quoted/escaped argument data separately from unquoted shell operators.
+SHELL_TOKENS = re.compile(r"'[^']*'|\"(?:\\.|[^\"\\])*\"|\\.|[;&|<>`]+|\$\(|[\r\n]")
 
 
 def load_work_plan(path: str | Path) -> dict[str, Any]:
@@ -93,14 +96,14 @@ def default_verification_output(work_plan: dict[str, Any]) -> Path:
 
 
 def parse_command(command: str) -> list[str]:
-    if any(token in command for token in DISALLOWED_TOKENS):
-        raise SystemExit(f"Refusing verification command with shell control syntax: {command}")
     try:
         argv = shlex.split(command)
     except ValueError as exc:
         raise SystemExit(f"Invalid verification command: {exc}") from None
     if not argv:
         raise SystemExit("Verification command cannot be empty")
+    if any(token[0] not in "'\"\\" for token in SHELL_TOKENS.findall(command)):
+        raise SystemExit(f"Refusing verification command with shell control syntax: {command}")
     return argv
 
 
@@ -109,27 +112,23 @@ def _run_one(*, command: str, cwd: Path, timeout: int) -> VerificationResult:
     started = time.monotonic()
     started_at = timestamp()
     try:
-        proc = subprocess.run(
+        exit_code, stdout_bytes, stderr_bytes = supervise(
             argv,
             cwd=str(cwd),
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
+            capture=True,
             timeout=timeout,
-            check=False,
+            contain=True,
         )
-        exit_code = proc.returncode
-        stdout = proc.stdout
-        stderr = proc.stderr
+        stdout = stdout_bytes.decode("utf-8", errors="replace")
+        stderr = stderr_bytes.decode("utf-8", errors="replace")
     except FileNotFoundError as exc:
         exit_code = 127
         stdout = ""
         stderr = str(exc)
     except subprocess.TimeoutExpired as exc:
         exit_code = 124
-        stdout = exc.stdout if isinstance(exc.stdout, str) else ""
-        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
         stderr = stderr or f"Timed out after {timeout}s"
     ended_at = timestamp()
     duration_ms = int((time.monotonic() - started) * 1000)
