@@ -27,7 +27,7 @@ from hipson import ledger
 from hipson.redaction import is_sensitive_path, redact_text
 from hipson.task_verification import _TOOL_CACHE_DIRS
 
-FORMAT = 2
+FORMAT = 3
 MAX_FILES = 20_000
 MAX_HASH_BYTES = 256 * 1024 * 1024
 MAX_DEPTH = 64
@@ -43,7 +43,8 @@ UNCERTAINTY = ("Filesystem observation of the project tree before and after the 
                "unattributed.")
 # Case-insensitive defaults on Windows and macOS: scope comparison follows the filesystem, not the spelling.
 _FOLD = sys.platform in ("win32", "darwin")
-_HASHED = "sha256:"
+# Real file names never contain NUL, so a NUL-led component cannot collide with a literal name.
+_HASHED = "\0"
 
 
 @dataclass(frozen=True)
@@ -61,9 +62,20 @@ def _fold(path: str) -> str:
     return path.casefold() if _FOLD else path
 
 
+def _component(part: str) -> str:
+    if redact_text(part) == part:
+        return part
+    return _HASHED + hashlib.sha256(part.encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def _key(path: str) -> str:
-    """Stored identity of a path: the path itself, or a digest when its name looks like a secret."""
-    return path if redact_text(path) == path else _HASHED + hashlib.sha256(path.encode("utf-8", "surrogatepass")).hexdigest()
+    """Stored identity of a path: each secret-shaped component becomes a NUL-marked digest, so prefixes (scope,
+    unreadable directories) still match; case-folded where the filesystem is case-insensitive."""
+    return "/".join(_component(part) for part in _fold(path).split("/"))
+
+
+def _hashed(key: str) -> bool:
+    return _HASHED in key
 
 
 def _order(key: str) -> tuple[str, ...]:
@@ -80,8 +92,8 @@ def _digest(path: str, info: os.stat_result) -> tuple[str | None, int]:
         return None, 0
     with os.fdopen(descriptor, "rb") as source:
         opened = os.fstat(source.fileno())
-        same = stat.S_ISREG(opened.st_mode) and opened.st_size == info.st_size and (
-            not info.st_ino or (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino))
+        same = (stat.S_ISREG(opened.st_mode) and opened.st_size == info.st_size and bool(info.st_ino)
+                and (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino))
         if not same:
             return None, 0
         digest, read = hashlib.sha256(), 0
@@ -95,7 +107,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
     """Snapshot paths (never contents) under the project in a bounded, deterministic walk."""
     caps = caps or Caps()
     root = Path(project).resolve()
-    skip = {_fold(item) for item in exclude}
+    skip = set(exclude)
     entries: dict[str, list[Any]] = {}
     reasons: list[str] = []
     unreadable: list[str] = []
@@ -131,7 +143,7 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                 break
             visited += len(items)
             for child in sorted(items, key=lambda item: item.name, reverse=True):
-                if child.name in EXCLUDED_NAMES or _fold(relative + child.name) in skip:
+                if child.name in EXCLUDED_NAMES or _key(relative + child.name) in skip:
                     continue
                 try:
                     directory = child.is_dir(follow_symlinks=False)
@@ -143,7 +155,8 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                 last = _key(relative.rstrip("/"))
             continue
         try:
-            info = entry.stat(follow_symlinks=False)
+            # On Windows DirEntry.stat() reports no inode; lstat() does, and hashing needs that identity.
+            info = os.lstat(absolute) if sys.platform == "win32" else entry.stat(follow_symlinks=False)
         except OSError:
             unreadable.append(_key(relative))
             reasons.append("unreadable file: " + redact_text(relative))
@@ -161,6 +174,8 @@ def take(project: str | Path, caps: Caps | None = None, *, exclude: Sequence[str
                 pass  # Secret files are compared by size and mtime only: no digest of their content anywhere.
             elif hashed + info.st_size > caps.max_hash_bytes:
                 reasons.append(f"hash budget {caps.max_hash_bytes} bytes reached")
+            elif not info.st_ino:
+                reasons.append("file identity unavailable, compared by size and mtime: " + redact_text(relative))
             else:
                 digest, read = _digest(absolute, info)
                 hashed += read
@@ -184,11 +199,11 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
     old, new = before["entries"], after["entries"]
 
     def comparable(key: str) -> bool:
-        if key in hidden or any(not key.startswith(_HASHED) and key.startswith(prefix + "/") for prefix in hidden):
+        if key in hidden or any(key.startswith(prefix + "/") for prefix in hidden):
             return False
         if not bounds:
             return True
-        if any(bound is None or bound.startswith(_HASHED) for bound in bounds) or key.startswith(_HASHED):
+        if any(bound is None or _hashed(bound) for bound in bounds) or _hashed(key):
             return key in old and key in new  # No usable order bound: only paths seen in both snapshots.
         return _order(key) <= min(_order(bound) for bound in bounds)
 
@@ -215,9 +230,10 @@ def diff(before: dict[str, Any], after: dict[str, Any]) -> tuple[dict[str, list[
     return changes, metadata, reasons
 
 
-def _covered(path: str, scope: Sequence[str]) -> bool:
-    key = _fold(path)
-    return any(item == "." or key == _fold(item) or key.startswith(_fold(item).rstrip("/") + "/") for item in scope)
+def _covered(key: str, scope: Sequence[str]) -> bool:
+    """Scope match on encoded keys, so redacted text can never stand in for a different real path."""
+    return any(item == "." or key == _key(item.rstrip("/")) or key.startswith(_key(item.rstrip("/")) + "/")
+               for item in scope)
 
 
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],
@@ -230,9 +246,8 @@ def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope:
     for change in CHANGES:
         for key in changes[change]:
             display = (after["entries"].get(key) or before["entries"][key])[0]
-            path = display if key.startswith(_HASHED) else key  # Secret-shaped names match scope as redacted text.
-            holders = [assignment for assignment, claimed in others if _covered(path, claimed)]
-            if mode == "rw" and _covered(path, scope):
+            holders = [assignment for assignment, claimed in others if _covered(key, claimed)]
+            if mode == "rw" and _covered(key, scope):
                 group = "in_scope"
             elif holders:
                 group = "unattributed"
@@ -302,7 +317,7 @@ def ledger_exclusions(db: Path, project: str | Path) -> list[str]:
     excluded = []
     for path in candidates:
         try:
-            excluded.append(path.relative_to(root).as_posix())
+            excluded.append(_key(path.relative_to(root).as_posix()))
         except ValueError:
             continue
     return excluded
@@ -333,8 +348,8 @@ def start_failed(db: Path, assignment: str, reason: str) -> None:
 def _baseline(db: Path, assignment: str) -> dict[str, Any] | None:
     try:
         payload = json.loads(baseline_path(db, assignment).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
+    except (FileNotFoundError, NotADirectoryError):
+        return None  # No baseline (a broken baseline directory is handled by the runner's own record).
     except (OSError, ValueError) as exc:
         return {"error": f"baseline unreadable: {type(exc).__name__}"}
     return payload if isinstance(payload, dict) else {"error": "baseline malformed"}
@@ -345,8 +360,9 @@ def capture_after(db: Path, assignment: str) -> tuple[dict[str, Any], str] | Non
     before = _baseline(db, assignment)
     if not before or "error" in before or before.get("format") != FORMAT:
         return None
-    stamp = ledger._timestamp()
-    return take(before["root"], Caps(**before["caps"]), exclude=before.get("exclude", [])), stamp
+    snapshot = take(before["root"], Caps(**before["caps"]), exclude=before.get("exclude", []))
+    # The window ends when the walk is complete: a writer starting during the walk may appear in it.
+    return snapshot, ledger._timestamp()
 
 
 def complete(db: Path, assignment: str, *, after: tuple[dict[str, Any], str] | None = None) -> ledger.Assignment | None:
@@ -369,8 +385,10 @@ def complete(db: Path, assignment: str, *, after: tuple[dict[str, Any], str] | N
         record = unobserved(item["mode"], "baseline from another Hipson version")
     else:
         try:
-            snapshot, stamp = after or (take(before["root"], Caps(**before["caps"]), exclude=before.get("exclude", [])),
-                                        ledger._timestamp())
+            if after is None:
+                after = (take(before["root"], Caps(**before["caps"]), exclude=before.get("exclude", [])),
+                         ledger._timestamp())
+            snapshot, stamp = after
             with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
                 others = store.overlapping_writers(assignment, until=stamp)
             record = classify(before, snapshot, mode=item["mode"], scope=item["scope"], others=others)
@@ -409,6 +427,6 @@ def summary(record: dict[str, Any] | None) -> str:
     parts = [f"{group.replace('_', ' ')}: " + ", ".join(f"{count} {change}" for change, count in counts.items() if count)
              for group, counts in record["counts"].items() if any(counts.values())]
     if record["status"] == "incomplete":
-        return (f"incomplete, not a clean result ({'; '.join(record['incomplete_reasons'][:3])})"
+        return (f"incomplete, not a clean result ({'; '.join(record.get('incomplete_reasons', [])[:3])})"
                 + (f"; observed {'; '.join(parts)}" if parts else ""))
     return f"{record['status']}: {'; '.join(parts) or 'no changes observed'}"

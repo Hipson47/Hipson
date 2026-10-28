@@ -137,7 +137,8 @@ def test_secret_files_are_compared_without_any_content_digest(tmp_path):
     root = _tree(tmp_path)
     (root / ".env").write_text("TOKEN=one\n")
     before = take(root)
-    assert before["entries"][".env"][4] is None and before["entries"]["README.md"][4] is not None
+    keys = task_observation._key
+    assert before["entries"][keys(".env")][4] is None and before["entries"][keys("README.md")][4] is not None
     (root / ".env").write_text("TOKEN=two-longer\n")
     record = classify(before, take(root), mode="rw", scope=["src"], others=[])
     assert record["paths"] == [{"path": ".env", "change": "modified", "attribution": "out_of_scope",
@@ -328,7 +329,7 @@ def test_baseline_never_stores_secret_shaped_names(tmp_path):
     db = tmp_path / "ledger.sqlite"
     task_observation.start(db, "A-0001", root, Caps())
     stored = task_observation.baseline_path(db, "A-0001").read_text(encoding="utf-8")
-    assert secret not in stored and "sha256:" in stored
+    assert secret not in stored and "\\u0000" in stored  # NUL-marked digest component, JSON-escaped.
     (root / "src" / f"{secret}.txt").write_text("changed")
     before = json.loads(stored)
     record = classify(before, take(root), mode="rw", scope=["src"], others=[])
@@ -486,3 +487,113 @@ def test_orphan_recovery_inside_assign_and_mcp_reap_complete_observations(tmp_pa
         item = store.activity(orphan)
     assert item["status"] == "cancelled" and item["changes"]["counts"]["out_of_scope"]["created"] == 1
     assert task_observation.pending(db) == []
+
+
+def test_a_literal_name_cannot_collide_with_an_encoded_secret_component(tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("Windows file names cannot contain ':'")
+    root = _tree(tmp_path)
+    secret = "ghp_" + "c" * 36
+    (root / f"{secret}.txt").write_text("one")
+    encoded = task_observation._key(f"{secret}.txt")
+    (root / encoded.replace("\0", "sha256:")).write_text("two")  # The old marker, as a literal file name.
+    before = take(root)
+    assert len([key for key in before["entries"] if key not in ("README.md",)]) >= 2
+    (root / f"{secret}.txt").write_text("changed")
+    record = classify(before, take(root), mode="rw", scope=["src"], others=[])
+    assert record["counts"]["out_of_scope"]["modified"] == 1
+
+
+def test_unreadable_secret_shaped_directory_hides_its_descendants(tmp_path):
+    root = _tree(tmp_path)
+    secret_dir = root / "src" / ("ghp_" + "d" * 36)
+    secret_dir.mkdir()
+    (secret_dir / "file.py").write_text("x")
+    before = take(root)
+    scandir = os.scandir
+
+    def failing(path):
+        if str(path).endswith("d" * 36):
+            raise PermissionError("denied")
+        return scandir(path)
+
+    with patch.object(task_observation.os, "scandir", side_effect=failing):
+        after = take(root)
+    record = classify(before, after, mode="ro", scope=[], others=[])
+    assert record["counts"]["out_of_scope"]["deleted"] == 0 and record["status"] == "incomplete"
+
+
+def test_redacted_text_never_satisfies_a_scope(tmp_path):
+    root = _tree(tmp_path)
+    secret_dir = root / "src" / ("ghp_" + "e" * 36)
+    secret_dir.mkdir()
+    (secret_dir / "file.py").write_text("x")
+    redacted_scope = task_observation.redact_text(f"src/{'ghp_' + 'e' * 36}/file.py")
+    assert redacted_scope != f"src/{'ghp_' + 'e' * 36}/file.py"
+    record = _observe(root, lambda root: (secret_dir / "file.py").write_text("y"), scope=(redacted_scope,))
+    assert record["counts"]["out_of_scope"]["modified"] == 1 and record["counts"]["in_scope"]["modified"] == 0
+    exact = _observe(root, lambda root: (secret_dir / "file.py").write_text("z"), scope=("src",))
+    assert exact["counts"]["in_scope"]["modified"] == 1
+
+
+def test_files_without_an_identity_are_not_hashed(tmp_path):
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"abc")
+    info = os.stat_result((stat_mode(path), 0, 0, 1, 0, 0, 3, 0, 0, 0))
+    assert task_observation._digest(str(path), info) == (None, 0)
+
+
+def stat_mode(path: Path) -> int:
+    return path.lstat().st_mode
+
+
+def test_secret_shaped_ledger_exclusions_are_encoded(tmp_path):
+    project = _tree(tmp_path)
+    db = project / ("ghp_" + "f" * 36 + ".sqlite")
+    stored = json.dumps(task_observation.ledger_exclusions(db, project))
+    assert "f" * 36 not in stored and "\\u0000" in stored
+
+
+def test_window_end_is_taken_after_the_final_walk(tmp_path):
+    root = _tree(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    task_observation.start(db, "A-0001", root, Caps())
+    stamps = []
+    real_take = task_observation.take
+
+    def slow_take(*args, **kwargs):
+        stamps.append(("walk", ledger._timestamp()))
+        return real_take(*args, **kwargs)
+
+    with patch.object(task_observation, "take", side_effect=slow_take):
+        _, stamp = task_observation.capture_after(db, "A-0001")
+    assert stamp > stamps[0][1]
+
+
+def test_unwritable_baseline_storage_still_records_unobserved(tmp_path):
+    project = _project(tmp_path)
+    store, task = _ledger(tmp_path, project)
+    store.close()
+    blocker = tmp_path / ".ledger.sqlite.observations"
+    blocker.write_text("not a directory")  # Baseline and failure marker storage both fail.
+    run = subprocess.run([sys.executable, "-P", "-m", "hipson.cli", "task", "run", "--task", task, "--actor", "codex",
+                          "--role", "builder", "--mode", "rw", "--scope", ".", "--observe", "--",
+                          sys.executable, "-c", "pass"], cwd=project, env=_env(tmp_path), capture_output=True,
+                         text=True, timeout=120)
+    assert run.returncode != 0 and "observation baseline" in run.stderr, run.stderr
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite", read_only=True)) as store:
+        changes = store.show(task)["assignments"][0]["changes"]
+    assert changes["status"] == "unobserved" and changes["incomplete_reasons"][0].startswith("baseline failed")
+
+
+def test_legacy_records_without_incomplete_reasons_still_render(tmp_path):
+    root = _tree(tmp_path)
+    store, task = _ledger(tmp_path, root)
+    with closing(store):
+        assignment = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(assignment, result="passed", summary="done")
+        legacy = {"status": "incomplete", "truncated": True, "counts": {}, "paths": [], "caps": {"max_files": 2}}
+        store.connection.execute("UPDATE assignments SET changes = ? WHERE id = ?", (json.dumps(legacy), assignment))
+        changes = store.activity(assignment)["changes"]
+    assert changes["incomplete_reasons"] == []
+    assert task_observation.summary(changes).startswith("incomplete, not a clean result")

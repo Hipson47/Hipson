@@ -315,6 +315,9 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         return
     try:
         observed = task_observation.complete(db, assignment, after=after)
+        if observed is None and getattr(args, "observation_error", None):
+            with closing(ledger.Ledger(db)) as store:
+                observed = store.record_changes(assignment, task_observation.unobserved(args.mode, args.observation_error))
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not record observed changes for {assignment}: {exc}; run 'hipson task reap'")
         return
@@ -460,7 +463,11 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     task_observation.start(db, assignment, str(check['expected']), caps)
                 except (OSError, ValueError) as exc:
                     # Requested but impossible: never launch unobserved, and record why instead of nothing.
-                    task_observation.start_failed(db, assignment, f"baseline failed: {type(exc).__name__}")
+                    reason = f"baseline failed: {type(exc).__name__}"
+                    try:
+                        task_observation.start_failed(db, assignment, reason)
+                    except OSError:
+                        args.observation_error = reason  # Storage itself fails: _finish records it directly.
                     raise OSError(f"could not take the observation baseline: {exc}") from exc
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)

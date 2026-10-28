@@ -544,6 +544,14 @@ def load_task_result(path: str | Path) -> TaskResult:
         raise LedgerError("Invalid worker result JSON: parser resource limit") from exc
 
 
+def _changes(raw: str) -> dict[str, Any]:
+    """Change observations recorded before incomplete_reasons existed still read and render."""
+    record = json.loads(raw)
+    if isinstance(record, dict):
+        record.setdefault("incomplete_reasons", [])
+    return record
+
+
 def _timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -1552,7 +1560,7 @@ class Ledger:
             'failure_journal': json.loads(row['failure_journal']) if 'failure_journal' in row.keys() and row['failure_journal'] else None,
             'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
-            'changes': json.loads(row['changes']) if 'changes' in row.keys() and row['changes'] else None,
+            'changes': _changes(row['changes']) if 'changes' in row.keys() and row['changes'] else None,
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
                           else 'not_required' if legacy or historical else 'unacknowledged'),
         }

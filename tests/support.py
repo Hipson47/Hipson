@@ -25,6 +25,7 @@ PLATFORM_SKIP_REASONS = {
         "requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C",
         "requires POSIX process inspection for verification descendant cleanup",
         "POSIX no-clobber placement only; Windows rename refuses an existing destination",
+        "Windows file names cannot contain ':'",
     },
 }
 
