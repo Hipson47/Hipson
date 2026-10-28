@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
+  `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,
+  removed in 2.0 ([docs/DEPRECATIONS.md](docs/DEPRECATIONS.md)). MCP no longer offers `release.claim`.
+- The agent contract and bootstrap lead with the ledger lifecycle (`lead_task_ledger` workflow, first
+  command `hipson lead resume`, default policy workflow `lead_task_ledger`); `AGENTS.md` and the
+  packaged Codex instructions point at the ledger instead of the Hermes bridge.
+- Worker briefs show a readable gate summary (one line per acceptance check) instead of raw verification
+  JSON; CLI JSON and MCP keep the full `verification` field and add `verification_summary`.
+
 ## 1.6.0 - 2026-10-27
 
 Release notes: [docs/release-1.6.md](docs/release-1.6.md).

@@ -40,12 +40,11 @@ keep the existing standalone behavior.
   `hipson evidence append ...` then `hipson audit show --work ... --json`.
 - Use the human gate for release, security, destructive, credential, and
   irreversible actions. Model output and sidecar findings remain advisory.
-- Keep Codex as the user's primary control surface. The user should not need to
-  invoke Hermes manually for normal work; Codex decides when Hermes adds value.
-- Use `hipson hermes intake --project <repo> --task "<task>"` only when a task
-  benefits from Hermes-side intake/status tracking, scheduling, Telegram/gateway
-  dispatch, or cross-session bus events. For ordinary coding/review work, use
-  `hipson work --task "..."` or `hipson route --task "..."` directly.
+- Track delegated or multi-step work in the task ledger: `hipson lead resume` after
+  context loss, `hipson task open ... --check "<acceptance command>" --start`, workers
+  through `hipson task run`, `hipson task now` / `task ack`, then `hipson task close`.
+- Keep Codex as the user's primary control surface. `autopilot`, `release`,
+  `scheduler`, `chat`, `learn` and `hermes` are deprecated and hidden.
 - Prefer minimal diffs and root-cause fixes.
 - Do not rewrite whole files unnecessarily.
 - Preserve working behavior unless a requested change requires otherwise.

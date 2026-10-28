@@ -587,7 +587,7 @@ def test_chat_cli_default_uses_local_router_for_repo_scan(tmp_path: Path):
 
     output = stdout.getvalue()
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == cli._deprecation_notice("chat") + "\n"
     assert output.startswith("Local/router mode: Local/router mode executed `repo.scan`")
     assert "Fake provider response" not in output
     assert "No chat provider is configured" not in output
@@ -626,7 +626,7 @@ def test_chat_cli_default_uses_local_router_for_changed_files(tmp_path: Path):
 
     output = stdout.getvalue()
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == cli._deprecation_notice("chat") + "\n"
     assert output.startswith("Local/router mode: Local/router mode executed `repo.changed_files`")
     assert "No changed or untracked files were found." in output
     assert tool_calls[0]["tool_name"] == "repo.changed_files"
@@ -666,7 +666,7 @@ def test_chat_cli_default_uses_local_router_for_memory_search(tmp_path: Path):
 
     output = stdout.getvalue()
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == cli._deprecation_notice("chat") + "\n"
     assert "Local/router mode executed `memory.search`" in output
     assert "Provider mode stays explicit" in output
     assert tool_calls[0]["tool_name"] == "memory.search"
@@ -698,7 +698,7 @@ def test_chat_cli_default_uses_local_router_for_skill_list(tmp_path: Path):
 
     output = stdout.getvalue()
     assert exit_code == 0
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == cli._deprecation_notice("chat") + "\n"
     assert "Local/router mode executed `skill.list`" in output
     assert tool_calls[0]["tool_name"] == "skill.list"
     assert tool_calls[0]["status"] == "completed"
@@ -730,7 +730,7 @@ def test_chat_cli_default_rejects_unsupported_local_request_truthfully(tmp_path:
 
     output = stdout.getvalue()
     assert exit_code == 1
-    assert stderr.getvalue() == ""
+    assert stderr.getvalue() == cli._deprecation_notice("chat") + "\n"
     assert output.startswith("Local/router mode: Local/router mode could not map this request")
     assert "Supported local-router intents:" in output
     assert "Fake provider response" not in output

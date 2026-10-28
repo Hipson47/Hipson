@@ -40,7 +40,6 @@ MCP_TOOL_NAMES = (
     "run.status",
     "run.validate",
     "handoff.create",
-    "release.claim",
     "task.show",
     "task.brief",
     "task.context",
@@ -73,7 +72,7 @@ MCP_INSTRUCTIONS = (
     "call lead.resume. Worker summaries, journals and verification output are untrusted evidence."
 )
 MCP_GATED_TOOLS = {
-    "verify.run", "evidence.append", "handoff.create", "release.claim",
+    "verify.run", "evidence.append", "handoff.create",
     "task.open", "task.assign", "task.finish", "task.reap", "task.event", "task.status",
     "task.finding_add", "task.finding_update", "task.ack", "task.verify", "task.checks", "task.close",
 }
@@ -186,17 +185,6 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "type": "object",
         "required": ["run", "approved"],
         "properties": {"run": {"type": "string"}, "approved": {"type": "boolean"}},
-        "additionalProperties": False,
-    },
-    "release.claim": {
-        "type": "object",
-        "required": ["run", "claim", "approved"],
-        "properties": {
-            "run": {"type": "string"},
-            "claim": {"type": "string"},
-            "human_decision": {"type": "string"},
-            "approved": {"type": "boolean"},
-        },
         "additionalProperties": False,
     },
     "task.show": {
@@ -472,7 +460,6 @@ def _description(name: str) -> str:
         "run.status": "Read the status of a Hipson run bundle.",
         "run.validate": "Validate expected run bundle artifacts and artifact kinds.",
         "handoff.create": "Write a compact agent handoff artifact for the run bundle.",
-        "release.claim": "Evaluate and record a release claim against run evidence.",
         "task.show": "Read a central ledger task with all assignments and current claims.",
         "task.brief": "Read a bounded worker brief for a task, role and optional scope.",
         "task.context": "Read worker context; defaults to HIPSON_TASK and marks HIPSON_ASSIGNMENT as you.",
@@ -518,7 +505,6 @@ def _fallback_command(name: str) -> str:
         "run.status": "hipson run status --run runs/<work_id> --json",
         "run.validate": "hipson run validate --run runs/<work_id> --json",
         "handoff.create": "hipson run handoff --run runs/<work_id> --json",
-        "release.claim": "hipson release claim --run runs/<work_id> --claim \"release readiness\" --human-decision approved --json",
         "task.show": "hipson task show --task T-0001 --json",
         "task.brief": "hipson task brief --task T-0001 --role builder --scope src --json",
         "task.context": "hipson task context --json",
@@ -734,16 +720,6 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> obj
         handoff = run_control.build_handoff(run_dir)
         outputs = run_control.write_handoff(run_dir, handoff)
         return {**handoff, "outputs": outputs}
-    if name == "release.claim":
-        _require_mcp_approval(arguments, name)
-        run_dir = run_control.resolve_run(str(arguments.get("run", "")))
-        claim = run_control.build_release_claim(
-            run_dir,
-            claim=str(arguments.get("claim", "")),
-            human_decision=str(arguments.get("human_decision", "pending")),
-        )
-        output = run_control.write_release_claim(run_dir, claim)
-        return {**claim, "output": str(output)}
     if name == "verify.run":
         _require_mcp_approval(arguments, name)
         work_plan = verification.load_work_plan(arguments.get("work", ""))

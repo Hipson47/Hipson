@@ -1951,6 +1951,11 @@ def command_task(args: argparse.Namespace) -> int:
     return 0
 
 
+def _deprecation_notice(command: str) -> str:
+    return (f"hipson {command} is deprecated and hidden since 1.7 and will be removed in 2.0: "
+            f"{agent_contract.DEPRECATED_COMMANDS[command]} (docs/DEPRECATIONS.md)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     lead_quick_reference = (
         "Lead quick reference:\n"
@@ -2781,6 +2786,14 @@ def build_parser() -> argparse.ArgumentParser:
     scheduler_tick.add_argument("--json", action="store_true", help="Print machine-readable tick results")
     scheduler_tick.set_defaults(func=command_scheduler_tick)
 
+    # argparse has no public way to hide a subcommand: drop deprecated ones from the help listing and usage.
+    deprecated = agent_contract.DEPRECATED_COMMANDS
+    subparsers._choices_actions = [action for action in subparsers._choices_actions if action.dest not in deprecated]
+    subparsers.metavar = "{" + ",".join(name for name in subparsers.choices if name not in deprecated) + "}"
+    for name in deprecated:
+        # Subcommands may reuse the `command` dest for their own arguments, so mark the parser itself.
+        subparsers.choices[name].description = _deprecation_notice(name)
+        subparsers.choices[name].set_defaults(deprecated_command=name)
     return parser
 
 
@@ -2794,6 +2807,8 @@ def main(argv: list[str] | None = None) -> int:
             stream.reconfigure(encoding="utf-8", newline=None if stream is sys.stdin else "\n")
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "deprecated_command", None):
+        print(_deprecation_notice(args.deprecated_command), file=sys.stderr)
     return args.func(args)
 
 

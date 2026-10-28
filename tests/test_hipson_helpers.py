@@ -1927,7 +1927,7 @@ def test_agent_bootstrap_emits_stable_json_for_each_target(tmp_path: Path):
         assert payload["target"] == target
         assert payload["project"] == str(repo)
         assert payload["contract_available"] is True
-        assert payload["recommended_first_command"] == "hipson contract show --json"
+        assert payload["recommended_first_command"] == "hipson lead resume --json"
         assert "installed_surfaces" in payload
         assert "fallback_commands" in payload
 
@@ -4454,7 +4454,6 @@ def test_mcp_server_lists_expected_tools_without_provider_calls(tmp_path: Path):
         "run.status",
         "run.validate",
         "handoff.create",
-        "release.claim",
     }.issubset(tool_names)
     for tool in payload["tools"]:
         assert tool["input_schema"]["type"] == "object"

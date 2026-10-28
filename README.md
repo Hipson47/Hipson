@@ -296,10 +296,13 @@ The ledger sits on top of Hipson's existing local workflow layer:
 | Bounded packets for agents | `hipson packet review / exec`, `hipson packet preflight` |
 | Acceptance checks and revision-bound verification | `hipson task open --check`, `hipson task checks`, `hipson task verify`, `hipson task close`, `hipson task do` |
 | Local verification and evidence | `hipson verify run`, `hipson evidence append / show / verify`, `hipson audit show` |
-| Run bundles and release gates | `hipson kit review`, `hipson autopilot`, `hipson run status / validate / handoff`, `hipson release claim` |
-| Memory and sessions | `hipson memory`, `hipson session`, `hipson learn` (approval-gated) |
+| Run bundles | `hipson kit review`, `hipson run status / validate / handoff` |
+| Memory and sessions | `hipson memory`, `hipson session` |
 | Agent integration | `hipson install agents`, `hipson agent bootstrap`, `hipson mcp serve` |
 | Optional AI second opinions | `hipson sidecar route / run`, `hipson quality report / eval` (explicit, advisory) |
+
+Deprecated since 1.7 and hidden (removed in 2.0): `autopilot`, `release`, `scheduler`, `chat`, `learn`,
+`hermes`; see [docs/DEPRECATIONS.md](https://github.com/Hipson47/Hipson/blob/main/docs/DEPRECATIONS.md).
 
 Full command reference and workflows: [docs/USAGE.md](https://github.com/Hipson47/Hipson/blob/main/docs/USAGE.md). All docs: [docs/README.md](https://github.com/Hipson47/Hipson/blob/main/docs/README.md).
 

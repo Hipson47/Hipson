@@ -35,20 +35,23 @@ def build_bootstrap(*, target: str, project_path: str | Path = ".") -> dict[str,
         "project": str(project),
         "contract_available": contract_available,
         "contract_artifact_kind": contract.get("artifact_kind", "") if isinstance(contract, dict) else "",
-        "recommended_first_command": "hipson contract show --json",
-        "recommended_first_tool": "contract.show" if target == "mcp" else "",
+        "recommended_first_command": "hipson lead resume --json",
+        "recommended_first_tool": "lead.resume" if target == "mcp" else "",
         "installed_surfaces": surfaces,
         "policy": {
             "path": policy_payload.get("path", ""),
-            "default_workflow": policy_payload.get("policy", {}).get("default_workflow", "autopilot_review")
+            "default_workflow": policy_payload.get("policy", {}).get("default_workflow", "lead_task_ledger")
             if isinstance(policy_payload.get("policy"), dict)
-            else "autopilot_review",
+            else "lead_task_ledger",
             "local_only": policy_payload.get("policy", {}).get("local_only", True)
             if isinstance(policy_payload.get("policy"), dict)
             else True,
         },
         "warnings": warnings,
         "fallback_commands": [
+            "hipson task now",
+            "hipson task open --project . --title T --objective O --check 'pytest -q' --start",
+            "hipson task close --task T-0001",
             "hipson work --task \"...\" --write-packet --work-output runs/work.json",
             "hipson packet preflight runs/review-packet.md -o runs/preflight.json --json",
             "hipson verify run --work runs/work.json -o runs/verify.json --json",

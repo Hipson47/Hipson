@@ -38,16 +38,13 @@ keep the existing standalone behavior.
 ## Default Behavior (Standalone)
 - Inspect before editing.
 - Understand repo structure first.
-- For non-trivial repo tasks, run `hipson work --task "..."` first to get the
-  provider-free route, scan, packet, verify, memory/handoff, skills, and audit
-  contract. Use `hipson route --task "..."` when you only need the lower-level
-  routing decision.
-- The lead agent (Claude Code or Codex) is the user's primary control surface. The user should not
-  need to invoke Hermes manually for normal work; the lead decides when Hermes adds value.
-- Use `hipson hermes intake --project <repo> --task "<task>"` only when a task
-  benefits from Hermes-side intake/status tracking, scheduling, Telegram/gateway
-  dispatch, or cross-session bus events. For ordinary coding/review work, use
-  `hipson work --task "..."` or `hipson route --task "..."` directly.
+- Track delegated or multi-step work in the task ledger: `hipson lead resume` after context loss,
+  `hipson task open ... --check "<real acceptance command>" --start`, workers through `hipson task run`,
+  `hipson task now` / `task ack` for results, `hipson task close` to verify and finish.
+- `hipson work --task "..."` gives an optional provider-free route, scan, packet, verify and audit plan
+  for a repository task; use `hipson route --task "..."` when you only need the routing decision.
+- The lead agent (Claude Code or Codex) is the user's primary control surface. `autopilot`, `release`,
+  `scheduler`, `chat`, `learn` and `hermes` are deprecated and hidden (docs/DEPRECATIONS.md).
 - Prefer minimal diffs.
 - Fix root cause, not symptoms.
 - Preserve working behavior unless change is required.

@@ -13,7 +13,7 @@ from hipson.redaction import sanitize_path
 POLICY_JSON = Path(".hipson") / "policy.json"
 POLICY_YAML = Path(".hipson") / "policy.yaml"
 DEFAULT_POLICY: dict[str, Any] = {
-    "default_workflow": "autopilot_review",
+    "default_workflow": "lead_task_ledger",
     "denied_paths": [],
     "allowed_paths": [],
     "prompt_required_operations": ["provider_call", "destructive_write", "release_claim", "security_decision"],

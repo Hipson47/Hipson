@@ -2,6 +2,10 @@
 
 Full command reference and workflow guide. The project overview and the task ledger quick start are in the top-level [README](../README.md); the ledger itself is documented in [TASK_LEDGER.md](TASK_LEDGER.md).
 
+Since 1.7, `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes` are deprecated: hidden from
+`hipson --help` and MCP, still callable with a warning, removed in 2.0. Their sections below are marked
+*(deprecated)* and kept for existing scripts; [DEPRECATIONS.md](DEPRECATIONS.md) names each replacement.
+
 ## Feature list
 
 - **Provider-free 1.1 local-first core** for bounded, human-reviewed AI software work.
@@ -9,11 +13,10 @@ Full command reference and workflow guide. The project overview and the task led
   workflow, artifact, risk, path, provider, memory, verification, and adapter policy.
 - **AI Review Control Kit v0** through `hipson kit review`, producing a single
   `runs/<work_id>/` bundle for agent review with resumable missing-step replay.
-- **Agent Autopilot Layer v0** through `hipson install agents`, `hipson agent
-  bootstrap`, `hipson autopilot review`, `hipson autopilot implement`, policy
-  files, and a minimal read-first MCP stdio surface.
+- **Agent integration** through `hipson install agents`, `hipson agent bootstrap`,
+  policy files, and the MCP stdio surface (`hipson autopilot` is deprecated).
 - **Run control artifacts** with `manifest.json`, `handoff.json`, `handoff.md`,
-  run validation, run status, and release-claim evaluation.
+  run validation and run status.
 - **Delta scans** for one repo or many repos from `repos.yaml`.
 - **Codex work briefs** through `hipson work`, joining route, scan, packet,
   verify, memory, and audit guidance into one local contract.
@@ -23,17 +26,14 @@ Full command reference and workflow guide. The project overview and the task led
   second opinions on bounded packets without changing the provider-free default.
 - **Structured packet compiler** for review and implementation subagents.
 - **Local JSONL memory** for durable decisions, risks, handoffs, and source refs.
-- **Runtime session observability** for inspecting SQLite-backed chat sessions.
-- **Explicit OpenAI-compatible runtime provider adapter** for configured real-provider chat.
-- **Approval-gated learning proposals** that can be explicitly applied to local memory.
+- **Runtime session observability** for inspecting SQLite-backed sessions (`hipson chat` and
+  `hipson learn` are deprecated).
 - **Tool registry observability** for reviewing tool risk levels, contracts, and path policies.
 - **MoE-like sidecar routing** from explicit agent metadata in `config/agents.json`.
 - **Optional LLM router** behind `hipson sidecar route --llm`, using only a redacted JSON summary.
 - **OpenRouter sidecars** for optional bounded second opinions.
 - **Codex installer** with dry-run mode, backups, and managed marker blocks.
 - **Agent-readable `SKILLS.md` and deterministic workflow router** for autonomous tool choice.
-- **Hermes Agent bridge** for intake, Telegram-ready dispatch, workflow bus events,
-  and Hipson-governed Codex packets.
 - **Secret redaction and sensitive-path guards** before persistence or provider calls.
 - **Dependency-light runtime** with `uv` and `ruff` for mature development workflow.
 - **Visual direction and optional HyperFrames video sidecars** for bounded UI,
@@ -77,20 +77,13 @@ uv run hipson doctor
 uv run hipson contract show --json
 uv run hipson install agents --codex --dry-run
 uv run hipson agent bootstrap --target codex --json
-uv run hipson autopilot review --task "review current diff" --json
-uv run hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --json
-uv run hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
+uv run hipson kit review --project . --json
+uv run hipson kit review resume --run runs/<work_id> --json
 uv run hipson run status --run runs/<work_id> --json
 uv run hipson run validate --run runs/<work_id> --json
 uv run hipson run handoff --run runs/<work_id> --json
-uv run hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
-uv run hipson kit review --project . --json
-uv run hipson kit review resume --run runs/<work_id> --json
 uv run hipson route --task "security review of auth"
 uv run hipson work --task "security review of auth"
-uv run hipson hermes doctor
-uv run hipson hermes install-skill
-uv run hipson hermes intake --project . --task "review failing CI"
 uv run hipson scan .
 uv run hipson packet review . --title "Review current delta" --include-diff -o runs/review-packet.md
 uv run hipson sidecar route --task "security review of release diff" --risk security
@@ -98,8 +91,7 @@ uv run hipson memory add --scope repo --repo Hipson --kind decision --summary "K
 uv run hipson memory search "sidecar routing"
 ```
 
-`.env` is optional and only needed for provider-backed sidecars or explicit
-`hipson chat --provider openai-compatible` usage. Core local commands do not
+`.env` is optional and only needed for provider-backed sidecars. Core local commands do not
 require API keys or cloud services.
 
 ## Common Commands
@@ -117,13 +109,9 @@ hipson install agents --codex --apply
 hipson agent bootstrap --target codex --json
 hipson agent bootstrap --target cursor --json
 hipson agent bootstrap --target claude --json
-hipson autopilot review --task "review current diff" --verify-profile quick --json
-hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
-hipson autopilot resume --run runs/<work_id> --rerun-step verify --json
 hipson run status --run runs/<work_id> --json
 hipson run validate --run runs/<work_id> --json
 hipson run handoff --run runs/<work_id> --json
-hipson release claim --run runs/<work_id> --claim "release readiness" --human-decision approved --json
 hipson doctor --agent-surfaces --json
 hipson policy show --json
 hipson policy validate
@@ -132,10 +120,6 @@ hipson mcp serve --stdio
 hipson kit review --project . --task "review current diff" --verify-profile quick --json
 hipson kit review --project . --task "review current diff" --verify-profile full --json
 hipson kit review resume --run runs/<work_id> --verify-profile release --rerun-step verify --json
-hipson hermes doctor
-hipson hermes install-skill
-hipson hermes intake --project . --task "review failing CI" --channel telegram
-hipson hermes events list
 hipson scan . --include-diff
 hipson scan . --include-diff -o runs/latest-scan.md
 hipson scan-many repos.yaml -o scans/latest.md --json scans/latest.json
@@ -147,10 +131,6 @@ hipson memory add --scope repo --repo Hipson --kind decision --summary "..."
 hipson memory search "release checklist"
 hipson memory list
 
-hipson chat -q "scan this repo"
-hipson chat --fake -q "offline runtime smoke"
-hipson chat --fake --fake-tool-call repo.changed_files --fake-tool-input '{"path":"."}' -q "check files"
-hipson chat --provider openai-compatible --model openai/gpt-4o-mini -q "scan this repo"
 hipson session list
 hipson session show <session-id>
 hipson session search "runtime hardening"
@@ -158,8 +138,6 @@ hipson session search "runtime hardening" --json
 hipson tool list
 hipson tool show repo.scan
 hipson tool run repo.changed_files '{"path":"."}' --json
-hipson learn propose --session-id <session-id>
-hipson learn apply-memory --session-id <session-id> --proposal-id <proposal-id> --memory-dir memory
 
 hipson sidecar list
 hipson sidecar route --task "architecture security review" --risk security
@@ -211,21 +189,18 @@ some artifacts are deleted, resume without rebuilding the work plan or packet:
 hipson kit review resume --run runs/<work_id> --rerun-step verify --json
 ```
 
-For bounded implementation planning, agents can use the same run bundle with an
-executor packet and explicit edit scope:
+For implementation work, track the worker in the task ledger instead
+(`hipson task do` or `hipson task open ... --check ... --start` plus `hipson task run`); the deprecated
+`hipson autopilot implement` only prepared a packet and launched no worker.
 
-```bash
-hipson autopilot implement --task "implement bounded parser fix" --allowed-edit src/hipson/parser.py,tests --verification "git diff --check" --json
-```
-
-Project policy is enforced before autopilot runs. `denied_paths` block runs when
+Project policy is enforced before kit runs. `denied_paths` block runs when
 the current diff touches protected files, `local_only` blocks provider-backed
 sidecars, and prompt-required operations must be explicitly approved.
 For implementation runs, `--allowed-edit` is checked against project policy:
 `denied_paths` always block, and non-empty `allowed_paths` define the permitted
 write scope.
 
-Every review/autopilot run now also writes run-control artifacts:
+Every kit review run also writes run-control artifacts:
 
 ```text
 runs/<work_id>/
@@ -234,9 +209,8 @@ runs/<work_id>/
   handoff.md
 ```
 
-Use `hipson run validate` before handoff, `hipson run status` for agent
-coordination, and `hipson release claim` to record whether a release/security
-claim is supported by local evidence and a human decision.
+Use `hipson run validate` before handoff and `hipson run status` for agent
+coordination. The deprecated `hipson release claim` is not a release gate.
 
 For manual control of the same steps:
 
@@ -308,9 +282,9 @@ the sidecar command. Free and model-selected sidecars are advisory only; local
 diffs, tests, and human review remain authoritative. Unsafe profile/task
 combinations are blocked before the sidecar command is prepared.
 
-## Runtime Preview
+## Runtime Preview *(deprecated: `chat`, `learn`, `scheduler`)*
 
-The persistent runtime is local and provider-free by default. `hipson chat`
+These commands are hidden since 1.7 and removed in 2.0; `session`, `tool` and `memory` stay. The persistent runtime is local and provider-free by default. `hipson chat`
 uses a deterministic local router for supported safe engineering tasks such as
 repo scans, changed-file summaries, memory search, and skill listing. It runs
 read-only tools through the same registry, approval, path-policy,

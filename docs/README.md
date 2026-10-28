@@ -40,6 +40,7 @@ before running examples.
 - [1.0 readiness](release-1.0.md) — historical 1.0 gates and packaging decisions; for release maintainers.
 - [Releasing](RELEASING.md) — how versions reach PyPI through Trusted Publishing, and the one-time maintainer setup.
 - [Roadmap](ROADMAP.md) — what comes next and the evidence behind the order.
+- [Deprecations](DEPRECATIONS.md) — commands hidden since 1.7 and removed in 2.0, with their replacements.
 - [Release notes 1.5.0](release-1.5.md) — `hipson task verify` and revision-bound acceptance, measured results.
 - [Release notes 1.4.0](release-1.4.md) — activity journal, result acknowledgement, `task now`, `lead resume`, measured results.
 - [Release notes 1.3.0](release-1.3.md) — `hipson init` and `hipson task run`, review fixes and limits.

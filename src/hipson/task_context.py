@@ -97,6 +97,24 @@ class WorkerContext(TypedDict):
     worker_rules: str
     return_evidence: dict[str, Any]
     verification: str
+    verification_summary: str
+
+
+def _verification_summary(state: dict[str, Any]) -> str:
+    """Readable gate status for briefs; the full state stays in the JSON `verification` field."""
+    lines = [f"Gate: {'passing' if state['passing'] else 'not passing'} ({state['freshness']})"]
+    for check in state['checks']:
+        status = '; '.join(check['reasons']) or f"{check['freshness']} by {check['record']}"
+        lines.append(f"- {shlex.join(check['command'])}: {status}")
+    if not state['checks']:
+        latest = state['latest']
+        if latest:
+            lines.append(f"- latest {latest['id']}: {shlex.join(latest['command'])} exit={latest['exit_code']}")
+        lines.extend(f"- {reason}" for reason in state['reasons'])
+    current = state['current'] or {}
+    lines.append(f"Working tree: revision {str(current.get('revision') or 'unknown')[:12]}, "
+                 f"{'dirty' if current.get('dirty') else 'clean'}")
+    return "\n".join(_text(line, limit=900) for line in lines[:MAX_ITEMS + 3])
 
 
 def _text(value: object, *, limit: int = 220) -> str:
@@ -186,6 +204,7 @@ def _build(
         "instructions": ROLE_INSTRUCTIONS[role] if role else "Read the task and coordinate scope with the lead.",
         "evidence_policy": EVIDENCE_POLICY,
         "verification": _text(json.dumps(verification, ensure_ascii=False), limit=10000),
+        "verification_summary": _verification_summary(view['verification']),
         "open_findings": [
             {"id": _text(item["id"]), "severity": _text(item["severity"]), "title": _text(item["title"]),
              "location": _text(item["location"]), "detail": _text(item["detail"], limit=1200),
@@ -220,7 +239,7 @@ def render(view: WorkerContext) -> str:
         lines.append("Scope: not specified.")
     lines.extend(["", "## Evidence policy", "", view["evidence_policy"], ""])
     evidence: list[str] = []
-    evidence.extend(['## Lead verification', '', view['verification'], ''])
+    evidence.extend(['## Lead verification', '', view['verification_summary'], ''])
     if view["you"]:
         evidence.extend(["## You", "", *_assignment_lines([view["you"]]), ""])
     evidence.extend(["## Open findings", ""])

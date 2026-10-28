@@ -15,15 +15,12 @@ verification commands, memory/handoff command, curated skills, and audit
 contract. Use `hipson route --task "..."` when only the lower-level routing
 decision and safe commands are needed.
 
-## Codex-First Hermes Bridge
-Codex remains the user's primary control surface. Do not require the user to
-talk to Hermes for normal software work.
-
-Use `hipson hermes intake --project <repo> --task "<task>"` only when the task
-benefits from Hermes-side status tracking, scheduling, Telegram/gateway
-dispatch, or cross-session bus events. For ordinary coding, review, verification,
-and packet generation, route through `hipson work --task "..."` or
-`hipson route --task "..."` directly.
+## Task Ledger
+Track delegated or multi-step work in the Hipson task ledger: open a task with real
+acceptance checks (`hipson task open ... --check "<command>" --start`), run workers
+through `hipson task run`, read results with `hipson task now`, acknowledge them with
+`hipson task ack`, and finish with `hipson task close`, which runs the checks fresh.
+After context loss, `hipson lead resume` restores the lead's state.
 
 ## When To Use
 - Starting a new project.

@@ -181,7 +181,7 @@ def test_learning_cli_propose_is_redacted_and_does_not_persist_memory(tmp_path: 
 
     rc, stdout, stderr = run_cli("learn", "propose", "--session-id", session_id, "--session-db", str(db_path), "--json")
     assert rc == 0
-    assert stderr == ""
+    assert stderr == cli._deprecation_notice("learn") + "\n"
     assert secret not in stdout
     payload = json.loads(stdout)
     memory_proposal = next(proposal for proposal in payload["proposals"] if proposal["kind"] == "memory")
@@ -218,7 +218,7 @@ def test_learning_cli_apply_memory_explicitly_writes_redacted_note_with_provenan
         "--json",
     )
     assert rc == 0
-    assert stderr == ""
+    assert stderr == cli._deprecation_notice("learn") + "\n"
     assert secret not in stdout
     result = json.loads(stdout)
     assert result["status"] == "applied"
