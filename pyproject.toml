@@ -209,11 +209,11 @@ source_paths = ["src/hipson/ledger.py", "src/hipson/task_verification.py"]
 tests = ["tests/test_gate_contracts.py"]
 
 [tool.hipson.mutation-gate-ledger-core]
-# Fresh full run: 1780 killed / 2406 total, 619 surviving, 7 without tests (local Python 3.13, 4 children).
+# Fresh full run (CI, Python 3.12; identical locally on 3.13): 1780 killed / 2406 total, 619 surviving, 7 without tests.
 measured_on = "2026-10-28"
 mutmut_version = "3.8.0"
-python_version = "3.13"
-elapsed_seconds = 301
+python_version = "3.12"
+elapsed_seconds = 178
 min_killed_percent = 73.98
 min_total = 2406
 max_survived = 619
