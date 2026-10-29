@@ -210,15 +210,16 @@ source_paths = ["src/hipson/ledger.py", "src/hipson/task_verification.py"]
 tests = ["tests/test_gate_contracts.py"]
 
 [tool.hipson.mutation-gate-ledger-core]
-# Fresh full run (local Python 3.12, same as CI): 2031 killed / 2675 total, 637 surviving, 7 without tests.
-# 1.7 change-observation contracts cover more ledger code (2406 -> 2675 mutants); the floor rose 73.98% -> 75.92%
-# (75.925% measured, truncated like the first gate).
+# Fresh full run (local Python 3.12, same as CI): 2072 killed / 2723 total, 644 surviving, 7 without tests.
+# 1.7 change-observation contracts cover more ledger code (2406 -> 2675 mutants); the floor rose 73.98% -> 75.92%.
+# The worker-environment record adds 48 mutants with exact contracts (2675 -> 2723); the score rose to 76.09%
+# (76.094% measured, truncated like the first gate) and the survivor cap follows the larger pool (637 -> 644).
 measured_on = "2026-10-29"
 mutmut_version = "3.8.0"
 python_version = "3.12"
-elapsed_seconds = 314
-min_killed_percent = 75.92
-min_total = 2675
-max_survived = 637
+elapsed_seconds = 334
+min_killed_percent = 76.09
+min_total = 2723
+max_survived = 644
 max_no_tests = 7
 max_timeout = 0

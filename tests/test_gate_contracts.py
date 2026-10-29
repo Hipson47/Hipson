@@ -573,3 +573,44 @@ def _minimal_records_contract(tmp_path):
 def test_minimal_change_records_exact_contract(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         _minimal_records_contract(tmp_path)
+
+
+def _environment_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        minimal = {"mode": "minimal", "names": ["HOME", "PATH"], "allowed": ["GH_TOKEN"], "missing": ["GH_TOKEN"],
+                   "dropped": 4}
+        first = store.assign(task, actor="w", role="explorer", mode="ro", environment=minimal)
+        assert first["environment"] == minimal and store.activity(first["id"])["environment"] == minimal
+        stored = store.connection.execute("SELECT environment FROM assignments WHERE id = ?", (first["id"],)).fetchone()[0]
+        assert json.loads(stored) == minimal
+        inherit = store.assign(task, actor="w", role="explorer", mode="ro", environment={"mode": "inherit", "count": 3})
+        assert inherit["environment"] == {"mode": "inherit", "count": 3}
+        plain = store.assign(task, actor="w", role="explorer", mode="ro")
+        assert plain["environment"] is None
+        assert store.connection.execute("SELECT environment FROM assignments WHERE id = ?",
+                                        (plain["id"],)).fetchone()[0] is None
+        for bad in ({"mode": "all"}, {"mode": None}, {}, ["minimal"], "minimal"):
+            _error(lambda bad=bad: store.assign(task, actor="w", role="explorer", mode="ro", environment=bad),
+                   "environment must be an object with mode inherit or minimal")
+        # A refused record creates nothing.
+        assert len(store.show(task)["assignments"]) == 3
+        secret = "sk-ant-api03-" + "b" * 40
+        redacted = store.assign(task, actor="w", role="explorer", mode="ro",
+                                environment={"mode": "minimal", "names": [secret], "allowed": [], "missing": [],
+                                             "dropped": 0})["environment"]
+        assert secret not in json.dumps(redacted) and redacted["mode"] == "minimal" and redacted["dropped"] == 0
+        assert secret not in store.connection.execute(
+            "SELECT environment FROM assignments ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def test_environment_records_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _environment_contract(tmp_path)
+
+
+
+def test_v9_schema_constants_are_exact():
+    assert ledger.SCHEMA_VERSION == 9
+    assert ledger.MIGRATION_V8_TO_V9 == ("ALTER TABLE assignments ADD COLUMN environment TEXT",
+                                         "UPDATE schema_version SET version = 9 WHERE singleton = 1")
