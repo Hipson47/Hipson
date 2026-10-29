@@ -360,7 +360,7 @@ def test_task_do_forwards_the_environment_options(tmp_path):
     project = _project(tmp_path)
     report = tmp_path / "seen.json"
     done = _hipson(project, tmp_path, "task", "do", "--title", "Env", "--check",
-                   shlex.join([sys.executable, "-c", "pass"]), "--actor", "codex", "--scope", "source.py",
+                   shlex.join([Path(sys.executable).as_posix(), "-c", "pass"]), "--actor", "codex", "--scope", "source.py",
                    "--env", "minimal", "--env-allow", "EXTRA_ALLOWED", "--", *_probe(report))
     assert done.returncode == 0, done.stderr
     seen = json.loads(report.read_text())
