@@ -47,11 +47,11 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         for table in ("claims", "events"):
             assert after[table] == before[table]
         # v7 appends declared acceptance checks, empty for migrated tasks.
-        assert [row[:-1] for row in after["tasks"]] == before["tasks"]
+        assert [row[:-2] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-12] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-12:-3] == (None,) * 9 and row[-2:] == (None, None) for row in after['assignments'])  # v8 changes, v9 environment
-        assert [row[-3] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-13] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-13:-4] == (None,) * 9 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
+        assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -62,7 +62,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-12] == 42  # Reopening never repeats ALTER TABLE (v8 +changes, v9 +environment).
+        assert _rows(store)["assignments"][-1][-13] == 42  # Reopening never repeats ALTER TABLE (v8 +changes, v9 +environment).
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
@@ -162,11 +162,11 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         for table in ("claims", "events"):
             assert after[table] == before[table]
         # v7 appends declared acceptance checks, empty for migrated tasks.
-        assert [row[:-1] for row in after["tasks"]] == before["tasks"]
+        assert [row[:-2] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-7] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-7:-3] == (None,) * 4 and row[-2:] == (None, None) for row in after['assignments'])  # v8 changes, v9 environment
-        assert [row[-3] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-8] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-8:-4] == (None,) * 4 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
+        assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)

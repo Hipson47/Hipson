@@ -134,6 +134,8 @@ def test_v8_ledgers_open_read_only_and_migrate_to_an_empty_environment_column(tm
         task = store.open_task(project=tmp_path, title="Old", objective="Old ledger")["id"]
         store.assign(task, actor="codex", role="builder", mode="ro")
     with closing(sqlite3.connect(db)) as connection:
+        connection.execute("ALTER TABLE assignments DROP COLUMN needs")
+        connection.execute("ALTER TABLE tasks DROP COLUMN needs")
         connection.execute("ALTER TABLE assignments DROP COLUMN environment")
         connection.execute("UPDATE schema_version SET version = 8")
         connection.commit()
@@ -142,7 +144,7 @@ def test_v8_ledgers_open_read_only_and_migrate_to_an_empty_environment_column(tm
     with closing(sqlite3.connect(db)) as connection:
         assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 8
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION == 9
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         assert "environment" in [row[1] for row in store.connection.execute("PRAGMA table_info(assignments)")]
 
 
