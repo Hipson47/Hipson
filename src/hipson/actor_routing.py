@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import shutil
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
@@ -92,7 +91,7 @@ def validate_registry(data: object) -> list[str]:
     if "min_sample" in data and (type(data["min_sample"]) is not int or data["min_sample"] < 1):
         problems.append("min_sample must be a positive integer")
     if "history_weight" in data and not (type(data["history_weight"]) in (int, float)
-                                         and math.isfinite(data["history_weight"]) and 0 < data["history_weight"] <= 1000):
+                                         and 0 < data["history_weight"] <= 1000):  # Range first: no float overflow.
         problems.append("history_weight must be a finite number between 0 (exclusive) and 1000")
     extra = data.get("capabilities", [])
     if not isinstance(extra, list) or not all(isinstance(tag, str) and ledger.NEED_PATTERN.fullmatch(tag)
@@ -337,7 +336,7 @@ def event_summary(route: Mapping[str, Any]) -> str:
     refused = [f"{item['actor']} ({item['reasons'][0]})" for item in route["rejected"][:4]]
     return "; ".join([head, *(["then " + ", ".join(others)] if others else []),
                       *(["rejected " + ", ".join(refused)] if refused else []),
-                      f"registry {route['registry']['version']} {route['registry']['sha256'][:12]}"])
+                      f"registry {_shown(route['registry']['version'], 80)} {route['registry']['sha256'][:12]}"])
 
 
 def _shown(value: object, limit: int = 160) -> str:
@@ -349,7 +348,8 @@ def render(route: Mapping[str, Any]) -> str:
     request = route["request"]
     lines = [f"Route {request['role']}/{request['mode']} for {', '.join(request['needs'])}"
              + (f" on {_shown(request['task'], 40)}" if request["task"] else "")
-             + f" (registry {route['registry']['version']}, {route['history_basis']['assignments']} past assignments)"]
+             + f" (registry {_shown(route['registry']['version'], 80)}, "
+               f"{route['history_basis']['assignments']} past assignments)"]
     if route["recommended"]:
         lines.append(f"Recommended: {_shown(route['recommended'])}")
     else:

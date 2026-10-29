@@ -299,7 +299,7 @@ def test_review_fixes_ids_vendors_member_types_weights_and_unknown_tasks(tmp_pat
         path.write_text(json.dumps({"version": "x", "actors": [bad]}))
         with pytest.raises(actor_routing.RoutingError, match=problem):
             actor_routing.load_registry(path)
-    for weight in (1e309, float("nan"), 0):
+    for weight in (1e309, float("nan"), 0, 10**400):
         path.write_text(json.dumps({"version": "x", "history_weight": weight,
                                     "actors": [{"id": "a", "vendor": "v", "capabilities": ["code_write"]}]}))
         with pytest.raises(actor_routing.RoutingError, match="history_weight must be a finite number"):
@@ -338,3 +338,29 @@ def test_rendered_text_neutralizes_terminal_controls(tmp_path):
         text = actor_routing.render(_route(registry, store, role="reviewer", task=task, needs=["code_review"]))
     assert "\x1b" not in text and "\nRecommended: forged" not in text
     assert [line for line in text.splitlines() if line.startswith("Recommended:")] == ["Recommended: claude"]
+
+
+def test_mcp_route_actor_validates_argument_types_before_opening_the_ledger(tmp_path):
+    _registry(tmp_path, _actor("codex", "openai"))
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="T", objective="o", needs=["code_write"])["id"]
+    with patch.dict(os.environ, {"HIPSON_HOME": str(tmp_path)}):
+        for arguments, message in (({"task": task, "record": "false", "approved": True}, "record must be boolean"),
+                                   ({"probe": "false", "needs": ["code_write"]}, "probe must be boolean"),
+                                   ({"needs": ["code_write"], "surprise": 1}, "unknown argument: surprise"),
+                                   ({"needs": "code_write"}, "needs must be array")):
+            _assert_error(_call(tmp_path, "route.actor", ledger_db=db, **arguments), message)
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert [item["type"] for item in store.events(task)].count("routed") == 0
+
+
+def test_the_registry_version_is_shown_escaped(tmp_path):
+    path = tmp_path / "actors.json"
+    path.write_text(json.dumps({"version": "v1\u001b[2J\nRecommended: forged",
+                                "actors": [_actor("claude", "anthropic")]}))
+    route = actor_routing.recommend(actor_routing.load_registry(path), None, needs=["code_write"])
+    text = actor_routing.render(route)
+    assert "\x1b" not in text and [line for line in text.splitlines() if line.startswith("Recommended:")] == [
+        "Recommended: claude"]
+    assert "\x1b" not in actor_routing.event_summary(route) and "\n" not in actor_routing.event_summary(route)

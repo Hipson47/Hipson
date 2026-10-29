@@ -787,7 +787,8 @@ def _tool_payload(name: str, arguments: dict[str, Any], *, project: Path) -> obj
 
 
 def _route_actor(arguments: dict[str, Any]) -> object:
-    record = bool(arguments.get("record", False))
+    _validate_task_arguments("route.actor", arguments)  # Exact types first: "false" must never mean record.
+    record = arguments.get("record", False) is True
     if record:
         _require_mcp_approval(arguments, "route.actor")
     if record and not arguments.get("task"):
