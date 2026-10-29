@@ -365,3 +365,33 @@ def test_task_do_forwards_the_environment_options(tmp_path):
     assert done.returncode == 0, done.stderr
     seen = json.loads(report.read_text())
     assert seen["EXTRA_ALLOWED"] and not seen["DUMMY_SECRET"]
+
+
+def test_the_mention_scan_is_linear_and_skipped_for_parsed_policies():
+    import time
+
+    from hipson import task_runner
+
+    hostile = "worker" + "\\" * 5000 + "other" + " worker" * 2000
+    started = time.monotonic()
+    assert not task_runner._may_mean_worker_env(hostile)
+    assert task_runner._may_mean_worker_env("worker" + "\\" * 4999 + "tenv")  # The last pair is \t: a separator.
+    assert time.monotonic() - started < 1.0
+    for text in ("worker_env", "WORKER-ENV", "worker \\t env", "workerenv", "x\\u0041", None, "a\0b"):
+        assert task_runner._may_mean_worker_env(text), text
+    for text in ("{}", '{"denied_paths": ["a\\\\b"]}', "workers environment"):
+        assert not task_runner._may_mean_worker_env(text), text
+
+
+def test_a_valid_policy_with_many_backslashes_launches_promptly(tmp_path):
+    import time
+    from argparse import Namespace
+
+    from hipson import task_runner
+
+    project = tmp_path / "p"
+    (project / ".hipson").mkdir(parents=True)
+    (project / ".hipson" / "policy.json").write_text(json.dumps({"default_workflow": "worker" + "\\" * 64 + "other"}))
+    started = time.monotonic()
+    assert task_runner.worker_environment(Namespace(env=None, env_allow=[]), str(project)) == ("inherit", [])
+    assert time.monotonic() - started < 1.0

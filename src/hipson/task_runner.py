@@ -212,8 +212,13 @@ def add_env_arguments(parser: argparse.ArgumentParser) -> None:
                         help="With --env minimal, also pass this variable (repeatable), e.g. OPENAI_API_KEY")
 
 
-# "worker" ... "env" with any separators, including escapes such as \t; any \u escape could spell it too.
-MENTIONS_WORKER_ENV = re.compile(r"worker(?:[\W_]|\\.)*env|\\[uU]", re.IGNORECASE)
+# "worker" ... "env" with any separators, including escapes such as \t; any \u escape could spell it too. The two
+# separator alternatives are disjoint (only one can take a backslash), so the scan stays linear.
+MENTIONS_WORKER_ENV = re.compile(r"worker(?:\\.|[^a-z0-9\\])*env|\\u", re.IGNORECASE)
+
+
+def _may_mean_worker_env(text: str | None) -> bool:
+    return text is None or "\0" in text or MENTIONS_WORKER_ENV.search(text) is not None
 
 
 def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:
@@ -236,11 +241,10 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
         text = raw.decode("utf-8") if raw is not None else None
     except UnicodeDecodeError:
         text = None  # Another encoding (UTF-16, ...) can hide the key from the text check.
-    # For a file that cannot be parsed the raw text decides whether it means worker_env: any case, any separators
-    # or escapes between the words, \u escapes, NUL bytes (UTF-16 that happens to decode) and non-UTF-8 bytes.
-    mentions = text is None or "\0" in text or MENTIONS_WORKER_ENV.search(text) is not None
+    # Where the parsed keys cannot decide (YAML, or a file that does not parse), the raw text does: any case, any
+    # separators or escapes between the words, \u escapes, NUL bytes (UTF-16 that happens to decode), non-UTF-8.
     if path.name != POLICY_JSON.name:
-        if mentions and not explicit:
+        if not explicit and _may_mean_worker_env(text):
             raise ValueError("worker_env is read only from .hipson/policy.json, and the policy.yaml in effect may "
                              "set it; move the setting to policy.json or pass --env explicitly")
         return worker_env.resolve(args, {"valid": True, "policy": {}})
@@ -250,7 +254,7 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
             raise ValueError("not UTF-8 text")
         payload = policy_payload(project, str(path), json.loads(text))
     except (SystemExit, ValueError, RecursionError) as exc:
-        if mentions and not explicit:
+        if not explicit and _may_mean_worker_env(text):
             raise ValueError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
                              "fix .hipson/policy.json or pass --env explicitly") from None
         payload = {}  # A broken policy that never mentions it keeps the pre-1.7 behaviour.
