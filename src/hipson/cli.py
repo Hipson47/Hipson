@@ -2049,6 +2049,8 @@ def build_parser() -> argparse.ArgumentParser:
             ('checks', 'Declare or replace the acceptance checks that gate review/done'),
             ('close', 'Run pending acceptance checks, then move the task to review and done'),
             ('do', 'Open a task with checks, run one worker, and close it if everything passes'),
+            ('restore', 'Restore an rw assignment checkpoint (task run --checkpoint); dry run unless --apply'),
+            ('checkpoints', 'List assignment checkpoints, or prune them by the retention policy'),
             ("finish", "Finish an assignment and release its claims"),
             ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
             ('ack', 'Acknowledge an ended assignment result or failure journal'),
@@ -2081,6 +2083,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_flow.configure_checks(task_parsers['checks'])
     task_flow.configure_close(task_parsers['close'])
     task_flow.configure_do(task_parsers['do'])
+    task_flow.configure_restore(task_parsers['restore'])
+    task_flow.configure_checkpoints(task_parsers['checkpoints'])
     task_parsers["open"].add_argument("--project", required=True)
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)

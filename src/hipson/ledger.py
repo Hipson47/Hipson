@@ -368,7 +368,7 @@ class CloseRefusedError(LedgerError):
 
 RESERVED_EVENT_TYPES = frozenset({
     "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
-    "claim_conflict", "reopened", "override", "observed", "routed",
+    "claim_conflict", "reopened", "override", "observed", "routed", "checkpointed", "restored",
 })
 
 
@@ -1331,6 +1331,15 @@ class Ledger:
             self._task(task)
             return self._append_event(task, actor, "routed", redact_text(require_text(summary, "summary")),
                                       [redact_text(ref) for ref in refs])
+
+    def record_checkpoint(self, assignment: str, *, type: str, summary: str) -> TaskEvent:
+        """Record a host-owned checkpoint or restore of an assignment's scope (counts, never contents)."""
+        if type not in ("checkpointed", "restored"):
+            raise LedgerError("Checkpoint events are checkpointed or restored")
+        with self._transaction():
+            current = self._assignment(assignment)
+            return self._append_event(current["task"], "hipson", type,
+                                      redact_text(require_text(summary, "summary")), [assignment])
 
     def set_status(
         self, task: str, *, to: str, actor: str, summary: str = "", force: bool = False, reason: str = "",

@@ -231,6 +231,33 @@ that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONF
   default in a later minor release, after it has been used with the real worker CLIs; `--env inherit` will
   keep the old behaviour.
 
+## Pre-run checkpoints and restore (opt-in, 1.7)
+
+Rolling back a failed writer should not depend on what the worker did with git. `hipson task run --mode rw
+--scope src --checkpoint` (also `task do --checkpoint`) makes the host copy the claimed scope into private
+state beside the ledger (`.<ledger file>.checkpoints/A-..../`, mode 0700) after the claim is taken and before
+the worker starts.
+
+- Bounded: `--checkpoint-max-files` (default 20000) and `--checkpoint-max-bytes` (default 512 MiB). A scope over
+  either cap, nested deeper than 64 levels, holding special files, or reached through a link (a claimed path
+  below a linked directory) is refused before any assignment is created (exit 64), never checkpointed in part.
+  If the copy itself fails after the claim (a file changes while copied), the worker is not started.
+- What is copied: regular files (content, permission bits, mtime), directories and links (as links, never
+  followed). Not copied and never touched by a restore: sensitive files such as `.env` or keys (the same rule as
+  redaction) and excluded directories (`.git`, `.venv`, `node_modules`, tool caches), plus the ledger and its
+  private state when they live inside the project.
+- `hipson task restore --assignment A-0001` is a dry run: what would be restored (changed), re-created
+  (deleted by the worker) and deleted (created by the worker), all within the checkpointed scope, and what
+  blocks it. `--apply` performs it and then verifies that the scope matches the checkpoint (exit 1 if not).
+  It is refused while the assignment is active or while any live rw assignment in the same project holds an
+  overlapping claim. It never writes through a link: a link the worker put where a directory was is removed
+  and the directory re-created. A created directory that still holds left-alone files is kept and reported.
+- The ledger records a `checkpointed` event (counts and scope) and a `restored` event (counts and whether it
+  verified); both are reserved types. Contents and paths stay in the private checkpoint only.
+- Retention: `hipson task checkpoints` lists them; `--prune [--dry-run]` removes checkpoints of done or
+  cancelled tasks and those older than `--older-than-days` (default 14), never one whose assignment is active.
+  Pruning also runs whenever a new checkpoint is taken. There is no MCP tool for restore: it is a lead action.
+
 ## Actor routing recommendation (1.7)
 
 `hipson route actor` answers "who should take this?" from your own actor registry and the ledger's record of

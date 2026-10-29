@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from hipson import ledger, task_activity, task_observation, worker_env
+from hipson import ledger, task_activity, task_checkpoint, task_observation, worker_env
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job, batch_command
@@ -201,7 +201,25 @@ def configure(parser: argparse.ArgumentParser) -> None:
     add_observe_arguments(parser)
     add_env_arguments(parser)
     add_needs_arguments(parser, "this run (defaults to the task's)")
+    add_checkpoint_arguments(parser)
     parser.add_argument("worker_command", nargs=argparse.REMAINDER, help="-- COMMAND [ARGS...]")
+
+
+def add_checkpoint_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--checkpoint", action="store_true",
+                        help="rw only: copy the claimed --scope into private Hipson state before launch, so "
+                             "hipson task restore --assignment can roll the worker back")
+    parser.add_argument("--checkpoint-max-files", type=int,
+                        help=f"Refuse the run when the scope holds more files (default {task_checkpoint.MAX_FILES})")
+    parser.add_argument("--checkpoint-max-bytes", type=int,
+                        help=f"Refuse the run when the scope holds more bytes (default {task_checkpoint.MAX_BYTES})")
+
+
+def checkpoint_caps(args: argparse.Namespace) -> task_checkpoint.Caps | None:
+    if not getattr(args, "checkpoint", False):
+        return None
+    return task_checkpoint.Caps(max_files=getattr(args, "checkpoint_max_files", None) or task_checkpoint.MAX_FILES,
+                                max_bytes=getattr(args, "checkpoint_max_bytes", None) or task_checkpoint.MAX_BYTES)
 
 
 def add_needs_arguments(parser: argparse.ArgumentParser, subject: str) -> None:
@@ -416,6 +434,12 @@ def run(args: argparse.Namespace) -> int:
             if value is not None and value < 1:
                 raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
         args.run_needs = parse_needs(getattr(args, "needs", None) or []) or None
+        for name in ("checkpoint_max_files", "checkpoint_max_bytes"):
+            value = getattr(args, name, None)
+            if value is not None and value < 1:
+                raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
+        if getattr(args, "checkpoint", False) and args.mode != "rw":
+            raise ValueError("--checkpoint needs --mode rw: it saves the claimed write scope")
     except (ValueError, OverflowError, ledger.LedgerError) as exc:
         _message(str(exc))
         return 64
@@ -437,7 +461,12 @@ def run(args: argparse.Namespace) -> int:
         return 76
     try:
         args.worker_env = worker_environment(args, str(check["expected"]))
-    except ValueError as exc:
+        checkpoint = checkpoint_caps(args)
+        if checkpoint is not None:
+            # Before any claim: an oversize or unsafe scope is refused without an assignment.
+            task_checkpoint.scan(str(check["expected"]), args.scope, caps=checkpoint,
+                                 private=task_checkpoint.private_paths(db))
+    except (ValueError, OSError) as exc:
         _message(f"{exc}; worker not started")
         return 64
     return _execute(db, args, command[1:], mismatch, check, grace)
@@ -553,6 +582,24 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     raise OSError(f"could not take the observation baseline: {exc}") from exc
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
+            checkpoint = checkpoint_caps(args)
+            if checkpoint is not None:
+                # After the claim, so no other writer changes the scope while it is copied; before launch.
+                try:
+                    saved = task_checkpoint.take(db, assignment, str(check['expected']), args.scope, checkpoint)
+                except (task_checkpoint.CheckpointError, OSError) as exc:
+                    raise OSError(f"could not take the checkpoint: {exc}") from exc
+                with closing(ledger.Ledger(db)) as store:
+                    store.record_checkpoint(assignment, type="checkpointed", summary=(
+                        f"{assignment}: checkpoint of {', '.join(saved['scope'])}: {saved['files']} files, "
+                        f"{saved['bytes']} bytes, {saved['directories']} directories, {saved['links']} links; "
+                        f"{saved['untouched_sensitive']} sensitive files left alone"))
+                    try:
+                        task_checkpoint.prune(db, store)  # Retention runs whenever a new checkpoint is taken.
+                    except OSError:
+                        pass
+                _message(f"{assignment} checkpoint: {saved['files']} files, {saved['bytes']} bytes "
+                         f"(restore: hipson task restore --assignment {assignment})")
         progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         progress_path = Path(progress_dir.name) / 'progress'
         progress = progress_path.open('w+b', buffering=0)

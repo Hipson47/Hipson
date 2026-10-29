@@ -14,7 +14,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from hipson import ledger, task_activity, task_runner, task_verification
+from hipson import ledger, task_activity, task_checkpoint, task_runner, task_verification
 
 
 def parse_check(text: str) -> list[str]:
@@ -185,6 +185,9 @@ def command_do(args: argparse.Namespace) -> int:
               *(['--observe-max-bytes', str(args.observe_max_bytes)] if args.observe_max_bytes else []),
               *(['--env', args.env] if args.env else []),
               *[item for name in args.env_allow for item in ('--env-allow', name)],
+              *(['--checkpoint'] if args.checkpoint else []),
+              *(['--checkpoint-max-files', str(args.checkpoint_max_files)] if args.checkpoint_max_files else []),
+              *(['--checkpoint-max-bytes', str(args.checkpoint_max_bytes)] if args.checkpoint_max_bytes else []),
               *args.worker_command]
     code = _run_worker(worker, project)
     try:
@@ -258,6 +261,100 @@ def configure_do(parser: argparse.ArgumentParser) -> None:
     task_runner.add_observe_arguments(parser)
     task_runner.add_env_arguments(parser)
     task_runner.add_needs_arguments(parser, 'the task')
+    task_runner.add_checkpoint_arguments(parser)
     parser.add_argument('--to', choices=('review', 'done'), default='done')
     parser.add_argument('--timeout', type=float, default=300, help='Per-check timeout in seconds')
     parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- WORKER COMMAND [ARGS...]')
+
+
+def configure_restore(parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(func=command_restore)
+    parser.add_argument('--assignment', required=True)
+    parser.add_argument('--apply', action='store_true',
+                        help='Perform the restore (default: dry run listing what would change)')
+
+
+def _paths(label: str, paths: list[str]) -> list[str]:
+    shown = [f'  {label}: {task_activity.safe_text(path, 200)}' for path in paths[:50]]
+    return shown + ([f'  {label}: ... {len(paths) - 50} more'] if len(paths) > 50 else [])
+
+
+def command_restore(args: argparse.Namespace) -> int:
+    """Dry run by default; --apply restores within the checkpointed scope only, refused while anything is live."""
+    db = _db(args)
+    try:
+        with closing(ledger.Ledger(db, create=False, read_only=not args.apply)) as store:
+            assignment = store.activity(args.assignment)
+            if args.apply:
+                result = task_checkpoint.apply(db, args.assignment, store)
+                store.record_checkpoint(args.assignment, type='restored', summary=(
+                    f"{args.assignment}: restored {len(result['restore'])}, re-created {len(result['recreate'])}, "
+                    f"deleted {len(result['delete']) - len(result['kept'])} path(s) in "
+                    f"{', '.join(result['scope'])}; verified {str(result['verified']).lower()}"))
+            else:
+                result = {**task_checkpoint.plan(db, args.assignment), 'applied': False,
+                          'blockers': task_checkpoint.live_blockers(
+                              store, args.assignment, task_checkpoint.load(db, args.assignment)['roots'])}
+    except (task_checkpoint.CheckpointError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        print(f'hipson task restore: {task_activity.safe_text(exc, 1200)}', file=sys.stderr)
+        return 1
+    result['task'] = assignment['task']
+    if getattr(args, 'json', False):
+        print(json.dumps(result, ensure_ascii=True))
+    else:
+        verb = 'Restored' if result['applied'] else 'Would restore'
+        lines = [f"{verb} {args.assignment} ({assignment['task']}) to its checkpoint of {result['taken_at']} "
+                 f"in {', '.join(result['scope'])}:"]
+        lines += _paths('restore', result['restore']) + _paths('re-create', result['recreate'])
+        lines += _paths('delete', result['delete'])
+        if result['clean']:
+            lines.append('  nothing to do: the scope matches the checkpoint')
+        if result['untouched']['sensitive']:
+            lines.append(f"  left alone: {len(result['untouched']['sensitive'])} sensitive file(s) (never copied)")
+        if result['applied']:
+            lines += _paths('kept (holds files left alone)', result['kept'])
+            lines.append('  verified: the scope matches the checkpoint' if result['verified']
+                         else '  NOT verified: ' + json.dumps(result['remaining']))
+        elif result['blockers']:
+            lines += [f'  blocked: {task_activity.safe_text(reason, 300)}' for reason in result['blockers']]
+        else:
+            lines.append(f'  apply with: hipson task restore --assignment {args.assignment} --apply')
+        print('\n'.join(lines))
+    return 0 if not result['applied'] or result['verified'] else 1
+
+
+def configure_checkpoints(parser: argparse.ArgumentParser) -> None:
+    parser.set_defaults(func=command_checkpoints)
+    parser.add_argument('--prune', action='store_true',
+                        help='Remove checkpoints of done/cancelled tasks and those older than --older-than-days')
+    parser.add_argument('--older-than-days', type=int, default=task_checkpoint.RETENTION_DAYS)
+    parser.add_argument('--dry-run', action='store_true', help='With --prune, only list what would go')
+
+
+def command_checkpoints(args: argparse.Namespace) -> int:
+    db = _db(args)
+    if args.older_than_days < 0:
+        print('hipson task checkpoints: --older-than-days must be nonnegative', file=sys.stderr)
+        return 64
+    try:
+        store = ledger.Ledger(db, create=False, read_only=True) if db.exists() else None
+        try:
+            payload: Any = (task_checkpoint.prune(db, store, older_than_days=args.older_than_days, dry_run=args.dry_run)
+                            if args.prune else task_checkpoint.checkpoints(db))
+        finally:
+            if store is not None:
+                store.close()
+    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        print(f'hipson task checkpoints: {task_activity.safe_text(exc, 600)}', file=sys.stderr)
+        return 1
+    if getattr(args, 'json', False):
+        print(json.dumps(payload, ensure_ascii=True))
+    elif args.prune:
+        verb = 'Would remove' if args.dry_run else 'Removed'
+        print('\n'.join(f"{verb} {item['assignment']}: {item['reason']}" for item in payload) or 'Nothing to prune.')
+    else:
+        print('\n'.join(f"{item['assignment']} {item.get('taken_at', '?')}: {item.get('files', '?')} files, "
+                        f"{item.get('bytes', '?')} bytes in {', '.join(item.get('scope', []))}"
+                        + (f" ({item['error']})" if 'error' in item else '') for item in payload)
+              or 'No checkpoints.')
+    return 0

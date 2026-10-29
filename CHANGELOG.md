@@ -21,6 +21,14 @@
   unavailable, a reviewer from the builder's vendor). Recommendation only, deterministic, recorded as a
   `routed` event with `--task`. Capability tags on work: `task open` / `task do` / `task run --needs`
   (ledger schema v10 adds `tasks.needs` and `assignments.needs`); output schema `schemas/actor-route.schema.json`.
+- Opt-in pre-run checkpoints for rw assignments: `task run` / `task do --checkpoint` copies the claimed scope
+  into private state beside the ledger after the claim and before launch (bounded by `--checkpoint-max-files` /
+  `--checkpoint-max-bytes`; an oversize or link-traversing scope is refused before any assignment). `hipson task
+  restore --assignment A` is a dry run listing what would be restored, re-created and deleted; `--apply`
+  restores the scope exactly (content, permissions, mtimes, links) and verifies it, never touches anything
+  outside the scope, sensitive files or excluded directories, never writes through links, and is refused while
+  the assignment or an overlapping write claim is live. `checkpointed` / `restored` events record counts;
+  `hipson task checkpoints [--prune]` lists and applies the retention policy (terminal tasks, older than 14 days).
 
 - Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
   `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,
