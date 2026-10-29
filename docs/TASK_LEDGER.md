@@ -251,8 +251,9 @@ lead decides.
   optional `binary` looked up on `PATH` (`--no-probe` skips it) or `"available": false`.
 - Hard rejections, each with its reason: a missing capability, a role or mode the actor does not take, work
   above its `max_sensitivity` (`--sensitivity`, default `internal`), unavailable, and for `--role reviewer
-  --task T` the same vendor as any builder of that task (a reviewer must be independent; builders missing from
-  the registry are listed in `notes`).
+  --task T` the same vendor as any builder of that task (a reviewer must be independent; vendors compare
+  case-insensitively, builders missing from the registry are listed in `notes`). Only verifications the task
+  lead recorded in a lead context count toward history, as for review and done.
 - Score per tag: the prior until the actor has `min_sample` (default 5) ended assignments in that role with that
   tag; from then on `(prior + w * history) / (1 + w)` with `w = history_weight * samples / min_sample`
   (`history_weight` default 2, so history outweighs the prior as soon as it counts). History is the success

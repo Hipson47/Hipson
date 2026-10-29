@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import statistics
 from collections.abc import Iterable, Mapping, Sequence
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from hipson import ledger
+from hipson.display import bounded_text, escape_display_controls
 from hipson.home import detect_hipson_home
 
 ROUTE_SCHEMA_VERSION = "1.0"
@@ -68,7 +70,7 @@ def load_registry(path: Path) -> dict[str, Any]:
     actors = []
     for item in data["actors"]:
         actors.append({
-            "id": item["id"], "vendor": item["vendor"], "model": item.get("model"),
+            "id": item["id"], "vendor": item["vendor"].strip().lower(), "model": item.get("model"),
             "capabilities": list(dict.fromkeys(item["capabilities"])), "priors": dict(item.get("priors", {})),
             "default_prior": item.get("default_prior", DEFAULT_PRIOR), "cost_tier": item.get("cost_tier", 0),
             "roles": list(item.get("roles", ledger.ROLES)), "modes": list(item.get("modes", ledger.MODES)),
@@ -89,11 +91,12 @@ def validate_registry(data: object) -> list[str]:
         problems.append("version must be a non-empty string")
     if "min_sample" in data and (type(data["min_sample"]) is not int or data["min_sample"] < 1):
         problems.append("min_sample must be a positive integer")
-    if "history_weight" in data and not (type(data["history_weight"]) in (int, float) and data["history_weight"] > 0):
-        problems.append("history_weight must be a positive number")
+    if "history_weight" in data and not (type(data["history_weight"]) in (int, float)
+                                         and math.isfinite(data["history_weight"]) and 0 < data["history_weight"] <= 1000):
+        problems.append("history_weight must be a finite number between 0 (exclusive) and 1000")
     extra = data.get("capabilities", [])
     if not isinstance(extra, list) or not all(isinstance(tag, str) and ledger.NEED_PATTERN.fullmatch(tag)
-                                              for tag in extra):
+                                              for tag in extra):  # Strings first: unhashable members never crash.
         problems.append("capabilities must be a list of lower-case tag names")
         extra = []
     known = set(BUILTIN_CAPABILITIES) | set(extra)
@@ -108,20 +111,22 @@ def validate_registry(data: object) -> list[str]:
             continue
         problems += [f"{where}: unknown key {key!r}" for key in sorted(set(item) - _ACTOR_KEYS)]
         actor_id = item.get("id")
-        if not isinstance(actor_id, str) or not actor_id.strip():
-            problems.append(f"{where}: id must be the actor label used in the ledger (e.g. codex)")
+        if not isinstance(actor_id, str) or not actor_id.strip() or actor_id != actor_id.strip():
+            # The ledger strips actor labels, so a padded id would never match its own history or builders.
+            problems.append(f"{where}: id must be the actor label used in the ledger (e.g. codex), without "
+                            "surrounding whitespace")
         elif actor_id in seen:
             problems.append(f"{where}: duplicate id {actor_id!r}")
         else:
             seen.add(actor_id)
-        if not isinstance(item.get("vendor"), str) or not item.get("vendor"):
+        if not isinstance(item.get("vendor"), str) or not item["vendor"].strip():
             problems.append(f"{where}: vendor must be a non-empty string")
         for key in ("model", "binary", "notes"):
             if key in item and not isinstance(item[key], str):
                 problems.append(f"{where}: {key} must be a string")
         tags = item.get("capabilities")
-        if not isinstance(tags, list) or not tags:
-            problems.append(f"{where}: capabilities must be a non-empty list")
+        if not isinstance(tags, list) or not tags or not all(isinstance(tag, str) for tag in tags):
+            problems.append(f"{where}: capabilities must be a non-empty list of names")
             tags = []
         problems += [f"{where}: unknown capability {tag!r} (declare it in top-level capabilities)"
                      for tag in tags if tag not in known]
@@ -137,7 +142,8 @@ def validate_registry(data: object) -> list[str]:
         if "cost_tier" in item and (type(item["cost_tier"]) is not int or item["cost_tier"] < 0):
             problems.append(f"{where}: cost_tier must be a nonnegative integer")
         for key, allowed in (("roles", ledger.ROLES), ("modes", ledger.MODES)):
-            if key in item and (not isinstance(item[key], list) or not set(item[key]) <= set(allowed)):
+            if key in item and (not isinstance(item[key], list) or not all(isinstance(value, str) for value in item[key])
+                                or not set(item[key]) <= set(allowed)):
                 problems.append(f"{where}: {key} must be a list drawn from {', '.join(allowed)}")
         if "max_sensitivity" in item and item["max_sensitivity"] not in SENSITIVITY_LEVELS:
             problems.append(f"{where}: max_sensitivity must be one of {', '.join(SENSITIVITY_LEVELS)}")
@@ -155,6 +161,13 @@ def _date(text: str | None) -> datetime | None:
         return None
 
 
+def _lead_verification(record: Mapping[str, Any], lead: str) -> bool:
+    """The ledger's own rule: recorded by the task lead in a lead context, never from a worker."""
+    context = record.get("context")
+    return (record.get("actor") == lead and isinstance(context, dict) and set(context) == {"role", "assignment", "task"}
+            and str(context.get("role") or "").strip().lower() != "worker" and context.get("assignment") is None)
+
+
 def outcomes(store: ledger.Ledger | None, *, role: str) -> list[dict[str, Any]]:
     """One record per ended assignment in this role that carries capability tags, oldest task first."""
     if store is None:
@@ -163,7 +176,8 @@ def outcomes(store: ledger.Ledger | None, *, role: str) -> list[dict[str, Any]]:
     for task in sorted(store.list_tasks(), key=lambda item: item["id"]):
         view = store.show(task["id"])
         checks = sorted(((stamp, record) for record in store.verifications(task["id"])
-                         if (stamp := _date(record.get("started_at"))) is not None), key=lambda pair: pair[0])
+                         if _lead_verification(record, view["lead"])
+                         and (stamp := _date(record.get("started_at"))) is not None), key=lambda pair: pair[0])
         builders = [(item["id"], _date(item["started_at"])) for item in view["assignments"] if item["role"] == "builder"]
         for item in view["assignments"]:
             ended = _date(item["ended_at"])
@@ -237,6 +251,8 @@ def recommend(registry: Mapping[str, Any], store: ledger.Ledger | None, *, needs
         raise RoutingError(f"sensitivity must be one of {', '.join(SENSITIVITY_LEVELS)}")
     if task is not None and store is None:
         raise RoutingError(f"task {task} needs a task ledger")
+    if task is not None and store is not None:
+        store.show(task)  # Raises LedgerError for an unknown task, whatever else was given.
     notes: list[str] = []
     actors = {entry["id"]: entry for entry in registry["actors"]}
     builder_vendors = _builder_vendors(store, task, actors, notes) if role == "reviewer" else {}
@@ -324,23 +340,29 @@ def event_summary(route: Mapping[str, Any]) -> str:
                       f"registry {route['registry']['version']} {route['registry']['sha256'][:12]}"])
 
 
+def _shown(value: object, limit: int = 160) -> str:
+    # Registry ids and ledger labels are user text: one inert line each, never terminal controls.
+    return bounded_text(escape_display_controls(str(value)), limit=limit)
+
+
 def render(route: Mapping[str, Any]) -> str:
     request = route["request"]
     lines = [f"Route {request['role']}/{request['mode']} for {', '.join(request['needs'])}"
-             + (f" on {request['task']}" if request["task"] else "")
+             + (f" on {_shown(request['task'], 40)}" if request["task"] else "")
              + f" (registry {route['registry']['version']}, {route['history_basis']['assignments']} past assignments)"]
     if route["recommended"]:
-        lines.append(f"Recommended: {route['recommended']}")
+        lines.append(f"Recommended: {_shown(route['recommended'])}")
     else:
         lines.append("Recommended: none (every actor was rejected)")
     for rank, item in enumerate(route["candidates"], 1):
         parts = ", ".join(f"{part['tag']} {part['score']} (prior {part['prior']}, {part['history']['samples']} samples"
                           + (f", history {part['history']['score']}" if part["history_weight"] else "") + ")"
                           for part in item["components"])
-        lines.append(f"  {rank}. {item['actor']} [{item['vendor']}] score {item['score']} cost {item['cost_tier']}: {parts}")
+        lines.append(f"  {rank}. {_shown(item['actor'])} [{_shown(item['vendor'])}] score {item['score']} "
+                     f"cost {item['cost_tier']}: {parts}")
     for item in route["rejected"]:
-        lines.append(f"  rejected {item['actor']}: {'; '.join(item['reasons'])}")
-    lines += [f"  note: {note}" for note in route["notes"]]
+        lines.append(f"  rejected {_shown(item['actor'])}: {_shown('; '.join(item['reasons']), 400)}")
+    lines += [f"  note: {_shown(note, 400)}" for note in route["notes"]]
     if route["recorded_event"] is not None:
         lines.append(f"Recorded as event {route['recorded_event']} on {request['task']}")
     lines.append(route["authority"])

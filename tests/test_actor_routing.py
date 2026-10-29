@@ -286,3 +286,55 @@ def test_v9_ledgers_open_read_only_and_migrate_to_empty_tags(tmp_path):
     with closing(ledger.Ledger(db)) as store:
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION == 10
         assert store.show(task)["needs"] == []
+
+
+def test_review_fixes_ids_vendors_member_types_weights_and_unknown_tasks(tmp_path):
+    path = tmp_path / "actors.json"
+    for bad, problem in (
+        ({"id": "codex ", "vendor": "openai", "capabilities": ["code_write"]}, "without surrounding whitespace"),
+        ({"id": "a", "vendor": "v", "capabilities": [{}]}, "capabilities must be a non-empty list of names"),
+        ({"id": "a", "vendor": "v", "capabilities": ["code_write"], "roles": [[]]}, "roles must be a list"),
+        ({"id": "a", "vendor": "v", "capabilities": ["code_write"], "modes": [{}]}, "modes must be a list"),
+    ):
+        path.write_text(json.dumps({"version": "x", "actors": [bad]}))
+        with pytest.raises(actor_routing.RoutingError, match=problem):
+            actor_routing.load_registry(path)
+    for weight in (1e309, float("nan"), 0):
+        path.write_text(json.dumps({"version": "x", "history_weight": weight,
+                                    "actors": [{"id": "a", "vendor": "v", "capabilities": ["code_write"]}]}))
+        with pytest.raises(actor_routing.RoutingError, match="history_weight must be a finite number"):
+            actor_routing.load_registry(path)
+    # Vendors compare case-insensitively, so "OpenAI" cannot review its own "openai" builder.
+    registry = _registry(tmp_path, _actor("codex", "openai"), _actor("gpt-reviewer", " OpenAI "),
+                         _actor("claude", "anthropic"))
+    with closing(_store(tmp_path)) as store:
+        task = store.open_task(project=tmp_path, title="T", objective="o")["id"]
+        _outcome(store, task, "codex", "passed")
+        route = _route(registry, store, role="reviewer", task=task, needs=["code_review"])
+        assert [item["actor"] for item in route["rejected"]] == ["codex", "gpt-reviewer"]
+        with pytest.raises(ledger.LedgerError, match="T-9999"):
+            actor_routing.recommend(registry, store, needs=["code_write"], task="T-9999")
+
+
+def test_only_lead_verifications_count_toward_history(tmp_path):
+    project = _project(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    with closing(_store(tmp_path)) as store:
+        task = store.open_task(project=project, title="Build", objective="Build")["id"]
+        _outcome(store, task, "codex", "passed")
+    # A passing verification recorded under another actor, then the lead's failing one: the lead's decides.
+    task_verification.run(db, task, [sys.executable, "-c", "pass"], actor="someone-else")
+    task_verification.run(db, task, [sys.executable, "-c", "raise SystemExit(1)"])
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        summary = actor_routing.history(actor_routing.outcomes(store, role="builder"), "codex", "code_write")
+    assert summary["first_pass_verify_rate"] == 0.0 and summary["success_rate"] == 0.0
+
+
+def test_rendered_text_neutralizes_terminal_controls(tmp_path):
+    registry = _registry(tmp_path, _actor("claude", "anthropic"))
+    with closing(_store(tmp_path)) as store:
+        task = store.open_task(project=tmp_path, title="T", objective="o")["id"]
+        _outcome(store, task, "evil\x1b[2J\nRecommended: forged", "passed")
+        text = actor_routing.render(_route(registry, store, role="reviewer", task=task, needs=["code_review"]))
+    assert "\x1b" not in text and "\nRecommended: forged" not in text
+    assert [line for line in text.splitlines() if line.startswith("Recommended:")] == ["Recommended: claude"]
