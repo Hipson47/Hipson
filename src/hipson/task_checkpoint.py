@@ -122,111 +122,262 @@ def _root_identity(root: Path) -> list[int]:
     return [info.st_dev, info.st_ino]
 
 
-def _refused_root(rel: str, root: Path, skip: set[Path]) -> str | None:
+def _canon_part(name: str) -> str:
+    # Windows ignores trailing dots and spaces in a path component (".git." names ".git").
+    return name.rstrip(" .") if sys.platform == "win32" else name
+
+
+def _canon_rel(rel: str) -> str:
+    return "/".join(_canon_part(part) for part in PurePosixPath(rel).parts)
+
+
+def _private_keys(paths: Iterable[Path]) -> set[str]:
+    return {_fold(str(Path(path).resolve())) for path in paths}
+
+
+def _is_private(path: Path, keys: set[str]) -> bool:
+    return _fold(str(path)) in keys
+
+
+def _refused_root(rel: str, root: Path, keys: set[str]) -> str | None:
     """Why a claimed path may not be checkpointed at all: excluded, sensitive or private state."""
     if rel == ".":
         return None
     parts = PurePosixPath(rel).parts
     if any(_excluded_part(part) for part in parts):
         return "it is or lies in an excluded directory"
-    if is_sensitive_path(rel):
+    if is_sensitive_path(_canon_rel(rel)):
         return "it is a sensitive path"
-    if any((root / PurePosixPath(*parts[:index])) in skip for index in range(1, len(parts) + 1)):
+    if any(_is_private(root / PurePosixPath(*parts[:index]), keys) for index in range(1, len(parts) + 1)):
         return "it holds the ledger's private state"
     return None
 
 
-def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None,
-         private: Iterable[Path] = (), hash_files: bool = False) -> dict[str, Any]:
-    """Walk the claimed scope without following links. Raises CheckpointError above the caps."""
+class _Dir:
+    """One directory being read without following links. With descriptor support (POSIX) it is a descriptor
+    opened with O_NOFOLLOW relative to its verified parent, so a directory swapped for a link while the walk
+    runs is never traversed; elsewhere it is a path whose components were checked."""
+
+    def __init__(self, *, fd: int = -1, path: Path) -> None:
+        self.fd, self.path = fd, path
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    def names(self) -> list[str]:
+        return sorted(os.listdir(self.fd if self.fd >= 0 else self.path))
+
+    def lstat(self, name: str) -> os.stat_result:
+        return os.lstat(name, dir_fd=self.fd) if self.fd >= 0 else os.lstat(self.path / name)
+
+    def readlink(self, name: str) -> str:
+        return os.readlink(name, dir_fd=self.fd) if self.fd >= 0 else os.readlink(self.path / name)
+
+    def open_file(self, name: str) -> int:
+        return os.open(name, _FLAGS, dir_fd=self.fd) if self.fd >= 0 else os.open(self.path / name, _FLAGS)
+
+    def child(self, name: str, info: os.stat_result, rel: str) -> _Dir:
+        if self.fd < 0:
+            current = os.lstat(self.path / name)
+            if _is_link(current) or not stat.S_ISDIR(current.st_mode):
+                raise CheckpointError(f"{rel} changed while it was read; refusing to follow it")
+            return _Dir(path=self.path / name)
+        try:
+            opened = os.open(name, _DIRECTORY, dir_fd=self.fd)
+        except OSError as exc:  # ELOOP: it became a link since lstat.
+            raise CheckpointError(f"{rel} changed while it was read ({type(exc).__name__}); refusing to follow it") from None
+        current = os.fstat(opened)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            os.close(opened)
+            raise CheckpointError(f"{rel} changed while it was read; refusing to follow it")
+        return _Dir(fd=opened, path=self.path / name)
+
+
+def _open_root(root: Path) -> _Dir:
+    identity = _root_identity(root)
+    if not _FD_SAFE:
+        return _Dir(path=root)
+    fd = os.open(root, _DIRECTORY)
+    info = os.fstat(fd)
+    if [info.st_dev, info.st_ino] != identity:
+        os.close(fd)
+        raise CheckpointError(f"the project {root} changed while it was opened")
+    return _Dir(fd=fd, path=root)
+
+
+def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: Path | None) -> str | None:
+    """Digest of exactly the regular file that was stat()ed, copied into objects when given. A file that
+    changed reads as None when only hashing and refuses the copy when checkpointing."""
+    try:
+        descriptor = folder.open_file(name)
+    except OSError:
+        if objects is not None:
+            raise CheckpointError(f"{rel} cannot be read") from None
+        return None
+    handle, temporary = -1, ""
+    try:
+        if objects is not None:
+            handle, temporary = tempfile.mkstemp(dir=objects, prefix=".copy.")
+        with os.fdopen(descriptor, "rb") as source, (os.fdopen(handle, "wb") if handle >= 0 else _NoSink()) as sink:
+            descriptor = -1
+            handle = -1
+            if not _same(os.fstat(source.fileno()), info):
+                raise _Changed()
+            digest, read = hashlib.sha256(), 0
+            while chunk := source.read(_CHUNK):
+                digest.update(chunk)
+                sink.write(chunk)
+                read += len(chunk)
+            sink.flush()
+            if objects is not None:
+                os.fsync(sink.fileno())
+        after = folder.lstat(name)
+        if read != info.st_size or (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
+            raise _Changed()
+        name_hex = digest.hexdigest()
+        if objects is not None:
+            os.replace(temporary, objects / name_hex)
+            temporary = ""
+        return name_hex
+    except _Changed:
+        if objects is not None:
+            raise CheckpointError(f"{rel} changed while it was copied") from None
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if handle >= 0:
+            os.close(handle)
+        if temporary:
+            Path(temporary).unlink(missing_ok=True)
+
+
+class _Changed(Exception):
+    pass
+
+
+class _NoSink:
+    def __enter__(self) -> _NoSink:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def write(self, chunk: bytes) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+    def fileno(self) -> int:
+        return -1
+
+
+def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None, private: Iterable[Path] = (),
+         hash_files: bool = False, copy_into: Path | None = None) -> dict[str, Any]:
+    """Walk the claimed scope without following links (on POSIX through directory descriptors). Raises
+    CheckpointError above the caps. With copy_into, every regular file is copied there as it is read."""
     root = Path(project).resolve()
-    _root_identity(root)
     limits = caps or Caps()
     roots = _roots(scope)
-    skip = {path.resolve() for path in private}
+    keys = _private_keys(private)
     entries: dict[str, dict[str, Any]] = {}
     sensitive: list[str] = []
     excluded: list[str] = []
-    total = files = 0
+    absent: list[str] = []
+    totals = {"files": 0, "bytes": 0}
 
-    def add(rel: str, path: Path, info: os.stat_result) -> None:
-        nonlocal total, files
+    def add(folder: _Dir, name: str, rel: str, info: os.stat_result) -> None:
         if stat.S_ISLNK(info.st_mode):
-            entries[rel] = {"type": "link", "target": os.readlink(path)}
+            entries[rel] = {"type": "link", "target": folder.readlink(name)}
         elif _is_link(info):
             raise CheckpointError(f"{rel} is a Windows junction or reparse point, which checkpoints do not support")
         elif stat.S_ISDIR(info.st_mode):
             entries[rel] = {"type": "dir", "mode": stat.S_IMODE(info.st_mode)}
         elif stat.S_ISREG(info.st_mode):
-            files += 1
-            total += info.st_size
+            totals["files"] += 1
+            totals["bytes"] += info.st_size
+            if totals["files"] > limits.max_files or totals["bytes"] > limits.max_bytes:
+                raise CheckpointError(f"the claimed scope exceeds the checkpoint caps ({limits.max_files} files, "
+                                      f"{limits.max_bytes} bytes); narrow --scope or raise --checkpoint-max-files / "
+                                      "--checkpoint-max-bytes")
             entries[rel] = {"type": "file", "mode": stat.S_IMODE(info.st_mode), "size": info.st_size,
                             "mtime_ns": info.st_mtime_ns}
-            if hash_files:
-                entries[rel]["sha256"] = _hash(path, info)
+            if hash_files or copy_into is not None:
+                entries[rel]["sha256"] = _read(folder, name, info, rel, copy_into)
         else:
             raise CheckpointError(f"{rel} is not a regular file, directory or link")
-        if files > limits.max_files or total > limits.max_bytes:
-            raise CheckpointError(f"the claimed scope exceeds the checkpoint caps ({limits.max_files} files, "
-                                  f"{limits.max_bytes} bytes); narrow --scope or raise --checkpoint-max-files / "
-                                  "--checkpoint-max-bytes")
 
-    absent = []
-    for rel in roots:
-        reason = _refused_root(rel, root, skip)
-        if reason:
-            raise CheckpointError(f"cannot checkpoint {rel}: {reason}; narrow --scope")
-        if rel != ".":
-            _real_directories(root, str(PurePosixPath(rel).parent))
-        start = root if rel == "." else root / rel
-        try:
-            info = os.lstat(start)
-        except FileNotFoundError:
-            absent.append(rel)
-            continue
-        if rel != ".":
-            add(rel, start, info)
-        if _is_link(info) or not stat.S_ISDIR(info.st_mode):
-            continue
-        stack = [(start, rel, 0)]
-        while stack:
-            folder, prefix, depth = stack.pop()
-            if depth >= MAX_DEPTH:
-                raise CheckpointError(f"{prefix} is nested deeper than {MAX_DEPTH} levels")
-            with os.scandir(folder) as listing:
-                children = sorted(listing, key=lambda entry: entry.name)
-            for child in children:
-                child_rel = child.name if prefix == "." else f"{prefix}/{child.name}"
-                path = Path(child.path)
-                # The walk starts from the resolved project and never follows links, so paths stay canonical.
-                if _excluded_part(child.name) or path in skip:
-                    excluded.append(child_rel)
-                    continue
-                if is_sensitive_path(child_rel):
-                    sensitive.append(child_rel)
-                    continue
-                info = os.lstat(path)
-                add(child_rel, path, info)
-                if stat.S_ISDIR(info.st_mode) and not _is_link(info):
-                    stack.append((path, child_rel, depth + 1))
-    return {"roots": roots, "absent": absent, "entries": dict(sorted(entries.items())), "sensitive": sorted(sensitive),
-            "excluded": sorted(excluded), "files": files, "bytes": total}
+    def walk(folder: _Dir, prefix: str, depth: int) -> None:
+        if depth >= MAX_DEPTH:
+            raise CheckpointError(f"{prefix} is nested deeper than {MAX_DEPTH} levels")
+        for name in folder.names():
+            rel = name if prefix == "." else f"{prefix}/{name}"
+            if _excluded_part(name) or _is_private(root / rel, keys):
+                excluded.append(rel)
+                continue
+            if is_sensitive_path(_canon_rel(rel)):
+                sensitive.append(rel)
+                continue
+            info = folder.lstat(name)
+            add(folder, name, rel, info)
+            if stat.S_ISDIR(info.st_mode) and not _is_link(info):
+                child = folder.child(name, info, rel)
+                try:
+                    walk(child, rel, depth + 1)
+                finally:
+                    child.close()
 
-
-def _hash(path: Path, info: os.stat_result) -> str | None:
-    """Digest of exactly the regular file that was stat()ed; None when it changed or cannot be read."""
+    top = _open_root(root)
     try:
-        descriptor = os.open(path, _FLAGS)
-    except OSError:
-        return None
-    with os.fdopen(descriptor, "rb") as source:
-        if not _same(os.fstat(source.fileno()), info):
-            return None
-        digest, read = hashlib.sha256(), 0
-        while chunk := source.read(_CHUNK):
-            digest.update(chunk)
-            read += len(chunk)
-    return digest.hexdigest() if read == info.st_size else None
+        for rel in roots:
+            reason = _refused_root(rel, root, keys)
+            if reason:
+                raise CheckpointError(f"cannot checkpoint {rel}: {reason}; narrow --scope")
+            if rel == ".":
+                walk(top, ".", 0)
+                continue
+            parts = PurePosixPath(rel).parts
+            opened: list[_Dir] = []
+            folder, walked = top, PurePosixPath()
+            try:
+                missing = False
+                for part in parts[:-1]:
+                    walked = walked / part
+                    try:
+                        info = folder.lstat(part)
+                    except FileNotFoundError:
+                        missing = True
+                        break
+                    if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+                        raise CheckpointError(f"{walked} is not a real directory (a link or a file); refusing to go "
+                                              "through it")
+                    folder = folder.child(part, info, str(walked))
+                    opened.append(folder)
+                if missing:
+                    absent.append(rel)
+                    continue
+                try:
+                    info = folder.lstat(parts[-1])
+                except FileNotFoundError:
+                    absent.append(rel)
+                    continue
+                add(folder, parts[-1], rel, info)
+                if stat.S_ISDIR(info.st_mode) and not _is_link(info):
+                    child = folder.child(parts[-1], info, rel)
+                    try:
+                        walk(child, rel, 1)
+                    finally:
+                        child.close()
+            finally:
+                for item in reversed(opened):
+                    item.close()
+    finally:
+        top.close()
+    return {"roots": roots, "absent": absent, "entries": dict(sorted(entries.items())), "sensitive": sorted(sensitive),
+            "excluded": sorted(excluded), "files": totals["files"], "bytes": totals["bytes"]}
 
 
 def _same(opened: os.stat_result, info: os.stat_result) -> bool:
@@ -234,55 +385,20 @@ def _same(opened: os.stat_result, info: os.stat_result) -> bool:
             and (opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino))
 
 
-def _copy_object(path: Path, objects: Path) -> tuple[str, int]:
-    """Copy one file into the object store, hashing what was read; refuse if it changes meanwhile."""
-    info = os.lstat(path)
-    descriptor = os.open(path, _FLAGS)
-    try:
-        handle, temporary = tempfile.mkstemp(dir=objects, prefix=".copy.")
-    except BaseException:
-        os.close(descriptor)
-        raise
-    digest, read = hashlib.sha256(), 0
-    try:
-        with os.fdopen(descriptor, "rb") as source, os.fdopen(handle, "wb") as target:
-            if not _same(os.fstat(source.fileno()), info):
-                raise CheckpointError(f"{path.name} changed while it was copied")
-            while chunk := source.read(_CHUNK):
-                digest.update(chunk)
-                target.write(chunk)
-                read += len(chunk)
-            target.flush()
-            os.fsync(target.fileno())
-        after = os.lstat(path)
-        if read != info.st_size or (after.st_size, after.st_mtime_ns) != (info.st_size, info.st_mtime_ns):
-            raise CheckpointError(f"{path.name} changed while it was copied")
-        name = digest.hexdigest()
-        os.replace(temporary, objects / name)
-        return name, read
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
-
-
 def take(db: Path, assignment: str, project: str | Path, scope: Sequence[str], caps: Caps | None = None) -> dict[str, Any]:
-    """Copy the claimed scope into private state; the manifest is written last, the directory renamed into place."""
+    """Copy the claimed scope into private state while walking it; the manifest is written last and the
+    directory renamed into place."""
     root = Path(project).resolve()
     target = location(db, assignment)
     if target.exists():
         raise CheckpointError(f"a checkpoint for {assignment} already exists")
     identity = _root_identity(root)
-    found = scan(root, scope, caps=caps, private=private_paths(db))
     directory(db).mkdir(mode=0o700, parents=True, exist_ok=True)
     staging = directory(db) / f".{assignment}.{uuid.uuid4().hex}.tmp"
     objects = staging / "objects"
     objects.mkdir(mode=0o700, parents=True)
     try:
-        for rel, entry in found["entries"].items():
-            if entry["type"] == "file":
-                entry["sha256"], copied = _copy_object(root / rel, objects)
-                if copied != entry["size"]:
-                    raise CheckpointError(f"{rel} changed while it was copied")
+        found = scan(root, scope, caps=caps, private=private_paths(db), copy_into=objects)
         manifest = {"format": FORMAT, "assignment": assignment, "project": str(root), "project_identity": identity,
                     "taken_at": ledger._timestamp(), **found}
         (staging / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -308,16 +424,18 @@ def _valid_rel(rel: object) -> bool:
     path, windows = PurePosixPath(rel), PureWindowsPath(rel)
     if path.is_absolute() or windows.drive or windows.root:  # "C:/x" is relative to POSIX, absolute on Windows.
         return False
+    if sys.platform == "win32" and any(part != _canon_part(part) for part in path.parts):
+        return False  # "src." and "src " are aliases of "src" there.
     return rel == str(path) and all(part not in ("", ".", "..") for part in path.parts)
 
 
 def _excluded_part(name: str) -> bool:
-    return _fold(name) in {_fold(item) for item in EXCLUDED_NAMES}
+    return _fold(_canon_part(name)) in {_fold(item) for item in EXCLUDED_NAMES}
 
 
 def _protected(rel: str) -> bool:
     """Paths a checkpoint never holds: sensitive files and anything in an excluded directory."""
-    return is_sensitive_path(rel) or any(_excluded_part(part) for part in PurePosixPath(rel).parts)
+    return is_sensitive_path(_canon_rel(rel)) or any(_excluded_part(part) for part in PurePosixPath(rel).parts)
 
 
 def _check_manifest(manifest: dict[str, Any], assignment: str) -> None:
@@ -398,7 +516,7 @@ def live_blockers(store: ledger.Ledger, assignment: str, roots: Sequence[str], *
     reasons = []
     if current["status"] == "active":
         reasons.append(f"{assignment} is still active; stop it or run hipson task reap first")
-    for other in store.list_tasks(project=task["project"]):
+    for other in [item for item in store.list_tasks() if _fold(item["project"]) == _fold(task["project"])]:
         for item in store.show(other["id"])["assignments"]:
             if item["id"] in (assignment, own) or item["status"] != "active" or item["mode"] != "rw":
                 continue
@@ -417,9 +535,9 @@ def plan(db: Path, assignment: str, store: ledger.Ledger | None = None) -> dict[
     now = scan(root, manifest["roots"], caps=Caps(max_files=MAX_FILES * 10, max_bytes=2**62),
                private=private_paths(db), hash_files=True)
     saved, present = manifest["entries"], now["entries"]
-    private = private_paths(db)
+    keys = _private_keys(private_paths(db))
     for rel in saved:
-        if any((root / PurePosixPath(*PurePosixPath(rel).parts[:index])) in private
+        if any(_is_private(root / PurePosixPath(*PurePosixPath(rel).parts[:index]), keys)
                for index in range(1, len(PurePosixPath(rel).parts) + 1)):
             raise CheckpointError(f"the checkpoint of {assignment} is damaged (entry {rel!r} is private state)")
     restore, recreate, conflicts = [], [], []
@@ -667,7 +785,8 @@ def _verify_objects(db: Path, assignment: str, entries: dict[str, Any], paths: I
 
 def _locked(db: Path, assignment: str) -> Any:
     from hipson.init_config import config_locks
-    return config_locks([location(db, assignment)])
+    # One key per checkpoint however the ledger path is spelled (LEDGER.sqlite and ledger.sqlite on macOS).
+    return config_locks([Path(_fold(str(location(db, assignment).resolve())))])
 
 
 def apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:

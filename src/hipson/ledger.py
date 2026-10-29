@@ -422,6 +422,12 @@ def _overlaps(left: str, right: str) -> bool:
     return left == "." or right == "." or left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
+def _same_project(left: str, right: str) -> bool:
+    if sys.platform in ("win32", "darwin"):
+        return left.casefold() == right.casefold()
+    return left == right
+
+
 def _claims_overlap(left: str, right: str) -> bool:
     """Write claims conflict as the default filesystem sees paths: case-insensitively on Windows and macOS."""
     if sys.platform in ("win32", "darwin"):
@@ -965,13 +971,14 @@ class Ledger:
                 raise LedgerError("lease_seconds is too large") from exc
             if mode == "rw":
                 holders = self.connection.execute(
-                    """SELECT c.assignment, c.path, a.* FROM claims c
+                    """SELECT c.assignment, c.path, t.project AS project, a.* FROM claims c
                        JOIN assignments a ON a.id = c.assignment
                        JOIN tasks t ON t.id = a.task
-                       WHERE t.project = ? AND a.status = 'active'
+                       WHERE a.status = 'active'
                        ORDER BY c.assignment, c.path""",
-                    (current["project"],),
                 ).fetchall()
+                # The same project however its path is cased, where the filesystem ignores case.
+                holders = [row for row in holders if _same_project(row["project"], current["project"])]
                 reaped: set[str] = set()
                 checked: set[str] = set()
                 for holder in holders:

@@ -74,7 +74,9 @@ def test_restore_brings_back_the_exact_scope_and_leaves_everything_else(tmp_path
         (root / "src/.env").write_text("TOKEN=changed-by-worker\n")
         store.finish(assignment, result="failed", summary="broke things")
         result = task_checkpoint.apply(db, assignment, store)
-    assert result["verified"] and result["restore"] == ["src/app.py", "src/data.bin"]
+    # Windows chmod only toggles the read-only bit, so 0o600 leaves data.bin's mode as it was there.
+    expected = ["src/app.py"] if sys.platform == "win32" else ["src/app.py", "src/data.bin"]
+    assert result["verified"] and result["restore"] == expected
     assert result["recreate"] == ["src/pkg", "src/pkg/util.py"]
     assert result["delete"] == ["src/newdir/deep/file.txt", "src/newdir/deep", "src/new.py", "src/newdir"]
     after = _tree(root)
@@ -564,3 +566,64 @@ def test_the_text_dry_run_reports_conflicts(tmp_path):
     dry = _hipson(project, tmp_path, "task", "restore", "--assignment", assignment)
     assert "blocked: src/app.py is now a directory holding files restore leaves alone" in dry.stdout
     assert "apply with" not in dry.stdout
+
+
+def test_private_state_and_locks_fold_case_where_the_filesystem_does(tmp_path):
+    keys = task_checkpoint._private_keys([tmp_path / "ledger.sqlite"])
+    with patch.object(task_checkpoint, "_FOLD", True):
+        folded = task_checkpoint._private_keys([tmp_path / "ledger.sqlite"])
+        assert task_checkpoint._is_private(tmp_path / "LEDGER.sqlite", folded)
+        seen = []
+        with patch("hipson.init_config.config_locks", lambda paths: seen.append(paths) or open(os.devnull)):
+            task_checkpoint._locked(tmp_path / "Ledger.sqlite", "A-0001")
+            task_checkpoint._locked(tmp_path / "ledger.SQLITE", "A-0001")
+        assert seen[0] == seen[1]
+    with patch.object(task_checkpoint, "_FOLD", False):
+        assert not task_checkpoint._is_private(tmp_path / "LEDGER.sqlite", keys)
+
+
+def test_windows_trailing_dot_and_space_aliases_are_never_trusted():
+    with patch.object(task_checkpoint.sys, "platform", "win32"):
+        for rel in (".git./config", "src./a.py", "src /a.py", "node_modules./x"):
+            assert not task_checkpoint._valid_rel(rel), rel
+        assert task_checkpoint._excluded_part("node_modules.") and task_checkpoint._excluded_part(".git ")
+        assert task_checkpoint._protected(".env.") and task_checkpoint._protected(".git./config")
+    assert task_checkpoint._valid_rel("src./a.py")  # Elsewhere "src." is its own directory.
+
+
+def test_differently_cased_project_paths_share_claims_on_windows_and_macos(tmp_path):
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+        first = store.open_task(project=tmp_path / "Repo", title="A", objective="o")["id"]
+        second = store.open_task(project=tmp_path / "repo", title="B", objective="o")["id"]
+        held = store.assign(first, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        with patch.object(ledger.sys, "platform", "darwin"):
+            with pytest.raises(ledger.ClaimConflictError, match=held):
+                store.assign(second, actor="claude", role="builder", mode="rw", scope=["SRC/pkg"])
+        with patch.object(ledger.sys, "platform", "linux"):
+            store.assign(second, actor="claude", role="builder", mode="rw", scope=["src"])
+        done = store.assign(first, actor="codex", role="builder", mode="rw", scope=["docs"])["id"]
+        store.finish(done, result="passed", summary="x")
+        with patch.object(task_checkpoint, "_FOLD", True):
+            assert any(held in reason for reason in task_checkpoint.live_blockers(store, done, ["src"]))
+
+
+@pytest.mark.skipif(not task_checkpoint._FD_SAFE, reason="descriptor-anchored walk is POSIX only")
+def test_a_directory_swapped_for_a_link_during_the_walk_is_never_followed(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    outside = tmp_path / "credentials"
+    _write(outside, {"util.py": "TOKEN=outside\n"})
+    real_lstat = task_checkpoint._Dir.lstat
+
+    def lstat_then_swap(self, name):
+        info = real_lstat(self, name)
+        if name == "pkg" and (root / "src/pkg").is_dir() and not (root / "src/pkg").is_symlink():
+            (root / "src/pkg/util.py").unlink()
+            (root / "src/pkg").rmdir()
+            os.symlink(outside, root / "src/pkg", target_is_directory=True)
+        return info
+
+    with closing(store), patch.object(task_checkpoint._Dir, "lstat", lstat_then_swap), \
+            pytest.raises(task_checkpoint.CheckpointError, match="src/pkg changed while it was read"):
+        task_checkpoint.take(db, assignment, root, ["src"])
+    assert not task_checkpoint.location(db, assignment).exists()
+    assert not list(task_checkpoint.directory(db).glob("*/objects/*"))

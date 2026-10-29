@@ -259,11 +259,13 @@ the worker starts.
 - Safety: the checkpoint must match the ledger's project and the assignment's claimed scope, every saved path
   must be relative and inside that scope, and the project directory must be the same one (device and inode)
   that was checkpointed. Every saved copy a restore needs is verified, and a directory in the way that holds
-  left-alone files is reported, before anything changes. On Linux and macOS every change is made relative to
-  directory descriptors opened without following links from the verified project root, so a link swapped in
-  during the restore is never followed. On Windows each parent is checked for links and junctions right before
-  each change (no descriptor-relative operations there): avoid restoring while other local processes rewrite
-  the scope. A link the worker put where a directory was is removed and the directory re-created; directory
+  left-alone files is reported, before anything changes. On Linux and macOS every read (taking the checkpoint,
+  planning a restore) and every change is made relative to directory descriptors opened without following
+  links from the verified project root, so a directory swapped for a link meanwhile is never traversed. On
+  Windows each component is checked for links and junctions right before use (no descriptor-relative
+  operations there): avoid checkpointing or restoring while other local processes rewrite the scope. Saved
+  paths may not use Windows drive, root or trailing-dot aliases, and private-state, lock and project
+  comparisons ignore case on Windows and macOS. A link the worker put where a directory was is removed and the directory re-created; directory
   permissions are restored after their contents. A created directory that still holds left-alone files is kept
   and reported.
 - The ledger records a `checkpointed` event (counts and scope) and a `restored` event (counts and whether it
