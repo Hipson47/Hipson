@@ -87,6 +87,10 @@ def test_cli_options_override_policy_and_allowed_names_add_up():
     with pytest.raises(ValueError, match="sets worker_env but is invalid"):
         resolve(Namespace(env=None, env_allow=[]), _payload(False, worker_env="minimal"))
     assert resolve(Namespace(env=None, env_allow=[]), _payload(False)) == ("inherit", [])
+    # An explicit --env decides alone; the invalid policy then contributes no allowed names.
+    assert resolve(Namespace(env="minimal", env_allow=["B"]),
+                   _payload(False, worker_env="minimal", worker_env_allow=["A"])) == ("minimal", ["B"])
+    assert resolve(Namespace(env="inherit", env_allow=[]), _payload(False, worker_env="minimal")) == ("inherit", [])
     # Verification and other callers without the options get the default.
     assert resolve(Namespace(), _payload()) == ("inherit", [])
 
@@ -221,6 +225,32 @@ def test_project_policy_selects_minimal_and_an_invalid_policy_never_falls_back(t
     assert bad_allow.returncode == 64 and "cannot pass GIT_DIR" in bad_allow.stderr
     with closing(ledger.Ledger(tmp_path / "ledger.sqlite", read_only=True)) as store:
         assert len(store.show(task)["assignments"]) == 2  # Refused runs never assign.
+
+
+def test_an_unreadable_policy_that_may_set_worker_env_never_falls_back_to_inherit(tmp_path):
+    project = _project(tmp_path)
+    (project / ".hipson").mkdir()
+    policy_file = project / ".hipson" / "policy.json"
+    policy_file.write_text('{"worker_env": "minimal",}')  # A trailing comma: not JSON.
+    task = _open_task(tmp_path, project)
+    refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                      "--", sys.executable, "-c", "pass")
+    assert refused.returncode == 64 and "cannot be read (JSONDecodeError) and may set worker_env" in refused.stderr
+    assert not _run(tmp_path, project, task, "--env", "minimal")["DUMMY_SECRET"]
+    assert _run(tmp_path, project, task, "--env", "inherit")["DUMMY_SECRET"]
+    # A broken policy that never mentions worker_env keeps the 1.6 behaviour: the run inherits.
+    policy_file.write_text('{"observe_changes": true,}')
+    assert _run(tmp_path, project, task)["DUMMY_SECRET"]
+
+
+def test_a_rejected_allowed_name_is_never_echoed(tmp_path):
+    project = _project(tmp_path)
+    task = _open_task(tmp_path, project)
+    cookie = "sessionid=opaque-cookie-value-91a"
+    refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                      "--env", "minimal", "--env-allow", cookie, "--", sys.executable, "-c", "pass")
+    assert refused.returncode == 64 and "entry 1 is not one" in refused.stderr
+    assert "opaque-cookie-value-91a" not in refused.stderr + refused.stdout
 
 
 def test_lead_verification_keeps_the_inherited_environment(tmp_path):

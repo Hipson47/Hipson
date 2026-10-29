@@ -42,9 +42,10 @@ def validate_names(names: Iterable[object], *, source: str = "--env-allow") -> l
     if len(items) > MAX_ALLOW:
         raise ValueError(f"{source} accepts at most {MAX_ALLOW} names")
     checked: list[str] = []
-    for name in items:
+    for position, name in enumerate(items, 1):
         if not isinstance(name, str) or not _NAME.fullmatch(name):
-            raise ValueError(f"{source} expects variable names such as OPENAI_API_KEY, not {name!r}")
+            # Never echo the rejected text: a mistaken "$TOKEN" would put the credential itself in the message.
+            raise ValueError(f"{source} expects variable names such as OPENAI_API_KEY; entry {position} is not one")
         if git_redirecting_variable(name):
             raise ValueError(f"{source} cannot pass {name}: it selects another repository or injects git configuration")
         if name not in checked:
@@ -87,10 +88,11 @@ def resolve(args: object, policy_payload: Mapping[str, Any]) -> tuple[str, list[
     raw = policy_payload.get("policy")
     policy: dict[str, Any] = raw if isinstance(raw, dict) else {}
     valid = bool(policy_payload.get("valid"))
-    if not valid and "worker_env" in policy:
+    if not valid and "worker_env" in policy and getattr(args, "env", None) is None:
         issues = "; ".join(str(issue) for issue in policy_payload.get("issues", []))
-        # Never fall back to the full environment when the policy that asked to narrow it cannot be read.
-        raise ValueError(f"project policy sets worker_env but is invalid: {issues}")
+        # Never fall back to the full environment when the policy that asked to narrow it cannot be used; an
+        # explicit --env decides on its own (an invalid policy then contributes no allowed names).
+        raise ValueError(f"project policy sets worker_env but is invalid: {issues}; fix it or pass --env explicitly")
     usable = policy if valid else {}
     mode = getattr(args, "env", None) or usable.get("worker_env") or DEFAULT_MODE
     requested = validate_names(getattr(args, "env_allow", None) or [])

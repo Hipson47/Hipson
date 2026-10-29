@@ -217,9 +217,25 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
     from hipson.policy import load_policy
     try:
         payload = load_policy(project)
-    except (SystemExit, OSError, ValueError):
+    except (SystemExit, OSError, ValueError) as exc:
+        # An unreadable policy may be the one asking for minimal: never fall back to the full environment on its
+        # account. Policies that plainly do not mention worker_env keep working as before.
+        if getattr(args, "env", None) is None and _may_set_worker_env(Path(project)):
+            raise ValueError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
+                             "fix .hipson/policy.json or pass --env explicitly") from None
         payload = {}
     return worker_env.resolve(args, payload)
+
+
+def _may_set_worker_env(project: Path) -> bool:
+    from hipson.policy import POLICY_JSON, POLICY_YAML
+    for name in (POLICY_JSON, POLICY_YAML):
+        try:
+            if (project / name).exists() and "worker_env" in (project / name).read_text(encoding="utf-8", errors="replace"):
+                return True
+        except OSError:
+            return True  # Unreadable: assume it might.
+    return False
 
 
 def add_observe_arguments(parser: argparse.ArgumentParser) -> None:
