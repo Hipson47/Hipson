@@ -422,6 +422,13 @@ def _overlaps(left: str, right: str) -> bool:
     return left == "." or right == "." or left == right or left.startswith(right + "/") or right.startswith(left + "/")
 
 
+def _claims_overlap(left: str, right: str) -> bool:
+    """Write claims conflict as the default filesystem sees paths: case-insensitively on Windows and macOS."""
+    if sys.platform in ("win32", "darwin"):
+        return _overlaps(left.casefold(), right.casefold())
+    return _overlaps(left, right)
+
+
 def validate_assignment_scope(scope: Sequence[str], *, mode: str) -> list[str]:
     """Validate claims before opening a store or starting an assignment transaction."""
     paths = normalize_scope(scope)
@@ -968,7 +975,7 @@ class Ledger:
                 reaped: set[str] = set()
                 checked: set[str] = set()
                 for holder in holders:
-                    if holder["id"] in checked or not any(_overlaps(path, holder["path"]) for path in paths):
+                    if holder["id"] in checked or not any(_claims_overlap(path, holder["path"]) for path in paths):
                         continue
                     checked.add(holder["id"])
                     item = self._assignment_dict(holder)
@@ -978,7 +985,7 @@ class Ledger:
                         reaped.add(item["id"])
                 holders = [holder for holder in holders if holder["id"] not in reaped]
                 for path in paths:
-                    holder = next((row for row in holders if _overlaps(path, row["path"])), None)
+                    holder = next((row for row in holders if _claims_overlap(path, row["path"])), None)
                     if holder is not None:
                         conflict = f"Claim {path!r} conflicts with {holder['path']!r} held by assignment {holder['assignment']}"
                         self._append_event(task, actor, "claim_conflict", conflict, [holder["assignment"], path])

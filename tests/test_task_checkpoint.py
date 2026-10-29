@@ -453,3 +453,114 @@ def test_a_changed_mtime_alone_is_restored(tmp_path):
         assert task_checkpoint.plan(db, assignment, store)["restore"] == ["src/app.py"]
         assert task_checkpoint.apply(db, assignment, store)["verified"]
     assert os.lstat(root / "src/app.py").st_mtime_ns == before
+
+
+def test_manifest_entries_cannot_name_drives_protected_or_private_paths(tmp_path):
+    assert not task_checkpoint._valid_rel("C:/Users/me/victim.txt") and not task_checkpoint._valid_rel("c:x")
+    root = tmp_path / "project"
+    _write(root, {"app.py": "a\n"})
+    db = root / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=root, title="T", objective="o")["id"]
+        assignment = store.assign(task, actor="codex", role="builder", mode="rw", scope=["."])["id"]
+        task_checkpoint.take(db, assignment, root, ["."])
+        store.finish(assignment, result="failed", summary="done")
+        original = _manifest_path(db, assignment).read_text()
+        manifest = json.loads(original)
+        some = manifest["entries"]["app.py"]
+        for rel in ("C:/Users/me/victim.txt", ".env", ".git/config", "node_modules/x/index.js", "NODE_MODULES/y"):
+            if rel == "NODE_MODULES/y" and not task_checkpoint._FOLD:
+                continue
+            _manifest_path(db, assignment).write_text(json.dumps({**manifest, "entries": {**manifest["entries"], rel: some}}))
+            with pytest.raises(task_checkpoint.CheckpointError, match="is damaged"):
+                task_checkpoint.plan(db, assignment, store)
+        _manifest_path(db, assignment).write_text(json.dumps({**manifest, "entries": {**manifest["entries"],
+                                                                                         "ledger.sqlite": some}}))
+        with pytest.raises(task_checkpoint.CheckpointError, match="private state|is damaged"):
+            task_checkpoint.apply(db, assignment, store)
+        _manifest_path(db, assignment).write_text(original)
+
+
+def test_excluded_scope_components_fold_case_where_the_filesystem_does(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    _write(root, {".git/config": "x"})
+    with closing(store), patch.object(task_checkpoint, "_FOLD", True), \
+            pytest.raises(task_checkpoint.CheckpointError, match="excluded directory"):
+        task_checkpoint.take(db, assignment, root, [".GIT/config"])
+
+
+def test_prune_skips_a_checkpoint_a_restore_holds(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+
+        class Busy:
+            def __enter__(self):
+                raise TimeoutError
+
+            def __exit__(self, *exc):
+                return False
+
+        with patch.object(task_checkpoint, "_locked", lambda db, assignment: Busy()):
+            assert task_checkpoint.prune(db, store, older_than_days=0) == []
+            with pytest.raises(task_checkpoint.CheckpointError, match="is busy"):
+                task_checkpoint.apply(db, assignment, store)
+        assert task_checkpoint.location(db, assignment).exists()
+
+
+def test_write_claims_overlap_case_insensitively_on_windows_and_macos():
+    for platform, expected in (("win32", True), ("darwin", True), ("linux", False)):
+        with patch.object(ledger.sys, "platform", platform):
+            assert ledger._claims_overlap("SRC/pkg", "src") is expected
+            assert ledger._claims_overlap("src/pkg", "src") is True
+
+
+def test_a_wholly_deleted_or_linked_scope_is_rebuilt(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        before = _tree(root)
+        task_checkpoint.take(db, assignment, root, ["src"])
+        env = (root / "src/.env").read_text()
+        import shutil as _shutil
+        _shutil.rmtree(root / "src")
+        store.finish(assignment, result="failed", summary="done")
+        result = task_checkpoint.apply(db, assignment, store)
+    assert result["verified"]
+    after = _tree(root)
+    assert {key: value for key, value in after.items() if key != "src/.env"} == {
+        key: value for key, value in before.items() if key != "src/.env"}
+    assert env  # The sensitive file was never saved, so a deleted one stays deleted.
+
+
+def test_restore_bookkeeping_never_counts_as_rework(tmp_path):
+    from hipson import actor_routing
+
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        store.connection.execute("UPDATE assignments SET needs = ? WHERE id = ?", (json.dumps(["code_write"]), assignment))
+        store.connection.commit()
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        claim = task_checkpoint.apply(db, assignment, store)["claim"]
+        records = actor_routing.outcomes(store, role="builder")
+        assert store.activity(claim)["needs"] == []
+    assert [(record["assignment"], record["reworked"]) for record in records] == [(assignment, False)]
+
+
+def test_the_text_dry_run_reports_conflicts(tmp_path):
+    project = _project(tmp_path)
+    _write(project, {"src/app.py": "a = 1\n"})
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+        task = store.open_task(project=project, title="T", objective="o")["id"]
+        store.set_status(task, to="in_progress", actor="claude")
+    worker = ("from pathlib import Path; Path('src/app.py').unlink(); Path('src/app.py').mkdir(); "
+              "Path('src/app.py/.env').write_text('SECRET=1')")
+    run = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "builder",
+                  "--mode", "rw", "--scope", "src", "--checkpoint", "--", sys.executable, "-c", worker)
+    assert run.returncode == 0, run.stderr
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite", read_only=True)) as store:
+        assignment = store.show(task)["assignments"][0]["id"]
+    dry = _hipson(project, tmp_path, "task", "restore", "--assignment", assignment)
+    assert "blocked: src/app.py is now a directory holding files restore leaves alone" in dry.stdout
+    assert "apply with" not in dry.stdout

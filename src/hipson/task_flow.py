@@ -315,8 +315,9 @@ def command_restore(args: argparse.Namespace) -> int:
             lines += _paths('kept (holds files left alone)', result['kept'])
             lines.append('  verified: the scope matches the checkpoint' if result['verified']
                          else '  NOT verified: ' + json.dumps(result['remaining']))
-        elif result['blockers']:
-            lines += [f'  blocked: {task_activity.safe_text(reason, 300)}' for reason in result['blockers']]
+        elif result['blockers'] or result['conflicts']:
+            lines += [f'  blocked: {task_activity.safe_text(reason, 300)}'
+                      for reason in [*result['blockers'], *result['conflicts']]]
         else:
             lines.append(f'  apply with: hipson task restore --assignment {args.assignment} --apply')
         print('\n'.join(lines))

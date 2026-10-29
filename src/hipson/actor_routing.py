@@ -180,7 +180,9 @@ def outcomes(store: ledger.Ledger | None, *, role: str) -> list[dict[str, Any]]:
         checks = sorted(((stamp, record) for record in store.verifications(task["id"])
                          if _lead_verification(record, view["lead"])
                          and (stamp := _date(record.get("started_at"))) is not None), key=lambda pair: pair[0])
-        builders = [(item["id"], _date(item["started_at"])) for item in view["assignments"] if item["role"] == "builder"]
+        # Restore bookkeeping (task restore's own claim) is not a builder redoing the work.
+        builders = [(item["id"], _date(item["started_at"])) for item in view["assignments"]
+                    if item["role"] == "builder" and item["actor"] != "hipson-restore"]
         for item in view["assignments"]:
             ended = _date(item["ended_at"])
             if item["role"] != role or item["status"] == "active" or ended is None or not item.get("needs"):

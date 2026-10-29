@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from hipson import ledger
@@ -48,6 +48,10 @@ _FD_SAFE = (hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and os.open
 
 class CheckpointError(ValueError):
     """A checkpoint cannot be taken, read or restored as requested."""
+
+
+class _MissingParent(CheckpointError):
+    """A parent directory does not exist (yet): the path itself is absent."""
 
 
 @dataclass(frozen=True)
@@ -123,7 +127,7 @@ def _refused_root(rel: str, root: Path, skip: set[Path]) -> str | None:
     if rel == ".":
         return None
     parts = PurePosixPath(rel).parts
-    if any(part in EXCLUDED_NAMES for part in parts):
+    if any(_excluded_part(part) for part in parts):
         return "it is or lies in an excluded directory"
     if is_sensitive_path(rel):
         return "it is a sensitive path"
@@ -195,7 +199,7 @@ def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None,
                 child_rel = child.name if prefix == "." else f"{prefix}/{child.name}"
                 path = Path(child.path)
                 # The walk starts from the resolved project and never follows links, so paths stay canonical.
-                if child.name in EXCLUDED_NAMES or path in skip:
+                if _excluded_part(child.name) or path in skip:
                     excluded.append(child_rel)
                     continue
                 if is_sensitive_path(child_rel):
@@ -234,7 +238,11 @@ def _copy_object(path: Path, objects: Path) -> tuple[str, int]:
     """Copy one file into the object store, hashing what was read; refuse if it changes meanwhile."""
     info = os.lstat(path)
     descriptor = os.open(path, _FLAGS)
-    handle, temporary = tempfile.mkstemp(dir=objects, prefix=".copy.")
+    try:
+        handle, temporary = tempfile.mkstemp(dir=objects, prefix=".copy.")
+    except BaseException:
+        os.close(descriptor)
+        raise
     digest, read = hashlib.sha256(), 0
     try:
         with os.fdopen(descriptor, "rb") as source, os.fdopen(handle, "wb") as target:
@@ -297,8 +305,19 @@ def summary(manifest: dict[str, Any]) -> dict[str, Any]:
 def _valid_rel(rel: object) -> bool:
     if not isinstance(rel, str) or not rel or "\\" in rel or "\0" in rel:
         return False
-    path = PurePosixPath(rel)
-    return not path.is_absolute() and rel == str(path) and all(part not in ("", ".", "..") for part in path.parts)
+    path, windows = PurePosixPath(rel), PureWindowsPath(rel)
+    if path.is_absolute() or windows.drive or windows.root:  # "C:/x" is relative to POSIX, absolute on Windows.
+        return False
+    return rel == str(path) and all(part not in ("", ".", "..") for part in path.parts)
+
+
+def _excluded_part(name: str) -> bool:
+    return _fold(name) in {_fold(item) for item in EXCLUDED_NAMES}
+
+
+def _protected(rel: str) -> bool:
+    """Paths a checkpoint never holds: sensitive files and anything in an excluded directory."""
+    return is_sensitive_path(rel) or any(_excluded_part(part) for part in PurePosixPath(rel).parts)
 
 
 def _check_manifest(manifest: dict[str, Any], assignment: str) -> None:
@@ -314,7 +333,7 @@ def _check_manifest(manifest: dict[str, Any], assignment: str) -> None:
         entries = {}
     for rel, entry in entries.items():
         kind = entry.get("type") if isinstance(entry, dict) else None
-        if not _valid_rel(rel) or not _inside(rel, roots) or kind not in ("file", "dir", "link"):
+        if not _valid_rel(rel) or not _inside(rel, roots) or kind not in ("file", "dir", "link") or _protected(rel):
             problems.append(f"entry {rel!r}")
         elif kind == "file" and not (isinstance(entry.get("sha256"), str) and _DIGEST.fullmatch(entry["sha256"])
                                      and type(entry.get("mode")) is int and type(entry.get("mtime_ns")) is int):
@@ -398,6 +417,11 @@ def plan(db: Path, assignment: str, store: ledger.Ledger | None = None) -> dict[
     now = scan(root, manifest["roots"], caps=Caps(max_files=MAX_FILES * 10, max_bytes=2**62),
                private=private_paths(db), hash_files=True)
     saved, present = manifest["entries"], now["entries"]
+    private = private_paths(db)
+    for rel in saved:
+        if any((root / PurePosixPath(*PurePosixPath(rel).parts[:index])) in private
+               for index in range(1, len(PurePosixPath(rel).parts) + 1)):
+            raise CheckpointError(f"the checkpoint of {assignment} is damaged (entry {rel!r} is private state)")
     restore, recreate, conflicts = [], [], []
     for rel, entry in saved.items():
         current = present.get(rel)
@@ -461,6 +485,8 @@ class _Ops:
                 walked = walked / part
                 try:
                     opened = os.open(part, _DIRECTORY, dir_fd=fd)
+                except FileNotFoundError:
+                    raise _MissingParent(str(walked)) from None
                 except OSError as exc:  # ELOOP for a link, ENOTDIR for a file: never followed.
                     raise CheckpointError(f"{walked} is not a real directory (a link or a file); refusing to go "
                                           f"through it ({type(exc).__name__})") from None
@@ -485,7 +511,10 @@ class _Ops:
         if self.root_fd < 0:
             path = self._path(rel)
             return os.lstat(path) if os.path.lexists(path) else None
-        fd, name = self._parent(rel)
+        try:
+            fd, name = self._parent(rel)
+        except _MissingParent:
+            return None
         try:
             return os.lstat(name, dir_fd=fd)
         except FileNotFoundError:
@@ -570,16 +599,24 @@ class _Ops:
         rename replaces a file or link at the target itself and never writes through a link)."""
         temporary = f".{PurePosixPath(rel).name}.restore.{uuid.uuid4().hex}"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        if self.root_fd < 0:
-            target = self._path(rel)
-            held = target.parent / temporary
-            parent_fd, handle = -1, os.open(held, flags, 0o600)
-        else:
-            parent_fd, name = self._parent(rel)
-            handle = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+        data = open(source, "rb")  # Opened first: a missing saved copy fails before anything else is held.
+        parent_fd = -1
+        try:
+            if self.root_fd < 0:
+                target = self._path(rel)
+                held = target.parent / temporary
+                handle = os.open(held, flags, 0o600)
+            else:
+                parent_fd, name = self._parent(rel)
+                handle = os.open(temporary, flags, 0o600, dir_fd=parent_fd)
+        except BaseException:
+            data.close()
+            if parent_fd >= 0:
+                self._release(parent_fd)
+            raise
         try:
             digest = hashlib.sha256()
-            with open(source, "rb") as data, os.fdopen(handle, "wb") as out:
+            with data, os.fdopen(handle, "wb") as out:
                 while chunk := data.read(_CHUNK):
                     digest.update(chunk)
                     out.write(chunk)
@@ -628,8 +665,22 @@ def _verify_objects(db: Path, assignment: str, entries: dict[str, Any], paths: I
             raise CheckpointError(f"the saved copy of {rel} is corrupt; nothing was changed")
 
 
+def _locked(db: Path, assignment: str) -> Any:
+    from hipson.init_config import config_locks
+    return config_locks([location(db, assignment)])
+
+
 def apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
-    """Restore the checkpoint exactly under a restore claim, then verify that a fresh plan finds nothing to do."""
+    """Restore the checkpoint exactly under a restore claim, then verify that a fresh plan finds nothing to do.
+    The checkpoint stays locked for the whole restore, so retention cannot remove it meanwhile."""
+    try:
+        with _locked(db, assignment):
+            return _apply(db, assignment, store)
+    except TimeoutError:
+        raise CheckpointError(f"the checkpoint of {assignment} is busy (another restore or prune)") from None
+
+
+def _apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
     manifest = load(db, assignment)
     item = _bind(store, assignment, manifest)
     roots = manifest["roots"]
@@ -641,7 +692,7 @@ def apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
     # The ledger's own claim keeps other writers out for the whole restore (conflicts are checked atomically).
     claim = store.assign(item["task"], actor=RESTORE_ACTOR, role="builder", mode="rw", scope=roots,
                          owner_pid=os.getpid(), owner_host=socket.gethostname(), owner_boot_id=ledger._boot_id(),
-                         owner_pid_namespace=ledger._pid_namespace())["id"]
+                         owner_pid_namespace=ledger._pid_namespace(), needs=[])["id"]
     outcome, note = "failed", "restore did not finish"
     try:
         late = live_blockers(store, assignment, roots, own=claim)  # Case-insensitive overlaps the claim check misses.
@@ -660,7 +711,10 @@ def apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
             # Directories stay writable for the owner while their contents change; saved modes come last.
             for rel in sorted((rel for rel, entry in saved.items() if entry["type"] == "dir"),
                               key=lambda rel: (rel.count("/"), rel)):
-                info = ops.lstat(rel)
+                try:
+                    info = ops.lstat(rel)
+                except CheckpointError:
+                    continue  # Below a link the worker put in place of a directory: re-created further down.
                 if info is not None and stat.S_ISDIR(info.st_mode) and not _is_link(info):
                     ops.chmod_dir(rel, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
             for rel in steps["delete"]:  # Deepest first, so a created directory is empty before it goes.
@@ -700,6 +754,25 @@ def apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
     finally:
         store.finish(claim, result=outcome, summary=note)
         store.ack(claim, note="restore claim released by hipson task restore")
+
+
+def _has_active_work(store: ledger.Ledger, assignment: str) -> bool:
+    try:
+        view = store.show(store.activity(assignment)["task"])
+    except ledger.LedgerError:
+        return False
+    return any(item["status"] == "active" for item in view["assignments"])
+
+
+def _prune_reason(task_status: str | None, taken: datetime | None, cutoff: datetime, days: int,
+                  manifest: dict[str, Any] | None) -> str | None:
+    if task_status in ("done", "cancelled"):
+        return f"task {task_status}"
+    if taken is not None and taken < cutoff:
+        return f"older than {days} days"
+    if manifest is None:
+        return "unreadable checkpoint"
+    return None
 
 
 def checkpoints(db: Path) -> list[dict[str, Any]]:
@@ -752,14 +825,17 @@ def prune(db: Path, store: ledger.Ledger | None, *, older_than_days: int = RETEN
                     continue
                 task_status = view["status"]
         reason = None
-        if task_status in ("done", "cancelled"):
-            reason = f"task {task_status}"
-        elif taken is not None and taken < cutoff:
-            reason = f"older than {older_than_days} days"
-        elif manifest is None:
-            reason = "unreadable checkpoint"
-        if reason:
-            removed.append({"assignment": path.name, "reason": reason})
-            if not dry_run:
-                shutil.rmtree(path, ignore_errors=True)
+        if task_status in ("done", "cancelled") or (taken is not None and taken < cutoff) or manifest is None:
+            # Under the checkpoint's lock, re-checked: a restore may have started since the check above.
+            try:
+                with _locked(db, path.name):
+                    if store is not None and _has_active_work(store, path.name):
+                        continue
+                    reason = _prune_reason(task_status, taken, cutoff, older_than_days, manifest)
+                    if reason:
+                        removed.append({"assignment": path.name, "reason": reason})
+                        if not dry_run:
+                            shutil.rmtree(path, ignore_errors=True)
+            except TimeoutError:
+                pass  # Busy: a restore holds it; the next prune decides.
     return removed

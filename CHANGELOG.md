@@ -29,6 +29,8 @@
   outside the scope, sensitive files or excluded directories, never writes through links, and is refused while
   the assignment or an overlapping write claim is live. `checkpointed` / `restored` events record counts;
   `hipson task checkpoints [--prune]` lists and applies the retention policy (terminal tasks, older than 14 days).
+- Write claims now conflict case-insensitively on Windows and macOS (`SRC/x` and `src` are the same files on
+  their default filesystems); Linux keeps case-sensitive claims.
 
 - Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
   `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,
