@@ -182,6 +182,8 @@ def command_do(args: argparse.Namespace) -> int:
               *(['--observe'] if args.observe else []),
               *(['--observe-max-files', str(args.observe_max_files)] if args.observe_max_files else []),
               *(['--observe-max-bytes', str(args.observe_max_bytes)] if args.observe_max_bytes else []),
+              *(['--env', args.env] if args.env else []),
+              *[item for name in args.env_allow for item in ('--env-allow', name)],
               *args.worker_command]
     code = _run_worker(worker, project)
     try:
@@ -253,6 +255,7 @@ def configure_do(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--result-file', help='Structured worker result to ingest (schemas/task-result.schema.json)')
     parser.add_argument('--rollout', choices=['codex'])
     task_runner.add_observe_arguments(parser)
+    task_runner.add_env_arguments(parser)
     parser.add_argument('--to', choices=('review', 'done'), default='done')
     parser.add_argument('--timeout', type=float, default=300, help='Per-check timeout in seconds')
     parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- WORKER COMMAND [ARGS...]')

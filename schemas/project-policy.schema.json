@@ -30,7 +30,10 @@
         "agent_integration": { "type": "object" },
         "observe_changes": { "type": "boolean", "description": "Opt-in post-run change observation for hipson task run" },
         "observe_max_files": { "type": "integer", "minimum": 1 },
-        "observe_max_bytes": { "type": "integer", "minimum": 1 }
+        "observe_max_bytes": { "type": "integer", "minimum": 1 },
+        "worker_env": { "enum": ["inherit", "minimal"], "description": "Worker environment for hipson task run (default inherit)" },
+        "worker_env_allow": { "type": "array", "items": { "type": "string" }, "maxItems": 64,
+                              "description": "Extra variable names passed to workers under worker_env minimal" }
       }
     },
     "valid": { "type": "boolean" },

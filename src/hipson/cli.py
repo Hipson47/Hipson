@@ -37,6 +37,7 @@ from hipson import (
     task_runner,
     task_verification,
     verification,
+    worker_env,
     workflow,
 )
 from hipson import evidence as evidence_mod
@@ -1923,6 +1924,8 @@ def command_task(args: argparse.Namespace) -> int:
                               f"{item['ack_state']}; last activity={heartbeat}")
                         if item['failure_journal']:
                             print(f"    Journal: {_bounded_json(item['failure_journal'], limit=800, escape_controls=True)}")
+                        if item['environment'] and item['environment'].get('mode') == 'minimal':
+                            print(f"    Env {_bounded_cli(worker_env.summary(item['environment']), limit=400, escape_controls=True)}")
                         if item['changes']:
                             print(f"    Changes {_bounded_cli(task_observation.summary(item['changes']), limit=400, escape_controls=True)}")
                             for change in [entry for entry in item['changes']['paths']

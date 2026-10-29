@@ -231,6 +231,9 @@ def _assignment_lines(item: dict[str, Any]) -> list[str]:
     if item.get('changes'):
         from hipson.task_observation import summary
         lines.append(f"{identity} observed {_text(summary(item['changes']), 240)}")
+    if (item.get('environment') or {}).get('mode') == 'minimal':
+        from hipson import worker_env
+        lines.append(f"{identity} env {_text(worker_env.summary(item['environment']), 240)}")
     if item['failure_journal']:
         lines.append(f"{identity} journal: {_text(json.dumps(item['failure_journal'], ensure_ascii=False), 320)}")
     return lines

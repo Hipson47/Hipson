@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from hipson import ledger, task_activity, task_observation
+from hipson import ledger, task_activity, task_observation, worker_env
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job, batch_command
@@ -199,7 +199,27 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--rollout", choices=["codex"])
     parser.add_argument("--allow-project-mismatch", action="store_true")
     add_observe_arguments(parser)
+    add_env_arguments(parser)
     parser.add_argument("worker_command", nargs=argparse.REMAINDER, help="-- COMMAND [ARGS...]")
+
+
+def add_env_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--env", choices=worker_env.MODES,
+                        help="Worker environment: inherit the lead's (default) or minimal, an allowlist of login, "
+                             "locale, proxy, certificate and agent-home variables plus HIPSON_* "
+                             "(also set by worker_env in .hipson/policy.json)")
+    parser.add_argument("--env-allow", action="append", default=[], metavar="NAME",
+                        help="With --env minimal, also pass this variable (repeatable), e.g. OPENAI_API_KEY")
+
+
+def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:
+    """The requested worker environment mode and extra allowed names; ValueError when they cannot apply."""
+    from hipson.policy import load_policy
+    try:
+        payload = load_policy(project)
+    except (SystemExit, OSError, ValueError):
+        payload = {}
+    return worker_env.resolve(args, payload)
 
 
 def add_observe_arguments(parser: argparse.ArgumentParser) -> None:
@@ -363,6 +383,11 @@ def run(args: argparse.Namespace) -> int:
     if mismatch and not args.allow_project_mismatch:
         _message(f"project mismatch {json.dumps(check)}; worker not started (explicit override: --allow-project-mismatch)")
         return 76
+    try:
+        args.worker_env = worker_environment(args, str(check["expected"]))
+    except ValueError as exc:
+        _message(f"{exc}; worker not started")
+        return 64
     return _execute(db, args, command[1:], mismatch, check, grace)
 
 
@@ -437,6 +462,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
     verify_started = time.monotonic()
     verify_stamp = ledger._timestamp()
     verify_before: dict = {}
+    worker_base: dict[str, str] = {}
     builder_seq = 0
     try:
         if not windows:
@@ -447,10 +473,13 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 builder_seq = store._builder_finished_seq(args.task)
                 verify_before = project_state(str(check['expected']), db)
             else:
+                env_mode, env_allow = getattr(args, "worker_env", (worker_env.DEFAULT_MODE, []))
+                inherited = {key: value for key, value in os.environ.items() if not git_redirecting_variable(key)}
+                worker_base, env_record = worker_env.select(inherited, env_mode, env_allow)
                 assignment = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
                                       owner_pid=os.getpid(), owner_host=socket.gethostname(),
                                       owner_boot_id=ledger._boot_id(), owner_pid_namespace=ledger._pid_namespace(),
-                                      lease_seconds=args.lease_seconds)["id"]
+                                      lease_seconds=args.lease_seconds, environment=env_record)["id"]
             if mismatch:
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
@@ -482,8 +511,10 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
         # Checks and workers see the same repository as the fingerprint: no inherited variable may select
         # another repository, index or object store, or inject configuration. Identity (GIT_AUTHOR_*) and
         # transport (GIT_SSH_COMMAND) settings stay, so checks that commit fixtures or fetch still work.
+        # Lead checks always inherit: they are the lead's own declared commands and need its toolchain. Workers
+        # get the environment selected at assignment, which --env minimal narrows to an allowlist.
         inherited = {key: value for key, value in os.environ.items() if not git_redirecting_variable(key)}
-        env = inherited if verifying else {**inherited, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
+        env = inherited if verifying else {**worker_base, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
                'HIPSON_PROGRESS_FILE': str(progress_path)}
         with tempfile.TemporaryFile() as brief:

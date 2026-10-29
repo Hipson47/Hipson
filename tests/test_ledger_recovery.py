@@ -49,9 +49,9 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-1] for row in after["tasks"]] == before["tasks"]
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-11] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-11:-2] == (None,) * 9 and row[-1] is None for row in after['assignments'])  # v8: changes
-        assert [row[-2] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-12] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-12:-3] == (None,) * 9 and row[-2:] == (None, None) for row in after['assignments'])  # v8 changes, v9 environment
+        assert [row[-3] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -62,7 +62,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-11] == 42  # Reopening never repeats ALTER TABLE (v8: +changes).
+        assert _rows(store)["assignments"][-1][-12] == 42  # Reopening never repeats ALTER TABLE (v8 +changes, v9 +environment).
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
@@ -164,9 +164,9 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-1] for row in after["tasks"]] == before["tasks"]
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-6] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-6:-2] == (None,) * 4 and row[-1] is None for row in after['assignments'])  # v8: changes
-        assert [row[-2] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-7] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-7:-3] == (None,) * 4 and row[-2:] == (None, None) for row in after['assignments'])  # v8 changes, v9 environment
+        assert [row[-3] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)

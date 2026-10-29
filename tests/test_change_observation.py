@@ -218,6 +218,7 @@ def test_v7_ledgers_open_and_migrate_with_an_empty_changes_column(tmp_path):
         task = store.open_task(project=tmp_path, title="Old", objective="Old ledger")["id"]
         store.assign(task, actor="codex", role="builder", mode="ro", scope=[])
     with closing(sqlite3.connect(db)) as connection:
+        connection.execute("ALTER TABLE assignments DROP COLUMN environment")
         connection.execute("ALTER TABLE assignments DROP COLUMN changes")
         connection.execute("UPDATE schema_version SET version = 7")
         connection.commit()
@@ -226,7 +227,7 @@ def test_v7_ledgers_open_and_migrate_with_an_empty_changes_column(tmp_path):
     with closing(sqlite3.connect(db)) as connection:
         assert connection.execute("SELECT version FROM schema_version").fetchone()[0] == 7
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         assert "changes" in [row[1] for row in store.connection.execute("PRAGMA table_info(assignments)")]
 
 

@@ -9,6 +9,11 @@
   and any write by a read-only assignment raise one major finding per kind, and a capped observation is
   `incomplete`, never clean. Ledger schema v8 adds `assignments.changes` and the reserved `observed` event;
   shown in `task show`, `task now`, `lead resume` and the MCP JSON ([docs/TASK_LEDGER.md](docs/TASK_LEDGER.md)).
+- Opt-in worker environment allowlist: `task run` / `task do --env minimal` (or `worker_env` in project policy)
+  passes workers only login, locale, proxy, CA-bundle, Windows/WSL and agent-home variables plus every
+  `HIPSON_*`; credentials in variables need `--env-allow NAME` or `worker_env_allow`. The default stays
+  `inherit`, and lead verification always inherits. The assignment records the mode and variable names,
+  never values (ledger schema v9 adds `assignments.environment`).
 
 - Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
   `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,

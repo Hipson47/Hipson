@@ -25,7 +25,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -126,6 +126,7 @@ SCHEMA: tuple[str, ...] = (
         acknowledged_at TEXT,
         ack_note TEXT NOT NULL DEFAULT '',
         changes TEXT,
+        environment TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -221,6 +222,10 @@ MIGRATION_V7_TO_V8 = (
     "ALTER TABLE assignments ADD COLUMN changes TEXT",
     "UPDATE schema_version SET version = 8 WHERE singleton = 1",
 )
+MIGRATION_V8_TO_V9 = (
+    "ALTER TABLE assignments ADD COLUMN environment TEXT",
+    "UPDATE schema_version SET version = 9 WHERE singleton = 1",
+)
 MAX_CHECKS = 16
 MAX_CHECK_ARGS = 64
 CHECK_ARG_LIMIT = 4096
@@ -306,6 +311,7 @@ class Assignment(TypedDict):
     ack_note: str
     ack_state: str
     changes: dict[str, Any] | None
+    environment: dict[str, Any] | None
 
 
 class ReapedAssignment(TypedDict):
@@ -777,7 +783,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -801,6 +807,9 @@ class Ledger:
                             self.connection.execute(statement)
                     if version[0] in (1, 2, 3, 4, 5, 6, 7):
                         for statement in MIGRATION_V7_TO_V8:
+                            self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5, 6, 7, 8):
+                        for statement in MIGRATION_V8_TO_V9:
                             self.connection.execute(statement)
         except BaseException:
             self.close()
@@ -883,6 +892,7 @@ class Ledger:
         owner_host: str | None = None,
         owner_pid_namespace: str | None = None,
         lease_seconds: int | None = None,
+        environment: dict[str, Any] | None = None,
     ) -> Assignment:
         actor = redact_text(require_text(actor, "actor"))
         if role not in ROLES or mode not in MODES:
@@ -897,6 +907,9 @@ class Ledger:
         owner_pid_namespace = redact_text(require_text(owner_pid_namespace, "owner_pid_namespace")) if owner_pid_namespace is not None else None
         if lease_seconds is not None and (type(lease_seconds) is not int or lease_seconds < 0):
             raise LedgerError("lease_seconds must be a nonnegative integer")
+        if environment is not None and (not isinstance(environment, dict)
+                                        or environment.get("mode") not in ("inherit", "minimal")):
+            raise LedgerError("environment must be an object with mode inherit or minimal")
         result: Assignment | None = None
         conflict = ""
         with self._transaction():
@@ -946,10 +959,12 @@ class Ledger:
                 self.connection.execute(
                     """INSERT INTO assignments
                        (id, task, actor, role, mode, scope, status, started_at, ended_at,
-                        owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace)
-                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?)""",
+                        owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace, environment)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)""",
                     (assignment, task, actor, role, mode, json.dumps(paths), now,
-                     owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace),
+                     owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace,
+                     # Names and counts only; redaction also covers a secret-shaped variable name.
+                     json.dumps(redact_value(environment)) if environment is not None else None),
                 )
                 if mode == "rw":
                     self.connection.executemany(
@@ -1561,6 +1576,7 @@ class Ledger:
             'acknowledged_at': row['acknowledged_at'] if 'acknowledged_at' in row.keys() else None,
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
             'changes': _changes(row['changes']) if 'changes' in row.keys() and row['changes'] else None,
+            'environment': json.loads(row['environment']) if 'environment' in row.keys() and row['environment'] else None,
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
                           else 'not_required' if legacy or historical else 'unacknowledged'),
         }

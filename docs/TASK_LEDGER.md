@@ -184,6 +184,44 @@ The result is stored on the assignment as `changes` (in `task show`, `task now`,
 MCP JSON). It is an observation of the filesystem, not attribution: the lead or another process may also
 have written during the run, and paths are untrusted text. Secret-shaped path names are redacted.
 
+## Worker environment allowlist (opt-in, 1.7)
+
+By default a worker inherits the lead's environment (minus variables that select another git repository or
+inject git configuration), so it sees every credential exported in the lead's shell. `hipson task run --env
+minimal` (also `task do --env minimal`, or `"worker_env": "minimal"` in `.hipson/policy.json`) passes only an
+allowlist instead:
+
+- the login and runtime basics: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `PWD`, `LANG`, `LANGUAGE`,
+  `LC_*`, `TZ`, `TERM`, `COLORTERM`, `TMP`, `TEMP`, `TMPDIR`, `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`,
+  `VIRTUAL_ENV` and the `XDG_*_HOME` / `XDG_RUNTIME_DIR` directories;
+- network access: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY` (and their lower-case forms) and CA
+  bundles (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`,
+  `GIT_SSL_CAINFO`); git identity (`GIT_AUTHOR_*`, `GIT_COMMITTER_*` names and emails);
+- agent CLI config homes (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`), the WSL bridge (`WSL_DISTRO_NAME`,
+  `WSL_INTEROP`, `WSLENV`) and the Windows essentials (`SYSTEMROOT`, `COMSPEC`, `PATHEXT`, `USERPROFILE`,
+  `APPDATA`, `LOCALAPPDATA`, `PROGRAMFILES`, ...);
+- every `HIPSON_*` variable: the lead's (`HIPSON_LEDGER`, `HIPSON_HOME`) and the worker's own.
+
+File-based logins (`~/.codex/auth.json`, `~/.claude/.credentials.json`) keep working through `HOME`.
+Credentials passed as variables never pass by default: name each one with `--env-allow NAME` (repeatable) or
+`"worker_env_allow": ["NAME", ...]` in the policy, e.g. `--env-allow OPENAI_API_KEY` for an API-key Codex
+login, `ANTHROPIC_API_KEY`, `GH_TOKEN` or `SSH_AUTH_SOCK`. Names match case-insensitively on Windows. Names
+that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONFIG_*`, ...) cannot be allowed.
+
+- Command-line options win over the policy: `--env inherit` overrides a policy's `minimal` (and its allowed
+  names); `--env-allow` adds to `worker_env_allow` and needs `minimal`. A policy that sets `worker_env` but
+  is invalid refuses the run (exit 64) rather than silently inheriting everything.
+- The assignment records the mode, never values: `{"mode": "inherit", "count": N}`, or for `minimal` the
+  passed `names`, the requested `allowed` names, those `missing` from the lead's environment and the number
+  `dropped`. `task show` prints an `Env minimal (...)` line and `task now` / `lead resume` an `env` line;
+  the JSON and MCP views carry the record as `environment` (ledger schema v9).
+- Lead verification (`task verify`, `task close`, the checks of `task do`) always inherits the environment:
+  checks are the lead's own declared commands, run as the lead, and often need its toolchain or test
+  credentials. The allowlist protects the lead's secrets from delegated workers, not from the lead.
+- `inherit` stays the default in 1.7 so nothing changes for existing users. The plan is to make `minimal` the
+  default in a later minor release, after it has been used with the real worker CLIs; `--env inherit` will
+  keep the old behaviour.
+
 ## Acceptance checks and short flows (1.6)
 
 A task can declare acceptance checks: exact commands that prove its acceptance criteria. Declare them

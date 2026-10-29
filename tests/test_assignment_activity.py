@@ -46,7 +46,7 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
         with closing(ledger.Ledger(db)) as store:
             assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
             after = _rows(store)
-            extra = {1: 11, 3: 6, 4: 5}[version]  # v8 appends assignments.changes.
+            extra = {1: 12, 3: 7, 4: 6}[version]  # v8 appends assignments.changes, v9 assignments.environment.
             assert [row[:-extra] for row in after['assignments']] == before['assignments']
             assert {row[-1] for row in after['assignments']} == {None}
             for table in ('events', 'claims'):

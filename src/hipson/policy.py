@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from hipson import worker_env
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import changed_files, git_root, resolve_project
 from hipson.redaction import sanitize_path
@@ -109,6 +110,16 @@ def validate_policy_payload(policy: dict[str, Any]) -> list[str]:
     for key in ("observe_max_files", "observe_max_bytes"):
         if key in policy and (type(policy[key]) is not int or policy[key] < 1):
             issues.append(f"{key} must be a positive integer")
+    if "worker_env" in policy and policy["worker_env"] not in worker_env.MODES:
+        issues.append(f"worker_env must be one of {', '.join(worker_env.MODES)}")
+    if "worker_env_allow" in policy:
+        if not isinstance(policy["worker_env_allow"], list):
+            issues.append("worker_env_allow must be a list of variable names")
+        else:
+            try:
+                worker_env.validate_names(policy["worker_env_allow"], source="worker_env_allow")
+            except ValueError as exc:
+                issues.append(str(exc))
     return issues
 
 

@@ -489,9 +489,9 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-1] for row in after["tasks"]] == before["tasks"]
         assert {row[-1] for row in after["tasks"]} == {"[]"}
-        assert [row[:-7] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-7:-2] == (None,) * 5 and row[-1] is None for row in after['assignments'])  # v8: changes
-        assert [row[-2] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-8] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-8:-3] == (None,) * 5 and row[-2:] == (None, None) for row in after['assignments'])  # v8 changes, v9 environment
+        assert [row[-3] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
         assert store.findings() == []
         finding = store.add_finding("T-0001", actor="lead", severity="major", title="Legacy follow-up")
         assert finding["id"] == "F-0001" and store.events("T-0001")[-1]["seq"] == 7

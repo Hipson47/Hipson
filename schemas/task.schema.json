@@ -148,7 +148,20 @@
         "acknowledged_at": { "type": ["string", "null"], "format": "date-time" },
         "ack_note": { "type": "string", "maxLength": 1024 },
         "ack_state": { "enum": ["not_required", "unacknowledged", "acknowledged"] },
-        "changes": { "$ref": "#/$defs/changes" }
+        "changes": { "$ref": "#/$defs/changes" },
+        "environment": { "$ref": "#/$defs/environment" }
+      }
+    },
+    "environment": {
+      "description": "Worker environment selected at assignment (task run --env); variable names and counts, never values.",
+      "type": ["object", "null"], "additionalProperties": false, "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["inherit", "minimal"]},
+        "count": {"type": "integer", "minimum": 0, "description": "inherit: number of variables passed"},
+        "names": {"type": "array", "items": {"type": "string"}, "description": "minimal: names passed"},
+        "allowed": {"type": "array", "items": {"type": "string"}, "description": "minimal: extra names requested"},
+        "missing": {"type": "array", "items": {"type": "string"}, "description": "minimal: requested but unset"},
+        "dropped": {"type": "integer", "minimum": 0, "description": "minimal: number of variables withheld"}
       }
     },
     "change_counts": {
