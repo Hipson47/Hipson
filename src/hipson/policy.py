@@ -31,14 +31,16 @@ DEFAULT_POLICY: dict[str, Any] = {
 def load_policy(project_path: str | Path = ".") -> dict[str, Any]:
     project = resolve_project(str(project_path))
     path = _policy_path(project)
-    warnings: list[str] = []
     if path is None:
-        payload = dict(DEFAULT_POLICY)
-        source = "default"
-    else:
-        payload = _load_policy_file(path)
-        source = str(path)
-    policy = _merge_defaults(payload)
+        return policy_payload(project, "default", dict(DEFAULT_POLICY))
+    return policy_payload(project, str(path), _load_policy_file(path))
+
+
+def policy_payload(project: str | Path, source: str, data: object) -> dict[str, Any]:
+    """Merge and validate already-parsed policy data (a caller that inspected the bytes parses that snapshot)."""
+    if not isinstance(data, dict):
+        raise SystemExit(f"Policy file must contain an object: {source}")
+    policy = _merge_defaults(data)
     issues = validate_policy_payload(policy)
     return {
         "artifact_kind": "hipson.project_policy",
@@ -48,7 +50,7 @@ def load_policy(project_path: str | Path = ".") -> dict[str, Any]:
         "policy": policy,
         "valid": not issues,
         "issues": issues,
-        "warnings": warnings,
+        "warnings": [],
     }
 
 

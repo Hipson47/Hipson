@@ -214,11 +214,12 @@ that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONF
 - `worker_env` and `worker_env_allow` are read only from `.hipson/policy.json` (top-level keys, parsed by the
   standard JSON parser); `policy.yaml` never configures the worker environment. Without `--env`, any doubt
   refuses the run (exit 64) instead of silently inheriting everything: a `policy.yaml` in effect that may set it,
-  a `policy.json` that sets it but is invalid, a `policy.json` that cannot be read or parsed and may set it, or
-  one whose text mentions it while no top-level key is spelled exactly `worker_env`. "May set it" is decided on
-  the raw file in effect (`policy.json` shadows `policy.yaml`): `worker` and `env` in any case with any
-  separators between them, a `\u` escape, a NUL byte, or bytes that are not UTF-8 (UTF-16 and other encodings).
-  A broken policy that never mentions it keeps the pre-1.7 behaviour.
+  a `policy.json` that sets it but is invalid (a top-level key that only looks like it, such as `Worker-Env`,
+  `worker env` or `workerenv`, makes it invalid), or a `policy.json` that cannot be read or parsed and may set
+  it. "May set it" is decided on the raw file in effect (`policy.json` shadows `policy.yaml`), read once and
+  parsed from those same bytes: `worker` and `env` in any case with any separators or escapes (or none) between
+  them, a `\u` escape, a NUL byte, or bytes that are not UTF-8 (UTF-16 and other encodings). A broken policy
+  that never mentions it keeps the pre-1.7 behaviour.
 - The assignment records the mode, never values: `{"mode": "inherit", "count": N}`, or for `minimal` the
   passed `names`, the requested `allowed` names, those `missing` from the lead's environment and the number
   `dropped`. `task show` prints an `Env minimal (...)` line and `task now` / `lead resume` an `env` line;

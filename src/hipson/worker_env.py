@@ -88,8 +88,10 @@ POLICY_KEYS = ("worker_env", "worker_env_allow")
 
 
 def _normal(key: object) -> str:
-    # Any run of separators (spaces of any kind, dashes, quotes, underscores) reads as one underscore.
-    return re.sub(r"[\W_]+", "_", str(key).lower()).strip("_")
+    # Separators of any kind (spaces, tabs, dashes, quotes, underscores, none at all) do not matter: "worker env",
+    # "Worker-Env" and "workerenv" all read as worker_env.
+    compact = re.sub(r"[\W_]+", "", str(key).lower())
+    return {"workerenv": "worker_env", "workerenvallow": "worker_env_allow"}.get(compact, compact)
 
 
 def misspelled_keys(policy: Mapping[str, Any]) -> list[str]:

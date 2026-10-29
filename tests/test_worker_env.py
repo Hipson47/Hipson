@@ -282,13 +282,15 @@ def test_doubtful_json_policies_refuse_and_near_miss_keys_are_invalid(tmp_path):
     (project / ".hipson").mkdir()
     json_file = project / ".hipson" / "policy.json"
     task = _open_task(tmp_path, project)
-    for key in ("Worker_Env", "worker-env", " worker_env", "worker  env", "worker\u00a0env", "WORKER--ENV"):
+    for key in ("Worker_Env", "worker-env", " worker_env", "worker  env", "worker\u00a0env", "WORKER--ENV",
+                "workerenv", "worker\tenv", "worker_env_ALLOW"):
         json_file.write_text(json.dumps({key: "minimal"}, ensure_ascii=False), encoding="utf-8")
         assert "spell it exactly" in _refused(tmp_path, project, task), key
     for encoding in ("utf-16", "utf-16-le", "utf-32"):
         json_file.write_bytes(json.dumps({"worker_env": "minimal"}).encode(encoding))
         assert "may set worker_env" in _refused(tmp_path, project, task), encoding
-    for text in ('{"Worker_Env": "minimal",}', '{"worker env": "minimal",}'):
+    for text in ('{"Worker_Env": "minimal",}', '{"worker env": "minimal",}', '{"workerenv": "minimal",}',
+                 '{"worker\\tenv": "minimal",}', '{"worker\\nenv": "minimal",}', '{"worker\\benv": "minimal",}'):
         json_file.write_text(text)
         assert "may set worker_env" in _refused(tmp_path, project, task), text
     json_file.write_text('\ufeff{"worker_env": "minimal"}', encoding="utf-8")  # json rejects a BOM.
@@ -299,6 +301,34 @@ def test_doubtful_json_policies_refuse_and_near_miss_keys_are_invalid(tmp_path):
     json_file.write_text(json.dumps({"worker_env": "minimal", "agent_integration": {"worker_env": "inherit"}}))
     assert not _run(tmp_path, project, task)["DUMMY_SECRET"]
     assert _run(tmp_path, project, task, "--env", "inherit")["DUMMY_SECRET"]
+    # A valid policy that never sets it is not refused for escapes or Windows paths elsewhere in it.
+    json_file.write_text('{"denied_paths": ["secrets\\\\keys"], "default_workflow": "caf\\u00e9"}')
+    assert _run(tmp_path, project, task)["DUMMY_SECRET"]
+
+
+def test_the_policy_is_parsed_from_the_same_bytes_that_were_inspected(tmp_path):
+    from argparse import Namespace
+    from unittest.mock import patch
+
+    from hipson import task_runner
+
+    project = tmp_path / "p"
+    (project / ".hipson").mkdir(parents=True)
+    policy_file = project / ".hipson" / "policy.json"
+    policy_file.write_text(json.dumps({"worker_env": "minimal"}))
+    original = Path.read_bytes
+    reads = []
+
+    def read_once_then_swap(self):
+        data = original(self)
+        reads.append(self)
+        policy_file.write_text("{}")  # A concurrent edit right after the inspected read.
+        return data
+
+    with patch.object(Path, "read_bytes", read_once_then_swap), \
+            patch("hipson.policy.load_policy", side_effect=AssertionError("the policy file was read twice")):
+        assert task_runner.worker_environment(Namespace(env=None, env_allow=[]), str(project)) == ("minimal", [])
+    assert len(reads) == 1
 
 
 def test_a_rejected_allowed_name_is_never_echoed(tmp_path):
