@@ -9,7 +9,9 @@ import subprocess
 import sys
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import SkipTest
+from unittest.mock import patch
 
 import pytest
 
@@ -279,3 +281,175 @@ def test_the_ledger_and_its_private_state_inside_the_project_are_never_checkpoin
         manifest = task_checkpoint.load(db, assignment)
     assert saved["files"] == 1 and list(manifest["entries"]) == ["app.py"]
     assert "ledger.sqlite" in manifest["excluded"] and ".ledger.sqlite.checkpoints" not in manifest["entries"]
+
+
+def _manifest_path(db: Path, assignment: str) -> Path:
+    return task_checkpoint.location(db, assignment) / "manifest.json"
+
+
+def test_a_tampered_manifest_is_never_used(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        original = _manifest_path(db, assignment).read_text()
+        manifest = json.loads(original)
+        some = next(entry for entry in manifest["entries"].values() if entry["type"] == "file")
+        for rel in ("/tmp/victim", "../outside.txt", "docs/guide.md", "src/../docs/x", "src\\x"):
+            changed = {**manifest, "entries": {**manifest["entries"], rel: some}}
+            _manifest_path(db, assignment).write_text(json.dumps(changed))
+            with pytest.raises(task_checkpoint.CheckpointError, match="is damaged"):
+                task_checkpoint.apply(db, assignment, store)
+        # Roots that differ from the assignment's claim in the ledger are refused too.
+        _manifest_path(db, assignment).write_text(json.dumps({**manifest, "roots": ["."], "entries": {}}))
+        with pytest.raises(task_checkpoint.CheckpointError, match="does not match the ledger"):
+            task_checkpoint.apply(db, assignment, store)
+        with pytest.raises(task_checkpoint.CheckpointError, match="does not match the ledger"):
+            task_checkpoint.plan(db, assignment, store)
+        _manifest_path(db, assignment).write_text(original)
+        assert task_checkpoint.apply(db, assignment, store)["verified"]
+
+
+def test_a_replaced_project_directory_is_refused(tmp_path):
+    _symlinks(tmp_path)
+    root, db, store, task, assignment = _setup(tmp_path)
+    other = tmp_path / "other-tree"
+    _write(other, {"src/app.py": "someone else's file\n"})
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        root.rename(tmp_path / "moved-away")
+        os.symlink(other, root, target_is_directory=True)
+        with pytest.raises(task_checkpoint.CheckpointError, match="replaced or moved|not a real directory"):
+            task_checkpoint.apply(db, assignment, store)
+    assert (other / "src/app.py").read_text() == "someone else's file\n"
+
+
+@pytest.mark.skipif(not task_checkpoint._FD_SAFE, reason="descriptor-relative restore is POSIX only")
+def test_a_link_swapped_in_after_planning_is_never_followed(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    outside = tmp_path / "outside"
+    _write(outside, {"deep/file.txt": "outside, must stay\n"})
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        _write(root, {"src/newdir/deep/file.txt": "created\n"})
+        store.finish(assignment, result="failed", summary="done")
+        real_plan = task_checkpoint.plan
+
+        def plan_then_swap(*args, **kwargs):
+            steps = real_plan(*args, **kwargs)
+            if (root / "src/newdir").is_dir() and not (root / "src/newdir").is_symlink():
+                (root / "src/newdir/deep/file.txt").unlink()
+                (root / "src/newdir/deep").rmdir()
+                (root / "src/newdir").rmdir()
+                os.symlink(outside, root / "src/newdir", target_is_directory=True)
+            return steps
+
+        with patch.object(task_checkpoint, "plan", plan_then_swap), \
+                pytest.raises(task_checkpoint.CheckpointError, match="src/newdir is not a real directory"):
+            task_checkpoint.apply(db, assignment, store)
+    assert (outside / "deep/file.txt").read_text() == "outside, must stay\n"
+
+
+def test_windows_junctions_count_as_links():
+    junction = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_file_attributes=task_checkpoint._REPARSE)
+    plain = SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_file_attributes=0)
+    assert task_checkpoint._is_link(junction) and not task_checkpoint._is_link(plain)  # type: ignore[arg-type]
+
+
+def test_excluded_sensitive_and_private_scope_roots_are_refused(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    _write(root, {"node_modules/pkg/index.js": "x", ".git/config": "x"})
+    with closing(store):
+        for scope in ([".env"], ["src/.env"], ["node_modules/pkg"], [".git"], ["secrets/key.pem"]):
+            with pytest.raises(task_checkpoint.CheckpointError, match="cannot checkpoint"):
+                task_checkpoint.take(db, assignment, root, scope)
+
+
+def test_restore_holds_a_claim_and_releases_it(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        _worker_damage(root)
+        store.finish(assignment, result="failed", summary="done")
+        real_verify = task_checkpoint._verify_objects
+        attempts = []
+
+        def writer_arrives(*args, **kwargs):
+            with closing(ledger.Ledger(db)) as other:
+                with pytest.raises(ledger.ClaimConflictError):
+                    other.assign(task, actor="claude", role="builder", mode="rw", scope=["src/pkg"])
+                attempts.append("refused")
+            return real_verify(*args, **kwargs)
+
+        with patch.object(task_checkpoint, "_verify_objects", writer_arrives):
+            result = task_checkpoint.apply(db, assignment, store)
+        claim = store.activity(result["claim"])
+    assert attempts == ["refused"] and result["verified"]
+    assert claim["actor"] == task_checkpoint.RESTORE_ACTOR and claim["status"] == "passed"
+    assert claim["ack_state"] == "acknowledged" and claim["scope"] == ["src"]
+
+
+def test_live_claims_compare_case_insensitively_where_the_filesystem_does(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        store.finish(assignment, result="failed", summary="done")
+        store.assign(task, actor="claude", role="builder", mode="rw", scope=["SRC/app.py"])
+        with patch.object(task_checkpoint, "_FOLD", True):
+            assert task_checkpoint.live_blockers(store, assignment, ["src"])
+        with patch.object(task_checkpoint, "_FOLD", False):
+            assert task_checkpoint.live_blockers(store, assignment, ["src"]) == []
+
+
+def test_a_missing_saved_copy_stops_the_restore_before_any_change(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        _worker_damage(root)
+        store.finish(assignment, result="failed", summary="done")
+        damaged = _tree(root)
+        manifest = task_checkpoint.load(db, assignment)
+        (task_checkpoint.location(db, assignment) / "objects" / manifest["entries"]["src/app.py"]["sha256"]).unlink()
+        with pytest.raises(task_checkpoint.CheckpointError, match="missing; nothing was changed"):
+            task_checkpoint.apply(db, assignment, store)
+        assert all(item["status"] != "active" for item in store.show(task)["assignments"])
+    assert _tree(root) == damaged
+
+
+def test_retention_never_drops_a_checkpoint_while_its_task_has_active_work(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        other = store.assign(task, actor="claude", role="builder", mode="rw", scope=["docs"])["id"]
+        assert task_checkpoint.prune(db, store, older_than_days=0) == []
+        store.finish(other, result="passed", summary="done")
+        assert [item["assignment"] for item in task_checkpoint.prune(db, store, older_than_days=0)] == [assignment]
+
+
+@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="POSIX permission bits as a normal user")
+def test_restrictive_directory_modes_are_restored_after_their_contents(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        (root / "src/pkg").chmod(0o555)
+        task_checkpoint.take(db, assignment, root, ["src"])
+        (root / "src/pkg").chmod(0o755)
+        (root / "src/pkg/util.py").write_text("changed\n")
+        store.finish(assignment, result="failed", summary="done")
+        result = task_checkpoint.apply(db, assignment, store)
+    assert result["verified"] and (root / "src/pkg/util.py").read_text() == "u = 1\n"
+    assert stat.S_IMODE(os.lstat(root / "src/pkg").st_mode) == 0o555
+    (root / "src/pkg").chmod(0o755)
+
+
+def test_a_changed_mtime_alone_is_restored(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        before = os.lstat(root / "src/app.py").st_mtime_ns
+        os.utime(root / "src/app.py", ns=(before + 10**10, before + 10**10))
+        store.finish(assignment, result="failed", summary="done")
+        assert task_checkpoint.plan(db, assignment, store)["restore"] == ["src/app.py"]
+        assert task_checkpoint.apply(db, assignment, store)["verified"]
+    assert os.lstat(root / "src/app.py").st_mtime_ns == before

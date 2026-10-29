@@ -292,7 +292,7 @@ def command_restore(args: argparse.Namespace) -> int:
                     f"deleted {len(result['delete']) - len(result['kept'])} path(s) in "
                     f"{', '.join(result['scope'])}; verified {str(result['verified']).lower()}"))
             else:
-                result = {**task_checkpoint.plan(db, args.assignment), 'applied': False,
+                result = {**task_checkpoint.plan(db, args.assignment, store), 'applied': False,
                           'blockers': task_checkpoint.live_blockers(
                               store, args.assignment, task_checkpoint.load(db, args.assignment)['roots'])}
     except (task_checkpoint.CheckpointError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
