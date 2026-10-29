@@ -209,13 +209,16 @@ login, `ANTHROPIC_API_KEY`, `GH_TOKEN` or `SSH_AUTH_SOCK`. Names match case-inse
 that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONFIG_*`, ...) cannot be allowed.
 
 - Command-line options win over the policy: `--env inherit` overrides a policy's `minimal` (and its allowed
-  names); `--env-allow` adds to `worker_env_allow` and needs `minimal`. Without `--env`, a policy that sets
-  `worker_env` but is invalid, or a policy file that cannot be read or parsed and mentions `worker_env` (or
-  holds a `\u` escape, which could spell it; only the file in effect counts, `policy.json` shadows
-  `policy.yaml`), refuses the run (exit 64) rather than silently inheriting everything. A key that only looks
-  like one of these settings (`Worker_Env`, `worker-env`, a padded key) makes the policy invalid instead of
-  being ignored; quoted YAML keys (`"worker_env": minimal`) apply as written. With `--env` the command line decides
+  names); `--env-allow` adds to `worker_env_allow` and needs `minimal`. With `--env` the command line decides
   and an invalid policy contributes no allowed names. A rejected `--env-allow` value is never echoed.
+- `worker_env` and `worker_env_allow` are read only from `.hipson/policy.json` (top-level keys, parsed by the
+  standard JSON parser); `policy.yaml` never configures the worker environment. Without `--env`, any doubt
+  refuses the run (exit 64) instead of silently inheriting everything: a `policy.yaml` in effect that may set it,
+  a `policy.json` that sets it but is invalid, or a `policy.json` that cannot be read or parsed and may set it.
+  "May set it" means the file mentions `worker_env` in any case, with `_`, `-` or spaces, or holds a `\u`
+  escape that could spell it; only the file in effect counts (`policy.json` shadows `policy.yaml`). A key that
+  only looks like one of these settings (`Worker_Env`, `worker-env`, a padded key) makes the policy invalid.
+  A broken policy that never mentions it keeps the pre-1.7 behaviour.
 - The assignment records the mode, never values: `{"mode": "inherit", "count": N}`, or for `minimal` the
   passed `names`, the requested `allowed` names, those `missing` from the lead's environment and the number
   `dropped`. `task show` prints an `Env minimal (...)` line and `task now` / `lead resume` an `env` line;

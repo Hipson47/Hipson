@@ -250,21 +250,49 @@ def test_an_unreadable_policy_that_may_set_worker_env_never_falls_back_to_inheri
     assert _run(tmp_path, project, task)["DUMMY_SECRET"]
 
 
-def test_quoted_yaml_keys_apply_and_near_miss_spellings_refuse(tmp_path):
+def _refused(tmp_path: Path, project: Path, task: str) -> str:
+    refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                      "--", sys.executable, "-c", "pass")
+    assert refused.returncode == 64, refused.stderr
+    return refused.stderr
+
+
+def test_worker_env_is_read_only_from_policy_json_and_yaml_that_may_set_it_refuses(tmp_path):
     project = _project(tmp_path)
     (project / ".hipson").mkdir()
     yaml_file = project / ".hipson" / "policy.yaml"
     task = _open_task(tmp_path, project)
-    for text in ('"worker_env": minimal\n', "'worker_env': minimal\n"):
-        yaml_file.write_text(text)
-        assert not _run(tmp_path, project, task)["DUMMY_SECRET"], text
-    yaml_file.unlink()
+    for text in ("worker_env: minimal\n", '"worker_env": minimal\n', '"worker\\u005fenv": minimal\n',
+                 "\ufeffworker_env: minimal\n", '{"worker_env": "minimal"}\n', "Worker-Env: minimal\n",
+                 "worker_env: minimal\nagent_integration:\n  \"worker_env\": inherit\n"):
+        yaml_file.write_text(text, encoding="utf-8")
+        assert "read only from .hipson/policy.json" in _refused(tmp_path, project, task), text
+    # An explicit --env decides, and YAML never configures the worker environment.
+    yaml_file.write_text("worker_env: minimal\nworker_env_allow:\n  - EXTRA_ALLOWED\n")
+    seen = _run(tmp_path, project, task, "--env", "minimal")
+    assert not seen["DUMMY_SECRET"] and not seen["EXTRA_ALLOWED"]
+    yaml_file.write_text("observe_changes: true\n")  # A YAML policy that never mentions it: unchanged behaviour.
+    assert _run(tmp_path, project, task)["DUMMY_SECRET"]
+
+
+def test_doubtful_json_policies_refuse_and_near_miss_keys_are_invalid(tmp_path):
+    project = _project(tmp_path)
+    (project / ".hipson").mkdir()
     json_file = project / ".hipson" / "policy.json"
+    task = _open_task(tmp_path, project)
     for key in ("Worker_Env", "worker-env", " worker_env"):
         json_file.write_text(json.dumps({key: "minimal"}))
-        refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
-                          "--", sys.executable, "-c", "pass")
-        assert refused.returncode == 64 and "spell it exactly worker_env" in refused.stderr, key
+        assert "spell it exactly worker_env" in _refused(tmp_path, project, task), key
+    for text in ('{"Worker_Env": "minimal",}', '{"worker env": "minimal",}'):
+        json_file.write_text(text)
+        assert "may set worker_env" in _refused(tmp_path, project, task), text
+    json_file.write_text('\ufeff{"worker_env": "minimal"}', encoding="utf-8")  # json rejects a BOM.
+    assert "may set worker_env" in _refused(tmp_path, project, task)
+    json_file.write_text('{"worker\\u005fenv": "minimal"}')  # Valid JSON: the exact parser decodes the key.
+    assert not _run(tmp_path, project, task)["DUMMY_SECRET"]
+    # A nested key is not the setting; the root decides.
+    json_file.write_text(json.dumps({"worker_env": "minimal", "agent_integration": {"worker_env": "inherit"}}))
+    assert not _run(tmp_path, project, task)["DUMMY_SECRET"]
     assert _run(tmp_path, project, task, "--env", "inherit")["DUMMY_SECRET"]
 
 

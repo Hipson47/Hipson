@@ -213,7 +213,7 @@ def _parse_simple_yaml(text: str) -> dict[str, Any]:
         if ":" not in line:
             raise SystemExit(f"Unsupported policy YAML line: {raw_line}")
         key, raw_value = line.split(":", 1)
-        key = key.strip().strip('"').strip("'")  # A quoted key names the same setting, as a quoted value does.
+        key = key.strip()
         value = raw_value.strip()
         current_key = key
         if not value:

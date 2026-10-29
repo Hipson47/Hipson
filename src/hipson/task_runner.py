@@ -212,33 +212,40 @@ def add_env_arguments(parser: argparse.ArgumentParser) -> None:
                         help="With --env minimal, also pass this variable (repeatable), e.g. OPENAI_API_KEY")
 
 
+MENTIONS_WORKER_ENV = re.compile(r"worker[\s_\-]*env|\\[uU]", re.IGNORECASE)
+
+
 def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:
-    """The requested worker environment mode and extra allowed names; ValueError when they cannot apply."""
-    from hipson.policy import load_policy
+    """The requested worker environment mode and extra allowed names; ValueError when they cannot apply.
+
+    Only .hipson/policy.json, read by the exact JSON parser, configures the worker environment. Any doubt about
+    a policy that may ask for minimal refuses the run without --env instead of inheriting everything.
+    """
+    from hipson.policy import POLICY_JSON, POLICY_YAML, load_policy
+    explicit = getattr(args, "env", None) is not None
+    root = Path(project)
+    path = root / POLICY_JSON if (root / POLICY_JSON).exists() else root / POLICY_YAML  # As load_policy chooses.
+    try:
+        text: str | None = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return worker_env.resolve(args, {"valid": True, "policy": {}})
+    except OSError:
+        text = None  # Unreadable: it may set worker_env.
+    # Spellings, padding, case and \u escapes all count: a policy that may mean worker_env is never ignored.
+    mentions = text is None or MENTIONS_WORKER_ENV.search(text) is not None
+    if path.name != POLICY_JSON.name:
+        if mentions and not explicit:
+            raise ValueError("worker_env is read only from .hipson/policy.json, and the policy.yaml in effect may "
+                             "set it; move the setting to policy.json or pass --env explicitly")
+        return worker_env.resolve(args, {"valid": True, "policy": {}})
     try:
         payload = load_policy(project)
     except (SystemExit, OSError, ValueError) as exc:
-        # An unreadable policy may be the one asking for minimal: never fall back to the full environment on its
-        # account. Policies that plainly do not mention worker_env keep working as before.
-        if getattr(args, "env", None) is None and _may_set_worker_env(Path(project)):
+        if mentions and not explicit:
             raise ValueError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
                              "fix .hipson/policy.json or pass --env explicitly") from None
-        payload = {}
+        payload = {}  # A broken policy that never mentions it keeps the pre-1.7 behaviour.
     return worker_env.resolve(args, payload)
-
-
-def _may_set_worker_env(project: Path) -> bool:
-    from hipson.policy import POLICY_JSON, POLICY_YAML
-    # Only the file load_policy uses counts: policy.json shadows policy.yaml.
-    path = project / POLICY_JSON if (project / POLICY_JSON).exists() else project / POLICY_YAML
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True  # Unreadable: assume it might.
-    # A \u escape can spell any key (e.g. "worker_env"), so text with one is treated as possibly setting it.
-    return "worker_env" in text or "\\u" in text or "\\U" in text
 
 
 def add_observe_arguments(parser: argparse.ArgumentParser) -> None:
