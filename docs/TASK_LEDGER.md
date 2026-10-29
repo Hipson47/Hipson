@@ -239,23 +239,38 @@ state beside the ledger (`.<ledger file>.checkpoints/A-..../`, mode 0700) after 
 the worker starts.
 
 - Bounded: `--checkpoint-max-files` (default 20000) and `--checkpoint-max-bytes` (default 512 MiB). A scope over
-  either cap, nested deeper than 64 levels, holding special files, or reached through a link (a claimed path
-  below a linked directory) is refused before any assignment is created (exit 64), never checkpointed in part.
-  If the copy itself fails after the claim (a file changes while copied), the worker is not started.
+  either cap, nested deeper than 64 levels, holding special files or Windows junctions, reached through a link
+  (a claimed path below a linked directory), or itself sensitive, excluded or the ledger's private state
+  (`--scope .env`, `--scope node_modules/x`, `--scope .git`) is refused before any assignment is created
+  (exit 64), never checkpointed in part. If the copy itself fails after the claim (a file changes while
+  copied), the worker is not started.
 - What is copied: regular files (content, permission bits, mtime), directories and links (as links, never
   followed). Not copied and never touched by a restore: sensitive files such as `.env` or keys (the same rule as
   redaction) and excluded directories (`.git`, `.venv`, `node_modules`, tool caches), plus the ledger and its
   private state when they live inside the project.
 - `hipson task restore --assignment A-0001` is a dry run: what would be restored (changed), re-created
   (deleted by the worker) and deleted (created by the worker), all within the checkpointed scope, and what
-  blocks it. `--apply` performs it and then verifies that the scope matches the checkpoint (exit 1 if not).
-  It is refused while the assignment is active or while any live rw assignment in the same project holds an
-  overlapping claim. It never writes through a link: a link the worker put where a directory was is removed
-  and the directory re-created. A created directory that still holds left-alone files is kept and reported.
+  blocks it. `--apply` performs it and then verifies that the scope matches the checkpoint, contents,
+  permission bits and file mtimes included (exit 1 if not).
+- Refused while the assignment is active, while any live rw assignment in the same project holds an
+  overlapping claim (compared case-insensitively on Windows and macOS), or when the task is done or cancelled.
+  While it runs, the restore holds its own rw claim on the scope (actor `hipson-restore`, finished and
+  acknowledged when it ends), so no worker can start on it meanwhile.
+- Safety: the checkpoint must match the ledger's project and the assignment's claimed scope, every saved path
+  must be relative and inside that scope, and the project directory must be the same one (device and inode)
+  that was checkpointed. Every saved copy a restore needs is verified, and a directory in the way that holds
+  left-alone files is reported, before anything changes. On Linux and macOS every change is made relative to
+  directory descriptors opened without following links from the verified project root, so a link swapped in
+  during the restore is never followed. On Windows each parent is checked for links and junctions right before
+  each change (no descriptor-relative operations there): avoid restoring while other local processes rewrite
+  the scope. A link the worker put where a directory was is removed and the directory re-created; directory
+  permissions are restored after their contents. A created directory that still holds left-alone files is kept
+  and reported.
 - The ledger records a `checkpointed` event (counts and scope) and a `restored` event (counts and whether it
   verified); both are reserved types. Contents and paths stay in the private checkpoint only.
 - Retention: `hipson task checkpoints` lists them; `--prune [--dry-run]` removes checkpoints of done or
-  cancelled tasks and those older than `--older-than-days` (default 14), never one whose assignment is active.
+  cancelled tasks and those older than `--older-than-days` (default 14), never one whose task has active work
+  (its worker or a restore in progress).
   Pruning also runs whenever a new checkpoint is taken. There is no MCP tool for restore: it is a lead action.
 
 ## Actor routing recommendation (1.7)
