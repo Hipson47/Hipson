@@ -212,7 +212,7 @@ def add_env_arguments(parser: argparse.ArgumentParser) -> None:
                         help="With --env minimal, also pass this variable (repeatable), e.g. OPENAI_API_KEY")
 
 
-MENTIONS_WORKER_ENV = re.compile(r"worker[\s_\-]*env|\\[uU]", re.IGNORECASE)
+MENTIONS_WORKER_ENV = re.compile(r"worker[\W_]*env|\\[uU]", re.IGNORECASE)
 
 
 def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:
@@ -226,13 +226,18 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
     root = Path(project)
     path = root / POLICY_JSON if (root / POLICY_JSON).exists() else root / POLICY_YAML  # As load_policy chooses.
     try:
-        text: str | None = path.read_text(encoding="utf-8", errors="replace")
+        raw: bytes | None = path.read_bytes()
     except FileNotFoundError:
         return worker_env.resolve(args, {"valid": True, "policy": {}})
     except OSError:
-        text = None  # Unreadable: it may set worker_env.
-    # Spellings, padding, case and \u escapes all count: a policy that may mean worker_env is never ignored.
-    mentions = text is None or MENTIONS_WORKER_ENV.search(text) is not None
+        raw = None  # Unreadable: it may set worker_env.
+    try:
+        text = raw.decode("utf-8") if raw is not None else None
+    except UnicodeDecodeError:
+        text = None  # Another encoding (UTF-16, ...) can hide the key from the text check.
+    # The file text decides whether the policy means worker_env: any case, any separators between the words,
+    # \u escapes and NUL bytes (UTF-16 that happens to decode) all count, so no spelling is ignored silently.
+    mentions = text is None or "\0" in text or MENTIONS_WORKER_ENV.search(text) is not None
     if path.name != POLICY_JSON.name:
         if mentions and not explicit:
             raise ValueError("worker_env is read only from .hipson/policy.json, and the policy.yaml in effect may "
@@ -245,6 +250,12 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
             raise ValueError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
                              "fix .hipson/policy.json or pass --env explicitly") from None
         payload = {}  # A broken policy that never mentions it keeps the pre-1.7 behaviour.
+    loaded = payload.get("policy")
+    parsed: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
+    if mentions and not explicit and payload and "worker_env" not in parsed:
+        # It was parsed, but the text means worker_env somewhere other than the exact top-level key.
+        raise ValueError("project policy mentions worker_env but sets no top-level \"worker_env\" key; spell it "
+                         "exactly in .hipson/policy.json or pass --env explicitly")
     return worker_env.resolve(args, payload)
 
 

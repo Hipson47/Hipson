@@ -271,6 +271,8 @@ def test_worker_env_is_read_only_from_policy_json_and_yaml_that_may_set_it_refus
     yaml_file.write_text("worker_env: minimal\nworker_env_allow:\n  - EXTRA_ALLOWED\n")
     seen = _run(tmp_path, project, task, "--env", "minimal")
     assert not seen["DUMMY_SECRET"] and not seen["EXTRA_ALLOWED"]
+    yaml_file.write_bytes("worker_env: minimal\n".encode("utf-16-le"))
+    assert "read only from .hipson/policy.json" in _refused(tmp_path, project, task)
     yaml_file.write_text("observe_changes: true\n")  # A YAML policy that never mentions it: unchanged behaviour.
     assert _run(tmp_path, project, task)["DUMMY_SECRET"]
 
@@ -280,9 +282,12 @@ def test_doubtful_json_policies_refuse_and_near_miss_keys_are_invalid(tmp_path):
     (project / ".hipson").mkdir()
     json_file = project / ".hipson" / "policy.json"
     task = _open_task(tmp_path, project)
-    for key in ("Worker_Env", "worker-env", " worker_env"):
-        json_file.write_text(json.dumps({key: "minimal"}))
-        assert "spell it exactly worker_env" in _refused(tmp_path, project, task), key
+    for key in ("Worker_Env", "worker-env", " worker_env", "worker  env", "worker\u00a0env", "WORKER--ENV"):
+        json_file.write_text(json.dumps({key: "minimal"}, ensure_ascii=False), encoding="utf-8")
+        assert "spell it exactly" in _refused(tmp_path, project, task), key
+    for encoding in ("utf-16", "utf-16-le", "utf-32"):
+        json_file.write_bytes(json.dumps({"worker_env": "minimal"}).encode(encoding))
+        assert "may set worker_env" in _refused(tmp_path, project, task), encoding
     for text in ('{"Worker_Env": "minimal",}', '{"worker env": "minimal",}'):
         json_file.write_text(text)
         assert "may set worker_env" in _refused(tmp_path, project, task), text

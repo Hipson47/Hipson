@@ -88,7 +88,8 @@ POLICY_KEYS = ("worker_env", "worker_env_allow")
 
 
 def _normal(key: object) -> str:
-    return str(key).strip().strip("\"'").strip().lower().replace("-", "_").replace(" ", "_")
+    # Any run of separators (spaces of any kind, dashes, quotes, underscores) reads as one underscore.
+    return re.sub(r"[\W_]+", "_", str(key).lower()).strip("_")
 
 
 def misspelled_keys(policy: Mapping[str, Any]) -> list[str]:
