@@ -676,3 +676,49 @@ def _needs_contract(tmp_path):
 def test_capability_tags_and_routed_events_exact_contract(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         _needs_contract(tmp_path)
+
+
+def test_case_aware_claims_and_projects_exact_contract():
+    for platform, folds in (("win32", True), ("darwin", True), ("linux", False), ("freebsd", False)):
+        with patch.object(ledger.sys, "platform", platform):
+            assert ledger._claims_overlap("SRC/a", "src") is folds
+            assert ledger._claims_overlap("src", "SRC/a") is folds
+            assert ledger._claims_overlap("src/a", "src") is True and ledger._claims_overlap("docs", "src") is False
+            assert ledger._claims_overlap(".", "anything") is True
+            assert ledger._same_project("/w/Repo", "/w/repo") is folds
+            assert ledger._same_project("/w/repo", "/w/repo") is True
+            assert ledger._same_project("/w/repo", "/w/other") is False
+            windows = platform == "win32"
+            assert ledger._claims_overlap("src.", "src") is windows and ledger._claims_overlap("src /a", "src") is windows
+            assert ledger._claim_key(".") == "." and ledger._claim_key("a./b .") == ("a/b" if windows else
+                                                                                     "a./b ." if not folds else "a./b .")
+            assert ledger._claims_overlap("src.x", "src") is False
+
+
+def _checkpoint_events_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        other_task = store.open_task(project=tmp_path / "Other", title="O", objective="o", lead=LEAD)["id"]
+        held = store.assign(task, actor="w", role="builder", mode="rw", scope=["src"])["id"]
+        # Another project's claims never conflict, whatever the case rules.
+        store.assign(other_task, actor="w", role="builder", mode="rw", scope=["src"])
+        with patch.object(ledger.sys, "platform", "darwin"):
+            same = store.open_task(project=str(tmp_path).upper(), title="S", objective="o", lead=LEAD)["id"]
+            _error(lambda: store.assign(same, actor="w", role="builder", mode="rw", scope=["SRC/x"]),
+                   f"Claim 'SRC/x' conflicts with 'src' held by assignment {held}")
+        event = store.record_checkpoint(held, type="checkpointed", summary=" A: checkpoint of src ")
+        assert (event["type"], event["actor"], event["summary"], event["refs"], event["task"]) == (
+            "checkpointed", "hipson", "A: checkpoint of src", [held], task)
+        assert store.record_checkpoint(held, type="restored", summary="restored")["type"] == "restored"
+        secret = "sk-ant-api03-" + "d" * 40
+        assert secret not in json.dumps(store.record_checkpoint(held, type="restored", summary=f"x {secret}"))
+        _error(lambda: store.record_checkpoint(held, type="observed", summary="x"),
+               "Checkpoint events are checkpointed or restored")
+        _error(lambda: store.record_checkpoint(held, type="checkpointed", summary=" "), "summary must not be empty")
+        _error(lambda: store.record_checkpoint("A-9999", type="restored", summary="x"), "Assignment not found: A-9999")
+        assert {"checkpointed", "restored"} <= ledger.RESERVED_EVENT_TYPES
+
+
+def test_checkpoint_events_and_case_aware_assign_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _checkpoint_events_contract(tmp_path)
