@@ -212,13 +212,20 @@ def add_env_arguments(parser: argparse.ArgumentParser) -> None:
                         help="With --env minimal, also pass this variable (repeatable), e.g. OPENAI_API_KEY")
 
 
-# "worker" ... "env" with any separators, including escapes such as \t; any \u escape could spell it too. The two
-# separator alternatives are disjoint (only one can take a backslash), so the scan stays linear.
-MENTIONS_WORKER_ENV = re.compile(r"worker(?:\\.|[^a-z0-9\\])*env|\\u", re.IGNORECASE)
+_SEPARATORS = re.compile(r"[^a-z0-9]+")
+_ESCAPES = re.compile(r"\\.", re.DOTALL)
 
 
 def _may_mean_worker_env(text: str | None) -> bool:
-    return text is None or "\0" in text or MENTIONS_WORKER_ENV.search(text) is not None
+    """Whether raw policy text could mean worker_env: "worker" and "env" with any separators between them, read
+    both with backslashes as plain separators ("worker\\env") and with each escape pair dropped ("worker\\tenv");
+    any \\u escape could spell it too. Each reading is one linear pass."""
+    if text is None or "\0" in text:
+        return True
+    lowered = text.lower()
+    if "\\u" in lowered:
+        return True
+    return any("workerenv" in _SEPARATORS.sub("", reading) for reading in (lowered, _ESCAPES.sub("", lowered)))
 
 
 def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:

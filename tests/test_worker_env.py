@@ -377,8 +377,14 @@ def test_the_mention_scan_is_linear_and_skipped_for_parsed_policies():
     assert not task_runner._may_mean_worker_env(hostile)
     assert task_runner._may_mean_worker_env("worker" + "\\" * 4999 + "tenv")  # The last pair is \t: a separator.
     assert time.monotonic() - started < 1.0
-    for text in ("worker_env", "WORKER-ENV", "worker \\t env", "workerenv", "x\\u0041", None, "a\0b"):
+    for text in ("worker_env", "WORKER-ENV", "worker \\t env", "workerenv", "x\\u0041", None, "a\0b",
+                 "worker\\env: minimal", '{"worker\\env":"minimal"}', "worker\\\nenv", "worker\\\\env",
+                 "worker" + "\\" * 3 + "tenv"):
         assert task_runner._may_mean_worker_env(text), text
+    started = time.monotonic()
+    assert task_runner._may_mean_worker_env(("worker" + "\\" * 2000) * 200 + "env")
+    assert not task_runner._may_mean_worker_env(("worker" + "\\" * 2000 + "x") * 200)
+    assert time.monotonic() - started < 1.0
     for text in ("{}", '{"denied_paths": ["a\\\\b"]}', "workers environment"):
         assert not task_runner._may_mean_worker_env(text), text
 
