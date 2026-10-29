@@ -16,7 +16,9 @@ LINUX_ONLY_SKIPS = frozenset({
     "agent e2e harness is Linux/WSL2-only: requires /proc, prctl and Linux process groups",
 })
 PLATFORM_SKIP_REASONS = {
-    "darwin": LINUX_ONLY_SKIPS,
+    "darwin": LINUX_ONLY_SKIPS | {
+        "requires a filesystem that accepts file names that are not UTF-8 and FIFOs",
+    },
     "win32": LINUX_ONLY_SKIPS | {
         "agent-run.sh requires Linux/WSL2 or macOS POSIX process groups; native Windows is unsupported",
         "Windows chmod cannot enforce POSIX directory/sidecar permissions; ACL errors are mocked separately",
@@ -26,6 +28,9 @@ PLATFORM_SKIP_REASONS = {
         "requires POSIX process inspection for verification descendant cleanup",
         "POSIX no-clobber placement only; Windows rename refuses an existing destination",
         "Windows file names cannot contain ':'",
+        "requires descriptor-relative filesystem operations (dir_fd); Windows checks each path component instead",
+        "requires a filesystem that accepts file names that are not UTF-8 and FIFOs",
+        "backslashes are path separators on Windows",
     },
 }
 

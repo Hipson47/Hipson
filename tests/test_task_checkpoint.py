@@ -135,7 +135,7 @@ def _symlinks(tmp_path: Path) -> None:
     try:
         os.symlink(tmp_path, tmp_path / "probe-link", target_is_directory=True)
     except (OSError, NotImplementedError) as exc:
-        raise SkipTest(f"symlinks are not available here: {exc}") from exc
+        raise SkipTest("Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege") from exc
     (tmp_path / "probe-link").unlink()
 
 
@@ -327,8 +327,9 @@ def test_a_replaced_project_directory_is_refused(tmp_path):
     assert (other / "src/app.py").read_text() == "someone else's file\n"
 
 
-@pytest.mark.skipif(not task_checkpoint._FD_SAFE, reason="descriptor-relative restore is POSIX only")
 def test_a_link_swapped_in_after_planning_is_never_followed(tmp_path):
+    if not task_checkpoint._FD_SAFE:
+        raise SkipTest("requires descriptor-relative filesystem operations (dir_fd); Windows checks each path component instead")
     root, db, store, task, assignment = _setup(tmp_path)
     outside = tmp_path / "outside"
     _write(outside, {"deep/file.txt": "outside, must stay\n"})
@@ -429,9 +430,9 @@ def test_retention_never_drops_a_checkpoint_while_its_task_has_active_work(tmp_p
         assert [item["assignment"] for item in task_checkpoint.prune(db, store, older_than_days=0)] == [assignment]
 
 
-@pytest.mark.skipif(sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
-                    reason="POSIX permission bits as a normal user")
 def test_restrictive_directory_modes_are_restored_after_their_contents(tmp_path):
+    if sys.platform == "win32" or os.geteuid() == 0:
+        raise SkipTest("requires POSIX directory mode bits and geteuid; Windows ACL errors are mocked separately")
     root, db, store, task, assignment = _setup(tmp_path)
     with closing(store):
         (root / "src/pkg").chmod(0o555)
@@ -588,7 +589,8 @@ def test_windows_trailing_dot_and_space_aliases_are_never_trusted():
             assert not task_checkpoint._valid_rel(rel), rel
         assert task_checkpoint._excluded_part("node_modules.") and task_checkpoint._excluded_part(".git ")
         assert task_checkpoint._protected(".env.") and task_checkpoint._protected(".git./config")
-    assert task_checkpoint._valid_rel("src./a.py")  # Elsewhere "src." is its own directory.
+    if sys.platform != "win32":
+        assert task_checkpoint._valid_rel("src./a.py")  # Elsewhere "src." is its own directory.
 
 
 def test_differently_cased_project_paths_share_claims_on_windows_and_macos(tmp_path):
@@ -607,8 +609,9 @@ def test_differently_cased_project_paths_share_claims_on_windows_and_macos(tmp_p
             assert any(held in reason for reason in task_checkpoint.live_blockers(store, done, ["src"]))
 
 
-@pytest.mark.skipif(not task_checkpoint._FD_SAFE, reason="descriptor-anchored walk is POSIX only")
 def test_a_directory_swapped_for_a_link_during_the_walk_is_never_followed(tmp_path):
+    if not task_checkpoint._FD_SAFE:
+        raise SkipTest("requires descriptor-relative filesystem operations (dir_fd); Windows checks each path component instead")
     root, db, store, task, assignment = _setup(tmp_path)
     outside = tmp_path / "credentials"
     _write(outside, {"util.py": "TOKEN=outside\n"})
@@ -663,9 +666,9 @@ def test_windows_claims_ignore_trailing_dots_and_spaces():
         assert not ledger._claims_overlap("src.", "src")
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo") or sys.platform == "darwin",
-                    reason="needs a filesystem that accepts arbitrary name bytes")
 def test_an_undecodable_special_file_name_still_releases_the_restore_claim(tmp_path):
+    if not hasattr(os, "mkfifo") or sys.platform == "darwin":
+        raise SkipTest("requires a filesystem that accepts file names that are not UTF-8 and FIFOs")
     root, db, store, task, assignment = _setup(tmp_path)
     with closing(store):
         task_checkpoint.take(db, assignment, root, ["src"])
@@ -710,8 +713,9 @@ def test_saved_copies_are_never_read_through_links_or_from_devices(tmp_path):
     assert (root / "src/app.py").read_text() == "changed\n"
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="backslashes are separators on Windows")
 def test_names_a_manifest_cannot_hold_are_refused_before_launch(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("backslashes are path separators on Windows")
     root, db, store, task, assignment = _setup(tmp_path)
     (root / "src" / "odd\\name.txt").write_text("x")
     with closing(store), pytest.raises(task_checkpoint.CheckpointError, match="cannot store"):

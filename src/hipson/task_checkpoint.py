@@ -225,7 +225,11 @@ class _Dir:
             opened = os.open(name, _DIRECTORY, dir_fd=self.fd)
         except OSError as exc:  # ELOOP: it became a link since lstat.
             raise CheckpointError(f"{rel} changed while it was read ({type(exc).__name__}); refusing to follow it") from None
-        current = os.fstat(opened)
+        try:
+            current = os.fstat(opened)
+        except OSError:
+            os.close(opened)
+            raise
         if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
             os.close(opened)
             raise CheckpointError(f"{rel} changed while it was read; refusing to follow it")
@@ -249,7 +253,11 @@ def _store_dir(db: Path, *, create: bool = False) -> _Dir | None:
     if not _FD_SAFE:
         return _Dir(path=folder)
     fd = os.open(folder, _DIRECTORY)
-    opened = os.fstat(fd)
+    try:
+        opened = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
     if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
         os.close(fd)
         raise CheckpointError(f"the checkpoint store {folder} changed while it was opened")
@@ -263,7 +271,11 @@ def _open_root(root: Path, expected: list[int] | None = None) -> _Dir:
     if not _FD_SAFE:
         return _Dir(path=root)
     fd = os.open(root, _DIRECTORY)
-    info = os.fstat(fd)
+    try:
+        info = os.fstat(fd)
+    except OSError:
+        os.close(fd)
+        raise
     if [info.st_dev, info.st_ino] != identity:
         os.close(fd)
         raise CheckpointError(f"the project {root} changed while it was opened")
@@ -711,7 +723,11 @@ class _Ops:
         self.root_fd = -1
         if _FD_SAFE:
             self.root_fd = os.open(root, _DIRECTORY)
-            info = os.fstat(self.root_fd)
+            try:
+                info = os.fstat(self.root_fd)
+            except OSError:
+                os.close(self.root_fd)
+                raise
             if [info.st_dev, info.st_ino] != identity:
                 os.close(self.root_fd)
                 raise CheckpointError(f"the project directory {root} was replaced while restoring")
@@ -914,7 +930,11 @@ def _open_object(db: Path, assignment: str, entry: dict[str, Any]) -> Any:
     finally:
         folder.close()
         store.close()
-    info = os.fstat(descriptor)
+    try:
+        info = os.fstat(descriptor)
+    except OSError:
+        os.close(descriptor)
+        raise
     if (_is_link(expected) or not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]
             or (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)):
         os.close(descriptor)
