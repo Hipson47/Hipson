@@ -102,7 +102,7 @@ def test_policy_validates_worker_env_and_its_allowed_names():
     assert "worker_env_allow must be a list of variable names" in policy.validate_policy_payload(
         {**base, "worker_env_allow": "GH_TOKEN"})
     issues = policy.validate_policy_payload({**base, "worker_env_allow": ["GIT_DIR"]})
-    assert any("cannot pass GIT_DIR" in issue for issue in issues)
+    assert any("entry 1 cannot be passed" in issue and "GIT_DIR" in issue for issue in issues)
 
 
 def test_summary_lines():
@@ -222,7 +222,7 @@ def test_project_policy_selects_minimal_and_an_invalid_policy_never_falls_back(t
     policy_file.unlink()
     bad_allow = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
                         "--env", "minimal", "--env-allow", "GIT_DIR", "--", sys.executable, "-c", "pass")
-    assert bad_allow.returncode == 64 and "cannot pass GIT_DIR" in bad_allow.stderr
+    assert bad_allow.returncode == 64 and "entry 1 cannot be passed" in bad_allow.stderr
     with closing(ledger.Ledger(tmp_path / "ledger.sqlite", read_only=True)) as store:
         assert len(store.show(task)["assignments"]) == 2  # Refused runs never assign.
 
@@ -238,8 +238,15 @@ def test_an_unreadable_policy_that_may_set_worker_env_never_falls_back_to_inheri
     assert refused.returncode == 64 and "cannot be read (JSONDecodeError) and may set worker_env" in refused.stderr
     assert not _run(tmp_path, project, task, "--env", "minimal")["DUMMY_SECRET"]
     assert _run(tmp_path, project, task, "--env", "inherit")["DUMMY_SECRET"]
-    # A broken policy that never mentions worker_env keeps the 1.6 behaviour: the run inherits.
+    # A \u escape can spell the key, so a broken policy holding one is refused too.
+    policy_file.write_text('{"worker\\u005fenv": "minimal",}')
+    escaped = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                      "--", sys.executable, "-c", "pass")
+    assert escaped.returncode == 64 and "may set worker_env" in escaped.stderr
+    # A broken policy that never mentions worker_env keeps the 1.6 behaviour: the run inherits, also when a
+    # policy.yaml it shadows does mention worker_env.
     policy_file.write_text('{"observe_changes": true,}')
+    (project / ".hipson" / "policy.yaml").write_text("worker_env: minimal\n")
     assert _run(tmp_path, project, task)["DUMMY_SECRET"]
 
 
@@ -251,6 +258,11 @@ def test_a_rejected_allowed_name_is_never_echoed(tmp_path):
                       "--env", "minimal", "--env-allow", cookie, "--", sys.executable, "-c", "pass")
     assert refused.returncode == 64 and "entry 1 is not one" in refused.stderr
     assert "opaque-cookie-value-91a" not in refused.stderr + refused.stdout
+    git_like = "GIT_CONFIG_opaque_credential_91a"
+    refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                      "--env", "minimal", "--env-allow", git_like, "--", sys.executable, "-c", "pass")
+    assert refused.returncode == 64 and "entry 1 cannot be passed" in refused.stderr
+    assert "opaque_credential_91a" not in refused.stderr + refused.stdout
 
 
 def test_lead_verification_keeps_the_inherited_environment(tmp_path):

@@ -229,13 +229,16 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
 
 def _may_set_worker_env(project: Path) -> bool:
     from hipson.policy import POLICY_JSON, POLICY_YAML
-    for name in (POLICY_JSON, POLICY_YAML):
-        try:
-            if (project / name).exists() and "worker_env" in (project / name).read_text(encoding="utf-8", errors="replace"):
-                return True
-        except OSError:
-            return True  # Unreadable: assume it might.
-    return False
+    # Only the file load_policy uses counts: policy.json shadows policy.yaml.
+    path = project / POLICY_JSON if (project / POLICY_JSON).exists() else project / POLICY_YAML
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # Unreadable: assume it might.
+    # A \u escape can spell any key (e.g. "worker_env"), so text with one is treated as possibly setting it.
+    return "worker_env" in text or "\\u" in text or "\\U" in text
 
 
 def add_observe_arguments(parser: argparse.ArgumentParser) -> None:

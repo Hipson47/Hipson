@@ -47,7 +47,8 @@ def validate_names(names: Iterable[object], *, source: str = "--env-allow") -> l
             # Never echo the rejected text: a mistaken "$TOKEN" would put the credential itself in the message.
             raise ValueError(f"{source} expects variable names such as OPENAI_API_KEY; entry {position} is not one")
         if git_redirecting_variable(name):
-            raise ValueError(f"{source} cannot pass {name}: it selects another repository or injects git configuration")
+            raise ValueError(f"{source} entry {position} cannot be passed: git variables that select another "
+                             "repository or inject configuration (GIT_DIR, GIT_CONFIG_*, ...) are never allowed")
         if name not in checked:
             checked.append(name)
     return checked

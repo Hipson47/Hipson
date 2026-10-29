@@ -210,8 +210,9 @@ that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONF
 
 - Command-line options win over the policy: `--env inherit` overrides a policy's `minimal` (and its allowed
   names); `--env-allow` adds to `worker_env_allow` and needs `minimal`. Without `--env`, a policy that sets
-  `worker_env` but is invalid, or a policy file that mentions `worker_env` but cannot be read or parsed,
-  refuses the run (exit 64) rather than silently inheriting everything; with `--env` the command line decides
+  `worker_env` but is invalid, or a policy file that cannot be read or parsed and mentions `worker_env` (or
+  holds a `\u` escape, which could spell it; only the file in effect counts, `policy.json` shadows
+  `policy.yaml`), refuses the run (exit 64) rather than silently inheriting everything; with `--env` the command line decides
   and an invalid policy contributes no allowed names. A rejected `--env-allow` value is never echoed.
 - The assignment records the mode, never values: `{"mode": "inherit", "count": N}`, or for `minimal` the
   passed `names`, the requested `allowed` names, those `missing` from the lead's environment and the number
