@@ -321,6 +321,9 @@ def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None,
             raise CheckpointError(f"{prefix} is nested deeper than {MAX_DEPTH} levels")
         for name in folder.names():
             rel = name if prefix == "." else f"{prefix}/{name}"
+            if not _valid_rel(rel):
+                shown = rel.encode("utf-8", "backslashreplace").decode("utf-8")
+                raise CheckpointError(f"{shown!r} has a name checkpoints cannot store (for example a backslash)")
             if _excluded_part(name) or _is_private(root / rel, keys):
                 excluded.append(rel)
                 continue
@@ -469,6 +472,14 @@ def _check_manifest(manifest: dict[str, Any], assignment: str) -> None:
     for key in ("absent", "sensitive", "excluded"):
         if not isinstance(manifest.get(key), list) or not all(isinstance(item, str) for item in manifest[key]):
             problems.append(key)
+    if not isinstance(manifest.get("taken_at"), str) or not all(
+            type(manifest.get(key)) is int and manifest[key] >= 0 for key in ("files", "bytes")):
+        problems.append("metadata")
+    for entry in entries.values():
+        if isinstance(entry, dict) and entry.get("type") == "file" and not (type(entry.get("size")) is int
+                                                                             and entry["size"] >= 0):
+            problems.append("file size")
+            break
     identity = manifest.get("project_identity")
     if not isinstance(manifest.get("project"), str) or not (
             isinstance(identity, list) and len(identity) == 2 and all(type(value) is int for value in identity)):
@@ -723,7 +734,7 @@ class _Ops:
         rename replaces a file or link at the target itself and never writes through a link)."""
         temporary = f".{PurePosixPath(rel).name}.restore.{uuid.uuid4().hex}"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        data = open(source, "rb")  # Opened first: a missing saved copy fails before anything else is held.
+        data = _open_object(source, entry)  # First: a missing or swapped saved copy fails before anything is held.
         parent_fd = -1
         try:
             if self.root_fd < 0:
@@ -771,6 +782,19 @@ class _Ops:
                 self._release(parent_fd)
 
 
+def _open_object(source: Path, entry: dict[str, Any]) -> Any:
+    """A saved copy: a regular file of the recorded size, never through a link and never a device or FIFO."""
+    try:
+        descriptor = os.open(source, _FLAGS)
+    except OSError:
+        raise CheckpointError(f"the saved copy {source.name[:12]} is missing; nothing was changed") from None
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]:
+        os.close(descriptor)
+        raise CheckpointError(f"the saved copy {source.name[:12]} is not the file that was saved; nothing was changed")
+    return os.fdopen(descriptor, "rb")
+
+
 def _verify_objects(db: Path, assignment: str, entries: dict[str, Any], paths: Iterable[str]) -> None:
     """Before any change: every saved copy a restore needs exists and still has its recorded digest."""
     objects = location(db, assignment) / "objects"
@@ -779,12 +803,9 @@ def _verify_objects(db: Path, assignment: str, entries: dict[str, Any], paths: I
         if entry["type"] != "file":
             continue
         digest = hashlib.sha256()
-        try:
-            with open(objects / entry["sha256"], "rb") as data:
-                while chunk := data.read(_CHUNK):
-                    digest.update(chunk)
-        except OSError:
-            raise CheckpointError(f"the saved copy of {rel} is missing; nothing was changed") from None
+        with _open_object(objects / entry["sha256"], entry) as data:
+            while chunk := data.read(_CHUNK):
+                digest.update(chunk)
         if digest.hexdigest() != entry["sha256"]:
             raise CheckpointError(f"the saved copy of {rel} is corrupt; nothing was changed")
 
@@ -895,9 +916,7 @@ def _prune_reason(task_status: str | None, taken: datetime | None, cutoff: datet
     if task_status in ("done", "cancelled"):
         return f"task {task_status}"
     if taken is not None and taken < cutoff:
-        return f"older than {days} days"
-    if manifest is None:
-        return "unreadable checkpoint"
+        return f"older than {days} days" if manifest is not None else f"unreadable and older than {days} days"
     return None
 
 
@@ -939,7 +958,9 @@ def prune(db: Path, store: ledger.Ledger | None, *, older_than_days: int = RETEN
             manifest: dict[str, Any] | None = load(db, path.name)
             taken = datetime.fromisoformat(str(manifest["taken_at"]).replace("Z", "+00:00")) if manifest else None
         except (CheckpointError, KeyError, ValueError):
-            manifest, taken = None, None
+            # Unreadable: its saved copies may still matter, so only the window (by directory age) removes it.
+            manifest = None
+            taken = datetime.fromtimestamp(path.stat().st_mtime, UTC)
         task_status = None
         if store is not None:
             try:
@@ -951,7 +972,7 @@ def prune(db: Path, store: ledger.Ledger | None, *, older_than_days: int = RETEN
                     continue
                 task_status = view["status"]
         reason = None
-        if task_status in ("done", "cancelled") or (taken is not None and taken < cutoff) or manifest is None:
+        if task_status in ("done", "cancelled") or (taken is not None and taken < cutoff):
             # Under the checkpoint's lock, re-checked: a restore may have started since the check above.
             try:
                 with _locked(db, path.name):

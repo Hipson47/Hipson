@@ -675,3 +675,62 @@ def test_an_undecodable_special_file_name_still_releases_the_restore_claim(tmp_p
             task_checkpoint.apply(db, assignment, store)
         restore = [item for item in store.show(task)["assignments"] if item["actor"] == task_checkpoint.RESTORE_ACTOR]
     assert len(restore) == 1 and restore[0]["status"] == "failed" and restore[0]["ack_state"] == "acknowledged"
+
+
+def test_an_unreadable_checkpoint_is_kept_for_the_retention_window(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        _manifest_path(db, assignment).write_text("{broken")
+        assert task_checkpoint.prune(db, store) == []
+        assert (task_checkpoint.location(db, assignment) / "objects").is_dir()
+        assert task_checkpoint.prune(db, store, older_than_days=0) == [
+            {"assignment": assignment, "reason": "unreadable and older than 0 days"}]
+
+
+def test_saved_copies_are_never_read_through_links_or_from_devices(tmp_path):
+    _symlinks(tmp_path)
+    root, db, store, task, assignment = _setup(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("a = 1\n")
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        (root / "src/app.py").write_text("changed\n")
+        store.finish(assignment, result="failed", summary="done")
+        manifest = task_checkpoint.load(db, assignment)
+        saved = task_checkpoint.location(db, assignment) / "objects" / manifest["entries"]["src/app.py"]["sha256"]
+        for target in (outside, Path("/dev/zero")):
+            if not target.exists():
+                continue
+            saved.unlink()
+            os.symlink(target, saved)
+            with pytest.raises(task_checkpoint.CheckpointError, match="missing|not the file that was saved"):
+                task_checkpoint.apply(db, assignment, store)
+    assert (root / "src/app.py").read_text() == "changed\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslashes are separators on Windows")
+def test_names_a_manifest_cannot_hold_are_refused_before_launch(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    (root / "src" / "odd\\name.txt").write_text("x")
+    with closing(store), pytest.raises(task_checkpoint.CheckpointError, match="cannot store"):
+        task_checkpoint.take(db, assignment, root, ["src"])
+
+
+def test_missing_manifest_metadata_is_damage_not_a_traceback(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        manifest = json.loads(_manifest_path(db, assignment).read_text())
+        for key in ("taken_at", "files", "bytes"):
+            _manifest_path(db, assignment).write_text(json.dumps({k: v for k, v in manifest.items() if k != key}))
+            with pytest.raises(task_checkpoint.CheckpointError, match="is damaged"):
+                task_checkpoint.load(db, assignment)
+        entries = {rel: ({k: v for k, v in entry.items() if k != "size"} if entry["type"] == "file" else entry)
+                   for rel, entry in manifest["entries"].items()}
+        _manifest_path(db, assignment).write_text(json.dumps({**manifest, "entries": entries}))
+        with pytest.raises(task_checkpoint.CheckpointError, match="is damaged"):
+            task_checkpoint.load(db, assignment)
+        listed = task_checkpoint.checkpoints(db)
+    assert listed[0]["assignment"] == assignment and "damaged" in listed[0]["error"]
