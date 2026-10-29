@@ -372,20 +372,15 @@ def test_the_mention_scan_is_linear_and_skipped_for_parsed_policies():
 
     from hipson import task_runner
 
-    hostile = "worker" + "\\" * 5000 + "other" + " worker" * 2000
     started = time.monotonic()
-    assert not task_runner._may_mean_worker_env(hostile)
-    assert task_runner._may_mean_worker_env("worker" + "\\" * 4999 + "tenv")  # The last pair is \t: a separator.
+    assert not task_runner._may_mean_worker_env("worker other " * 50000)
+    assert task_runner._may_mean_worker_env("worker" + "\\" * 5000 + "other")  # Any backslash: doubt.
     assert time.monotonic() - started < 1.0
     for text in ("worker_env", "WORKER-ENV", "worker \\t env", "workerenv", "x\\u0041", None, "a\0b",
                  "worker\\env: minimal", '{"worker\\env":"minimal"}', "worker\\\nenv", "worker\\\\env",
-                 "worker" + "\\" * 3 + "tenv"):
+                 "worker" + "\\" * 3 + "tenv", "worker\\t\\env: minimal", "\\worker\\tenv", "worker: x\\n"):
         assert task_runner._may_mean_worker_env(text), text
-    started = time.monotonic()
-    assert task_runner._may_mean_worker_env(("worker" + "\\" * 2000) * 200 + "env")
-    assert not task_runner._may_mean_worker_env(("worker" + "\\" * 2000 + "x") * 200)
-    assert time.monotonic() - started < 1.0
-    for text in ("{}", '{"denied_paths": ["a\\\\b"]}', "workers environment"):
+    for text in ("{}", "workers environment", "observe_changes: true\n", '{"denied_paths": ["a/b"]}'):
         assert not task_runner._may_mean_worker_env(text), text
 
 

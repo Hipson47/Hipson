@@ -213,19 +213,17 @@ def add_env_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 _SEPARATORS = re.compile(r"[^a-z0-9]+")
-_ESCAPES = re.compile(r"\\.", re.DOTALL)
 
 
 def _may_mean_worker_env(text: str | None) -> bool:
-    """Whether raw policy text could mean worker_env: "worker" and "env" with any separators between them, read
-    both with backslashes as plain separators ("worker\\env") and with each escape pair dropped ("worker\\tenv");
-    any \\u escape could spell it too. Each reading is one linear pass."""
-    if text is None or "\0" in text:
+    """Whether raw policy text that cannot be parsed exactly (YAML, or broken JSON) could mean worker_env.
+
+    Deliberately broad, because a yes only refuses a run without --env: any backslash (every escape needs one,
+    so no escaped spelling can hide), a NUL byte, text that is not UTF-8, or "worker" and "env" with any
+    separators or none between them. One linear pass."""
+    if text is None or "\0" in text or "\\" in text:
         return True
-    lowered = text.lower()
-    if "\\u" in lowered:
-        return True
-    return any("workerenv" in _SEPARATORS.sub("", reading) for reading in (lowered, _ESCAPES.sub("", lowered)))
+    return "workerenv" in _SEPARATORS.sub("", text.lower())
 
 
 def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, list[str]]:
