@@ -84,12 +84,24 @@ def select(source: Mapping[str, str], mode: str, extra: Iterable[str] = (), *,
     }
 
 
+POLICY_KEYS = ("worker_env", "worker_env_allow")
+
+
+def _normal(key: object) -> str:
+    return str(key).strip().strip("\"'").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def misspelled_keys(policy: Mapping[str, Any]) -> list[str]:
+    """Keys that look like worker_env settings but are not spelled exactly: never ignore them silently."""
+    return sorted(str(key) for key in policy if _normal(key) in POLICY_KEYS and key not in POLICY_KEYS)
+
+
 def resolve(args: object, policy_payload: Mapping[str, Any]) -> tuple[str, list[str]]:
     """CLI options win over project policy; allowed names add up. A policy asking for minimal must be valid."""
     raw = policy_payload.get("policy")
     policy: dict[str, Any] = raw if isinstance(raw, dict) else {}
     valid = bool(policy_payload.get("valid"))
-    if not valid and "worker_env" in policy and getattr(args, "env", None) is None:
+    if not valid and any(_normal(key) in POLICY_KEYS for key in policy) and getattr(args, "env", None) is None:
         issues = "; ".join(str(issue) for issue in policy_payload.get("issues", []))
         # Never fall back to the full environment when the policy that asked to narrow it cannot be used; an
         # explicit --env decides on its own (an invalid policy then contributes no allowed names).

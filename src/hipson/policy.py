@@ -110,6 +110,8 @@ def validate_policy_payload(policy: dict[str, Any]) -> list[str]:
     for key in ("observe_max_files", "observe_max_bytes"):
         if key in policy and (type(policy[key]) is not int or policy[key] < 1):
             issues.append(f"{key} must be a positive integer")
+    for key in worker_env.misspelled_keys(policy):
+        issues.append(f"{key!r} is not a policy key; spell it exactly worker_env or worker_env_allow")
     if "worker_env" in policy and policy["worker_env"] not in worker_env.MODES:
         issues.append(f"worker_env must be one of {', '.join(worker_env.MODES)}")
     if "worker_env_allow" in policy:
@@ -211,7 +213,7 @@ def _parse_simple_yaml(text: str) -> dict[str, Any]:
         if ":" not in line:
             raise SystemExit(f"Unsupported policy YAML line: {raw_line}")
         key, raw_value = line.split(":", 1)
-        key = key.strip()
+        key = key.strip().strip('"').strip("'")  # A quoted key names the same setting, as a quoted value does.
         value = raw_value.strip()
         current_key = key
         if not value:

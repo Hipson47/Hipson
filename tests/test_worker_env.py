@@ -250,6 +250,24 @@ def test_an_unreadable_policy_that_may_set_worker_env_never_falls_back_to_inheri
     assert _run(tmp_path, project, task)["DUMMY_SECRET"]
 
 
+def test_quoted_yaml_keys_apply_and_near_miss_spellings_refuse(tmp_path):
+    project = _project(tmp_path)
+    (project / ".hipson").mkdir()
+    yaml_file = project / ".hipson" / "policy.yaml"
+    task = _open_task(tmp_path, project)
+    for text in ('"worker_env": minimal\n', "'worker_env': minimal\n"):
+        yaml_file.write_text(text)
+        assert not _run(tmp_path, project, task)["DUMMY_SECRET"], text
+    yaml_file.unlink()
+    json_file = project / ".hipson" / "policy.json"
+    for key in ("Worker_Env", "worker-env", " worker_env"):
+        json_file.write_text(json.dumps({key: "minimal"}))
+        refused = _hipson(project, tmp_path, "task", "run", "--task", task, "--actor", "codex", "--role", "explorer",
+                          "--", sys.executable, "-c", "pass")
+        assert refused.returncode == 64 and "spell it exactly worker_env" in refused.stderr, key
+    assert _run(tmp_path, project, task, "--env", "inherit")["DUMMY_SECRET"]
+
+
 def test_a_rejected_allowed_name_is_never_echoed(tmp_path):
     project = _project(tmp_path)
     task = _open_task(tmp_path, project)
