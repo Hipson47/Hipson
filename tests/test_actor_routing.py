@@ -372,6 +372,7 @@ def test_decoder_limits_and_unresolvable_paths_are_controlled_errors(tmp_path):
         path.write_text(text)
         with pytest.raises(actor_routing.RoutingError, match="not valid JSON"):
             actor_routing.load_registry(path)
-    for option in ("--db", "--config"):
-        run = _cli(tmp_path, "route", "actor", "--needs", "code_write", option, "~no-such-user-hipson-test/x")
-        assert run.returncode == 2 and "cannot be resolved" in run.stderr and "Traceback" not in run.stderr, option
+    if sys.platform != "win32":  # Windows expands ~user without looking the user up.
+        for option in ("--db", "--config"):
+            run = _cli(tmp_path, "route", "actor", "--needs", "code_write", option, "~no-such-user-hipson-test/x")
+            assert run.returncode == 2 and "cannot be resolved" in run.stderr and "Traceback" not in run.stderr, option

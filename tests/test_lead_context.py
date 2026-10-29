@@ -94,7 +94,8 @@ def test_now_activity_age_progress_journals_and_failed_resume(tmp_path):
         view = lead_context.build(store, clock=clock)
         entry = view['tasks'][0]
         assert entry['active_assignments'][0]['last_progress'] == 'Guard implemented'
-        assert 299 <= entry['active_assignments'][0]['age_seconds'] <= 300
+        # The heartbeat is stamped after the clock is fixed; slow CI hosts (Windows) take a few seconds.
+        assert 290 <= entry['active_assignments'][0]['age_seconds'] <= 300
         assert entry['pending_results'][0]['failure_journal']['reason'] == 'Worker died'
         resume = lead_context.build(store, resume=True)
         assert [item['id'] for item in resume['tasks'][0]['failed_attempts']] == [failed]

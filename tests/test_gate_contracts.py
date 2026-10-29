@@ -573,3 +573,106 @@ def _minimal_records_contract(tmp_path):
 def test_minimal_change_records_exact_contract(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         _minimal_records_contract(tmp_path)
+
+
+def _environment_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        minimal = {"mode": "minimal", "names": ["HOME", "PATH"], "allowed": ["GH_TOKEN"], "missing": ["GH_TOKEN"],
+                   "dropped": 4}
+        first = store.assign(task, actor="w", role="explorer", mode="ro", environment=minimal)
+        assert first["environment"] == minimal and store.activity(first["id"])["environment"] == minimal
+        stored = store.connection.execute("SELECT environment FROM assignments WHERE id = ?", (first["id"],)).fetchone()[0]
+        assert json.loads(stored) == minimal
+        inherit = store.assign(task, actor="w", role="explorer", mode="ro", environment={"mode": "inherit", "count": 3})
+        assert inherit["environment"] == {"mode": "inherit", "count": 3}
+        plain = store.assign(task, actor="w", role="explorer", mode="ro")
+        assert plain["environment"] is None
+        assert store.connection.execute("SELECT environment FROM assignments WHERE id = ?",
+                                        (plain["id"],)).fetchone()[0] is None
+        for bad in ({"mode": "all"}, {"mode": None}, {}, ["minimal"], "minimal"):
+            _error(lambda bad=bad: store.assign(task, actor="w", role="explorer", mode="ro", environment=bad),
+                   "environment must be an object with mode inherit or minimal")
+        # A refused record creates nothing.
+        assert len(store.show(task)["assignments"]) == 3
+        secret = "sk-ant-api03-" + "b" * 40
+        redacted = store.assign(task, actor="w", role="explorer", mode="ro",
+                                environment={"mode": "minimal", "names": [secret], "allowed": [], "missing": [],
+                                             "dropped": 0})["environment"]
+        assert secret not in json.dumps(redacted) and redacted["mode"] == "minimal" and redacted["dropped"] == 0
+        assert secret not in store.connection.execute(
+            "SELECT environment FROM assignments ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def test_environment_records_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _environment_contract(tmp_path)
+
+
+
+def test_v9_schema_constants_are_exact():
+    assert ledger.MIGRATION_V8_TO_V9 == ("ALTER TABLE assignments ADD COLUMN environment TEXT",
+                                         "UPDATE schema_version SET version = 9 WHERE singleton = 1")
+
+
+def test_v10_schema_constants_are_exact():
+    assert ledger.SCHEMA_VERSION == 10
+    assert ledger.MIGRATION_V9_TO_V10 == ("ALTER TABLE tasks ADD COLUMN needs TEXT NOT NULL DEFAULT '[]'",
+                                          "ALTER TABLE assignments ADD COLUMN needs TEXT",
+                                          "UPDATE schema_version SET version = 10 WHERE singleton = 1")
+    assert ledger.MAX_NEEDS == 16 and "routed" in ledger.RESERVED_EVENT_TYPES
+
+
+def test_validate_needs_exact_contract():
+    assert ledger.validate_needs([]) == []
+    assert ledger.validate_needs(["code_write", "web_research", "code_write"]) == ["code_write", "web_research"]
+    assert ledger.validate_needs(["a" + "b" * 39]) == ["a" + "b" * 39]
+    assert ledger.validate_needs(["a1_"]) == ["a1_"]
+    assert ledger.validate_needs([f"t{index}" for index in range(16)]) == [f"t{index}" for index in range(16)]
+    _error(lambda: ledger.validate_needs([f"t{index}" for index in range(17)]),
+           "Capability tags must be a list of at most 16 names")
+    _error(lambda: ledger.validate_needs("code_write"), "Capability tags must be a list of at most 16 names")
+    for bad in ("Code", "1abc", "a" + "b" * 40, "a-b", "", "a b", 7):
+        _error(lambda bad=bad: ledger.validate_needs([bad]),
+               f"Capability tags are lower-case names such as code_write, not {bad!r}")
+
+
+def _needs_contract(tmp_path):
+    store, task = _store(tmp_path)
+    with closing(store):
+        assert store.show(task)["needs"] == []
+        tagged = store.open_task(project=tmp_path, title="T", objective="o", lead=LEAD,
+                                 needs=["web_research", "code_write", "web_research"])
+        assert tagged["needs"] == ["web_research", "code_write"]
+        stored = store.connection.execute("SELECT needs FROM tasks WHERE id = ?", (tagged["id"],)).fetchone()[0]
+        assert json.loads(stored) == ["web_research", "code_write"]
+        inherited = store.assign(tagged["id"], actor="w", role="explorer", mode="ro")
+        assert inherited["needs"] == ["web_research", "code_write"]
+        own = store.assign(tagged["id"], actor="w", role="explorer", mode="ro", needs=["browser"])
+        assert own["needs"] == ["browser"]
+        none = store.assign(tagged["id"], actor="w", role="explorer", mode="ro", needs=[])
+        assert none["needs"] == []
+        untagged = store.assign(task, actor="w", role="explorer", mode="ro")
+        assert untagged["needs"] == []
+        _error(lambda: store.assign(task, actor="w", role="explorer", mode="ro", needs=["Bad"]),
+               "Capability tags are lower-case names such as code_write, not 'Bad'")
+        _error(lambda: store.open_task(project=tmp_path, title="T", objective="o", needs=["Bad"]),
+               "Capability tags are lower-case names such as code_write, not 'Bad'")
+        event = store.record_route(tagged["id"], actor=" hipson ", summary=" route builder/ro: x ",
+                                   refs=["codex", "abc"])
+        assert (event["type"], event["actor"], event["summary"], event["refs"], event["task"]) == (
+            "routed", "hipson", "route builder/ro: x", ["codex", "abc"], tagged["id"])
+        assert store.events(tagged["id"])[-1] == event
+        assert store.record_route(tagged["id"], actor="hipson", summary="no refs")["refs"] == []
+        secret = "sk-ant-api03-" + "c" * 40
+        hidden = store.record_route(tagged["id"], actor="hipson", summary=f"route {secret}", refs=[secret])
+        assert secret not in json.dumps(hidden) and hidden["summary"].startswith("route ")
+        assert secret not in json.dumps(store.events(tagged["id"])[-1])
+        _error(lambda: store.record_route("T-9999", actor="hipson", summary="x"), "Task not found: T-9999")
+        _error(lambda: store.record_route(tagged["id"], actor=" ", summary="x"), "actor must not be empty")
+        _error(lambda: store.record_route(tagged["id"], actor="hipson", summary=" "), "summary must not be empty")
+
+
+def test_capability_tags_and_routed_events_exact_contract(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        _needs_contract(tmp_path)
