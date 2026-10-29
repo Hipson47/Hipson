@@ -476,7 +476,8 @@ def take(db: Path, assignment: str, project: str | Path, scope: Sequence[str], c
     location(db, assignment)  # Validates the id.
     identity = _root_identity(root)
     store = _store_dir(db, create=True)
-    assert store is not None
+    if store is None:  # Created just above; gone again only if something removed it meanwhile.
+        raise CheckpointError(f"the checkpoint store {directory(db)} could not be created")
     staging_name = f".{assignment}.{uuid.uuid4().hex}.tmp"
     try:
         try:
