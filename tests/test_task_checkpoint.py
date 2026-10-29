@@ -627,3 +627,51 @@ def test_a_directory_swapped_for_a_link_during_the_walk_is_never_followed(tmp_pa
         task_checkpoint.take(db, assignment, root, ["src"])
     assert not task_checkpoint.location(db, assignment).exists()
     assert not list(task_checkpoint.directory(db).glob("*/objects/*"))
+
+
+def test_the_walk_reads_only_the_verified_project_directory(tmp_path):
+    _symlinks(tmp_path)
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        with pytest.raises(task_checkpoint.CheckpointError, match="replaced or moved"):
+            task_checkpoint.scan(root, ["src"], identity=[0, 0])
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        other = tmp_path / "other-tree"
+        _write(other, {"src/app.py": "elsewhere\n"})
+        real_check = task_checkpoint._check_root
+
+        def check_then_swap(manifest):
+            checked = real_check(manifest)
+            root.rename(tmp_path / "moved-away")
+            os.symlink(other, root, target_is_directory=True)
+            return checked
+
+        with patch.object(task_checkpoint, "_check_root", check_then_swap), \
+                pytest.raises(task_checkpoint.CheckpointError, match="replaced or moved|not a real directory"):
+            task_checkpoint.plan(db, assignment, store)
+    assert (other / "src/app.py").read_text() == "elsewhere\n"
+
+
+def test_windows_claims_ignore_trailing_dots_and_spaces():
+    with patch.object(ledger.sys, "platform", "win32"):
+        assert ledger._claims_overlap("src.", "src") and ledger._claims_overlap("SRC /a.py", "src")
+        assert ledger._claim_key(".") == "." and not ledger._claims_overlap("src.x", "src")
+        with patch.object(task_checkpoint.sys, "platform", "win32"), patch.object(task_checkpoint, "_FOLD", True):
+            assert task_checkpoint._overlaps("src.", "SRC") and task_checkpoint._overlaps(".", "src")
+    with patch.object(ledger.sys, "platform", "linux"):
+        assert not ledger._claims_overlap("src.", "src")
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo") or sys.platform == "darwin",
+                    reason="needs a filesystem that accepts arbitrary name bytes")
+def test_an_undecodable_special_file_name_still_releases_the_restore_claim(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        os.mkfifo(os.fsencode(str(root / "src")) + b"/bad\xff")
+        with pytest.raises(task_checkpoint.CheckpointError, match="not a regular file"):
+            task_checkpoint.apply(db, assignment, store)
+        restore = [item for item in store.show(task)["assignments"] if item["actor"] == task_checkpoint.RESTORE_ACTOR]
+    assert len(restore) == 1 and restore[0]["status"] == "failed" and restore[0]["ack_state"] == "acknowledged"

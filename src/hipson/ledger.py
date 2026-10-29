@@ -428,11 +428,17 @@ def _same_project(left: str, right: str) -> bool:
     return left == right
 
 
+def _claim_key(path: str) -> str:
+    """A claimed path as the default filesystem sees it: case-insensitive on Windows and macOS, and on Windows
+    without the trailing dots and spaces it ignores ("src." is "src")."""
+    if sys.platform == "win32" and path != ".":
+        path = "/".join(part.rstrip(" .") for part in path.split("/"))
+    return path.casefold() if sys.platform in ("win32", "darwin") else path
+
+
 def _claims_overlap(left: str, right: str) -> bool:
-    """Write claims conflict as the default filesystem sees paths: case-insensitively on Windows and macOS."""
-    if sys.platform in ("win32", "darwin"):
-        return _overlaps(left.casefold(), right.casefold())
-    return _overlaps(left, right)
+    """Write claims conflict as the default filesystem sees paths."""
+    return _overlaps(_claim_key(left), _claim_key(right))
 
 
 def validate_assignment_scope(scope: Sequence[str], *, mode: str) -> list[str]:

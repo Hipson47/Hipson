@@ -83,7 +83,11 @@ def _fold(text: str) -> str:
 
 
 def _overlaps(left: str, right: str) -> bool:
-    return ledger._overlaps(_fold(left), _fold(right))
+    return ledger._overlaps(_fold(_claim_rel(left)), _fold(_claim_rel(right)))
+
+
+def _claim_rel(rel: str) -> str:
+    return rel if rel == "." else _canon_rel(rel)
 
 
 def _inside(rel: str, roots: Iterable[str]) -> bool:
@@ -195,8 +199,10 @@ class _Dir:
         return _Dir(fd=opened, path=self.path / name)
 
 
-def _open_root(root: Path) -> _Dir:
+def _open_root(root: Path, expected: list[int] | None = None) -> _Dir:
     identity = _root_identity(root)
+    if expected is not None and identity != expected:
+        raise CheckpointError(f"the project directory {root} was replaced or moved; refusing to read it")
     if not _FD_SAFE:
         return _Dir(path=root)
     fd = os.open(root, _DIRECTORY)
@@ -276,7 +282,7 @@ class _NoSink:
 
 
 def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None, private: Iterable[Path] = (),
-         hash_files: bool = False, copy_into: Path | None = None) -> dict[str, Any]:
+         hash_files: bool = False, copy_into: Path | None = None, identity: list[int] | None = None) -> dict[str, Any]:
     """Walk the claimed scope without following links (on POSIX through directory descriptors). Raises
     CheckpointError above the caps. With copy_into, every regular file is copied there as it is read."""
     root = Path(project).resolve()
@@ -330,7 +336,7 @@ def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None,
                 finally:
                     child.close()
 
-    top = _open_root(root)
+    top = _open_root(root, identity)  # The directory the caller verified, or nothing is read.
     try:
         for rel in roots:
             reason = _refused_root(rel, root, keys)
@@ -398,7 +404,7 @@ def take(db: Path, assignment: str, project: str | Path, scope: Sequence[str], c
     objects = staging / "objects"
     objects.mkdir(mode=0o700, parents=True)
     try:
-        found = scan(root, scope, caps=caps, private=private_paths(db), copy_into=objects)
+        found = scan(root, scope, caps=caps, private=private_paths(db), copy_into=objects, identity=identity)
         manifest = {"format": FORMAT, "assignment": assignment, "project": str(root), "project_identity": identity,
                     "taken_at": ledger._timestamp(), **found}
         (staging / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -533,7 +539,7 @@ def plan(db: Path, assignment: str, store: ledger.Ledger | None = None) -> dict[
         _bind(store, assignment, manifest)
     root = _check_root(manifest)
     now = scan(root, manifest["roots"], caps=Caps(max_files=MAX_FILES * 10, max_bytes=2**62),
-               private=private_paths(db), hash_files=True)
+               private=private_paths(db), hash_files=True, identity=manifest["project_identity"])
     saved, present = manifest["entries"], now["entries"]
     keys = _private_keys(private_paths(db))
     for rel in saved:
@@ -868,7 +874,8 @@ def _apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
         return {**steps, "applied": True, "kept": kept, "verified": after["clean"], "claim": claim,
                 "remaining": {key: after[key] for key in ("restore", "recreate", "delete")}}
     except CheckpointError as exc:
-        note = f"restore of {assignment} stopped: {exc}"
+        # File names can hold bytes that are not text; the ledger only takes valid Unicode.
+        note = f"restore of {assignment} stopped: " + str(exc).encode("utf-8", "backslashreplace").decode("utf-8")
         raise
     finally:
         store.finish(claim, result=outcome, summary=note)
