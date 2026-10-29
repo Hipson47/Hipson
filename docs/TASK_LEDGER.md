@@ -231,6 +231,43 @@ that select another repository or inject git configuration (`GIT_DIR`, `GIT_CONF
   default in a later minor release, after it has been used with the real worker CLIs; `--env inherit` will
   keep the old behaviour.
 
+## Actor routing recommendation (1.7)
+
+`hipson route actor` answers "who should take this?" from your own actor registry and the ledger's record of
+how each actor did. It is a recommendation only: it never launches, assigns or authorizes anything, and the
+lead decides.
+
+- Capability tags describe what work needs: `task open --needs code_write,web_research` (repeatable or
+  comma-separated; also `task do --needs`, MCP `task.open` `needs`), and `task run --needs browser` for one run.
+  An assignment records the run's tags, or the task's when the run names none. Built-in tags: `browser`,
+  `computer_use`, `web_research`, `long_context`, `code_write`, `code_review`, `creative_writing`,
+  `image_gen`; a registry can declare more in `capabilities`.
+- The registry is user config, not part of Hipson: `<hipson home>/actors.json` (usually
+  `~/.config/hipson/actors.json`, or `--config PATH`). Without one the command fails with a clear error;
+  there is no built-in ranking. `hipson route actor --print-example` prints a neutral starting point in which
+  every prior is equal. Each actor has an `id` (the `--actor` label you use with `task run`), `vendor`,
+  optional `model`, `capabilities`, `priors` per tag (0..1, else `default_prior`, 0.5), `cost_tier`, `roles`,
+  `modes`, `max_sensitivity` (`public` < `internal` < `confidential` < `secret`; default `internal`), and an
+  optional `binary` looked up on `PATH` (`--no-probe` skips it) or `"available": false`.
+- Hard rejections, each with its reason: a missing capability, a role or mode the actor does not take, work
+  above its `max_sensitivity` (`--sensitivity`, default `internal`), unavailable, and for `--role reviewer
+  --task T` the same vendor as any builder of that task (a reviewer must be independent; builders missing from
+  the registry are listed in `notes`).
+- Score per tag: the prior until the actor has `min_sample` (default 5) ended assignments in that role with that
+  tag; from then on `(prior + w * history) / (1 + w)` with `w = history_weight * samples / min_sample`
+  (`history_weight` default 2, so history outweighs the prior as soon as it counts). History is the success
+  rate (passed, no out-of-scope change observed, and the first lead verification after it did not fail)
+  minus half the rework rate (another builder started on the same task afterwards); the output also shows the
+  first-pass verification rate, scope-violation rate, median duration and every sample size. An actor's score
+  is the mean over the requested tags; ties break on lower `cost_tier`, then on the id. Equal registry, ledger
+  and `PATH` give the same output.
+- With `--task`, tags default to the task's and the recommendation is recorded as a `routed` task event (the
+  recommended actor and the registry digest in its refs; `--no-record` skips it), so outcomes can later be
+  traced to the decision. The MCP tool `route.actor` is read-only unless `record: true` with `approved: true`.
+- Output: `hipson.actor_route` JSON (`--json`, [schemas/actor-route.schema.json](../schemas/actor-route.schema.json))
+  with the request, the registry path, version and SHA-256, ranked candidates with per-tag components, the
+  rejections and notes. Ledger schema v10 adds `tasks.needs` and `assignments.needs`.
+
 ## Acceptance checks and short flows (1.6)
 
 A task can declare acceptance checks: exact commands that prove its acceptance criteria. Declare them

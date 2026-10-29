@@ -14,6 +14,13 @@
   `HIPSON_*`; credentials in variables need `--env-allow NAME` or `worker_env_allow`. The default stays
   `inherit`, and lead verification always inherits. The assignment records the mode and variable names,
   never values (ledger schema v9 adds `assignments.environment`).
+- Actor routing recommendation: `hipson route actor --needs TAGS [--role] [--mode] [--task T] --json` (and MCP
+  `route.actor`) ranks the actors in your registry (`~/.config/hipson/actors.json`; `--print-example` gives a
+  neutral one, Hipson ships no vendor ranking) by per-capability priors corrected by ledger history once it
+  reaches `min_sample`, with hard rejections and reasons (missing capability, role/mode, sensitivity,
+  unavailable, a reviewer from the builder's vendor). Recommendation only, deterministic, recorded as a
+  `routed` event with `--task`. Capability tags on work: `task open` / `task do` / `task run --needs`
+  (ledger schema v10 adds `tasks.needs` and `assignments.needs`); output schema `schemas/actor-route.schema.json`.
 
 - Deprecate and hide `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes`: absent from
   `hipson --help`, the quick reference and the agent contract, still callable with a stderr warning,

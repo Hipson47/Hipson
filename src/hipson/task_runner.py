@@ -200,7 +200,18 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--allow-project-mismatch", action="store_true")
     add_observe_arguments(parser)
     add_env_arguments(parser)
+    add_needs_arguments(parser, "this run (defaults to the task's)")
     parser.add_argument("worker_command", nargs=argparse.REMAINDER, help="-- COMMAND [ARGS...]")
+
+
+def add_needs_arguments(parser: argparse.ArgumentParser, subject: str) -> None:
+    parser.add_argument("--needs", action="append", default=[], metavar="TAGS",
+                        help=f"Capability tags {subject} needs, comma-separated or repeated, e.g. "
+                             "code_write,web_research; hipson route actor ranks actors by them")
+
+
+def parse_needs(values: list[str]) -> list[str]:
+    return ledger.validate_needs([tag.strip() for value in values for tag in value.split(",") if tag.strip()])
 
 
 def add_env_arguments(parser: argparse.ArgumentParser) -> None:
@@ -404,6 +415,7 @@ def run(args: argparse.Namespace) -> int:
             value = getattr(args, name, None)
             if value is not None and value < 1:
                 raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
+        args.run_needs = parse_needs(getattr(args, "needs", None) or []) or None
     except (ValueError, OverflowError, ledger.LedgerError) as exc:
         _message(str(exc))
         return 64
@@ -519,7 +531,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 assignment = store.assign(args.task, actor=args.actor, role=args.role, mode=args.mode, scope=args.scope,
                                       owner_pid=os.getpid(), owner_host=socket.gethostname(),
                                       owner_boot_id=ledger._boot_id(), owner_pid_namespace=ledger._pid_namespace(),
-                                      lease_seconds=args.lease_seconds, environment=env_record)["id"]
+                                      lease_seconds=args.lease_seconds, environment=env_record,
+                                      needs=getattr(args, "run_needs", None))["id"]
             if mismatch:
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])

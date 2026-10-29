@@ -14,6 +14,7 @@ from typing import cast
 
 from hipson import (
     __version__,
+    actor_routing,
     agent_bootstrap,
     agent_contract,
     agent_install,
@@ -339,7 +340,36 @@ def command_install_codex(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_route_actor(args: argparse.Namespace) -> int:
+    if args.print_example:
+        print(actor_routing.example_registry(), end="")
+        return 0
+    db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+    record = args.task is not None and not args.no_record
+    try:
+        registry = actor_routing.load_registry(actor_routing.registry_path(args.config))
+        if args.task is not None and not db.exists():
+            raise actor_routing.RoutingError(f"Task not found: {args.task} (no ledger at {db})")
+        # History is read without migrating or creating a ledger; only recording opens it for writing.
+        store = ledger.Ledger(db, create=False, read_only=not record) if db.exists() else None
+        try:
+            route = actor_routing.request(registry, store, needs=args.needs, role=args.role, mode=args.mode,
+                                          task=args.task, sensitivity=args.sensitivity, probe=not args.no_probe,
+                                          record=record)
+        finally:
+            if store is not None:
+                store.close()
+    except (actor_routing.RoutingError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        print(f"hipson route actor: {_bounded_cli(str(exc), limit=1200, escape_controls=True)}", file=sys.stderr)
+        return 2
+    print(json.dumps(route, indent=2) if args.json else actor_routing.render(route))
+    return 0
+
+
 def command_route(args: argparse.Namespace) -> int:
+    if not args.task:
+        print("hipson route: --task is required (or use hipson route actor)", file=sys.stderr)
+        return 2
     route = route_task(args.task)
     if args.json:
         print(json.dumps(route, indent=2))
@@ -1854,6 +1884,7 @@ def command_task(args: argparse.Namespace) -> int:
                     acceptance=args.acceptance,
                     lead=args.lead,
                     checks=checks,
+                    needs=task_runner.parse_needs(args.needs),
                 )
                 if args.start:
                     payload = store.set_status(payload["id"], to="in_progress", actor=args.lead, summary="started on open")
@@ -1987,6 +2018,7 @@ def build_parser() -> argparse.ArgumentParser:
         "  What needs attention now: hipson task now\n"
         "  Start with acceptance checks: hipson task open --project . --title T --objective O "
         "--check 'pytest -q' --start\n"
+        "  Who should do it (recommendation only): hipson route actor --task T-0001 --needs code_write\n"
         "  Run workers: hipson task run --task T-0001 --actor codex --role builder "
         "--mode rw --scope src -- COMMAND [ARGS...]\n"
         "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
@@ -2052,6 +2084,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["open"].add_argument("--acceptance", action="append", default=[], help="Acceptance criterion; repeatable")
     task_parsers["open"].add_argument("--lead", default="claude")
     task_flow.add_check_arguments(task_parsers["open"])
+    task_runner.add_needs_arguments(task_parsers["open"], "the task")
     task_parsers["open"].add_argument("--start", action="store_true", help="Move the new task to in_progress")
     task_parsers["assign"].add_argument("--role", choices=ledger.ROLES, required=True)
     task_parsers["assign"].add_argument("--mode", choices=ledger.MODES, required=True)
@@ -2135,10 +2168,28 @@ def build_parser() -> argparse.ArgumentParser:
     scan_many.add_argument("--json", dest="json_output", help="Write JSON scan records to a file")
     scan_many.set_defaults(func=command_scan_many)
 
-    route = subparsers.add_parser("route", help="Suggest a deterministic Hipson workflow for a task")
-    route.add_argument("--task", required=True, help="Task description")
+    route = subparsers.add_parser("route", help="Suggest a workflow for a task, or which actor should do it (route actor)")
+    route.add_argument("--task", help="Task description")
     route.add_argument("--json", action="store_true", help="Print machine-readable route output")
     route.set_defaults(func=command_route)
+    route_sub = route.add_subparsers(dest="route_command")
+    route_actor = route_sub.add_parser(
+        "actor", help="Rank actors from your registry and the ledger's history (recommendation only; launches nothing)")
+    route_actor.add_argument("--needs", action="append", default=[], metavar="TAGS",
+                             help="Capability tags, comma-separated or repeated (e.g. code_write,web_research); "
+                                  "defaults to the task's with --task")
+    route_actor.add_argument("--role", choices=ledger.ROLES, default="builder")
+    route_actor.add_argument("--mode", choices=ledger.MODES, default="ro")
+    route_actor.add_argument("--task", help="Ledger task ID: applies the independent-reviewer rule and records the "
+                                            "recommendation as a 'routed' event")
+    route_actor.add_argument("--no-record", action="store_true", help="With --task, do not record the event")
+    route_actor.add_argument("--sensitivity", choices=actor_routing.SENSITIVITY_LEVELS, default="internal")
+    route_actor.add_argument("--config", help="Actor registry (default: <hipson home>/actors.json)")
+    route_actor.add_argument("--no-probe", action="store_true", help="Skip the PATH check for each actor's binary")
+    route_actor.add_argument("--print-example", action="store_true", help="Print the neutral example registry and exit")
+    route_actor.add_argument("--db", help="Task ledger SQLite path")
+    route_actor.add_argument("--json", action="store_true", help="Print the hipson.actor_route JSON")
+    route_actor.set_defaults(func=command_route_actor)
 
     contract = subparsers.add_parser("contract", help="Inspect the first-class Hipson agent contract")
     contract_sub = contract.add_subparsers(dest="contract_command", required=True)

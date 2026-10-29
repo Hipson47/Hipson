@@ -36,7 +36,7 @@ TASK_TOOLS = {
                          {"detail", "location", "source_assignment"}),
     "task.finding_update": ({"finding", "status", "actor", "approved"},
                             {"resolution_note", "resolved_by_assignment"}),
-    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "checks", "lead"}),
+    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "checks", "lead", "needs"}),
     "task.assign": ({"task", "actor", "role", "mode", "approved"},
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),

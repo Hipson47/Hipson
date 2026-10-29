@@ -25,7 +25,7 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -103,7 +103,8 @@ SCHEMA: tuple[str, ...] = (
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 0),
-        checks TEXT NOT NULL DEFAULT '[]'
+        checks TEXT NOT NULL DEFAULT '[]',
+        needs TEXT NOT NULL DEFAULT '[]'
     )""",
     """CREATE TABLE assignments (
         id TEXT PRIMARY KEY,
@@ -127,6 +128,7 @@ SCHEMA: tuple[str, ...] = (
         ack_note TEXT NOT NULL DEFAULT '',
         changes TEXT,
         environment TEXT,
+        needs TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -226,6 +228,13 @@ MIGRATION_V8_TO_V9 = (
     "ALTER TABLE assignments ADD COLUMN environment TEXT",
     "UPDATE schema_version SET version = 9 WHERE singleton = 1",
 )
+MIGRATION_V9_TO_V10 = (
+    "ALTER TABLE tasks ADD COLUMN needs TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE assignments ADD COLUMN needs TEXT",
+    "UPDATE schema_version SET version = 10 WHERE singleton = 1",
+)
+MAX_NEEDS = 16
+NEED_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_CHECKS = 16
 MAX_CHECK_ARGS = 64
 CHECK_ARG_LIMIT = 4096
@@ -240,6 +249,7 @@ class Task(TypedDict):
     objective: str
     acceptance: list[str]
     checks: list[list[str]]
+    needs: list[str]
     status: str
     lead: str
     created_at: str
@@ -312,6 +322,7 @@ class Assignment(TypedDict):
     ack_state: str
     changes: dict[str, Any] | None
     environment: dict[str, Any] | None
+    needs: list[str] | None
 
 
 class ReapedAssignment(TypedDict):
@@ -357,7 +368,7 @@ class CloseRefusedError(LedgerError):
 
 RESERVED_EVENT_TYPES = frozenset({
     "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
-    "claim_conflict", "reopened", "override", "observed",
+    "claim_conflict", "reopened", "override", "observed", "routed",
 })
 
 
@@ -473,6 +484,19 @@ def validate_checks(checks: Sequence[Sequence[str]]) -> list[list[str]]:
 
 def checks_text(checks: Sequence[Sequence[str]]) -> str:
     return '; '.join(shlex.join(check) for check in checks) or 'none declared'
+
+
+def validate_needs(needs: Sequence[str]) -> list[str]:
+    """Capability tags a task or run needs (e.g. code_write, web_research): lower-case slugs, deduplicated."""
+    if isinstance(needs, str) or len(needs) > MAX_NEEDS:
+        raise LedgerError(f"Capability tags must be a list of at most {MAX_NEEDS} names")
+    tags: list[str] = []
+    for tag in needs:
+        if not isinstance(tag, str) or not NEED_PATTERN.fullmatch(tag):
+            raise LedgerError(f"Capability tags are lower-case names such as code_write, not {tag!r}")
+        if tag not in tags:
+            tags.append(tag)
+    return tags
 
 
 def _validate_result_value(value: Any, schema: dict[str, Any], path: str) -> None:
@@ -783,7 +807,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, 8, SCHEMA_VERSION):
+                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -811,6 +835,9 @@ class Ledger:
                     if version[0] in (1, 2, 3, 4, 5, 6, 7, 8):
                         for statement in MIGRATION_V8_TO_V9:
                             self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5, 6, 7, 8, 9):
+                        for statement in MIGRATION_V9_TO_V10:
+                            self.connection.execute(statement)
         except BaseException:
             self.close()
             raise
@@ -837,6 +864,7 @@ class Ledger:
         acceptance: Sequence[str] = (),
         lead: str = "claude",
         checks: Sequence[Sequence[str]] = (),
+        needs: Sequence[str] = (),
     ) -> TaskView:
         project_path = str(Path(project).expanduser().resolve())
         if redact_text(project_path) != project_path:
@@ -846,6 +874,7 @@ class Ledger:
         lead = redact_text(require_text(lead, "lead"))
         accepted = [redact_text(item) for item in acceptance]
         declared = validate_checks(checks)
+        tags = validate_needs(needs)
         with self._transaction():
             number = self.connection.execute(
                 "SELECT COALESCE(MAX(CAST(SUBSTR(id, 3) AS INTEGER)), 0) + 1 FROM tasks"
@@ -854,8 +883,9 @@ class Ledger:
             now = _timestamp()
             self.connection.execute(
                 "INSERT INTO tasks (id, project, title, objective, acceptance, status, lead, created_at, updated_at,"
-                " revision, checks) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0, ?)",
-                (task, project_path, title, objective, json.dumps(accepted), lead, now, now, json.dumps(declared)),
+                " revision, checks, needs) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0, ?, ?)",
+                (task, project_path, title, objective, json.dumps(accepted), lead, now, now, json.dumps(declared),
+                 json.dumps(tags)),
             )
             self._append_event(task, lead, "opened", title, [])
             if declared:
@@ -893,6 +923,7 @@ class Ledger:
         owner_pid_namespace: str | None = None,
         lease_seconds: int | None = None,
         environment: dict[str, Any] | None = None,
+        needs: Sequence[str] | None = None,
     ) -> Assignment:
         actor = redact_text(require_text(actor, "actor"))
         if role not in ROLES or mode not in MODES:
@@ -910,6 +941,7 @@ class Ledger:
         if environment is not None and (not isinstance(environment, dict)
                                         or environment.get("mode") not in ("inherit", "minimal")):
             raise LedgerError("environment must be an object with mode inherit or minimal")
+        tags = validate_needs(needs) if needs is not None else None
         result: Assignment | None = None
         conflict = ""
         with self._transaction():
@@ -959,12 +991,14 @@ class Ledger:
                 self.connection.execute(
                     """INSERT INTO assignments
                        (id, task, actor, role, mode, scope, status, started_at, ended_at,
-                        owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace, environment)
-                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)""",
+                        owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace, environment, needs)
+                       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?)""",
                     (assignment, task, actor, role, mode, json.dumps(paths), now,
                      owner_pid, owner_boot_id, owner_host, lease_until, owner_pid_namespace,
                      # Names and counts only; redaction also covers a secret-shaped variable name.
-                     json.dumps(redact_value(environment)) if environment is not None else None),
+                     json.dumps(redact_value(environment)) if environment is not None else None,
+                     # The run's capability tags, or the task's when the run names none: routing history reads them.
+                     json.dumps(tags if tags is not None else current["needs"])),
                 )
                 if mode == "rw":
                     self.connection.executemany(
@@ -1290,6 +1324,14 @@ class Ledger:
             self._task(task)
             return self._append_event(task, actor, type, summary, refs)
 
+    def record_route(self, task: str, *, actor: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
+        """Record an actor recommendation so later outcomes can be traced back to the decision."""
+        actor = redact_text(require_text(actor, "actor"))
+        with self._transaction():
+            self._task(task)
+            return self._append_event(task, actor, "routed", redact_text(require_text(summary, "summary")),
+                                      [redact_text(ref) for ref in refs])
+
     def set_status(
         self, task: str, *, to: str, actor: str, summary: str = "", force: bool = False, reason: str = "",
     ) -> TaskView:
@@ -1527,6 +1569,7 @@ class Ledger:
             "objective": row["objective"],
             "acceptance": json.loads(row["acceptance"]),
             "checks": json.loads(row["checks"]) if "checks" in row.keys() else [],
+            "needs": json.loads(row["needs"]) if "needs" in row.keys() else [],
             "status": row["status"],
             "lead": row["lead"],
             "created_at": row["created_at"],
@@ -1577,6 +1620,7 @@ class Ledger:
             'ack_note': row['ack_note'] if 'ack_note' in row.keys() else '',
             'changes': _changes(row['changes']) if 'changes' in row.keys() and row['changes'] else None,
             'environment': json.loads(row['environment']) if 'environment' in row.keys() and row['environment'] else None,
+            'needs': json.loads(row['needs']) if 'needs' in row.keys() and row['needs'] is not None else None,
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
                           else 'not_required' if legacy or historical else 'unacknowledged'),
         }

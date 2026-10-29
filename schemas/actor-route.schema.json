@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hipson Actor Route",
+  "description": "hipson route actor / MCP route.actor: a deterministic recommendation of which actor should take work. Recommendation only; it never launches, assigns or authorizes anything.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["artifact_kind", "schema_version", "request", "registry", "history_basis", "recommended", "candidates",
+               "rejected", "notes", "authority", "recorded_event"],
+  "properties": {
+    "artifact_kind": { "const": "hipson.actor_route" },
+    "schema_version": { "const": "1.0" },
+    "request": {
+      "type": "object", "additionalProperties": false,
+      "required": ["needs", "role", "mode", "task", "sensitivity", "probe"],
+      "properties": {
+        "needs": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" } },
+        "role": { "enum": ["builder", "reviewer", "explorer", "researcher"] },
+        "mode": { "enum": ["ro", "rw"] },
+        "task": { "type": ["string", "null"] },
+        "sensitivity": { "enum": ["public", "internal", "confidential", "secret"] },
+        "probe": { "type": "boolean", "description": "Whether each actor's binary was looked up on PATH" }
+      }
+    },
+    "registry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "version", "sha256", "min_sample", "history_weight"],
+      "properties": {
+        "path": { "type": "string" },
+        "version": { "type": "string", "description": "The registry's own version field" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Digest of the registry file bytes" },
+        "min_sample": { "type": "integer", "minimum": 1 },
+        "history_weight": { "type": "number", "minimum": 0 }
+      }
+    },
+    "history_basis": {
+      "type": "object", "additionalProperties": false, "required": ["assignments", "role", "builder_vendors"],
+      "properties": {
+        "assignments": { "type": "integer", "minimum": 0, "description": "Ended assignments in this role with capability tags" },
+        "role": { "enum": ["builder", "reviewer", "explorer", "researcher"] },
+        "builder_vendors": { "type": "object", "additionalProperties": { "type": "string" } }
+      }
+    },
+    "recommended": { "type": ["string", "null"] },
+    "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+    "rejected": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["actor", "vendor", "reasons"],
+        "properties": {
+          "actor": { "type": "string" },
+          "vendor": { "type": "string" },
+          "reasons": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "authority": { "type": "string" },
+    "recorded_event": { "type": ["integer", "null"], "description": "Sequence of the routed task event, when recorded" }
+  },
+  "$defs": {
+    "rate": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actor", "vendor", "model", "cost_tier", "score", "components"],
+      "properties": {
+        "actor": { "type": "string" },
+        "vendor": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "cost_tier": { "type": "integer", "minimum": 0 },
+        "score": { "type": "number", "minimum": 0, "maximum": 1, "description": "Mean of the per-tag scores" },
+        "components": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["tag", "prior", "history", "history_weight", "score"],
+            "properties": {
+              "tag": { "type": "string" },
+              "prior": { "type": "number", "minimum": 0, "maximum": 1 },
+              "history_weight": { "type": "number", "minimum": 0,
+                                  "description": "0 below min_sample; else history_weight * samples / min_sample" },
+              "score": { "type": "number", "minimum": 0, "maximum": 1,
+                         "description": "(prior + w * history.score) / (1 + w)" },
+              "history": {
+                "type": "object", "additionalProperties": false,
+                "required": ["samples", "score", "success_rate", "first_pass_verify_rate", "verified_samples",
+                             "rework_rate", "scope_violation_rate", "median_duration_seconds"],
+                "properties": {
+                  "samples": { "type": "integer", "minimum": 0 },
+                  "score": { "$ref": "#/$defs/rate" },
+                  "success_rate": { "$ref": "#/$defs/rate" },
+                  "first_pass_verify_rate": { "$ref": "#/$defs/rate" },
+                  "verified_samples": { "type": "integer", "minimum": 0 },
+                  "rework_rate": { "$ref": "#/$defs/rate" },
+                  "scope_violation_rate": { "$ref": "#/$defs/rate" },
+                  "median_duration_seconds": { "type": ["number", "null"], "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

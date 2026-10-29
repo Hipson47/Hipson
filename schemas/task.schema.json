@@ -13,6 +13,8 @@
     "objective": { "type": "string", "minLength": 1 },
     "acceptance": { "type": "array", "items": { "type": "string" } },
     "checks": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+    "needs": { "type": "array", "maxItems": 16, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
+               "description": "Capability tags the task needs (task open --needs); hipson route actor ranks by them." },
     "status": { "enum": ["open", "in_progress", "blocked", "review", "done", "cancelled"] },
     "lead": { "type": "string", "minLength": 1, "description": "Recorded lead label, not an authenticated identity." },
     "created_at": { "type": "string", "format": "date-time" },
@@ -149,7 +151,10 @@
         "ack_note": { "type": "string", "maxLength": 1024 },
         "ack_state": { "enum": ["not_required", "unacknowledged", "acknowledged"] },
         "changes": { "$ref": "#/$defs/changes" },
-        "environment": { "$ref": "#/$defs/environment" }
+        "environment": { "$ref": "#/$defs/environment" },
+        "needs": { "type": ["array", "null"], "maxItems": 16,
+                   "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
+                   "description": "Capability tags of this run (task run --needs, else the task's at assignment)" }
       }
     },
     "environment": {

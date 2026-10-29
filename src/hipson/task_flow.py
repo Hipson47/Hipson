@@ -165,7 +165,8 @@ def command_do(args: argparse.Namespace) -> int:
         project = _project(args.project)
         with closing(ledger.Ledger(db)) as store:
             view = store.open_task(project=project, title=args.title, objective=args.objective or args.title,
-                                   acceptance=args.acceptance, lead=args.lead, checks=checks)
+                                   acceptance=args.acceptance, lead=args.lead, checks=checks,
+                                   needs=task_runner.parse_needs(args.needs))
             task = view['id']
             store.set_status(task, to='in_progress', actor=args.lead, summary='started by task do')
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
@@ -256,6 +257,7 @@ def configure_do(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--rollout', choices=['codex'])
     task_runner.add_observe_arguments(parser)
     task_runner.add_env_arguments(parser)
+    task_runner.add_needs_arguments(parser, 'the task')
     parser.add_argument('--to', choices=('review', 'done'), default='done')
     parser.add_argument('--timeout', type=float, default=300, help='Per-check timeout in seconds')
     parser.add_argument('worker_command', nargs=argparse.REMAINDER, help='-- WORKER COMMAND [ARGS...]')

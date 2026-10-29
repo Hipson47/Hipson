@@ -1,0 +1,44 @@
+{
+  "version": "example-1",
+  "description": "Neutral example actor registry for hipson route actor. Copy it to ~/.config/hipson/actors.json and set your own priors (0..1 per capability); every prior here is the same on purpose, so Hipson ships no vendor ranking. id must match the --actor label you use with hipson task run.",
+  "min_sample": 5,
+  "history_weight": 2.0,
+  "capabilities": [],
+  "actors": [
+    {
+      "id": "codex",
+      "vendor": "openai",
+      "model": "set-your-model",
+      "binary": "codex",
+      "capabilities": ["code_write", "code_review", "web_research", "browser", "computer_use", "long_context",
+                       "creative_writing", "image_gen"],
+      "default_prior": 0.5,
+      "priors": {},
+      "cost_tier": 1,
+      "max_sensitivity": "internal"
+    },
+    {
+      "id": "claude",
+      "vendor": "anthropic",
+      "model": "set-your-model",
+      "binary": "claude",
+      "capabilities": ["code_write", "code_review", "web_research", "browser", "computer_use", "long_context",
+                       "creative_writing"],
+      "default_prior": 0.5,
+      "priors": {},
+      "cost_tier": 1,
+      "max_sensitivity": "internal"
+    },
+    {
+      "id": "agy",
+      "vendor": "google",
+      "model": "set-your-model",
+      "binary": "agy",
+      "capabilities": ["code_write", "code_review", "web_research", "long_context", "creative_writing"],
+      "default_prior": 0.5,
+      "priors": {},
+      "cost_tier": 1,
+      "max_sensitivity": "internal"
+    }
+  ]
+}
