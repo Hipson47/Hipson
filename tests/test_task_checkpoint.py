@@ -734,3 +734,34 @@ def test_missing_manifest_metadata_is_damage_not_a_traceback(tmp_path):
             task_checkpoint.load(db, assignment)
         listed = task_checkpoint.checkpoints(db)
     assert listed[0]["assignment"] == assignment and "damaged" in listed[0]["error"]
+
+
+def test_the_object_store_is_never_reached_through_links(tmp_path):
+    _symlinks(tmp_path)
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        (root / "src/app.py").write_text("changed\n")
+        store.finish(assignment, result="failed", summary="done")
+        objects = task_checkpoint.location(db, assignment) / "objects"
+        elsewhere = tmp_path / "elsewhere-objects"
+        objects.rename(elsewhere)
+        os.symlink(elsewhere, objects, target_is_directory=True)
+        with pytest.raises(task_checkpoint.CheckpointError, match="not a real directory"):
+            task_checkpoint.apply(db, assignment, store)
+    assert (root / "src/app.py").read_text() == "changed\n"
+
+
+def test_long_names_restore_and_unstorable_explicit_roots_are_refused(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    long_name = "n" * 240 + ".txt"
+    (root / "src" / long_name).write_text("long\n")
+    with closing(store):
+        task_checkpoint.take(db, assignment, root, ["src"])
+        (root / "src" / long_name).write_text("changed\n")
+        store.finish(assignment, result="failed", summary="done")
+        assert task_checkpoint.apply(db, assignment, store)["verified"]
+        assert (root / "src" / long_name).read_text() == "long\n"
+        with patch.object(task_checkpoint.sys, "platform", "win32"), \
+                pytest.raises(task_checkpoint.CheckpointError, match="cannot store that name"):
+            task_checkpoint.scan(root, ["app.py."])

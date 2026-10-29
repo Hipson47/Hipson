@@ -342,6 +342,8 @@ def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None,
     top = _open_root(root, identity)  # The directory the caller verified, or nothing is read.
     try:
         for rel in roots:
+            if rel != "." and not _valid_rel(rel):
+                raise CheckpointError(f"cannot checkpoint {rel!r}: checkpoints cannot store that name; narrow --scope")
             reason = _refused_root(rel, root, keys)
             if reason:
                 raise CheckpointError(f"cannot checkpoint {rel}: {reason}; narrow --scope")
@@ -732,7 +734,7 @@ class _Ops:
     def write(self, rel: str, source: Path, entry: dict[str, Any]) -> None:
         """Write the saved bytes to a temporary name beside the target, verify, then atomically replace it (a
         rename replaces a file or link at the target itself and never writes through a link)."""
-        temporary = f".{PurePosixPath(rel).name}.restore.{uuid.uuid4().hex}"
+        temporary = f".hipson-restore.{uuid.uuid4().hex}"  # Fixed length: a 255-byte name still restores.
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         data = _open_object(source, entry)  # First: a missing or swapped saved copy fails before anything is held.
         parent_fd = -1
@@ -783,13 +785,20 @@ class _Ops:
 
 
 def _open_object(source: Path, entry: dict[str, Any]) -> Any:
-    """A saved copy: a regular file of the recorded size, never through a link and never a device or FIFO."""
+    """A saved copy: a regular file of the recorded size inside real checkpoint directories, never through a link
+    (the object or any of its store directories) and never a device or FIFO."""
     try:
+        for folder in (source.parent.parent.parent, source.parent.parent, source.parent):
+            info = os.lstat(folder)
+            if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+                raise CheckpointError(f"the checkpoint store {folder.name} is not a real directory; nothing was changed")
+        expected = os.lstat(source)
         descriptor = os.open(source, _FLAGS)
     except OSError:
         raise CheckpointError(f"the saved copy {source.name[:12]} is missing; nothing was changed") from None
     info = os.fstat(descriptor)
-    if not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]:
+    if (_is_link(expected) or not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]
+            or (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)):
         os.close(descriptor)
         raise CheckpointError(f"the saved copy {source.name[:12]} is not the file that was saved; nothing was changed")
     return os.fdopen(descriptor, "rb")
