@@ -765,3 +765,31 @@ def test_long_names_restore_and_unstorable_explicit_roots_are_refused(tmp_path):
         with patch.object(task_checkpoint.sys, "platform", "win32"), \
                 pytest.raises(task_checkpoint.CheckpointError, match="cannot store that name"):
             task_checkpoint.scan(root, ["app.py."])
+
+
+def test_a_linked_checkpoint_store_is_never_used(tmp_path):
+    _symlinks(tmp_path)
+    root, db, store, task, assignment = _setup(tmp_path)
+    outside = tmp_path / "outside-store"
+    _write(outside, {f"{assignment}/keep.txt": "external\n"})
+    os.symlink(outside, task_checkpoint.directory(db), target_is_directory=True)
+    with closing(store):
+        with pytest.raises(task_checkpoint.CheckpointError, match="not a real directory"):
+            task_checkpoint.take(db, assignment, root, ["src"])
+        store.finish(assignment, result="failed", summary="done")
+        store.set_status(task, to="cancelled", actor="claude")
+        with pytest.raises(task_checkpoint.CheckpointError, match="not a real directory"):
+            task_checkpoint.prune(db, store, older_than_days=0)
+        with pytest.raises(task_checkpoint.CheckpointError, match="not a real directory"):
+            task_checkpoint.checkpoints(db)
+    assert sorted(path.name for path in outside.rglob("*")) == [assignment, "keep.txt"]
+
+
+def test_retention_values_are_bounded(tmp_path):
+    root, db, store, task, assignment = _setup(tmp_path)
+    with closing(store):
+        for days in (-1, task_checkpoint.MAX_RETENTION_DAYS + 1, 10**30):
+            with pytest.raises(task_checkpoint.CheckpointError, match="--older-than-days must be between"):
+                task_checkpoint.prune(db, store, older_than_days=days)
+    run = _hipson(tmp_path, tmp_path, "task", "checkpoints", "--prune", "--older-than-days", str(10**30))
+    assert run.returncode == 64 and "must be between 0 and" in run.stderr and "Traceback" not in run.stderr

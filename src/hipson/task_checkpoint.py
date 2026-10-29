@@ -17,7 +17,6 @@ import shutil
 import socket
 import stat
 import sys
-import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Sequence
@@ -34,6 +33,7 @@ FORMAT = 2
 MAX_FILES = 20_000
 MAX_BYTES = 512 * 1024 * 1024
 RETENTION_DAYS = 14
+MAX_RETENTION_DAYS = 36500
 RESTORE_ACTOR = "hipson-restore"
 _CHUNK = 1024 * 1024
 _FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
@@ -182,6 +182,39 @@ class _Dir:
     def open_file(self, name: str) -> int:
         return os.open(name, _FLAGS, dir_fd=self.fd) if self.fd >= 0 else os.open(self.path / name, _FLAGS)
 
+    def mkdir(self, name: str) -> None:
+        os.mkdir(name, 0o700, dir_fd=self.fd) if self.fd >= 0 else os.mkdir(self.path / name, 0o700)
+
+    def create(self, name: str) -> int:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+        return os.open(name, flags, 0o600, dir_fd=self.fd) if self.fd >= 0 else os.open(self.path / name, flags, 0o600)
+
+    def replace(self, source: str, target: str) -> None:
+        if self.fd >= 0:
+            os.replace(source, target, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        else:
+            os.replace(self.path / source, self.path / target)
+
+    def unlink(self, name: str) -> None:
+        os.unlink(name, dir_fd=self.fd) if self.fd >= 0 else os.unlink(self.path / name)
+
+    def rmtree(self, name: str) -> None:
+        """Remove a directory in this one without following any link in it (or the name itself)."""
+        info = self.lstat(name)
+        if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+            raise CheckpointError(f"{name} in the checkpoint store is not a real directory; left alone")
+        if self.fd >= 0:
+            shutil.rmtree(name, dir_fd=self.fd)
+        else:
+            shutil.rmtree(self.path / name)
+
+    def subdir(self, name: str, rel: str) -> _Dir:
+        """A real directory inside this one (FileNotFoundError when absent), never a link."""
+        info = self.lstat(name)
+        if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+            raise CheckpointError(f"{rel} is not a real directory; refusing to use it")
+        return self.child(name, info, rel)
+
     def child(self, name: str, info: os.stat_result, rel: str) -> _Dir:
         if self.fd < 0:
             current = os.lstat(self.path / name)
@@ -199,6 +232,30 @@ class _Dir:
         return _Dir(fd=opened, path=self.path / name)
 
 
+def _store_dir(db: Path, *, create: bool = False) -> _Dir | None:
+    """The private checkpoint store beside the ledger, opened as a real directory (never a link); None if absent."""
+    folder = directory(db)
+    if create:
+        try:
+            os.mkdir(folder, 0o700)
+        except FileExistsError:
+            pass
+    try:
+        info = os.lstat(folder)
+    except FileNotFoundError:
+        return None
+    if _is_link(info) or not stat.S_ISDIR(info.st_mode):
+        raise CheckpointError(f"the checkpoint store {folder} is not a real directory; refusing to use it")
+    if not _FD_SAFE:
+        return _Dir(path=folder)
+    fd = os.open(folder, _DIRECTORY)
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+        os.close(fd)
+        raise CheckpointError(f"the checkpoint store {folder} changed while it was opened")
+    return _Dir(fd=fd, path=folder)
+
+
 def _open_root(root: Path, expected: list[int] | None = None) -> _Dir:
     identity = _root_identity(root)
     if expected is not None and identity != expected:
@@ -213,7 +270,7 @@ def _open_root(root: Path, expected: list[int] | None = None) -> _Dir:
     return _Dir(fd=fd, path=root)
 
 
-def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: Path | None) -> str | None:
+def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: _Dir | None) -> str | None:
     """Digest of exactly the regular file that was stat()ed, copied into objects when given. A file that
     changed reads as None when only hashing and refuses the copy when checkpointing."""
     try:
@@ -225,7 +282,8 @@ def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: Path
     handle, temporary = -1, ""
     try:
         if objects is not None:
-            handle, temporary = tempfile.mkstemp(dir=objects, prefix=".copy.")
+            temporary = f".copy.{uuid.uuid4().hex}"
+            handle = objects.create(temporary)
         with os.fdopen(descriptor, "rb") as source, (os.fdopen(handle, "wb") if handle >= 0 else _NoSink()) as sink:
             descriptor = -1
             handle = -1
@@ -244,7 +302,7 @@ def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: Path
             raise _Changed()
         name_hex = digest.hexdigest()
         if objects is not None:
-            os.replace(temporary, objects / name_hex)
+            objects.replace(temporary, name_hex)
             temporary = ""
         return name_hex
     except _Changed:
@@ -256,8 +314,11 @@ def _read(folder: _Dir, name: str, info: os.stat_result, rel: str, objects: Path
             os.close(descriptor)
         if handle >= 0:
             os.close(handle)
-        if temporary:
-            Path(temporary).unlink(missing_ok=True)
+        if temporary and objects is not None:
+            try:
+                objects.unlink(temporary)
+            except OSError:
+                pass
 
 
 class _Changed(Exception):
@@ -282,7 +343,7 @@ class _NoSink:
 
 
 def scan(project: str | Path, scope: Sequence[str], *, caps: Caps | None = None, private: Iterable[Path] = (),
-         hash_files: bool = False, copy_into: Path | None = None, identity: list[int] | None = None) -> dict[str, Any]:
+         hash_files: bool = False, copy_into: _Dir | None = None, identity: list[int] | None = None) -> dict[str, Any]:
     """Walk the claimed scope without following links (on POSIX through directory descriptors). Raises
     CheckpointError above the caps. With copy_into, every regular file is copied there as it is read."""
     root = Path(project).resolve()
@@ -400,23 +461,44 @@ def take(db: Path, assignment: str, project: str | Path, scope: Sequence[str], c
     """Copy the claimed scope into private state while walking it; the manifest is written last and the
     directory renamed into place."""
     root = Path(project).resolve()
-    target = location(db, assignment)
-    if target.exists():
-        raise CheckpointError(f"a checkpoint for {assignment} already exists")
+    location(db, assignment)  # Validates the id.
     identity = _root_identity(root)
-    directory(db).mkdir(mode=0o700, parents=True, exist_ok=True)
-    staging = directory(db) / f".{assignment}.{uuid.uuid4().hex}.tmp"
-    objects = staging / "objects"
-    objects.mkdir(mode=0o700, parents=True)
+    store = _store_dir(db, create=True)
+    assert store is not None
+    staging_name = f".{assignment}.{uuid.uuid4().hex}.tmp"
     try:
-        found = scan(root, scope, caps=caps, private=private_paths(db), copy_into=objects, identity=identity)
-        manifest = {"format": FORMAT, "assignment": assignment, "project": str(root), "project_identity": identity,
-                    "taken_at": ledger._timestamp(), **found}
-        (staging / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        os.replace(staging, target)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
+        try:
+            store.lstat(assignment)
+            raise CheckpointError(f"a checkpoint for {assignment} already exists")
+        except FileNotFoundError:
+            pass
+        store.mkdir(staging_name)
+        try:
+            staging = store.subdir(staging_name, staging_name)
+            try:
+                staging.mkdir("objects")
+                objects = staging.subdir("objects", "objects")
+                try:
+                    found = scan(root, scope, caps=caps, private=private_paths(db), copy_into=objects, identity=identity)
+                finally:
+                    objects.close()
+                manifest = {"format": FORMAT, "assignment": assignment, "project": str(root),
+                            "project_identity": identity, "taken_at": ledger._timestamp(), **found}
+                with os.fdopen(staging.create("manifest.json"), "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                staging.close()
+            store.replace(staging_name, assignment)
+        except BaseException:
+            try:
+                store.rmtree(staging_name)
+            except (OSError, CheckpointError):
+                pass
+            raise
+    finally:
+        store.close()
     return summary(manifest)
 
 
@@ -491,10 +573,35 @@ def _check_manifest(manifest: dict[str, Any], assignment: str) -> None:
                               "it will not be used")
 
 
-def load(db: Path, assignment: str) -> dict[str, Any]:
-    path = location(db, assignment) / "manifest.json"
+def _checkpoint_dir(db: Path, assignment: str) -> tuple[_Dir, _Dir]:
+    """The store and this checkpoint's directory, both real directories (FileNotFoundError when absent)."""
+    location(db, assignment)
+    store = _store_dir(db)
+    if store is None:
+        raise FileNotFoundError(assignment)
     try:
-        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return store, store.subdir(assignment, assignment)
+    except BaseException:
+        store.close()
+        raise
+
+
+def _read_manifest(db: Path, assignment: str) -> str:
+    store, folder = _checkpoint_dir(db, assignment)
+    try:
+        info = folder.lstat("manifest.json")
+        if _is_link(info) or not stat.S_ISREG(info.st_mode):
+            raise ValueError("the manifest is not a regular file")
+        with os.fdopen(folder.open_file("manifest.json"), "rb") as handle:
+            return handle.read(64 * 1024 * 1024).decode("utf-8")
+    finally:
+        folder.close()
+        store.close()
+
+
+def load(db: Path, assignment: str) -> dict[str, Any]:
+    try:
+        manifest = json.loads(_read_manifest(db, assignment))
     except FileNotFoundError:
         raise CheckpointError(f"no checkpoint for {assignment} (take one with hipson task run --checkpoint)") from None
     except (OSError, ValueError, RecursionError) as exc:
@@ -731,13 +838,12 @@ class _Ops:
         finally:
             self._release(fd)
 
-    def write(self, rel: str, source: Path, entry: dict[str, Any]) -> None:
+    def write(self, rel: str, data: Any, entry: dict[str, Any]) -> None:
         """Write the saved bytes to a temporary name beside the target, verify, then atomically replace it (a
         rename replaces a file or link at the target itself and never writes through a link)."""
         temporary = f".hipson-restore.{uuid.uuid4().hex}"  # Fixed length: a 255-byte name still restores.
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
-        data = _open_object(source, entry)  # First: a missing or swapped saved copy fails before anything is held.
-        parent_fd = -1
+        parent_fd = -1  # data is the opened saved copy: a missing or swapped one failed before anything was held.
         try:
             if self.root_fd < 0:
                 target = self._path(rel)
@@ -784,35 +890,46 @@ class _Ops:
                 self._release(parent_fd)
 
 
-def _open_object(source: Path, entry: dict[str, Any]) -> Any:
-    """A saved copy: a regular file of the recorded size inside real checkpoint directories, never through a link
-    (the object or any of its store directories) and never a device or FIFO."""
+def _open_object(db: Path, assignment: str, entry: dict[str, Any]) -> Any:
+    """A saved copy: a regular file of the recorded size inside real checkpoint directories, opened through the
+    store's directory descriptors on POSIX (never through a link) and never a device or FIFO."""
+    digest = entry["sha256"]
     try:
-        for folder in (source.parent.parent.parent, source.parent.parent, source.parent):
-            info = os.lstat(folder)
-            if _is_link(info) or not stat.S_ISDIR(info.st_mode):
-                raise CheckpointError(f"the checkpoint store {folder.name} is not a real directory; nothing was changed")
-        expected = os.lstat(source)
-        descriptor = os.open(source, _FLAGS)
+        store, folder = _checkpoint_dir(db, assignment)
+    except FileNotFoundError:
+        raise CheckpointError(f"the checkpoint of {assignment} is missing; nothing was changed") from None
+    except CheckpointError as exc:
+        raise CheckpointError(f"{exc}; nothing was changed") from None
+    try:
+        objects = folder.subdir("objects", "objects")
+        try:
+            expected = objects.lstat(digest)
+            descriptor = objects.open_file(digest)
+        finally:
+            objects.close()
+    except CheckpointError as exc:
+        raise CheckpointError(f"the checkpoint store is not intact ({exc}); nothing was changed") from None
     except OSError:
-        raise CheckpointError(f"the saved copy {source.name[:12]} is missing; nothing was changed") from None
+        raise CheckpointError(f"the saved copy {digest[:12]} is missing; nothing was changed") from None
+    finally:
+        folder.close()
+        store.close()
     info = os.fstat(descriptor)
     if (_is_link(expected) or not stat.S_ISREG(info.st_mode) or info.st_size != entry["size"]
             or (info.st_dev, info.st_ino) != (expected.st_dev, expected.st_ino)):
         os.close(descriptor)
-        raise CheckpointError(f"the saved copy {source.name[:12]} is not the file that was saved; nothing was changed")
+        raise CheckpointError(f"the saved copy {digest[:12]} is not the file that was saved; nothing was changed")
     return os.fdopen(descriptor, "rb")
 
 
 def _verify_objects(db: Path, assignment: str, entries: dict[str, Any], paths: Iterable[str]) -> None:
     """Before any change: every saved copy a restore needs exists and still has its recorded digest."""
-    objects = location(db, assignment) / "objects"
     for rel in paths:
         entry = entries[rel]
         if entry["type"] != "file":
             continue
         digest = hashlib.sha256()
-        with _open_object(objects / entry["sha256"], entry) as data:
+        with _open_object(db, assignment, entry) as data:
             while chunk := data.read(_CHUNK):
                 digest.update(chunk)
         if digest.hexdigest() != entry["sha256"]:
@@ -892,7 +1009,7 @@ def _apply(db: Path, assignment: str, store: ledger.Ledger) -> dict[str, Any]:
                 if entry["type"] == "link":
                     ops.symlink(rel, entry["target"])
                 else:
-                    ops.write(rel, location(db, assignment) / "objects" / entry["sha256"], entry)
+                    ops.write(rel, _open_object(db, assignment, entry), entry)
             for rel in sorted((rel for rel, entry in saved.items() if entry["type"] == "dir"),
                               key=lambda rel: (-rel.count("/"), rel)):
                 ops.chmod_dir(rel, saved[rel]["mode"])
@@ -929,69 +1046,92 @@ def _prune_reason(task_status: str | None, taken: datetime | None, cutoff: datet
     return None
 
 
+def _store_names(store: _Dir) -> list[tuple[str, os.stat_result]]:
+    named = []
+    for name in store.names():
+        info = store.lstat(name)
+        if not _is_link(info) and stat.S_ISDIR(info.st_mode):
+            named.append((name, info))
+    return named
+
+
 def checkpoints(db: Path) -> list[dict[str, Any]]:
-    folder = directory(db)
-    if not folder.is_dir():
+    store = _store_dir(db)
+    if store is None:
         return []
+    try:
+        names = [name for name, _ in _store_names(store) if not name.startswith(".")]
+    finally:
+        store.close()
     found = []
-    for path in sorted(folder.iterdir()):
-        if path.name.startswith(".") or not path.is_dir():
-            continue
+    for name in names:
         try:
-            manifest = load(db, path.name)
+            manifest = load(db, name)
         except CheckpointError as exc:
-            found.append({"assignment": path.name, "error": str(exc)})
+            found.append({"assignment": name, "error": str(exc)})
             continue
-        found.append({"assignment": path.name, "taken_at": manifest["taken_at"], **summary(manifest)})
+        found.append({"assignment": name, "taken_at": manifest["taken_at"], **summary(manifest)})
     return found
 
 
 def prune(db: Path, store: ledger.Ledger | None, *, older_than_days: int = RETENTION_DAYS,
           dry_run: bool = False) -> list[dict[str, str]]:
     """Retention: drop checkpoints of terminal tasks and those older than the window. Never one whose task has
-    active work (its worker or a restore in progress)."""
+    active work (its worker or a restore in progress). Deletion goes through the store's descriptors."""
+    if type(older_than_days) is not int or not 0 <= older_than_days <= MAX_RETENTION_DAYS:
+        raise CheckpointError(f"--older-than-days must be between 0 and {MAX_RETENTION_DAYS}")
     cutoff = datetime.now(UTC) - timedelta(days=older_than_days)
-    removed = []
-    folder = directory(db)
-    if not folder.is_dir():
-        return []
-    for path in sorted(folder.iterdir()):
-        if path.name.startswith("."):
-            # Staging left by an interrupted take: safe to drop after a day.
-            if path.is_dir() and time.time() - path.stat().st_mtime > 86400:
-                removed.append({"assignment": path.name, "reason": "interrupted checkpoint"})
-                if not dry_run:
-                    shutil.rmtree(path, ignore_errors=True)
-            continue
-        try:
-            manifest: dict[str, Any] | None = load(db, path.name)
-            taken = datetime.fromisoformat(str(manifest["taken_at"]).replace("Z", "+00:00")) if manifest else None
-        except (CheckpointError, KeyError, ValueError):
-            # Unreadable: its saved copies may still matter, so only the window (by directory age) removes it.
-            manifest = None
-            taken = datetime.fromtimestamp(path.stat().st_mtime, UTC)
-        task_status = None
-        if store is not None:
+    removed: list[dict[str, str]] = []
+    folder = _store_dir(db)
+    if folder is None:
+        return removed
+    try:
+        for name, info in _store_names(folder):
+            if name.startswith("."):
+                # Staging left by an interrupted take: safe to drop after a day.
+                if time.time() - info.st_mtime > 86400:
+                    removed.append({"assignment": name, "reason": "interrupted checkpoint"})
+                    if not dry_run:
+                        _quietly(folder.rmtree, name)
+                continue
             try:
-                view = store.show(store.activity(path.name)["task"])
-            except ledger.LedgerError:
-                view = None
-            if view is not None:
-                if any(item["status"] == "active" for item in view["assignments"]):
-                    continue
-                task_status = view["status"]
-        reason = None
-        if task_status in ("done", "cancelled") or (taken is not None and taken < cutoff):
+                manifest: dict[str, Any] | None = load(db, name)
+                taken = datetime.fromisoformat(str(manifest["taken_at"]).replace("Z", "+00:00")) if manifest else None
+            except (CheckpointError, KeyError, ValueError):
+                # Unreadable: its saved copies may still matter, so only the window (by directory age) removes it.
+                manifest = None
+                taken = datetime.fromtimestamp(info.st_mtime, UTC)
+            task_status = None
+            if store is not None:
+                try:
+                    view = store.show(store.activity(name)["task"])
+                except ledger.LedgerError:
+                    view = None
+                if view is not None:
+                    if any(item["status"] == "active" for item in view["assignments"]):
+                        continue
+                    task_status = view["status"]
+            if not (task_status in ("done", "cancelled") or (taken is not None and taken < cutoff)):
+                continue
             # Under the checkpoint's lock, re-checked: a restore may have started since the check above.
             try:
-                with _locked(db, path.name):
-                    if store is not None and _has_active_work(store, path.name):
+                with _locked(db, name):
+                    if store is not None and _has_active_work(store, name):
                         continue
                     reason = _prune_reason(task_status, taken, cutoff, older_than_days, manifest)
                     if reason:
-                        removed.append({"assignment": path.name, "reason": reason})
+                        removed.append({"assignment": name, "reason": reason})
                         if not dry_run:
-                            shutil.rmtree(path, ignore_errors=True)
+                            _quietly(folder.rmtree, name)
             except TimeoutError:
                 pass  # Busy: a restore holds it; the next prune decides.
+    finally:
+        folder.close()
     return removed
+
+
+def _quietly(action: Any, name: str) -> None:
+    try:
+        action(name)
+    except (OSError, CheckpointError):
+        pass

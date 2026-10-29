@@ -334,8 +334,9 @@ def configure_checkpoints(parser: argparse.ArgumentParser) -> None:
 
 def command_checkpoints(args: argparse.Namespace) -> int:
     db = _db(args)
-    if args.older_than_days < 0:
-        print('hipson task checkpoints: --older-than-days must be nonnegative', file=sys.stderr)
+    if not 0 <= args.older_than_days <= task_checkpoint.MAX_RETENTION_DAYS:
+        print(f'hipson task checkpoints: --older-than-days must be between 0 and {task_checkpoint.MAX_RETENTION_DAYS}',
+              file=sys.stderr)
         return 64
     try:
         store = ledger.Ledger(db, create=False, read_only=True) if db.exists() else None
@@ -345,7 +346,7 @@ def command_checkpoints(args: argparse.Namespace) -> int:
         finally:
             if store is not None:
                 store.close()
-    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+    except (task_checkpoint.CheckpointError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
         print(f'hipson task checkpoints: {task_activity.safe_text(exc, 600)}', file=sys.stderr)
         return 1
     if getattr(args, 'json', False):

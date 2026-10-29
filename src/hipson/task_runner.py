@@ -601,8 +601,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         f"{saved['untouched_sensitive']} sensitive files left alone"))
                     try:
                         task_checkpoint.prune(db, store)  # Retention runs whenever a new checkpoint is taken.
-                    except OSError:
-                        pass
+                    except (OSError, task_checkpoint.CheckpointError):
+                        pass  # Retention is best effort; the checkpoint just taken is what matters here.
                 _message(f"{assignment} checkpoint: {saved['files']} files, {saved['bytes']} bytes "
                          f"(restore: hipson task restore --assignment {assignment})")
         progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
