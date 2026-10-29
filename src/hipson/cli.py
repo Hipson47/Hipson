@@ -344,9 +344,12 @@ def command_route_actor(args: argparse.Namespace) -> int:
     if args.print_example:
         print(actor_routing.example_registry(), end="")
         return 0
-    db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
     record = args.task is not None and not args.no_record
     try:
+        try:
+            db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        except RuntimeError as exc:  # e.g. ~unknown-user
+            raise actor_routing.RoutingError(f"--db path cannot be resolved: {exc}") from None
         registry = actor_routing.load_registry(actor_routing.registry_path(args.config))
         if args.task is not None and not db.exists():
             raise actor_routing.RoutingError(f"Task not found: {args.task} (no ledger at {db})")

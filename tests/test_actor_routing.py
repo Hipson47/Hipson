@@ -364,3 +364,14 @@ def test_the_registry_version_is_shown_escaped(tmp_path):
     assert "\x1b" not in text and [line for line in text.splitlines() if line.startswith("Recommended:")] == [
         "Recommended: claude"]
     assert "\x1b" not in actor_routing.event_summary(route) and "\n" not in actor_routing.event_summary(route)
+
+
+def test_decoder_limits_and_unresolvable_paths_are_controlled_errors(tmp_path):
+    path = tmp_path / "actors.json"
+    for text in ('{"version": "x", "history_weight": ' + "9" * 5000 + ', "actors": []}', "[" * 10000 + "]" * 10000):
+        path.write_text(text)
+        with pytest.raises(actor_routing.RoutingError, match="not valid JSON"):
+            actor_routing.load_registry(path)
+    for option in ("--db", "--config"):
+        run = _cli(tmp_path, "route", "actor", "--needs", "code_write", option, "~no-such-user-hipson-test/x")
+        assert run.returncode == 2 and "cannot be resolved" in run.stderr and "Traceback" not in run.stderr, option

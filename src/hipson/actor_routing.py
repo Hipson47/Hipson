@@ -39,7 +39,10 @@ class RoutingError(ValueError):
 
 def registry_path(explicit: str | Path | None = None) -> Path:
     if explicit:
-        return Path(explicit).expanduser().resolve()
+        try:
+            return Path(explicit).expanduser().resolve()
+        except (RuntimeError, OSError) as exc:  # e.g. ~unknown-user
+            raise RoutingError(f"--config path cannot be resolved: {exc}") from None
     return detect_hipson_home()[0] / "actors.json"
 
 
@@ -60,7 +63,7 @@ def load_registry(path: Path) -> dict[str, Any]:
     raw = path.read_bytes()
     try:
         data = json.loads(raw.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:  # JSONDecodeError and decoder limits alike.
         raise RoutingError(f"Actor registry {path} is not valid JSON: {exc}") from exc
     problems = validate_registry(data)
     if problems:
