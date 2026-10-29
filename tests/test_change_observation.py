@@ -559,16 +559,22 @@ def test_window_end_is_taken_after_the_final_walk(tmp_path):
     root = _tree(tmp_path)
     db = tmp_path / "ledger.sqlite"
     task_observation.start(db, "A-0001", root, Caps())
-    stamps = []
+    calls = []  # Order, not clock values: Windows clock resolution can make both stamps equal.
     real_take = task_observation.take
 
-    def slow_take(*args, **kwargs):
-        stamps.append(("walk", ledger._timestamp()))
-        return real_take(*args, **kwargs)
+    def recorded_take(*args, **kwargs):
+        result = real_take(*args, **kwargs)
+        calls.append("walk finished")
+        return result
 
-    with patch.object(task_observation, "take", side_effect=slow_take):
+    def recorded_timestamp():
+        calls.append("window end")
+        return "2026-01-01T00:00:00.000000Z"
+
+    with (patch.object(task_observation, "take", side_effect=recorded_take),
+          patch.object(task_observation.ledger, "_timestamp", side_effect=recorded_timestamp)):
         _, stamp = task_observation.capture_after(db, "A-0001")
-    assert stamp > stamps[0][1]
+    assert calls == ["walk finished", "window end"] and stamp == "2026-01-01T00:00:00.000000Z"
 
 
 def test_unwritable_baseline_storage_still_records_unobserved(tmp_path):
