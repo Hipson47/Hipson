@@ -1,6 +1,17 @@
-"""Fail CI on skips outside the exact platform allowlist in tests.support."""
+"""Fail CI on skips outside the exact platform allowlist in tests.support; keep every test away from the
+developer's real ledger and Hipson home."""
+
+import os
+import tempfile
 
 from tests.support import skip_failure
+
+# A test that forgets --db, or a mutant under mutation testing that breaks the ledger path, would otherwise
+# write to ~/.config/hipson/ledger.sqlite (it did: test tasks and a schema migration reached a real ledger).
+# Tests that need other values still set them explicitly.
+_ISOLATED = tempfile.mkdtemp(prefix="hipson-tests-")
+os.environ["HIPSON_LEDGER"] = os.path.join(_ISOLATED, "ledger.sqlite")
+os.environ["HIPSON_HOME"] = os.path.join(_ISOLATED, "home")
 
 
 class _SkipPolicy:
