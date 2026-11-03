@@ -96,8 +96,11 @@ def _ledger_version(path: Path) -> int | None:
     # Reuse the no-sidecar reader: even dry-run against a live WAL must not create files.
     with closing(ledger._sidecar_read_only_connection(path, time.monotonic() + TIMEOUT)) as connection:
         row = connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()
-    if row is None or row[0] not in (1, 2, 3, ledger.SCHEMA_VERSION):
-        raise ValueError("Unsupported task ledger schema; setup has made no changes.")
+    if row is None or row[0] not in ledger.SUPPORTED_SCHEMA_VERSIONS:
+        found = "none" if row is None else row[0]
+        raise ValueError(
+            f"Unsupported task ledger schema version {found}; this build expects "
+            f"{ledger.SCHEMA_VERSION}. Setup has made no changes.")
     return int(row[0])
 
 

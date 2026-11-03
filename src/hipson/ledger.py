@@ -233,6 +233,15 @@ MIGRATION_V9_TO_V10 = (
     "ALTER TABLE assignments ADD COLUMN needs TEXT",
     "UPDATE schema_version SET version = 10 WHERE singleton = 1",
 )
+MIGRATIONS = (
+    MIGRATION_V1_TO_V2, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4, MIGRATION_V4_TO_V5, MIGRATION_V5_TO_V6,
+    MIGRATION_V6_TO_V7, MIGRATION_V7_TO_V8, MIGRATION_V8_TO_V9, MIGRATION_V9_TO_V10,
+)
+# One version per migration, plus the current one. Derived so the Ledger guard and `hipson init`
+# cannot drift apart again, and listing SCHEMA_VERSION separately keeps the refusal fail-closed:
+# bumping it without adding a migration leaves the previous version unsupported and loud, rather
+# than accepting a store this build would silently never migrate.
+SUPPORTED_SCHEMA_VERSIONS = (*range(1, len(MIGRATIONS) + 1), SCHEMA_VERSION)
 MAX_NEEDS = 16
 NEED_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_CHECKS = 16
@@ -826,7 +835,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
+                elif version is None or version[0] not in SUPPORTED_SCHEMA_VERSIONS:
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:

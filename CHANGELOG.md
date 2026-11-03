@@ -38,6 +38,11 @@
 - The agent contract and bootstrap lead with the ledger lifecycle (`lead_task_ledger` workflow, first
   command `hipson lead resume`, default policy workflow `lead_task_ledger`); `AGENTS.md` and the
   packaged Codex instructions point at the ledger instead of the Hermes bridge.
+- Fix `hipson init` refusing a ledger at any schema the `Ledger` already migrates: setup accepted only
+  v1-v3 and the current version, so every store written by an earlier release (v4-v9, for example a v6
+  ledger from 1.5.0) stopped setup with "Unsupported task ledger schema; setup has made no changes."
+  while every other command worked. Both guards now read one `ledger.SUPPORTED_SCHEMA_VERSIONS`, and the
+  refusal names the version it found and the one this build expects.
 - Fix `task verify`, `task close` and `task do` in projects with a top-level module named like the standard
   library (e.g. `json.py`): the supervisors Hipson spawns in the project directory now run with `python -P`.
 - A `task close` refusal for a check that ran out of time names the per-check timeout and `--timeout`.
