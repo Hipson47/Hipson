@@ -257,6 +257,33 @@ def test_init_migration_dry_run_is_read_only_then_apply_backs_up(tmp_path):
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
 
 
+def test_init_accepts_every_schema_version_the_ledger_migrates(tmp_path):
+    """Setup refused v4-v9 ledgers the Ledger migrates fine, so upgrades could not run init."""
+    assert ledger.SUPPORTED_SCHEMA_VERSIONS[-1] == ledger.SCHEMA_VERSION
+    # A bump without a migration must stay fail-closed, so the chain covers every earlier version.
+    assert len(ledger.MIGRATIONS) == ledger.SCHEMA_VERSION - 1
+    setup = _Setup(tmp_path)
+    setup.db.parent.mkdir()
+    with closing(sqlite3.connect(setup.db)) as connection:
+        connection.executescript((ROOT / "tests/fixtures/task-ledger-v1.sql").read_text(encoding="utf-8"))
+
+    def _stamp(version):
+        with closing(sqlite3.connect(setup.db)) as connection:
+            connection.execute("UPDATE schema_version SET version = ?", (version,))
+            connection.commit()
+
+    for version in ledger.SUPPORTED_SCHEMA_VERSIONS:
+        _stamp(version)
+        assert init_setup._ledger_version(setup.db) == version
+    _stamp(ledger.SCHEMA_VERSION + 1)
+    try:
+        init_setup._ledger_version(setup.db)
+    except ValueError as error:
+        assert "Unsupported task ledger schema" in str(error)
+    else:
+        raise AssertionError("a schema newer than this build supports must stop setup")
+
+
 def test_init_live_wal_dry_run_does_not_change_ledger_or_sidecars(tmp_path):
     setup = _Setup(tmp_path)
     with closing(ledger.Ledger(setup.db)) as store:
