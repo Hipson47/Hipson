@@ -6,6 +6,7 @@ lexical coordination records; they do not enforce filesystem access.
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import json
 import os
@@ -1521,16 +1522,28 @@ class Ledger:
 
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):
-            views = [self._view(row['id'], active_only=True) for row in self.connection.execute(
-                'SELECT id FROM tasks ORDER BY created_at, id')]
+            # A finished task stays on the board only while one of its assignments is live or unacknowledged.
+            # Decide that before building the view: a view fingerprints the task's project, and the whole task
+            # history must not pay for it (one large or slow project folder of an old task hung the board).
+            states: dict[str, dict[str, Any]] = {}
+            views = [self._view(row['id'], active_only=True, states=states) for row in self.connection.execute(
+                'SELECT id, status FROM tasks ORDER BY created_at, id').fetchall()
+                if row['status'] not in ('done', 'cancelled') or self._has_live_assignment(row['id'])]
             return [view for view in views if view['status'] not in ('done', 'cancelled') or view['assignments']]
+
+    def _has_live_assignment(self, task: str) -> bool:
+        """The board's own assignment filter (see _view active_only), without fingerprinting the project."""
+        return any(item['status'] == 'active' or item['ack_state'] == 'unacknowledged'
+                   for item in (self._assignment_dict(row) for row in self.connection.execute(
+                       'SELECT * FROM assignments WHERE task = ?', (task,)).fetchall()))
 
     def lead_snapshot(self, *, project: str | Path | None = None) -> list[tuple[TaskView, list[TaskEvent]]]:
         """Read views and events at one ledger revision, without migration or recovery."""
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         with self._transaction(write=False):
+            states: dict[str, dict[str, Any]] = {}
             return [
-                (self._view(row['id']), [self._event_dict(event) for event in self.connection.execute(
+                (self._view(row['id'], states=states), [self._event_dict(event) for event in self.connection.execute(
                     'SELECT * FROM events WHERE task = ? ORDER BY seq', (row['id'],))])
                 for row in self.connection.execute(
                     'SELECT id FROM tasks WHERE (? IS NULL OR project = ?) ORDER BY id',
@@ -1550,11 +1563,19 @@ class Ledger:
             raise LedgerError(f"Assignment not found: {assignment}")
         return self._assignment_dict(row)
 
-    def _view(self, task: str, *, active_only: bool = False) -> TaskView:
+    def _view(self, task: str, *, active_only: bool = False, states: dict[str, dict[str, Any]] | None = None) -> TaskView:
         current = self._task(task)
         from hipson.task_verification import project_state, verification_state
         records = self.verifications(task)
-        verification = verification_state(records, project_state(current['project'], self.path),
+        # One read (board, lead snapshot) fingerprints each project folder once, however many tasks share it.
+        # verification_state may annotate the state it gets, so every view receives its own copy.
+        if states is None:
+            state = project_state(current['project'], self.path)
+        else:
+            if current['project'] not in states:
+                states[current['project']] = project_state(current['project'], self.path)
+            state = copy.deepcopy(states[current['project']])
+        verification = verification_state(records, state,
                                           self._builder_finished_seq(task), current['lead'], current['checks'])
         assignments = [
             self._assignment_dict(row)

@@ -25,6 +25,10 @@ from hipson.redaction import redact_text
 OUTPUT_LIMIT = 8192
 FILE_HASH_LIMIT = 16 * 1024 * 1024
 TOTAL_HASH_LIMIT = 128 * 1024 * 1024
+# A project outside Git is walked file by file. Bound the walk so a large folder (media, several node_modules,
+# a slow mount such as /mnt/c under WSL) fails closed with an error instead of hanging every reader of the ledger.
+WALK_PATH_LIMIT = 20_000
+WALK_SECONDS = 20.0
 _TOOL_CACHE_DIRS = frozenset({
     '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.hypothesis', '.tox', '.nox', '.gradle',
 })
@@ -41,6 +45,11 @@ def _is_tool_cache(path: Path, *, directory: bool = False) -> bool:
 
 def _walk_error(error: OSError) -> None:
     raise error
+
+
+def _walk_limit_message(root: Path) -> str:
+    return (f'Project {root} is not a Git repository and is too large to fingerprint (over {WALK_PATH_LIMIT} '
+            f'paths or {WALK_SECONDS:g} s); make it a Git repository or register the task on a smaller folder')
 
 
 def _fingerprint(files: list[dict[str, Any]]) -> str:
@@ -158,7 +167,10 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
         else:
             baseline, index_entries, indexed = {}, {}, set()
             paths = set()
+            deadline = time.monotonic() + WALK_SECONDS
             for directory, dirs, walk_files in os.walk(root, followlinks=False, onerror=_walk_error):
+                if time.monotonic() > deadline:
+                    raise ValueError(_walk_limit_message(root))
                 for entry in list(dirs):
                     path = Path(directory) / entry
                     if _is_tool_cache(path.relative_to(root), directory=True):
@@ -167,6 +179,8 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
                         paths.add(os.fsencode(path.relative_to(root).as_posix()))
                         dirs.remove(entry)
                 paths.update(os.fsencode((Path(directory) / name).relative_to(root).as_posix()) for name in walk_files)
+                if len(paths) > WALK_PATH_LIMIT:
+                    raise ValueError(_walk_limit_message(root))
         files: list[dict[str, Any]] = []
         dirty = index_dirty
         content_bytes = 0

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fix: `task board` (and MCP `task.board`) no longer fingerprints the project of every task in history; a
+  finished task is skipped unless an assignment is live or unacknowledged, and one board or lead snapshot
+  fingerprints each project folder once. A project outside Git is walked for at most 20,000 paths or 20 s and
+  then fails closed with an actionable error. One old task on a 226k-file folder under `/mnt/c` hung the board.
 - Opt-in change observation for `task run` / `task do` (`--observe`, or `observe_changes` in project policy):
   a bounded pre-run snapshot of the project tree (path, size, mtime, content hash; never contents) is compared
   after every exit path, including `task reap`. Changes are classified against the assignment's scope and mode
