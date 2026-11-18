@@ -769,10 +769,20 @@ def test_review_state_exact_contract():
         state = ledger.review_state("required", "lead", [builder, review], {"A-0001": 1, **seqs}, 2, 3)
         assert state == {"required": True, "passing": False, "accepted": None, "current": current,
                          "reasons": [f"review required: latest review A-0002 does not qualify: {problem}" + REVIEW_TAIL]}
-    # The latest qualifying review is accepted even when a later one crashed; a later one is the current one.
-    later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", status="failed")],
-                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
-    assert later["accepted"] == "A-0002" and later["current"] == "A-0003" and later["passing"]
+    # A later review that ran and did not complete blocks; an interrupted (cancelled) or still-active one does not
+    # outvote the accepted review (active work blocks done elsewhere).
+    for status, result, blocks in (("failed", "completed", True), ("passed", "partial", True), ("passed", None, True),
+                                   ("cancelled", None, False), ("active", None, False)):
+        later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"),
+                                                         _reviewer("A-0003", status=status, result=result)],
+                                    {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+        assert later["current"] == "A-0003" and later["passing"] is not blocks, (status, result)
+        if blocks:
+            assert later["accepted"] is None and later["reasons"][0].startswith(
+                "review required: later review A-0003 did not complete (") and later["reasons"][0].endswith(
+                "after accepted review A-0002; run the reviewer again")
+        else:
+            assert later["accepted"] == "A-0002"
     # Exactly at the boundary is not after it.
     edge = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {"A-0002": 3}, 3, 0)
     assert not edge["passing"] and edge["current"] is None

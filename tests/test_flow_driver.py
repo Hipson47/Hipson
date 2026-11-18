@@ -360,3 +360,49 @@ def test_reviewer_brief_carries_the_bounded_scoped_diff_as_data(tmp_path):
     (project / 'src/parser/pairs.py').write_text(('x = 1' + nl) * 20000)
     big = flow_driver.candidate_diff(str(project), ['src/parser'])
     assert '(truncated: first 16000 of' in big[0] and len(big[1]) < 17000
+
+
+
+def test_a_failing_first_check_drives_repair_when_later_checks_did_not_run(tmp_path):
+    # Review F-01: run_checks stops at the first failure, leaving later checks missing, not failing.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    proc, result = _flow(project, db, _spec(tmp_path, project, builder='needs-repair',
+                                            checks=(TRIM_CHECK, SPLIT_CHECK), close_to='done'))
+    assert proc.returncode == 0 and result['state'] == 'accepted' and result['builder_attempts'] == 2, result
+
+
+def test_a_redacted_review_finding_is_still_repairable(tmp_path):
+    # Review F-04: the findings table stores redacted titles; matching must use the same redaction.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    proc, result = _flow(project, db, _spec(tmp_path, project, builder='needs-repair', reviewer='secret-title',
+                                            checks=(SPLIT_CHECK,), close_to='done'))
+    assert proc.returncode == 0 and result['state'] == 'accepted', result
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        finding = store.findings(task='T-0001')[0]
+    assert '[REDACTED]' in finding['title'] and finding['status'] == 'fixed'
+
+
+def test_a_brief_left_by_a_launch_that_never_started_does_not_wedge_resume(tmp_path):
+    # Review F-03: a brief written before a refused launch is replaced; an existing result is still refused.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, builder='crash')
+    _flow(project, db, spec)
+    flows = db.parent / '.ledger.sqlite.flows' / 'T-0001'
+    (flows / 'build-2.brief.md').write_text('stale brief from a launch that never got an assignment')
+    proc, retried = _flow(project, db, spec, '--resume', 'T-0001', '--retry')
+    assert proc.returncode == 3 and retried['builder_attempts'] == 2, retried
+    assert 'stale brief' not in (flows / 'build-2.brief.md').read_text()
+    (flows / 'build-3.result.json').write_text('{}')
+    proc, refused = _flow(project, db, spec, '--resume', 'T-0001', '--retry')
+    assert proc.returncode == 65 and 'build-3.result.json already exists' in refused['reasons'][0]
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege')
+def test_flow_state_reached_through_a_link_is_refused(tmp_path):
+    # Review F-08.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (tmp_path / '.ledger.sqlite.flows').symlink_to(elsewhere, target_is_directory=True)
+    proc, result = _flow(project, db, _spec(tmp_path, project))
+    assert proc.returncode == 65 and 'is a link' in result['reasons'][0] and not list(elsewhere.iterdir())

@@ -352,8 +352,9 @@ which the status event references.
 `hipson task flow --spec flow.json` drives one bounded implementation task through build, lead
 verification, independent review, bounded repair and close, with the lead's acceptance kept at the end. It
 is a deterministic procedure, not an agent: it runs workers with `task run` and checks with `task verify`
-(the same supervisors a lead uses by hand), and decides every next step from the ledger alone, so there is
-no second source of truth and an interrupted flow continues from what was recorded.
+(the same supervisors a lead uses by hand), and decides every next step from the ledger (plus one loop guard
+local to the invocation: verification runs at most once per builder), so there is no second source of truth
+and an interrupted flow continues from what was recorded.
 
 The spec (`schemas/task-flow.schema.json`, validated without dependencies; `--check` validates only):
 
@@ -384,8 +385,8 @@ What the flow does, each step derived from the recorded state:
 2. Builder (`rw`, the spec's scope, `--observe` by default, `--result-file` always), then acknowledges every
    ended result after printing it. A failed exit, an invalid or missing structured result, or a `partial` /
    `blocked` report stops with `worker_failed` (exit 3); `--resume T --retry` runs it once more.
-3. Runs every declared check that is not current. Failing checks with their records are the evidence for a
-   repair. Verification that is still not current after a run in this invocation stops with
+3. Runs the declared checks that are not current, in order, stopping at the first failure (later checks stay
+   missing until the next run). A current failing check with its record is the evidence for a repair. Verification that is still not current after a run in this invocation stops with
    `verification_inconclusive` (exit 4) instead of looping.
 4. Reviewer (`ro`, `--observe`). A failed reviewer stops with `reviewer_failed` (exit 3). Blocking/major
    findings the reviewer reported in its structured result are evidence for a repair.
@@ -409,7 +410,8 @@ verification and review, open findings and the next command. The flow refuses to
 bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
 result, and was assigned after the latest finished builder **and** after the accepted lead verification, so
 the review saw the tree that verification fingerprinted; verification must still be current at close, so a
-tree changed after review is caught as stale. The reviewer's label must differ, case-insensitively, from the
+tree changed after review is caught as stale. A later review that ran and failed, or returned a `partial` /
+`blocked` result, blocks `done` even when an earlier review passed; an interrupted (cancelled) one does not. The reviewer's label must differ, case-insensitively, from the
 lead and every builder. `task show` prints a `Review:` line and the JSON view carries `review` (`required`,
 `passing`, `accepted`, `current`, `reasons`). Labels are not authenticated: the gate is a coordination
 guarantee between cooperating processes, not a security boundary. The enforced boundaries remain the ones

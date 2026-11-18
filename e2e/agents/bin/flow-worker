@@ -56,7 +56,10 @@ elif role == "reviewer":
         raise SystemExit(6)
     text = source.read_text(encoding="utf-8") if source.exists() else ""
     if "strip" not in text:
-        report["findings"].append({"severity": "major", "title": "Pair elements retain surrounding whitespace",
+        title = "Pair elements retain surrounding whitespace"
+        if profile == "secret-title":  # A title the ledger redacts must still match the reviewer's report.
+            title += " (seen with token ghp_" + "a1B2" * 9 + ")"
+        report["findings"].append({"severity": "major", "title": title,
                                    "detail": "parse_pair(' a : b ') must return ('a', 'b').",
                                    "location": "src/parser/pairs.py:2"})
 else:

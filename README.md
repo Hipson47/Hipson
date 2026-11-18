@@ -25,6 +25,8 @@
 - Verify and close (runs the checks): `hipson task close --task T-0001`
 - One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
 - Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Build, verify, independent review, bounded repair (resumable): `hipson task flow --spec flow.json` ([TASK_LEDGER](https://github.com/Hipson47/Hipson/blob/main/docs/TASK_LEDGER.md#implementation-flow-and-the-review-gate-17))
+- Which agent CLIs are installed, logged in and verified: `hipson agent runtimes` ([AGENT_RUNTIMES](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_RUNTIMES.md))
 
 <table>
 <tr>

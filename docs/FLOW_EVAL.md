@@ -17,7 +17,7 @@ how a live model follows a prompt (a careful agent may do better than A1/A2, a c
 quality, or tokens. It uses no model; `tokens` is `null` in every run. One run per cell: the procedures and
 workers are deterministic, so repetition adds no information here; it is not a statistical sample.
 
-## Results (revision a83b9c2 + this document, 2026-11-19, Python 3.12, WSL2)
+## Results (revision a83b9c2 + this document, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2)
 
 Raw report: [evals/flow-compare-2026-11-19.json](evals/flow-compare-2026-11-19.json).
 Reproduce: `.venv/bin/python scripts/flow_compare.py --output report.json` (Linux/WSL2, about 30 s).

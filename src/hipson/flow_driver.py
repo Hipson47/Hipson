@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from hipson import ledger, task_activity, task_context, task_flow, task_observation, task_runner, task_verification
+from hipson.redaction import redact_text
 
 MAX_REPAIRS = 5
 MAX_INTERRUPTED = 2  # Re-runs of a worker the flow lost (reaped or cancelled), per role.
@@ -206,7 +207,8 @@ def reviewer_findings(view: ledger.TaskView) -> dict[str, list[ledger.Finding]]:
 
     Findings the runner raised on a reviewer (out-of-scope changes) are not review findings: they need the lead.
     """
-    reported = {item['id']: {(finding['severity'], finding['title']) for finding in item['result']['findings']}
+    reported = {item['id']: {(finding['severity'], redact_text(finding['title']))
+                             for finding in item['result']['findings']}
                 for item in view['assignments'] if item['role'] == 'reviewer' and item['result'] is not None}
     grouped: dict[str, list[ledger.Finding]] = {}
     for finding in view['findings']:
@@ -284,7 +286,9 @@ def decide(view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str,
                                               'then resume with --retry (counts against the repair budget)'])
     verification = view['verification']
     if not verification['passing']:
-        if evidence and all(state['passing'] or state['freshness'] == 'failing' for state in verification['checks']):
+        # run_checks stops at the first failing check, so later checks stay missing: one current failure is
+        # diagnostic evidence; stale, partial or unknown states need a fresh run instead.
+        if evidence and any(state['freshness'] == 'failing' for state in verification['checks']):
             if len(counted) >= budget:
                 return Step('stop', 'checks_failed', [
                     f"check `{shlex.join(record['command'])}` failed with exit {record['exit_code']} ({record['id']})"
@@ -386,12 +390,15 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
             echo: Callable[[str], None]) -> int:
     worker = spec[role]
     directory = _flow_dir(db, view['id'])
+    if any(path.is_symlink() for path in (directory, directory.parent)):
+        raise FlowError('conflict', [f'{directory} or its parent is a link; flow state must be a private directory'])
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     number = 1 + sum(item['role'] == role for item in view['assignments'])
     brief_path, result_path = directory / f'{stage}-{number}.brief.md', directory / f'{stage}-{number}.result.json'
-    for path in (brief_path, result_path):
-        if path.exists() or path.is_symlink():  # Never ingest a result written before this run.
-            raise FlowError('conflict', [f'{path} already exists; it is not evidence of this run, remove it and resume'])
+    if result_path.exists() or result_path.is_symlink():  # Never ingest a result written before this run.
+        raise FlowError('conflict', [f'{result_path} already exists; it is not evidence of this run, remove it and resume'])
+    # A brief from a launch that never became an assignment (refused claim, killed before assign) is replaced.
+    brief_path.unlink(missing_ok=True)
     brief_path.write_text(brief, encoding='utf-8')
     values = {'{brief}': str(brief_path), '{result}': str(result_path), '{stage}': stage}
 

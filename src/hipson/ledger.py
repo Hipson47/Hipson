@@ -434,6 +434,14 @@ def review_state(policy: str, lead: str, assignments: Sequence[Assignment], assi
     # The latest review assigned after the latest builder and accepted verification, whatever its outcome.
     current = next((item["id"] for item in reversed(reviews)
                     if assigned_seq.get(item["id"], 0) > max(builder_seq, verified_seq)), None)
+    later = next((item for item in reviews if item["id"] == current), None) if current != accepted else None
+    if accepted is not None and later is not None and (
+            later["status"] == "failed" or (later["status"] == "passed" and (
+                later["result"] is None or later["result"]["status"] != "completed"))):
+        # A later review that ran and did not complete is negative evidence: an earlier pass does not outvote it.
+        return {"required": True, "passing": False, "accepted": None, "current": current, "reasons": [
+            f"review required: later review {current} did not complete ({problem(later)}) after accepted review "
+            f"{accepted}; run the reviewer again"]}
     if accepted is not None:
         return {"required": True, "passing": True, "accepted": accepted, "current": current, "reasons": []}
     reason = ("review required: no reviewer assignment" if not reviews else
