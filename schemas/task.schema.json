@@ -15,6 +15,20 @@
     "checks": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
     "needs": { "type": "array", "maxItems": 16, "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
                "description": "Capability tags the task needs (task open --needs); hipson route actor ranks by them." },
+    "review_policy": { "enum": ["none", "required"],
+                       "description": "required: done needs an independent read-only review of the verified tree (task open --require-review)." },
+    "review": {
+      "type": "object", "additionalProperties": false, "required": ["required", "passing", "accepted", "current", "reasons"],
+      "description": "Review gate state; actor labels are not authenticated, so this is a coordination guarantee.",
+      "properties": {
+        "required": {"type": "boolean"},
+        "passing": {"type": "boolean"},
+        "accepted": {"type": ["string", "null"], "pattern": "^A-[0-9]{4,}$"},
+        "current": {"type": ["string", "null"], "pattern": "^A-[0-9]{4,}$",
+                    "description": "Latest reviewer assigned after the latest builder and accepted verification."},
+        "reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
     "status": { "enum": ["open", "in_progress", "blocked", "review", "done", "cancelled"] },
     "lead": { "type": "string", "minLength": 1, "description": "Recorded lead label, not an authenticated identity." },
     "created_at": { "type": "string", "format": "date-time" },

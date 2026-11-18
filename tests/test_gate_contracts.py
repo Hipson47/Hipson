@@ -616,7 +616,6 @@ def test_v9_schema_constants_are_exact():
 
 
 def test_v10_schema_constants_are_exact():
-    assert ledger.SCHEMA_VERSION == 10
     assert ledger.MIGRATION_V9_TO_V10 == ("ALTER TABLE tasks ADD COLUMN needs TEXT NOT NULL DEFAULT '[]'",
                                           "ALTER TABLE assignments ADD COLUMN needs TEXT",
                                           "UPDATE schema_version SET version = 10 WHERE singleton = 1")
@@ -722,3 +721,68 @@ def _checkpoint_events_contract(tmp_path):
 def test_checkpoint_events_and_case_aware_assign_exact_contract(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         _checkpoint_events_contract(tmp_path)
+
+
+def test_v11_schema_constants_are_exact():
+    assert ledger.SCHEMA_VERSION == 11 and ledger.REVIEW_POLICIES == ("none", "required")
+    assert ledger.MIGRATION_V10_TO_V11 == (
+        "ALTER TABLE tasks ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'none'"
+        " CHECK (review_policy IN ('none', 'required'))",
+        "UPDATE schema_version SET version = 11 WHERE singleton = 1")
+    assert {"review_policy", "flow"} <= ledger.RESERVED_EVENT_TYPES
+
+
+def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):
+    return {"id": id, "actor": actor, "role": role, "mode": mode, "status": status,
+            "result": None if result is None else {"status": result}}
+
+
+REVIEW_TAIL = ("; run an independent read-only reviewer after the latest builder and lead verification "
+               "(hipson task flow, or hipson task run --role reviewer --mode ro)")
+
+
+def test_review_state_exact_contract():
+    builder = _reviewer("A-0001", "Codex", mode="rw", role="builder")
+    off = ledger.review_state("none", "lead", [builder], {}, 0, 0)
+    assert off == {"required": False, "passing": True, "accepted": None, "current": None, "reasons": []}
+    assert ledger.review_state("required", "lead", [builder], {"A-0001": 1}, 2, 3) == {
+        "required": True, "passing": False, "accepted": None, "current": None,
+        "reasons": ["review required: no reviewer assignment" + REVIEW_TAIL]}
+    good = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {"A-0001": 1, "A-0002": 4}, 2, 3)
+    assert good == {"required": True, "passing": True, "accepted": "A-0002", "current": "A-0002", "reasons": []}
+    cases = [
+        ({"A-0002": 2}, _reviewer("A-0002"), "it started before the latest builder finished", None),
+        ({"A-0002": 3}, _reviewer("A-0002"), "it started before the accepted lead verification, so it did not "
+                                             "review the verified tree", None),
+        ({"A-0002": 4}, _reviewer("A-0002", mode="rw"), "it is not read-only", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", "codex"), "actor codex is the lead or a builder of this task", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", "LEAD"), "actor LEAD is the lead or a builder of this task", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", status="failed"), "it is failed", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", status="active"), "it is active", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", result=None),
+         "it has no completed structured result (task run --result-file)", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", result="partial"),
+         "it has no completed structured result (task run --result-file)", "A-0002"),
+        ({}, _reviewer("A-0002"), "it started before the latest builder finished", None),
+    ]
+    for seqs, review, problem, current in cases:
+        state = ledger.review_state("required", "lead", [builder, review], {"A-0001": 1, **seqs}, 2, 3)
+        assert state == {"required": True, "passing": False, "accepted": None, "current": current,
+                         "reasons": [f"review required: latest review A-0002 does not qualify: {problem}" + REVIEW_TAIL]}
+    # The latest qualifying review is accepted even when a later one crashed; a later one is the current one.
+    later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", status="failed")],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert later["accepted"] == "A-0002" and later["current"] == "A-0003" and later["passing"]
+    # Exactly at the boundary is not after it.
+    edge = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {"A-0002": 3}, 3, 0)
+    assert not edge["passing"] and edge["current"] is None
+
+
+def test_done_blockers_include_review_reasons_only_when_failing():
+    view = {"id": "T-0001", "lead": "lead", "assignments": [], "findings": [], "claims": [],
+            "review": {"required": True, "passing": False, "accepted": None, "current": None, "reasons": ["r1"]}}
+    assert ledger.done_blockers(view) == ["r1"]
+    view["review"] = {"required": True, "passing": True, "accepted": "A-0002", "current": None, "reasons": []}
+    assert ledger.done_blockers(view) == []
+    del view["review"]
+    assert ledger.done_blockers(view) == []

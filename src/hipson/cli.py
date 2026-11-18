@@ -20,6 +20,7 @@ from hipson import (
     agent_install,
     agents,
     evals,
+    flow_driver,
     init_setup,
     lead_context,
     learning,
@@ -1888,6 +1889,7 @@ def command_task(args: argparse.Namespace) -> int:
                     lead=args.lead,
                     checks=checks,
                     needs=task_runner.parse_needs(args.needs),
+                    review_policy="required" if args.require_review else "none",
                 )
                 if args.start:
                     payload = store.set_status(payload["id"], to="in_progress", actor=args.lead, summary="started on open")
@@ -1951,6 +1953,10 @@ def command_task(args: argparse.Namespace) -> int:
                     for state in view['verification']['checks']:
                         print(f"  check [{state['freshness']}] {_bounded_cli(shlex.join(state['command']), limit=200, escape_controls=True)}"
                               f" {state['record'] or ''}".rstrip())
+                    if view['review']['required']:
+                        print(f"Review: {'accepted ' + view['review']['accepted'] if view['review']['passing'] else 'required'}"
+                              + ("" if view['review']['passing'] else
+                                 f"; {_bounded_json(view['review']['reasons'], escape_controls=True)}"))
                     for item in view["assignments"]:
                         actor = _bounded_cli(item["actor"], escape_controls=True)
                         heartbeat = _bounded_cli((item['activity'] or {}).get('heartbeat_at') or 'unknown', escape_controls=True)
@@ -2049,6 +2055,7 @@ def build_parser() -> argparse.ArgumentParser:
             ('checks', 'Declare or replace the acceptance checks that gate review/done'),
             ('close', 'Run pending acceptance checks, then move the task to review and done'),
             ('do', 'Open a task with checks, run one worker, and close it if everything passes'),
+            ('flow', 'Build, verify, independent review and bounded repair from a JSON spec; resumable'),
             ('restore', 'Restore an rw assignment checkpoint (task run --checkpoint); dry run unless --apply'),
             ('checkpoints', 'List assignment checkpoints, or prune them by the retention policy'),
             ("finish", "Finish an assignment and release its claims"),
@@ -2083,6 +2090,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_flow.configure_checks(task_parsers['checks'])
     task_flow.configure_close(task_parsers['close'])
     task_flow.configure_do(task_parsers['do'])
+    flow_driver.configure(task_parsers['flow'])
     task_flow.configure_restore(task_parsers['restore'])
     task_flow.configure_checkpoints(task_parsers['checkpoints'])
     task_parsers["open"].add_argument("--project", required=True)
@@ -2093,6 +2101,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_flow.add_check_arguments(task_parsers["open"])
     task_runner.add_needs_arguments(task_parsers["open"], "the task")
     task_parsers["open"].add_argument("--start", action="store_true", help="Move the new task to in_progress")
+    task_parsers["open"].add_argument("--require-review", action="store_true",
+                                      help="done needs an independent read-only review of the verified tree")
     task_parsers["assign"].add_argument("--role", choices=ledger.ROLES, required=True)
     task_parsers["assign"].add_argument("--mode", choices=ledger.MODES, required=True)
     task_parsers["assign"].add_argument("--scope", action="append", default=[], help="Repo-relative path; repeatable")

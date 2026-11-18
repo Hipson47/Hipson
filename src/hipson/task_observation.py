@@ -357,7 +357,7 @@ def ledger_exclusions(db: Path, project: str | Path) -> list[str]:
     root = Path(project).resolve()
     database = Path(db).resolve()
     candidates = [database, *(database.with_name(database.name + suffix) for suffix in ("-wal", "-shm", "-journal")),
-                  _directory(db)]
+                  _directory(db), database.parent / f".{database.name}.flows"]
     excluded = []
     for path in candidates:
         try:

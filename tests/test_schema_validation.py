@@ -85,7 +85,7 @@ def test_schema_validator_checks_string_constraints_and_datetime():
 
 def test_schema_validator_rejects_unknown_vocabulary_in_unused_branches():
     for schema in (
-        {"properties": {"absent": {"minItems": 1}}}, {"$defs": {"unused": {"oneOf": []}}},
+        {"properties": {"absent": {"minContains": 1}}}, {"$defs": {"unused": {"oneOf": []}}},
         {"items": {"unknown": True}}, {"format": "email"}, {"type": ["unknown", "null"]},
         {"$ref": "external.schema.json"},
     ):

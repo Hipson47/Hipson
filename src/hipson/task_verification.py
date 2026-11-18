@@ -187,12 +187,13 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
         metadata_fallback = False
         filter_overrides: list[str] | None = None
         excluded = {db, Path(str(db) + '-wal'), Path(str(db) + '-shm'), Path(str(db) + '-journal')}
+        flows = db.parent / f'.{db.name}.flows'  # task flow briefs and worker results: lead-private state
         for name in sorted(paths):
             relative = Path(os.fsdecode(name))
             if relative.is_absolute() or '..' in relative.parts:
                 raise ValueError('Invalid repository path in content inventory')
             path = root / relative
-            if path in excluded:
+            if path in excluded or flows in path.parents:
                 continue  # The verification's own ledger writes must not invalidate it.
             tracked = name in baseline or name in indexed
             filename = os.fsdecode(name)

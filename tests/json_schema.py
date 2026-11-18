@@ -12,7 +12,7 @@ from datetime import datetime
 KEYWORDS = frozenset({
     "$schema", "title", "description", "$defs", "$ref", "type", "const", "enum",
     "properties", "additionalProperties", "required", "items", "uniqueItems",
-    "pattern", "minLength", "maxLength", "maxItems", "minimum", "maximum", "format",
+    "pattern", "minLength", "maxLength", "minItems", "maxItems", "minimum", "maximum", "format",
 })
 TYPES = frozenset({"object", "array", "string", "boolean", "integer", "number", "null"})
 
@@ -122,6 +122,8 @@ def _errors(schema, payload, root, path):
         if "maximum" in schema and payload > schema["maximum"]:
             errors.append(f"{path}: maximum")
     if isinstance(payload, list):
+        if len(payload) < schema.get('minItems', 0):
+            errors.append(f'{path}: minItems')
         if 'maxItems' in schema and len(payload) > schema['maxItems']:
             errors.append(f'{path}: maxItems')
         if schema.get("uniqueItems") and any(

@@ -40,8 +40,14 @@ def git_redirecting_variable(key: str) -> bool:
     return name in GIT_LOCATION_VARIABLES or name.startswith("GIT_CONFIG")
 
 
+# Signals supervise() forwarded, in order; a caller driving several supervisors (task flow) checks it to stop
+# instead of treating an interrupted step as a failed one.
+SIGNALS_SEEN: list[int] = []
+
+
 def supervise(command: list[str], *, cwd: str | None = None, capture: bool = False,
-              timeout: float | None = None, contain: bool = False) -> tuple[int, bytes, bytes]:
+              timeout: float | None = None, contain: bool = False,
+              env: dict[str, str] | None = None) -> tuple[int, bytes, bytes]:
     """Run a Hipson supervisor (task run / task verify) and let it clean up on cancellation.
 
     On POSIX the supervisor leads its own session, so terminal signals reach only this caller: forward
@@ -57,9 +63,10 @@ def supervise(command: list[str], *, cwd: str | None = None, capture: bool = Fal
                    'import sys; from hipson.task_runner import supervise_command; '
                    'sys.exit(supervise_command(sys.argv[1:]))', *command]
     pipe = subprocess.PIPE if capture else None
-    child = subprocess.Popen(command, cwd=cwd, stdout=pipe, stderr=pipe)
+    child = subprocess.Popen(command, cwd=cwd, stdout=pipe, stderr=pipe, env=env)
 
     def forward(number: int, frame: object) -> None:
+        SIGNALS_SEEN.append(number)
         if child.poll() is None:
             try:
                 child.send_signal(number)

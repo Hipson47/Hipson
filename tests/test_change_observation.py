@@ -220,6 +220,7 @@ def test_v7_ledgers_open_and_migrate_with_an_empty_changes_column(tmp_path):
     with closing(sqlite3.connect(db)) as connection:
         connection.execute("ALTER TABLE assignments DROP COLUMN needs")
         connection.execute("ALTER TABLE tasks DROP COLUMN needs")
+        connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
         connection.execute("ALTER TABLE assignments DROP COLUMN environment")
         connection.execute("ALTER TABLE assignments DROP COLUMN changes")
         connection.execute("UPDATE schema_version SET version = 7")
@@ -406,7 +407,7 @@ def test_in_project_ledger_and_baselines_are_never_attributed(tmp_path):
     assert view is not None and view["changes"]["status"] == "clean", view["changes"]
     assert set(task_observation.ledger_exclusions(db, project)) == {
         "ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "ledger.sqlite-journal",
-        ".ledger.sqlite.observations"}
+        ".ledger.sqlite.observations", ".ledger.sqlite.flows"}
 
 
 def _ledger_at(db: Path, project: Path):
