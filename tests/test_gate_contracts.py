@@ -796,3 +796,53 @@ def test_done_blockers_include_review_reasons_only_when_failing():
     assert ledger.done_blockers(view) == []
     del view["review"]
     assert ledger.done_blockers(view) == []
+
+
+
+def test_review_state_boundaries_ordering_and_full_refusals():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    # A reviewer without a recorded start is never after anything, even when nothing else happened yet.
+    unseen = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {}, 0, 0)
+    assert not unseen["passing"] and unseen["current"] is None
+    # Order follows the recorded start, not list position; a missing start sorts first.
+    ordered = ledger.review_state("required", "lead", [builder, _reviewer("A-0003", status="failed"),
+                                                       _reviewer("A-0002", status="failed")],
+                                  {"A-0003": 6, "A-0002": 5}, 2, 3)
+    assert ordered["reasons"][0].startswith("review required: latest review A-0003 does not qualify")
+    first = ledger.review_state("required", "lead", [builder, _reviewer("A-0002", status="failed"),
+                                                     _reviewer("A-0004", status="failed")], {"A-0002": 1}, 0, 0)
+    assert first["reasons"][0].startswith("review required: latest review A-0002 does not qualify")
+    # A later passed and completed review that does not qualify for another reason does not block.
+    later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", "codex")],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert later == {"required": True, "passing": True, "accepted": "A-0002", "current": "A-0003", "reasons": []}
+    failed = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", status="failed")],
+                                 {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert failed == {"required": True, "passing": False, "accepted": None, "current": "A-0003", "reasons": [
+        "review required: later review A-0003 did not complete (it is failed) after accepted review A-0002; "
+        "run the reviewer again"]}
+
+
+def test_review_seqs_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Seqs", objective="Event positions", lead=LEAD)["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        build = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(build, result="passed", summary="built")
+        assert store._review_seqs(task, [], 9) == ({build: _seq(store, task, "assigned", build)}, 9, 0)
+        store._record_verification(_record(id="V-" + "a" * 32, task=task))
+        store._record_verification(_record(id="V-" + "b" * 32, task=task))
+        store.add_event(task, actor=LEAD, type="note", summary="refs only", refs=[build, "V-" + "c" * 32])
+        review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
+        assigned = {build: _seq(store, task, "assigned", build), review: _seq(store, task, "assigned", review)}
+        first = _seq(store, task, "lead_verified", "V-" + "a" * 32)
+        assert store._review_seqs(task, ["V-" + "a" * 32], 7) == (assigned, 7, first)
+        assert store._review_seqs(task, ["V-" + "b" * 32, "V-" + "a" * 32], 7) == (
+            assigned, 7, _seq(store, task, "lead_verified", "V-" + "b" * 32))
+        assert store._review_seqs(task, ["V-" + "d" * 32], 7) == (assigned, 7, 0)
+        assert 0 < first < assigned[review]
+
+
+def _seq(store, task, kind, ref):
+    return next(event["seq"] for event in store.events(task) if event["type"] == kind and event["refs"][0] == ref)
