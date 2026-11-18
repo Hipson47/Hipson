@@ -138,7 +138,7 @@ def strategy_a(lead: Lead, profile: str, check: list[str], *, verify: bool, inte
 
 
 def strategy_b(lead: Lead, profile: str, check: list[str], *, interrupt: bool) -> bool:
-    result = str(lead.fixture.workdir / ".result.json")
+    result = str(lead.fixture.workdir.parent / "do-result.json")  # Outside the observed project tree.
     do = [PY, "-m", "hipson.cli", "task", "do", "--title", "Fix pair parser", "--lead", "lead", "--check",
           shlex.join(check), "--actor", "builder", "--scope", "src/parser", "--observe", "--result-file", result,
           "--", PY, WORKER, "builder", profile]

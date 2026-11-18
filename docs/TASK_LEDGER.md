@@ -10,6 +10,7 @@
 - Verify and close (runs the checks): `hipson task close --task T-0001`
 - One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
 - Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Build, verify, independent review, bounded repair: `hipson task flow --spec flow.json` (resume: `--resume T-0001`)
 
 The lead (for example Claude Code or Codex) is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
@@ -345,6 +346,79 @@ which the status event references.
   `task run` (default role `builder`, mode `rw`), and, if the worker exits 0 and its structured result (if
   any) is `completed`, acknowledges that result with a recorded note and closes the task as above.
   Otherwise the task stays `in_progress` and the worker's exit code is returned.
+
+## Implementation flow and the review gate (1.7)
+
+`hipson task flow --spec flow.json` drives one bounded implementation task through build, lead
+verification, independent review, bounded repair and close, with the lead's acceptance kept at the end. It
+is a deterministic procedure, not an agent: it runs workers with `task run` and checks with `task verify`
+(the same supervisors a lead uses by hand), and decides every next step from the ledger alone, so there is
+no second source of truth and an interrupted flow continues from what was recorded.
+
+The spec (`schemas/task-flow.schema.json`, validated without dependencies; `--check` validates only):
+
+```json
+{"version": 1, "title": "Fix pair parser", "objective": "Split a:b and trim whitespace",
+ "checks": [["python", "-m", "pytest", "-q"]],
+ "builder": {"actor": "codex", "command": ["codex-worker", "{brief}", "{result}"], "scope": ["src/parser"]},
+ "reviewer": {"actor": "agy", "command": ["agy-reviewer", "{brief}", "{result}"]},
+ "max_repairs": 2, "close_to": "review", "check_timeout": 300}
+```
+
+Optional: `objective` (default: title), `acceptance`, `project` (default: the current Git repository), `lead`
+(default `claude`), per worker `observe` (default true), `env` / `env_allow` (as `task run --env`), builder
+`checkpoint`. `max_repairs` is 0-5 (default 2); `close_to` is `review` (default: final acceptance stays with the
+lead, `hipson task close --task T`) or `done`. The reviewer label must differ from the builder and the lead.
+Worker commands receive `HIPSON_FLOW_STAGE` (`build`, `repair`, `review`), `HIPSON_FLOW_BRIEF` and
+`HIPSON_FLOW_RESULT`, and the tokens `{brief}`, `{result}`, `{stage}` are replaced in their arguments. The
+brief is `task brief` plus the stage: for a repair, the failing checks' recorded output and the reviewer
+findings, wrapped as untrusted data. Briefs and results live in private state beside the ledger
+(`.<ledger file>.flows/T-..../`), which verification fingerprints, change observation and checkpoints exclude;
+a result path that already exists is refused rather than ingested.
+
+What the flow does, each step derived from the recorded state:
+
+1. Opens the task with the spec's checks and `review_policy: required`, and records a reserved `flow` event
+   with the spec's SHA-256. A resume (`--resume T`) refuses a different spec, changed declared checks, a task
+   the flow did not start, or another project (`conflict`, exit 65).
+2. Builder (`rw`, the spec's scope, `--observe` by default, `--result-file` always), then acknowledges every
+   ended result after printing it. A failed exit, an invalid or missing structured result, or a `partial` /
+   `blocked` report stops with `worker_failed` (exit 3); `--resume T --retry` runs it once more.
+3. Runs every declared check that is not current. Failing checks with their records are the evidence for a
+   repair. Verification that is still not current after a run in this invocation stops with
+   `verification_inconclusive` (exit 4) instead of looping.
+4. Reviewer (`ro`, `--observe`). A failed reviewer stops with `reviewer_failed` (exit 3). Blocking/major
+   findings the reviewer reported in its structured result are evidence for a repair.
+5. A repair is a new builder run whose brief carries that evidence; the `flow` event names the records and
+   findings it acts on. At most `1 + max_repairs` builder attempts, counted from the ledger, so a resume
+   cannot reset the budget: `checks_failed` or `review_blocked` (exit 2) when it is spent.
+6. After a repair, a re-review with no blocking/major finding resolves the earlier review findings as
+   `fixed`, linked to the repair assignment, with the verification records and the re-review in the note.
+7. Closes through `task close` (the ledger's one transaction rechecks every gate) to `close_to`.
+
+Any other open blocking/major finding (an out-of-scope change seen by observation, a finding the lead
+recorded) stops with `needs_lead` (exit 4): the flow never resolves what it did not cause and review. A live
+assignment stops with `running` (exit 75). SIGINT/SIGTERM stops the running step through its supervisor,
+records `interrupted during ...` (its verification records are then not evidence) and exits 130; a builder or
+reviewer that the flow lost is re-run on resume (at most twice per role) without counting as a repair.
+`--json` prints `hipson.task_flow_result`: `state`, `status`, `steps`, `builder_attempts`, `reviews`, accepted
+verification and review, open findings and the next command. The flow refuses to run in a worker context.
+
+**Review gate.** `task open --require-review` (MCP `task.open` `require_review`; every flow task) sets
+`review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
+bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
+result, and was assigned after the latest finished builder **and** after the accepted lead verification, so
+the review saw the tree that verification fingerprinted; verification must still be current at close, so a
+tree changed after review is caught as stale. The reviewer's label must differ, case-insensitively, from the
+lead and every builder. `task show` prints a `Review:` line and the JSON view carries `review` (`required`,
+`passing`, `accepted`, `current`, `reasons`). Labels are not authenticated: the gate is a coordination
+guarantee between cooperating processes, not a security boundary. The enforced boundaries remain the ones
+`task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
+not sandbox.
+
+`scripts/flow_compare.py` compares four lead procedures (worker self-report, self-verify, `task do`,
+`task flow`) over the same scripted `e2e/agents/bin/flow-worker` behaviours with a hidden oracle; results and
+their limits are in [docs/FLOW_EVAL.md](FLOW_EVAL.md).
 
 ## Revision-bound lead verification (1.5)
 

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- `hipson task flow --spec flow.json [--resume T] [--retry]`: one deterministic implementation workflow over the
+  ledger: builder, lead verification of the declared checks, an independent read-only reviewer, at most
+  `max_repairs` (default 2) evidence-driven repairs, resolution of review findings after a clean re-review, and
+  close (to `review` by default, leaving final acceptance to the lead). Every decision is derived from the
+  ledger, so a resume reconciles instead of repeating; the spec digest and declared checks are locked; stops are
+  machine-readable states with exit codes (`schemas/task-flow.schema.json`, `hipson.task_flow_result`).
+- Review gate: `task open --require-review` (MCP `require_review`) sets `review_policy: required` at open (ledger
+  schema v11, reserved `review_policy` and `flow` events). `done` then needs a passed, read-only, structured
+  review by a label other than the lead and every builder, assigned after the latest builder and the accepted
+  verification. Shown as `review` in `task show` and the JSON views.
+- Fix: with `TMPDIR` inside the project, `task run --observe` attributed the runner's own progress file to the
+  worker as an out-of-scope change, blocking `done` for correct work.
 - Fix: `task board` (and MCP `task.board`) no longer fingerprints the project of every task in history; a
   finished task is skipped unless an assignment is live or unacknowledged, and one board or lead snapshot
   fingerprints each project folder once. A project outside Git is walked for at most 20,000 paths or 20 s and

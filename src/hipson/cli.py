@@ -2033,7 +2033,8 @@ def build_parser() -> argparse.ArgumentParser:
         "  Acknowledge deliveries: hipson task ack --assignment A-0001\n"
         "  Verify and close (runs checks): hipson task close --task T-0001\n"
         "  One shot: hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]\n"
-        "  Ad-hoc verification: hipson task verify --task T-0001 -- COMMAND [ARGS...]"
+        "  Ad-hoc verification: hipson task verify --task T-0001 -- COMMAND [ARGS...]\n"
+        "  Build, verify, independent review, bounded repair: hipson task flow --spec flow.json"
     )
     parser = argparse.ArgumentParser(prog="hipson", description="Local-first control plane for AI coding agents: one lead, many workers, one ledger",
                                      epilog=lead_quick_reference, formatter_class=argparse.RawDescriptionHelpFormatter)

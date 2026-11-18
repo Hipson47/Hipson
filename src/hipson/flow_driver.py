@@ -122,7 +122,8 @@ def _check_value(value: Any, schema: dict[str, Any], path: str) -> None:
 def validate_spec(raw: object) -> dict[str, Any]:
     """Validate a spec and fill its defaults; every problem is an invalid_config stop before any write."""
     _check_value(raw, SPEC_SCHEMA, 'spec')
-    assert isinstance(raw, dict)
+    if not isinstance(raw, dict):  # _check_value already refused it; this narrows the type explicitly.
+        raise FlowError('invalid_config', ['spec: expected object'])
     spec: dict[str, Any] = json.loads(json.dumps(raw))
     spec.setdefault('objective', spec['title'])
     spec.setdefault('acceptance', [])
