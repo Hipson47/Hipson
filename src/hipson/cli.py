@@ -18,6 +18,7 @@ from hipson import (
     agent_bootstrap,
     agent_contract,
     agent_install,
+    agent_runtimes,
     agents,
     evals,
     flow_driver,
@@ -2223,6 +2224,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap.add_argument("--project", default=".", help="Target repository; defaults to current directory")
     bootstrap.add_argument("--json", action="store_true", help="Print machine-readable bootstrap payload")
     bootstrap.set_defaults(func=command_agent_bootstrap)
+    agent_runtimes.configure(agent_sub)
 
     kit = subparsers.add_parser("kit", help="Run productized Hipson workflow kits")
     kit_sub = kit.add_subparsers(dest="kit_command", required=True)

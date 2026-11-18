@@ -350,7 +350,8 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
                 if finding['id'] in wanted:
                     lines += [f"Review finding {finding['id']} [{finding['severity']}] at {finding['location'] or '?'}:",
                               task_context._untrusted_block(f"{finding['title']}\n{finding['detail']}")]
-    lines.append('Write the structured result (schemas/task-result.schema.json) to the path in HIPSON_FLOW_RESULT.')
+    lines.append('Return the structured result (schemas/task-result.schema.json): write it to the path in '
+                 'HIPSON_FLOW_RESULT unless your launcher captures your final structured answer.')
     return '\n'.join(lines) + '\n'
 
 
@@ -383,7 +384,7 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
                *[item for name in worker['env_allow'] for item in ('--env-allow', name)],
                '--', *[fill(arg) for arg in worker['command']]]
     env = {**os.environ, 'HIPSON_FLOW_STAGE': stage, 'HIPSON_FLOW_BRIEF': str(brief_path),
-           'HIPSON_FLOW_RESULT': str(result_path)}
+           'HIPSON_FLOW_RESULT': str(result_path), 'HIPSON_FLOW_CHECKS': json.dumps(spec['checks'])}
     echo(f'hipson task flow: {view["id"]} {stage} by {worker["actor"]} ({role}, {mode})')
     return task_runner.supervise(command, cwd=view['project'], env=env)[0]
 
