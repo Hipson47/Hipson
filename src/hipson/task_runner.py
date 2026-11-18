@@ -577,13 +577,15 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             if mismatch:
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
+        progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         if not verifying:
             _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
             caps = observation_caps(args, str(check['expected']))
             if caps is not None:
                 # Before launch and after the claim: the baseline is what this worker starts from.
                 try:
-                    task_observation.start(db, assignment, str(check['expected']), caps)
+                    task_observation.start(db, assignment, str(check['expected']), caps,
+                                           private=[Path(progress_dir.name)])
                 except (OSError, ValueError) as exc:
                     # Requested but impossible: never launch unobserved, and record why instead of nothing.
                     reason = f"baseline failed: {type(exc).__name__}"
@@ -612,7 +614,6 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         pass  # Retention is best effort; the checkpoint just taken is what matters here.
                 _message(f"{assignment} checkpoint: {saved['files']} files, {saved['bytes']} bytes "
                          f"(restore: hipson task restore --assignment {assignment})")
-        progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
         progress_path = Path(progress_dir.name) / 'progress'
         progress = progress_path.open('w+b', buffering=0)
         activity = task_activity.Activity(progress)

@@ -379,9 +379,20 @@ def _write(target: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-def start(db: Path, assignment: str, project: str | Path, caps: Caps) -> None:
-    """Take and privately store the pre-run snapshot, so reap can still compare it if the supervisor dies."""
-    _write(baseline_path(db, assignment), take(project, caps, exclude=ledger_exclusions(db, project)))
+def start(db: Path, assignment: str, project: str | Path, caps: Caps, *, private: Sequence[Path] = ()) -> None:
+    """Take and privately store the pre-run snapshot, so reap can still compare it if the supervisor dies.
+
+    `private` names the runner's own state (its progress directory): when TMPDIR lies inside the project, those
+    writes must never be attributed to the worker.
+    """
+    root = Path(project).resolve()
+    extra = []
+    for path in private:
+        try:
+            extra.append(_match(Path(path).resolve().relative_to(root).as_posix()))
+        except ValueError:
+            continue
+    _write(baseline_path(db, assignment), take(project, caps, exclude=[*ledger_exclusions(db, project), *extra]))
 
 
 def start_failed(db: Path, assignment: str, reason: str) -> None:

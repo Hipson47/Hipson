@@ -332,3 +332,16 @@ def test_decide_is_pure_and_stops_on_live_work():
     assert step.kind == 'stop' and step.state == 'running' and flow_driver.EXIT[step.state] == 75
     if sys.platform == 'win32':
         raise SkipTest('remaining cases are platform independent and covered above')
+
+
+def test_runner_progress_state_inside_the_project_is_not_attributed_to_the_worker(tmp_path):
+    # Found by scripts/flow_compare.py: with TMPDIR inside the project, the runner's own progress file was
+    # reported as an out-of-scope change of the worker.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    (project / '.tmp').mkdir()
+    with open(project / '.gitignore', 'a') as handle:
+        handle.write('.tmp/' + chr(10))
+    proc, result = _flow(project, db, _spec(tmp_path, project), env={'TMPDIR': str(project / '.tmp')})
+    assert proc.returncode == 0 and result['state'] == 'accepted', result
+    view, _ = _view(db)
+    assert [path['attribution'] for path in view['assignments'][0]['changes']['paths']] == ['in_scope']
