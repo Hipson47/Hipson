@@ -348,7 +348,7 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
                     num_turns=payload.get("num_turns"))
         raw = payload.get("structured_output")
     if raw is None:
-        raise RuntimeFailure("malformed_output", "no structured_output in the runtime result")
+        raise RuntimeFailure(_evidence(stdout + stderr) or "malformed_output", "no structured_output in the runtime result")
     try:
         return ledger.validate_task_result(raw), meta
     except ledger.LedgerError as exc:

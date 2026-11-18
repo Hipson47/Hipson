@@ -332,7 +332,9 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
     lines = [base, '', f'## Flow stage: {stage}']
     if role == 'reviewer':
         lines += ['Review the current working tree against the objective and acceptance above. Do not edit files.',
-                  'Report every problem as a finding (blocking/major only for real defects) in the result JSON.']
+                  'Report every problem as a finding (blocking/major only for real defects) in the result JSON.',
+                  'The candidate change is below, so no shell command is needed; read files if you need more.']
+        lines += candidate_diff(view['project'], spec['builder']['scope'])
         earlier = [finding for items in reviewer_findings(view).values() for finding in items]
         if earlier:
             lines.append('Earlier review findings that a repair addressed; report again any that still apply:')
@@ -353,6 +355,31 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
     lines.append('Return the structured result (schemas/task-result.schema.json): write it to the path in '
                  'HIPSON_FLOW_RESULT unless your launcher captures your final structured answer.')
     return '\n'.join(lines) + '\n'
+
+
+DIFF_BUDGET = 16_000
+
+
+def candidate_diff(project: str, scope: list[str]) -> list[str]:
+    """The uncommitted change within the scope, bounded and marked as data; truncation is stated, never silent."""
+    from hipson.lead_context import _git
+    try:
+        overrides = task_verification._filter_overrides(project)  # No clean/process filter may run.
+    except ValueError:
+        return ['Candidate diff unavailable (Git filter configuration unreadable); inspect the files directly.']
+    status = _git(project, *overrides, 'status', '--porcelain', '--untracked-files=all', '--', *scope)
+    diff = _git(project, *overrides, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', 'HEAD', '--', *scope)
+    if status is None or diff is None:
+        return ['Candidate diff unavailable (git status/diff failed or exceeded its read limit); inspect the files.']
+    text = diff.decode('utf-8', errors='replace')
+    untracked = [line[3:] for line in status.decode('utf-8', errors='replace').splitlines() if line.startswith('??')]
+    shown = text[:DIFF_BUDGET]
+    header = f"Candidate diff against HEAD within {', '.join(scope)}" + (
+        f' (truncated: first {DIFF_BUDGET} of {len(text)} characters; read the files for the rest)'
+        if len(text) > DIFF_BUDGET else '')
+    return [header, task_context._untrusted_block(shown or '(no tracked changes)')] + (
+        [f"Untracked files in scope: {', '.join(untracked[:50])}" + (' ...' if len(untracked) > 50 else '')]
+        if untracked else [])
 
 
 def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, stage: str, brief: str,
