@@ -605,16 +605,34 @@ def test_windows_execution_contexts_are_detected_and_kept_apart(tmp_path):
     native.write_bytes(b"MZ")
     shim.write_text('@"C:/Program Files/nodejs/node.exe" "%~dp0node_modules/codex/bin/codex.js" %*' + chr(10))
     forward.write_text("@echo off" + chr(10) + 'for /f %%I in (`wsl.exe -d Ubuntu --exec wslpath -a "%CD%"`) do x' + chr(10))
-    with patch.object(runtimes.os, "name", "nt"):
-        assert runtimes.execution_context(str(native)) == {"context": "native"}
-        assert runtimes.execution_context(str(shim)) == {"context": "batch-shim", "launcher": str(shim)}
-        assert runtimes.execution_context(str(forward)) == {"context": "wsl-forwarded", "launcher": str(forward)}
-        assert runtimes.execution_context(None) == {"context": None}
-        assert "keeps Windows and WSL separate" in runtimes._context_limitation("agy", runtimes.execution_context(str(forward)))
-        assert "cannot pass" in runtimes._context_limitation("claude", runtimes.execution_context(str(shim)))
-        assert runtimes._context_limitation("codex", {"context": "native"}) is None
-    with patch.object(runtimes.os, "name", "posix"):  # A .cmd file on POSIX is just a file name.
-        assert runtimes.execution_context(str(forward)) == {"context": "native"}
+    def context(path):
+        return runtimes.execution_context(path, windows=True)
+
+    assert context(str(native)) == {"context": "native"}
+    assert context(str(shim)) == {"context": "batch-shim", "launcher": str(shim)}  # Its node and script are absent.
+    assert context(str(forward)) == {"context": "wsl-forwarded", "launcher": str(forward)}
+    assert context(None) == {"context": None}
+    assert "keeps Windows and WSL separate" in runtimes._context_limitation("agy", context(str(forward)))
+    assert "cannot pass" in runtimes._context_limitation("claude", context(str(shim)))
+    assert runtimes._context_limitation("codex", {"context": "native"}) is None
+    # A .cmd file on POSIX is just a file name.
+    assert runtimes.execution_context(str(forward), windows=False) == {"context": "native"}
+    # An npm launcher whose node and script exist runs them directly (no cmd.exe); so does "python script.py %*".
+    (tmp_path / "node.exe").write_bytes(b"MZ")
+    (tmp_path / "node_modules/@openai/codex/bin").mkdir(parents=True)
+    (tmp_path / "node_modules/@openai/codex/bin/codex.js").write_text("")
+    npm = tmp_path / "codex2.cmd"
+    npm.write_text('@ECHO off\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe")\n'
+                   'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+                   '"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n')
+    found = context(str(npm))
+    assert found["context"] == "batch-shim" and found["direct"][0] == str(tmp_path / "node.exe")
+    assert found["direct"][1].endswith("codex.js") and os.path.isfile(found["direct"][1])
+    assert runtimes._context_limitation("codex", found) is None
+    (tmp_path / "tool.py").write_text("")
+    py = tmp_path / "tool.cmd"
+    py.write_text(f'@"{sys.executable}" "%~dp0tool.py" %*\n')
+    assert context(str(py))["direct"] == [sys.executable, str(tmp_path / "tool.py")]
 
 
 
@@ -633,11 +651,10 @@ def test_wsl_forwarding_is_recognised_at_command_position_only(tmp_path):
         r'"C:\Windows\System32\wsl.exe" -e agy %*': "wsl-forwarded",
         "ubuntu2204.exe run agy %*": "wsl-forwarded",
     }
-    with patch.object(runtimes.os, "name", "nt"):
-        for index, (text, expected) in enumerate(cases.items()):
-            launcher = tmp_path / f"case{index}.cmd"
-            launcher.write_text("@echo off\n" + text + "\n")
-            assert runtimes.execution_context(str(launcher))["context"] == expected, text
+    for index, (text, expected) in enumerate(cases.items()):
+        launcher = tmp_path / f"case{index}.cmd"
+        launcher.write_text("@echo off\n" + text + "\n")
+        assert runtimes.execution_context(str(launcher), windows=True)["context"] == expected, text
 
 
 def test_codex_effort_must_be_a_level_name_because_it_is_passed_unquoted(tmp_path):

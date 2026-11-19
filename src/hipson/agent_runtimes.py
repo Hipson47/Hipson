@@ -359,23 +359,56 @@ COMMENT = re.compile(rb"^\s*@?\s*(?:rem(?:\s|$)|::).*$", re.I | re.M)
 EFFORT_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 
 
-def execution_context(executable: str | None) -> dict[str, Any]:
+# The final command of an npm (cmd-shim) or similar launcher: an interpreter and a script next to the launcher,
+# followed by %*. Running those two directly needs no cmd.exe, so arguments keep quotes and line breaks.
+SHIM_COMMAND = re.compile(
+    rb'(?:"(?P<program>[^"\r\n]+)"|(?P<bare>[^\s"&|()]+))\s+"(?P<dir>%~dp0|%dp0%)\\?(?P<script>[^"\r\n]+'
+    rb'\.(?:js|cjs|mjs|py))"\s+%\*', re.I)
+
+
+def execution_context(executable: str | None, *, windows: bool | None = None) -> dict[str, Any]:
     """How a runtime on PATH would execute here: native, a Windows batch launcher, or a launcher that forwards to WSL.
 
     A forwarding launcher runs the WSL installation, with WSL's login, configuration and workspace paths; Hipson keeps
-    the Windows and WSL contexts separate and never runs one as the other's worker.
+    the Windows and WSL contexts separate and never runs one as the other's worker. A batch launcher whose command is
+    "interpreter script %*" also reports `direct`: that interpreter and script, which agent exec runs without cmd.exe.
     """
     if not executable:
         return {"context": None}
-    if os.name == "nt" and Path(executable).suffix.lower() in (".cmd", ".bat"):
+    windows = os.name == "nt" if windows is None else windows
+    if windows and os.path.splitext(executable)[1].lower() in (".cmd", ".bat"):
         try:
             with open(executable, "rb") as stream:
                 head = stream.read(16384)
         except OSError:
             head = b""
         code = COMMENT.sub(b"", head)
-        return {"context": "wsl-forwarded" if WSL_FORWARD.search(code) else "batch-shim", "launcher": executable}
+        if WSL_FORWARD.search(code):
+            return {"context": "wsl-forwarded", "launcher": executable}
+        context: dict[str, Any] = {"context": "batch-shim", "launcher": executable}
+        if (direct := _shim_target(executable, code)) is not None:
+            context["direct"] = direct
+        return context
     return {"context": "native"}
+
+
+def _shim_target(launcher: str, code: bytes) -> list[str] | None:
+    """The interpreter and script a launcher's last "program script %*" line runs, when both exist; else None."""
+    matches = list(SHIM_COMMAND.finditer(code))
+    if not matches:
+        return None
+    match = matches[-1]
+    folder = os.path.dirname(os.path.abspath(launcher))
+    script = os.path.join(folder, os.fsdecode(match["script"]).replace("\\", os.sep).replace("/", os.sep))
+    program = os.fsdecode(match["program"] or match["bare"] or b"")
+    if "%" in program:  # A variable such as %_prog% (npm): its own node.exe beside the launcher, else node on PATH.
+        local = os.path.join(folder, "node.exe")
+        resolved = local if os.path.isfile(local) else shutil.which("node")
+    else:
+        resolved = shutil.which(program) or (program if os.path.isfile(program) else None)
+    if not resolved or not os.path.isfile(script):
+        return None
+    return [resolved, script]
 
 
 def _context_limitation(name: str, context: dict[str, Any]) -> str | None:
@@ -383,6 +416,8 @@ def _context_limitation(name: str, context: dict[str, Any]) -> str | None:
         return (f"{context['launcher']} forwards to WSL: it runs the WSL installation with WSL's login, configuration "
                 "and paths. Hipson keeps Windows and WSL separate and will not run it as a native worker; run Hipson "
                 f"inside WSL for {name}, or install the native Windows {name}")
+    if context["context"] == "batch-shim" and context.get("direct"):
+        return None  # Run as its interpreter and script, so no cmd.exe limit applies.
     if context["context"] == "batch-shim":
         return (f"{context['launcher']} is a batch launcher: Hipson passes each argument through cmd.exe without "
                 "reinterpretation, but arguments with quotes or line breaks cannot pass (Claude's JSON schema, "
@@ -569,7 +604,10 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail("unsupported", _context_limitation(args.runtime, context) or "")
     launch: str | list[str] = argv
     env = dict(os.environ)
-    if context["context"] == "batch-shim":
+    if context.get("direct"):  # The launcher's own interpreter and script: no cmd.exe, so every argument passes.
+        launch = [*context["direct"], *argv[1:]]
+        meta["execution_context"] = "batch-shim (direct)"
+    elif context["context"] == "batch-shim":
         from hipson.task_windows import batch_command
         try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
             launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
