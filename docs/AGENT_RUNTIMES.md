@@ -28,7 +28,7 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 | --- | --- | --- | --- |
 | Non-interactive run | `--print` | `exec` | `--print` |
 | Structured result | `--json-schema` -> `structured_output` (**verified live**) | `--output-schema` + `--output-last-message` (documented; live run blocked by the account's usage limit tonight) | `--json-schema` -> `structured_output` (**verified live**) |
-| Session id | `--session-id` (Hipson sets uuid5(task/assignment)); `--resume` (**verified live**) | `thread.started` event; `exec resume` (documented) | `conversation_id`; `--conversation` (documented) |
+| Session id | `--session-id` (Hipson sets a fresh uuid4 per run, kept in the run's meta); `--resume` (**verified live**) | `thread.started` event; `exec resume` (documented) | `conversation_id`; `--conversation` (documented) |
 | Usage telemetry | `usage`, `modelUsage`, `total_cost_usd` (a list-price estimate, not a subscription charge) | `turn.completed.usage` with `--json` | `usage` |
 | Read-only / write | `--permission-mode plan` / `acceptEdits` | `--sandbox read-only` / `workspace-write` | `--mode plan` / `accept-edits` |
 | Project instructions | `CLAUDE.md` honoured (**verified live**) | `AGENTS.md` (documented) | `AGENTS.md`/`GEMINI.md` honoured (**verified live**; which file is not isolated) |
@@ -57,8 +57,9 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
   run` records the exit code; the flow stops with `worker_failed` / `reviewer_failed`.
 - Evidence beside the result (`<result>.meta.json`): runtime, profile, role, session, models, usage, permission
   denials, duration, brief size and a bytes/4 token estimate.
-- Sessions: a new run gets a session id bound to its task and assignment; `--continue-session` resumes only this
-  flow's latest successful session of the same runtime, task and role. Another task's context is never reused.
+- Sessions: a new run gets a fresh session id, recorded with its task and assignment in the meta file;
+  `--continue-session` resumes only this flow's latest successful session of the same runtime, task and role,
+  read from this flow's own meta files. Another task's context is never reused.
 
 ## Live run through Hipson (2026-11-19, one sample each; not a benchmark)
 

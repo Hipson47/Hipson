@@ -32,7 +32,6 @@ from hipson.redaction import redact_text
 
 PROFILES = ("native", "controlled")
 MAX_BRIEF_BYTES = 256 * 1024
-SESSION_NAMESPACE = uuid.UUID("6f1c2a52-7d0c-4e7e-9a55-2f6b4c1d9e10")
 
 # Flags each capability needs, looked up in the runtime's own help output (documented, not verified).
 RUNTIMES: dict[str, dict[str, Any]] = {
@@ -246,9 +245,13 @@ def result_schema() -> dict[str, Any]:
     return json.loads(json.dumps(schema))
 
 
-def session_id(task: str, assignment: str) -> str:
-    """Deterministic per assignment: a run can never pick up another task's conversation."""
-    return str(uuid.uuid5(SESSION_NAMESPACE, f"{task}/{assignment}"))
+def session_id() -> str:
+    """A fresh id per run, recorded in the run's meta file (the only place a resume reads it from).
+
+    Task and assignment ids restart in every ledger, so an id derived from them could name a conversation of
+    another ledger's task in the same project directory (seen live: two scratch ledgers produced the same id).
+    """
+    return str(uuid.uuid4())
 
 
 def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_path: Path, last_path: Path,
@@ -399,7 +402,7 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail("unsupported", f"brief is {len(brief)} bytes, over the {MAX_BRIEF_BYTES} byte budget")
     mode = "ro" if args.role == "reviewer" else "rw"
     resume = _previous_session(result_path, args.runtime, task, args.role) if args.continue_session else None
-    session = session_id(task, assignment)
+    session = session_id()
     work = result_path.parent
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.last.json"

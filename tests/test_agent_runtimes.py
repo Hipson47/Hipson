@@ -120,9 +120,9 @@ def test_native_profile_adds_no_isolation_flags_and_controlled_profile_does(tmp_
     assert stdin is None and agy[agy.index("--mode") + 1] == "plan" and agy[agy.index("--conversation") + 1] == "conv-1"
 
 
-def test_session_ids_are_bound_to_task_and_assignment():
-    assert runtimes.session_id("T-0001", "A-0001") == runtimes.session_id("T-0001", "A-0001")
-    assert runtimes.session_id("T-0001", "A-0001") != runtimes.session_id("T-0002", "A-0001")
+def test_session_ids_never_repeat_across_runs():
+    # Task/assignment ids restart in every ledger; an id derived from them collided live across two ledgers.
+    assert len({runtimes.session_id() for _ in range(100)}) == 100
 
 
 def test_normalize_accepts_only_valid_structured_results_and_classifies_failures(tmp_path):
@@ -207,7 +207,7 @@ def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evid
     assert grants == [f"Bash({PY} tests/acceptance.py)"] * 2
     flows = db.parent / ".ledger.sqlite.flows" / "T-0001"
     meta = json.loads((flows / "build-1.result.json.meta.json").read_text())
-    assert meta["outcome"] == "ok" and meta["session"] == runtimes.session_id("T-0001", "A-0001")
+    assert meta["outcome"] == "ok" and meta["session"] == meta["session_requested"] and len(meta["session"]) == 36
     assert meta["usage"] == {"output_tokens": 7} and meta["brief_bytes"] > 0 and meta["role"] == "builder"
     verified = json.loads((tmp_path / "hh" / "runtimes" / "claude.verified.json").read_text())
     assert verified["structured_output"]["assignment"] == "A-0002"
