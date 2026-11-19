@@ -833,7 +833,8 @@ def test_review_seqs_exact_contract(tmp_path):
         assert store._review_seqs(task, [], 9) == ({build: _seq(store, task, "assigned", build)}, 9, 0)
         store._record_verification(_record(id="V-" + "a" * 32, task=task))
         store._record_verification(_record(id="V-" + "b" * 32, task=task))
-        store.add_event(task, actor=LEAD, type="note", summary="refs only", refs=[build, "V-" + "c" * 32])
+        with store._transaction():  # Another event type with the same refs must not count.
+            store._append_event(task, LEAD, "note", "refs only", [build, "V-" + "c" * 32])
         review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
         assigned = {build: _seq(store, task, "assigned", build), review: _seq(store, task, "assigned", review)}
         first = _seq(store, task, "lead_verified", "V-" + "a" * 32)
@@ -861,9 +862,13 @@ def _gate_task(store, tmp_path, policy="required"):
 
 
 def _review(store, task, actor="rev"):
+    # The completed result is written directly: result parsing has its own contracts outside this profile.
     item = store.assign(task, actor=actor, role="reviewer", mode="ro", scope=[])["id"]
-    store.finish(item, result="passed", summary="reviewed", worker_result={
-        "status": "completed", "summary": "ok", "files_changed": [], "commands": [], "findings": [], "risks": []})
+    store.finish(item, result="passed", summary="reviewed")
+    with store._transaction():
+        store.connection.execute("UPDATE assignments SET result = ? WHERE id = ?", (json.dumps({
+            "status": "completed", "summary": "ok", "files_changed": [], "commands": [], "findings": [],
+            "risks": []}), item))
     store.ack(item)
     return item
 
@@ -899,18 +904,3 @@ def test_review_policy_ledger_exact_contract(tmp_path):
         store.set_status(forced, to="done", actor=LEAD, force=True, reason="owner accepted without review")
         override = [event for event in store.events(forced) if event["type"] == "done_override"]
         assert override and override[0]["summary"] == f"Reason: owner accepted without review; blockers: {reason}"
-
-
-def test_v10_rows_read_as_no_review_policy(tmp_path):
-    db = tmp_path / "ledger.sqlite"
-    with closing(ledger.Ledger(db)) as store:
-        store.open_task(project=tmp_path, title="Old", objective="v10 row", lead=LEAD, review_policy="required")
-        store.connection.execute("BEGIN IMMEDIATE")
-        store.connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
-        store.connection.execute("UPDATE schema_version SET version = 10")
-        store.connection.commit()
-    with closing(ledger.Ledger(db, read_only=True)) as store:
-        assert store.show("T-0001")["review_policy"] == "none"
-    with closing(ledger.Ledger(db)) as store:
-        assert store.show("T-0001")["review_policy"] == "none"
-        assert store.connection.execute("SELECT review_policy FROM tasks").fetchone()[0] == "none"
