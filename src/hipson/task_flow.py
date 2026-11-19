@@ -47,7 +47,8 @@ def _refused(task: str, db: Path, reasons: list[str], records: list[dict[str, An
 
 def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: str | None = None,
           timeout: float = 300, command: list[str] | None = None,
-          on_record: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+          on_record: Callable[[dict[str, Any]], None] | None = None,
+          expected_checks: list[list[str]] | None = None) -> dict[str, Any]:
     """Verify (declared checks that are not yet fresh, or one given command), then review and done.
 
     Known blockers refuse before any check runs; the transitions happen in one ledger transaction that
@@ -82,7 +83,7 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
         return _refused(task, db, [reason], records, int(failed['exit_code']) or 1)
     try:
         with closing(ledger.Ledger(db, create=False)) as store:
-            view = store.close_task(task, to=to, actor=actor, summary=summary)
+            view = store.close_task(task, to=to, actor=actor, summary=summary, expected_checks=expected_checks)
     except ledger.CloseRefusedError as exc:
         hint = ([] if view['checks'] or records else
                 [f"no acceptance checks declared: run hipson task close --task {task} -- COMMAND, or declare "

@@ -547,3 +547,54 @@ def test_reviewer_diff_drops_sensitive_files_redacts_secrets_and_reads_scope_lit
     assert 'TOKEN' in text and 'outside.py' not in text
     glob = flow_driver.candidate_diff(str(project), [':(glob)**'])
     assert 'outside.py' not in ' '.join(glob) and 'TOKEN' not in ' '.join(glob)
+
+
+
+def test_round_two_review_fixes(tmp_path):
+    nl = chr(10)
+    # B1 (brief): a tree changed after verification is never described to a reviewer.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, reviewer='crash')
+    _flow(project, db, spec)  # Verified, then the reviewer crashed.
+    view, _ = _view(db)
+    assert view['verification']['passing'] and flow_driver._on_verified_tree(db, view)
+    (project / 'src/parser/pairs.py').write_text('B = 2' + nl)  # Between the decision and the brief.
+    assert not flow_driver._on_verified_tree(db, view)
+    # M6: unquoted -z names, so a sensitive untracked name is classified as itself.
+    (project / 'src/parser/.ssh').mkdir()
+    (project / 'src/parser/.ssh/private note').write_text('k' + nl)
+    lines = flow_driver.candidate_diff(str(project), ['src/parser'])
+    assert 'private note' not in ' '.join(lines)
+    # M7: the close transaction compares the expected checks.
+    with closing(ledger.Ledger(db)) as store:
+        with pytest.raises(ledger.CloseRefusedError, match='declared checks differ from the ones this close expects'):
+            store.close_task('T-0001', to='done', actor='lead', expected_checks=[['other']])
+
+
+def test_a_historical_override_does_not_taint_a_later_normal_acceptance(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, builder='crash')
+    _flow(project, db, spec)
+    forced = run_cli(project, 'task', 'status', '--db', str(db), '--task', 'T-0001', '--to', 'review', '--actor',
+                     'lead', '--force', '--reason', 'look early')
+    assert forced.returncode == 0, forced.stderr
+    back = run_cli(project, 'task', 'status', '--db', str(db), '--task', 'T-0001', '--to', 'in_progress', '--actor', 'lead')
+    assert back.returncode == 0, back.stderr
+    events = _view(db)[1]
+    assert flow_driver._current_overrides(events) == []
+    assert flow_driver._current_overrides(events[:-1])  # While still in the forced review it is reported.
+
+
+def test_reviewer_fingerprint_ignores_runner_state_with_tmpdir_in_the_project(tmp_path):
+    # Codex re-review: the progress file now lives beside the ledger, outside the fingerprinted tree.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    (project / 'tmp').mkdir()  # Not ignored: every file in it is covered by the fingerprint.
+    proc, result = _flow(project, db, _spec(tmp_path, project), env={'TMPDIR': str(project / 'tmp')})
+    assert proc.returncode == 0 and result['state'] == 'accepted', result
+    assert not list((project / 'tmp').iterdir())
+
+
+def test_a_dash_prefixed_lead_label_reaches_verification(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    proc, result = _flow(project, db, _spec(tmp_path, project, lead='-lead'))
+    assert proc.returncode == 0 and result['state'] == 'accepted', result

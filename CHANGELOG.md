@@ -18,6 +18,8 @@
   and a native-first worker adapter for `task run` / `task flow` ([docs/AGENT_RUNTIMES.md](docs/AGENT_RUNTIMES.md)).
 - Workers can no longer acknowledge results, update findings or change task status: `task ack`, `task finding
   update` and `task status` (CLI and MCP) refuse a known worker context, like `task checks/verify/close`.
+- `task run` keeps its progress files in `.<ledger file>.runs/` beside the ledger instead of `TMPDIR`, so they never
+  enter a fingerprint, an observation or a checkpoint.
 - `task run` records the tree a reviewer saw (reserved `reviewed` event). Upgrade note: `flow`, `review_policy`
   and `reviewed` are now reserved event types; custom `task event --type` calls using them are refused.
 - Fix: `task board` (and MCP `task.board`) no longer fingerprints the project of every task in history; a

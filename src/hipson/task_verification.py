@@ -188,12 +188,13 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
         filter_overrides: list[str] | None = None
         excluded = {db, Path(str(db) + '-wal'), Path(str(db) + '-shm'), Path(str(db) + '-journal')}
         flows = db.parent / f'.{db.name}.flows'  # task flow briefs and worker results: lead-private state
+        runs = db.parent / f'.{db.name}.runs'  # task run progress files
         for name in sorted(paths):
             relative = Path(os.fsdecode(name))
             if relative.is_absolute() or '..' in relative.parts:
                 raise ValueError('Invalid repository path in content inventory')
             path = root / relative
-            if path in excluded or flows in path.parents:
+            if path in excluded or flows in path.parents or runs in path.parents:
                 continue  # The verification's own ledger writes must not invalidate it.
             tracked = name in baseline or name in indexed
             filename = os.fsdecode(name)
@@ -495,7 +496,7 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
     # -P keeps the project directory off sys.path: a project json.py must not shadow the stdlib here.
     invocation = [sys.executable, '-P', '-m', 'hipson.cli', 'task', 'verify', '--db', str(db), '--task', task,
                   '--label', label, '--timeout', str(timeout), '--json',
-                  *(['--actor', actor] if actor is not None else []), '--', *command]
+                  *([f'--actor={actor}'] if actor is not None else []), '--', *command]
     from hipson.task_runner import supervise
     try:
         # Forward Ctrl+C/TERM to the supervisor so it stops its check tree and records the outcome.

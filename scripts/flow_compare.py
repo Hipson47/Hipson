@@ -189,9 +189,7 @@ def ledger_facts(fixture: Any) -> dict[str, Any]:
                 item["role"] == "reviewer" and item["status"] == "passed" for item in view["assignments"])
                 for view in views),
             # Measured from the ledger, not assumed from the strategy: an accepted independent review.
-            "reviewed": any(view["review"]["accepted"] or any(
-                item["role"] == "reviewer" and item["status"] == "passed" for item in view["assignments"])
-                for view in views)}
+            "reviewed": any(view["review"]["accepted"] for view in views)}
 
 
 def run_case(case: tuple[str, str, list[str], str], strategy: str, base: Path) -> dict[str, Any]:

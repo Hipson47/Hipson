@@ -592,7 +592,10 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             if mismatch:
                 store.add_event(args.task, actor=args.actor, type="project_mismatch_override",
                                 summary=f"Explicit --allow-project-mismatch: {json.dumps(check)}", refs=[assignment])
-        progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-')
+        # Private state beside the ledger, never the project: TMPDIR may point inside the fingerprinted tree.
+        runs = db.parent / f'.{db.name}.runs'
+        runs.mkdir(mode=0o700, parents=True, exist_ok=True)
+        progress_dir = tempfile.TemporaryDirectory(prefix='hipson-progress-', dir=runs)
         if not verifying:
             _message(f"{args.task} {assignment} {args.actor}/{args.role}/{args.mode}")
             caps = observation_caps(args, str(check['expected']))

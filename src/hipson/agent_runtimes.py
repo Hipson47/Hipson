@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -230,7 +231,8 @@ def inventory(name: str, *, project: str | Path = ".") -> dict[str, Any]:
             continue
         missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text)]
         evidence = report["verified"].get(capability) or {}
-        verified = bool(evidence) and evidence.get("version") == report["version"] and not missing
+        verified = (bool(evidence) and report["version"] is not None and evidence.get("version") == report["version"]
+                    and not missing)
         state = "verified" if verified else "documented" if not missing else "unsupported"
         report["capabilities"][capability] = {"state": state, "evidence": (
             evidence if state == "verified" else
@@ -391,10 +393,15 @@ WORKER_RULES = ("Worker rules: you are a worker for a Hipson lead. Stay within t
                 "Use partial or blocked only when the work itself is unfinished or impossible.")
 
 
+def _ledger_path() -> str | None:
+    database = os.environ.get("HIPSON_RUN_DB") or os.environ.get("HIPSON_LEDGER")
+    return str(Path(database).expanduser().resolve()) if database else None
+
+
 def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[str]]]:
     """The assignment and the task's declared checks, as the ledger recorded them (never the environment)."""
     from contextlib import closing
-    database = os.environ.get("HIPSON_RUN_DB") or os.environ.get("HIPSON_LEDGER")
+    database = _ledger_path()
     if not database:
         raise RuntimeFailure("unsupported", "HIPSON_RUN_DB is not set; run under hipson task run")
     with closing(ledger.Ledger(database, create=False, read_only=True)) as store:
@@ -416,7 +423,7 @@ def exec_worker(args: argparse.Namespace) -> int:
     result_path = Path(args.result or os.environ.get("HIPSON_FLOW_RESULT") or "")
     meta_path = result_path.with_name(result_path.name + ".meta.json") if result_path.name else None
     meta: dict[str, Any] = {"runtime": args.runtime, "profile": args.profile, "task": task, "assignment": assignment,
-                            "ledger": os.environ.get("HIPSON_RUN_DB"), "project": os.getcwd()}
+                            "ledger": _ledger_path(), "project": os.getcwd()}
     if os.environ.get("HIPSON_ROLE") != "worker" or not task or not assignment:
         print("hipson agent exec: run it as a worker command of hipson task run (or task flow), so the ledger "
               "records the assignment", file=sys.stderr)
@@ -425,8 +432,8 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail("unsupported", "needs --brief/--result or HIPSON_FLOW_BRIEF/HIPSON_FLOW_RESULT")
     try:
         item, checks = _recorded(task, assignment)
-    except (RuntimeFailure, ledger.LedgerError, OSError) as exc:
-        return fail("unsupported", str(exc))
+    except (RuntimeFailure, ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        return fail("unsupported", f"cannot read the recorded assignment: {exc}")
     # Mode and role come from the recorded assignment: a reviewer assignment never runs with edit permission.
     if item["role"] not in ("builder", "reviewer") or (args.role and args.role != item["role"]):
         return fail("unsupported", f"{assignment} is a {item['role']} assignment; --role {args.role} does not match")
@@ -441,8 +448,7 @@ def exec_worker(args: argparse.Namespace) -> int:
     session = session_id()
     work = result_path.parent
     schema_path = work / f"{result_path.stem}.schema.json"
-    last_path = work / f"{result_path.stem}.last.json"
-    last_path.unlink(missing_ok=True)  # Only this invocation's last message can be its result.
+    last_path = work / f"{result_path.stem}.{session}.last.json"  # Codex only; unique per run, never pre-existing.
     schema_path.write_text(json.dumps(result_schema()), encoding="utf-8")
     prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
     try:
@@ -505,7 +511,7 @@ SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
 def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> str | None:
     """The latest session of the same ledger, project, runtime, task and role, from meta files beside the result."""
     candidates = []
-    ledger_path, project = os.environ.get("HIPSON_RUN_DB"), os.getcwd()
+    ledger_path, project = _ledger_path(), os.getcwd()
     for path in result_path.parent.glob("*.result.json.meta.json"):
         data = _json_file(path) or {}
         session = data.get("session")

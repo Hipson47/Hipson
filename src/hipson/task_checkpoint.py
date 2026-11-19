@@ -98,7 +98,8 @@ def private_paths(db: Path) -> set[Path]:
     """The ledger, its sidecars, observation baselines and checkpoints are never part of a checkpoint."""
     base = Path(db).resolve()
     return {base, *(base.with_name(base.name + suffix) for suffix in ("-wal", "-shm", "-journal")),
-            base.parent / f".{base.name}.observations", base.parent / f".{base.name}.flows", directory(db)}
+            base.parent / f".{base.name}.observations", base.parent / f".{base.name}.flows",
+            base.parent / f".{base.name}.runs", directory(db)}
 
 
 def _is_link(info: os.stat_result) -> bool:

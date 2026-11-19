@@ -9,6 +9,8 @@ import json
 from contextlib import closing
 from unittest.mock import patch
 
+import pytest
+
 from hipson import ledger, task_verification
 from hipson.task_verification import argv_identity, verification_state
 from tests.test_ledger import _error
@@ -946,3 +948,37 @@ def test_review_policy_ledger_exact_contract(tmp_path):
         store.set_status(forced, to="done", actor=LEAD, force=True, reason="owner accepted without review")
         override = [event for event in store.events(forced) if event["type"] == "done_override"]
         assert override and override[0]["summary"] == f"Reason: owner accepted without review; blockers: {reason}"
+
+
+
+def test_a_failed_review_before_the_accepted_one_does_not_block():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    state = ledger.review_state("required", "lead", [builder, _reviewer("A-0002", status="failed"), _reviewer("A-0003")],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert state == {"required": True, "passing": True, "accepted": "A-0003", "current": "A-0003", "reasons": []}
+
+
+def test_record_review_tree_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Trees", objective="Reviewed trees", lead=LEAD)["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        builder = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
+        for phase in ("middle", "START", ""):
+            with pytest.raises(ledger.LedgerError) as error:
+                store.record_review_tree(review, phase=phase, revision="r", fingerprint="f")
+            assert str(error.value) == "Review tree phase is start or end"
+        with pytest.raises(ledger.LedgerError) as error:  # An active builder is not a reviewer.
+            store.record_review_tree(builder, phase="start", revision="r", fingerprint="f")
+        assert str(error.value) == f"Assignment {builder} is not an active reviewer"
+        event = store.record_review_tree(review, phase="start", revision="", fingerprint=None)
+        assert (event["actor"], event["type"], event["summary"], event["refs"]) == (
+            "hipson", "reviewed", f"{review}: start revision=none; fingerprint=none", [review])
+        with store._transaction():  # A lead_verified record whose summary lacks the pattern binds no tree.
+            store._append_event(task, LEAD, "lead_verified", "V-x: malformed", ["V-" + "9" * 32])
+        assert store._review_seqs(task, ["V-" + "9" * 32], 0)[4] == ("", "")
+        store.finish(review, result="passed", summary="done")
+        with pytest.raises(ledger.LedgerError) as error:
+            store.record_review_tree(review, phase="end", revision="r", fingerprint="f")
+        assert str(error.value) == f"Assignment {review} is not an active reviewer"

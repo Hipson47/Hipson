@@ -312,3 +312,27 @@ def test_grants_skip_environment_assignment_words_and_verified_needs_the_same_ve
         assert stale["capabilities"]["structured_output"]["state"] == "documented"
         (home / "runtimes" / "agy.verified.json").write_text(json.dumps({"structured_output": {"version": "agy 9.9.9"}}))
         assert runtimes.inventory("agy", project=tmp_path)["capabilities"]["structured_output"]["state"] == "verified"
+
+
+
+def test_verified_needs_a_known_version_on_both_sides(tmp_path):
+    home = tmp_path / "hh"
+    (home / "runtimes").mkdir(parents=True)
+    (home / "runtimes" / "agy.verified.json").write_text(json.dumps({"structured_output": {"version": None}}))
+    bin_dir = _fake_cli(tmp_path, "agy", "sys.exit(0)")
+    (bin_dir / "agy").write_text((bin_dir / "agy").read_text().replace("print('agy 9.9.9'); sys.exit(0)", "sys.exit(1)"))
+    with patch.dict(os.environ, {**_env(bin_dir), "HIPSON_HOME": str(home)}):
+        report = runtimes.inventory("agy", project=tmp_path)
+    assert report["version"] is None and report["capabilities"]["structured_output"]["state"] == "documented"
+
+
+def test_session_lookup_resolves_the_ledger_fallback(tmp_path):
+    result = tmp_path / "x.result.json"
+    (tmp_path / "a.result.json.meta.json").write_text(json.dumps({
+        "outcome": "ok", "runtime": "claude", "task": "T-0001", "role": "builder", "ledger": None,
+        "project": str(tmp_path), "session": "session-from-unknown-ledger"}))
+    with (patch.dict(os.environ, {"HIPSON_LEDGER": str(tmp_path / "l.sqlite")}, clear=False),
+          patch.object(os, "getcwd", return_value=str(tmp_path))):
+        os.environ.pop("HIPSON_RUN_DB", None)
+        assert runtimes._previous_session(result, "claude", "T-0001", "builder") is None
+        assert runtimes._ledger_path() == str((tmp_path / "l.sqlite").resolve())

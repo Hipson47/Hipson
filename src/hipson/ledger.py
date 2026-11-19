@@ -1489,7 +1489,8 @@ class Ledger:
         with self._transaction():
             return self._set_status_locked(task, to=to, actor=actor, summary=summary, force=force, reason=reason)
 
-    def close_task(self, task: str, *, to: str = "done", actor: str, summary: str = "") -> TaskView:
+    def close_task(self, task: str, *, to: str = "done", actor: str, summary: str = "",
+                   expected_checks: Sequence[Sequence[str]] | None = None) -> TaskView:
         """Move through review (and done) in one transaction; any refused gate rolls back every step."""
         actor = require_text(actor, "actor")
         if to not in ("review", "done"):
@@ -1501,6 +1502,8 @@ class Ledger:
                 raise CloseRefusedError(task, [f"{task} is {status}; close works from open, in_progress or review"
                                                + ("" if status != "review" else " (use --to done)")])
             reasons = [] if view["verification"]["passing"] else list(view["verification"]["reasons"])
+            if expected_checks is not None and view["checks"] != [list(check) for check in expected_checks]:
+                reasons.append("declared checks differ from the ones this close expects: " + checks_text(view["checks"]))
             blockers = done_blockers(view)
             # Review must not race a writer assigned after the caller's own checks either.
             reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]

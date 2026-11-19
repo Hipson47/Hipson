@@ -388,7 +388,9 @@ What the flow does, each step derived from the recorded state:
 3. Runs the declared checks that are not current, in order, stopping at the first failure (later checks stay
    missing until the next run). A current failing check with its record is the evidence for a repair. Verification that is still not current after a run in this invocation stops with
    `verification_inconclusive` (exit 4) instead of looping.
-4. Reviewer (`ro`, `--observe`). A failed reviewer stops with `reviewer_failed` (exit 3). Blocking/major
+4. Reviewer (`ro`, `--observe`). Its brief carries the scoped diff (sanitized like other embedded diffs) and is
+   built only while the tree is the verified one, checked before and after (else `verification_inconclusive`).
+   A failed reviewer stops with `reviewer_failed` (exit 3). Blocking/major
    findings the reviewer reported in its structured result are evidence for a repair.
 5. A repair is a new builder run whose brief carries that evidence; the `flow` event names the records and
    findings it acts on. At most `1 + max_repairs` builder attempts, counted from the ledger, so a resume
@@ -435,7 +437,8 @@ not sandbox.
 Known limits (open): an interrupted verification marks every record of that run as non-evidence for repairs,
 but the ledger still counts a check that passed before the signal; the non-Git inventory walk counts files
 under the flow's private directory toward its 20,000-path bound; with `TMPDIR` inside a checkpointed scope the
-runner's progress directory can be copied into the checkpoint.
+runner's progress directory was copied into a checkpoint (fixed: `task run` now keeps its progress files in
+`.<ledger file>.runs/` beside the ledger, excluded from fingerprints, observation and checkpoints).
 
 `scripts/flow_compare.py` compares four lead procedures (worker self-report, self-verify, `task do`,
 `task flow`) over the same scripted `e2e/agents/bin/flow-worker` behaviours with a hidden oracle; results and

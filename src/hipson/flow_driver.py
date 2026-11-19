@@ -389,16 +389,17 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
     except ValueError:
         return ['Candidate diff unavailable (Git filter configuration unreadable); inspect the files directly.']
     # Literal pathspecs: a scope such as ':(glob)**' names a path, never a Git pattern.
-    status = _git(project, '--literal-pathspecs', *overrides, 'status', '--porcelain', '--untracked-files=all', '--',
-                  *scope)
+    status = _git(project, '--literal-pathspecs', *overrides, 'status', '--porcelain', '-z', '--untracked-files=all',
+                  '--', *scope)
     diff = _git(project, '--literal-pathspecs', *overrides, 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
                 'HEAD', '--', *scope)
     if status is None or diff is None:
         return ['Candidate diff unavailable (git status/diff failed or exceeded its read limit); inspect the files.']
     # Sensitive files (.env, keys) leave whole sections and secrets are redacted before truncation can split them.
     text = safe_diff(diff.decode('utf-8', errors='replace'))
-    untracked = [redact_text(sanitize_path(line[3:])) for line in status.decode('utf-8', errors='replace').splitlines()
-                 if line.startswith('??')]
+    # -z: unquoted names, so a sensitive name (.ssh/private note) is classified as the path it is.
+    untracked = [redact_text(sanitize_path(entry[3:])) for entry in status.decode('utf-8', errors='replace').split('\0')
+                 if entry.startswith('?? ')]
     shown = text[:DIFF_BUDGET]
     header = f"Candidate diff against HEAD within {', '.join(scope)}" + (
         f' (truncated: first {DIFF_BUDGET} of {len(text)} characters; read the files for the rest)'
@@ -443,6 +444,28 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
            'HIPSON_FLOW_RESULT': str(result_path)}
     echo(f'hipson task flow: {view["id"]} {stage} by {worker["actor"]} ({role}, {mode})')
     return task_runner.supervise(command, cwd=view['project'], env=env)[0]
+
+
+def _on_verified_tree(db: Path, view: ledger.TaskView) -> bool:
+    """The project is the tree of the accepted verification (same revision and fingerprint)."""
+    accepted = view['verification']['accepted_ids']
+    if not accepted:
+        return False
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        record = next((item for item in store.verifications(view['id']) if item['id'] == accepted[-1]), None)
+    state = task_verification.project_state(view['project'], db)
+    return (record is not None and bool(state['fingerprint']) and state['revision'] == record['revision']
+            and state['fingerprint'] == record['fingerprint'])
+
+
+def _current_overrides(events: list[ledger.TaskEvent]) -> list[str]:
+    """Overrides recorded for the transition into the current status (they precede its status event)."""
+    statuses = [event['seq'] for event in events if event['type'] == 'status']
+    if not statuses:
+        return []
+    start = statuses[-2] if len(statuses) > 1 else 0
+    return [f"{event['type']} event {event['seq']}" for event in events
+            if event['type'] in ('review_override', 'done_override') and start < event['seq'] < statuses[-1]]
 
 
 def _record(db: Path, task: str, actor: str, summary: str, refs: list[str]) -> None:
@@ -498,13 +521,18 @@ def run(db: Path, spec: dict[str, Any], digest: str, *, resume: str | None = Non
         echo(f'hipson task flow: opened {task}; checks: {ledger.checks_text(spec["checks"])}')
     else:
         task = _bound(db, resume, spec, digest)['id']
-        with closing(ledger.Ledger(db, create=False)) as store:
-            for reaped in store.reap(task=task):
-                echo(f"hipson task flow: reaped {reaped['assignment']['id']}: {reaped['reason']}")
-        task_observation.complete_pending(db)
     with _task_lock(db, task) as locked:
         if not locked:
             return _result(db, task, 'running', [f'another hipson task flow is advancing {task}'], [])
+        if resume is not None:  # Recovery happens under the lock, and only for this task's own orphans.
+            with closing(ledger.Ledger(db, create=False)) as store:
+                reaped = store.reap(task=task)
+            for item in reaped:
+                echo(f"hipson task flow: reaped {item['assignment']['id']}: {item['reason']}")
+                try:
+                    task_observation.complete(db, item['assignment']['id'])
+                except (ledger.LedgerError, OSError, sqlite3.Error):
+                    pass  # Unobserved or already completed: nothing waiting.
         return _advance(db, spec, task, retry, echo)
 
 
@@ -540,16 +568,22 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
             events = store.events(task)
             ignored = {ref for event in events if event['type'] == 'flow'
                        and event['summary'].startswith('interrupted') for ref in event['refs']}
-            overrides = [f"{event['type']} event {event['seq']}" for event in events
-                         if event['type'] in ('review_override', 'done_override')]
+            overrides = _current_overrides(events)
             records = [record for record in store.verifications(task) if record['id'] not in ignored]
             if view['checks'] != spec['checks']:  # Acceptance cannot change under a running flow either.
                 step = Step('stop', 'conflict', [f"declared checks changed while the flow ran: "
                                                  f"{ledger.checks_text(view['checks'])}"])
             else:
                 step = decide(view, records, spec, verified_for=verified_for, retry=retry, overrides=overrides)
+            if step.kind == 'review' and not _on_verified_tree(db, view):
+                step = Step('stop', 'verification_inconclusive', [
+                    'the working tree is not the one lead verification accepted, so a review brief built now would '
+                    'describe another candidate; restore it or re-verify, then resume'])
             brief = (stage_brief(store, view, records, spec, 'builder' if step.kind == 'build' else 'reviewer',
                                  step.stage or 'review', step.refs) if step.kind in ('build', 'review') else '')
+        if step.kind == 'review' and not _on_verified_tree(db, view):  # Changed while the brief was built.
+            step, brief = Step('stop', 'verification_inconclusive', [
+                'the working tree changed while the review brief was built; restore it or re-verify, then resume']), ''
         steps.append(step.kind if not step.stage else f'{step.kind}:{step.stage}')
         if step.kind == 'stop':
             if step.state != 'accepted':
@@ -611,7 +645,8 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                     [*step.refs, accepted])
         elif step.kind == 'close':
             closed = task_flow.close(db, task, to=spec['close_to'], actor=lead, timeout=spec['check_timeout'],
-                                     summary=f"task flow: review {view['review']['accepted']}")
+                                     summary=f"task flow: review {view['review']['accepted']}",
+                                     expected_checks=spec['checks'])
             if not closed['closed']:
                 _record(db, task, lead, 'stopped close_refused: ' + '; '.join(closed['reasons']), [])
                 return _result(db, task, 'close_refused', closed['reasons'], steps)
