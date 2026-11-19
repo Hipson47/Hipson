@@ -222,7 +222,7 @@ tests = ["tests/test_gate_contracts.py"]
 # (2926 -> 3418): 80.28% (2744 killed, 80.281% measured), survivor cap 657 -> 667. Every survivor above the old
 # cap is an equivalent mutant (SQL keyword/identifier case and sqlite3.Row key case in _review_seqs, defaults
 # that a review with a recorded start never reaches in review_state). Measured locally with Python 3.13 on
-# 676a4ff; NEEDS OWNER REVIEW and a CI (3.12) confirmation before merge.
+# 676a4ff; approved by the owner on 2026-11-19. A CI (3.12) run must still confirm it before merge.
 measured_on = "2026-11-19"
 mutmut_version = "3.8.0"
 python_version = "3.13"
