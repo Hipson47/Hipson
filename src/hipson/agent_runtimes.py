@@ -708,8 +708,9 @@ def command_runtimes(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     for name, item in reports.items():
+        context = (item.get("execution_context") or {}).get("context")
         print(f"{name}: {'installed ' + (item['version'] or '?') if item['installed'] else 'not installed'}; "
-              f"auth {item['auth']['state']}")
+              f"auth {item['auth']['state']}" + (f"; execution {context}" if context else ""))
         for capability, state in item["capabilities"].items():
             print(f"  {capability:<22} {state['state']}")
         configured = item.get("configured") or {}

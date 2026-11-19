@@ -37,7 +37,9 @@ from hipson.init_process import run_contained  # noqa: E402
 from hipson.redaction import REDACTION, redact_incomplete_private_keys, redact_text  # noqa: E402
 
 HIPSON = [sys.executable, "-m", "hipson.cli"]
-CHECK = ["python3", "tests/check.py"]
+# Windows "python3" is usually the Microsoft Store alias, which runs no Python: use the launcher name there.
+PYTHON = "python" if os.name == "nt" else "python3"
+CHECK = [PYTHON, "tests/check.py"]
 BUG = "def add(left, right):\n    return left - right\n"
 CHECK_SOURCE = (
     "import sys\nfrom pathlib import Path\n\n"
@@ -47,7 +49,7 @@ CHECK_SOURCE = (
 INSTRUCTIONS = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "GEMINI.md"}
 SKILLS = {"claude": ".claude", "codex": ".agents"}
 BUILD = (
-    "Fix the bug in src/calc.py. Edit only that file and then run python3 tests/check.py. "
+    f"Fix the bug in src/calc.py. Edit only that file and then run {PYTHON} tests/check.py. "
     "Apply the probe-marker skill if it is available. Report the commands you ran and their exit codes. "
     "Do not commit."
 )
@@ -89,10 +91,11 @@ class ReportText:
         self.scratch = self.scratches[0]
         self.homes = sorted({str(Path.home()), env.get("HOME", ""), env.get("USERPROFILE", "")} - {"", "/"},
                             key=len, reverse=True)
-        values = sorted(set(env.values()) - {"", *self.homes, *self.scratches}, key=len, reverse=True)
-        self.env_values = re.compile("|".join(
-            rf"(?<!\w){re.escape(value)}(?!\w)" if len(value) < 4 else re.escape(value) for value in values
-        )) if values else None
+        # Short values (flags, counts, "1", "6") cannot be secrets and would mangle unrelated text such as a model
+        # name; secret-shaped text is still caught by redact_text.
+        values = sorted({value for value in env.values() if len(value) >= 6} - {*self.homes, *self.scratches},
+                        key=len, reverse=True)
+        self.env_values = re.compile("|".join(re.escape(value) for value in values)) if values else None
 
     def __call__(self, value: str) -> str:
         # Known paths first: an environment value such as TMPDIR (macOS) is a prefix of the scratch path.
@@ -223,12 +226,16 @@ def build_evidence(fixture: Fixture, result: ledger.TaskResult | None) -> dict[s
     if not check_file.parent.is_symlink() and not check_file.is_symlink() and check_file.is_file():
         expected = CHECK_SOURCE.encode()
         with check_file.open("rb") as stream:
-            tests_intact = stream.read(len(expected) + 1) == expected
+            # A Windows checkout may restore the file with CRLF (core.autocrlf): same content, other line endings.
+            tests_intact = stream.read(2 * len(expected) + 1).replace(b"\r\n", b"\n") == expected
     source = project / "src/calc.py"
     code = None
     if tests_intact and not source.parent.is_symlink() and not source.is_symlink() and source.is_file():
         # The lead's check needs no provider credentials or runtime configuration in its environment.
         check_env = {"PATH": fixture.env.get("PATH", os.defpath), "PYTHONDONTWRITEBYTECODE": "1"}
+        if os.name == "nt":  # Python cannot start on Windows without its system variables.
+            check_env.update({key: fixture.env[key] for key in ("SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC", "TEMP")
+                              if key in fixture.env})
         try:
             code = run_contained(CHECK, project, env=check_env, input_text=None, timeout=10).returncode
         except subprocess.TimeoutExpired:

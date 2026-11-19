@@ -3,12 +3,14 @@
 Hipson needs Python 3.11+ and Git. The commands below ask uv to install/use Python 3.12.
 No provider credentials are needed for CLI, task ledger, MCP or evidence commands.
 
-| Platform | CLI, ledger, MCP, evidence, `hipson task run` | `examples/agent-run.sh` | Agent e2e harness |
+| Platform | CLI, ledger, MCP, `task run/verify/close/flow` | Native agent runtimes | Deep evaluation harnesses |
 |---|---|---|---|
-| Linux | Supported | Supported | Supported |
-| macOS | Supported | Supported with Bash and `python3` | Linux/WSL2 only |
-| Windows native | Supported (Job Object worker containment) | Use WSL2 | Use WSL2 |
-| Windows WSL2 | Supported | Supported | Supported |
+| Linux | Supported (CI) | Claude, Codex, Antigravity (live) | Supported |
+| macOS | Supported (CI) | Expected; not live-verified | Linux/WSL2 only |
+| Windows native | Supported (CI; Job Object containment); no Bash or WSL needed | Codex live-verified; native Claude expected; WSL-forwarding launchers refused | Linux/WSL2 only |
+| Windows WSL2 | Supported (a separate Linux environment) | As Linux | Supported |
+
+Details, evidence and limits per platform: [PLATFORMS.md](PLATFORMS.md).
 
 ## Linux
 
@@ -79,7 +81,7 @@ in startup. A nested worker Job supports cleanup before finish; the guardian han
 open until interpreter exit. `KILL_ON_JOB_CLOSE` terminates the tree if the runner is killed.
 Ctrl+C and Ctrl+Break forward Ctrl+Break to the worker's process group, followed by bounded
 Job termination when needed. Leftovers stop before the runner records finish and releases claims.
-The Linux agent e2e harness still needs WSL2.
+The Linux agent e2e harness still needs WSL2; nothing in the core does.
 
 Use the task/assignment IDs printed by your commands. `hipson task reap` recovers expired leases.
 Windows PID probes use query-only handles (`OpenProcess` + `GetExitCodeProcess`), never signals.

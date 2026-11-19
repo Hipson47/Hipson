@@ -71,7 +71,7 @@ def test_dry_run_prints_plan_without_launching():
     assert plan["dry_run"] and len(plan["runs"]) == 15
     assert all(row["exit_code"] is None and row["verdict"] == "not-observed" for row in plan["runs"])
     claude, codex, agy = [row["argv"] for row in plan["runs"] if row["path"] == "manual"]
-    assert "--print" in claude and "Bash(python3 tests/check.py)" in claude
+    assert "--print" in claude and f"Bash({probe.PYTHON} tests/check.py)" in claude
     assert codex[1:3] == ["exec", "--cd"] and codex[-1] == "-"
     assert 'model_reasoning_effort=medium' in codex
     assert agy[agy.index("--print") + 1] == "<prompt>" and "600s" in agy
