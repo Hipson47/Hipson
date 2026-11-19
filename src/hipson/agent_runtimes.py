@@ -94,7 +94,8 @@ class RuntimeFailure(Exception):
 
 def _run(argv: list[str], *, timeout: float = 20, cwd: str | None = None) -> tuple[int, str]:
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd, check=False,
+        proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, cwd=cwd, check=False,
                               stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, f"{type(exc).__name__}: {exc}"
@@ -232,6 +233,9 @@ def inventory(name: str, *, project: str | Path = ".") -> dict[str, Any]:
         return report
     code, text = _run([executable, *spec["version"]])
     report["version"] = text.strip().splitlines()[0] if code == 0 and text.strip() else None
+    report["execution_context"] = execution_context(executable)
+    if (limitation := _context_limitation(name, report["execution_context"])) is not None:
+        report["limitations"].append(limitation)
     report["auth"] = auth_state(name, executable)
     if spec["auth"] is None:
         report["limitations"].append("no documented non-interactive auth status command; a smoke run is the evidence")
@@ -310,10 +314,12 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
         sandbox = "read-only" if mode == "ro" else "workspace-write"
         # `codex exec resume` has no --sandbox flag (0.169: verified live, the flag is refused); the same mode is
         # set through the documented sandbox_mode key, so a resumed session never runs with wider permissions.
-        flags = ["--json", *(["--config", f'sandbox_mode="{sandbox}"'] if resume else ["--sandbox", sandbox]),
+        # Unquoted values: Codex reads a value that is not valid TOML as a literal string (verified live, 0.169), and
+        # quote-free arguments also pass intact through an npm codex.cmd launcher on Windows (batch_command).
+        flags = ["--json", *(["--config", f"sandbox_mode={sandbox}"] if resume else ["--sandbox", sandbox]),
                  "--output-schema", str(schema_path), "--output-last-message", str(last_path)]
         flags += ["--model", model] if model else []
-        flags += ["--config", f'model_reasoning_effort="{effort}"'] if effort else []
+        flags += ["--config", f"model_reasoning_effort={effort}"] if effort else []
         if profile == "controlled":
             flags += ["--ephemeral", "--ignore-user-config", "--ignore-rules"]
         if resume:
@@ -338,11 +344,36 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     return argv, None
 
 
-def batch_prompt_problem(name: str, executable: str | None) -> str | None:
-    """Why a launch would corrupt the prompt: agy takes it as an argument, which cmd.exe cuts at a line break."""
-    if name == "agy" and os.name == "nt" and (executable or "").lower().endswith((".cmd", ".bat")):
-        return (f"{executable} is a batch script: Antigravity's prompt is an argument and cmd.exe would cut it at "
-                "the first line break; use the native agy executable")
+WSL_FORWARD = re.compile(rb"(?<![\w.-])wsl(?:\.exe)?(?![\w.-])", re.I)  # The command, not a word in a path.
+
+
+def execution_context(executable: str | None) -> dict[str, Any]:
+    """How a runtime on PATH would execute here: native, a Windows batch launcher, or a launcher that forwards to WSL.
+
+    A forwarding launcher runs the WSL installation, with WSL's login, configuration and workspace paths; Hipson keeps
+    the Windows and WSL contexts separate and never runs one as the other's worker.
+    """
+    if not executable:
+        return {"context": None}
+    if os.name == "nt" and Path(executable).suffix.lower() in (".cmd", ".bat"):
+        try:
+            with open(executable, "rb") as stream:
+                head = stream.read(16384)
+        except OSError:
+            head = b""
+        return {"context": "wsl-forwarded" if WSL_FORWARD.search(head) else "batch-shim", "launcher": executable}
+    return {"context": "native"}
+
+
+def _context_limitation(name: str, context: dict[str, Any]) -> str | None:
+    if context["context"] == "wsl-forwarded":
+        return (f"{context['launcher']} forwards to WSL: it runs the WSL installation with WSL's login, configuration "
+                "and paths. Hipson keeps Windows and WSL separate and will not run it as a native worker; run Hipson "
+                f"inside WSL for {name}, or install the native Windows {name}")
+    if context["context"] == "batch-shim":
+        return (f"{context['launcher']} is a batch launcher: Hipson passes each argument through cmd.exe without "
+                "reinterpretation, but arguments with quotes or line breaks cannot pass (Claude's JSON schema, "
+                "Antigravity's prompt); prefer the native executable")
     return None
 
 
@@ -519,8 +550,18 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail(exc.kind, exc.detail)
     if shutil.which(argv[0]) is None:
         return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
-    if problem := batch_prompt_problem(args.runtime, shutil.which(argv[0])):
-        return fail("unsupported", problem)
+    context = execution_context(shutil.which(argv[0]))
+    meta["execution_context"] = context["context"]
+    if context["context"] == "wsl-forwarded":
+        return fail("unsupported", _context_limitation(args.runtime, context) or "")
+    launch: str | list[str] = argv
+    env = dict(os.environ)
+    if context["context"] == "batch-shim":
+        from hipson.task_windows import batch_command
+        try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
+            launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
+        except ValueError:
+            return fail("unsupported", _context_limitation(args.runtime, context) or "")
     # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
     auth = auth_state(args.runtime, argv[0])
     meta["preflight"] = {"auth": auth["state"]}
@@ -530,7 +571,9 @@ def exec_worker(args: argparse.Namespace) -> int:
     meta.update(session_requested=resume or session, resumed=bool(resume))
     started = time.monotonic()
     try:
-        proc = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=args.timeout, check=False)
+        # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
+        proc = subprocess.run(launch, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=args.timeout, check=False, env=env)
         code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
         code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)

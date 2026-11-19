@@ -73,7 +73,7 @@ def test_dry_run_prints_plan_without_launching():
     claude, codex, agy = [row["argv"] for row in plan["runs"] if row["path"] == "manual"]
     assert "--print" in claude and "Bash(python3 tests/check.py)" in claude
     assert codex[1:3] == ["exec", "--cd"] and codex[-1] == "-"
-    assert 'model_reasoning_effort="medium"' in codex
+    assert 'model_reasoning_effort=medium' in codex
     assert agy[agy.index("--print") + 1] == "<prompt>" and "600s" in agy
     assert "Fix the bug" not in output and "Remember this code word" not in output
     assert "<scratch>" in output and str(Path.home()) not in output

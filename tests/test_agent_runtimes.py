@@ -559,8 +559,8 @@ def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_p
         fresh, _ = runtimes.build_command("codex", mode=mode, **common)
         resumed, _ = runtimes.build_command("codex", mode=mode, resume="0123456789abcdef", **common)
         assert fresh[fresh.index("--sandbox") + 1] == sandbox and "--sandbox" not in resumed
-        assert resumed[:3][1:] == ["exec", "resume"] and f'sandbox_mode="{sandbox}"' in resumed
-        assert resumed[resumed.index(f'sandbox_mode="{sandbox}"') - 1] == "--config"
+        assert resumed[:3][1:] == ["exec", "resume"] and f"sandbox_mode={sandbox}" in resumed
+        assert resumed[resumed.index(f"sandbox_mode={sandbox}") - 1] == "--config"
     # agy: a session-only settings layer grants exactly the declared checks; none without checks.
     argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
                                      **common)
@@ -600,11 +600,19 @@ def test_a_session_whose_resume_failed_is_not_resumed_again(tmp_path):
         assert runtimes._previous_session(result, "claude", task, "builder") is None
 
 
-def test_a_batch_script_agy_is_refused_on_windows_rather_than_cut():
+def test_windows_execution_contexts_are_detected_and_kept_apart(tmp_path):
+    native, shim, forward = tmp_path / "agy.exe", tmp_path / "codex.cmd", tmp_path / "agy.CMD"
+    native.write_bytes(b"MZ")
+    shim.write_text('@"C:/Program Files/nodejs/node.exe" "%~dp0node_modules/codex/bin/codex.js" %*' + chr(10))
+    forward.write_text("@echo off" + chr(10) + 'for /f %%I in (`wsl.exe -d Ubuntu --exec wslpath -a "%CD%"`) do x' + chr(10))
     with patch.object(runtimes.os, "name", "nt"):
-        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.CMD")
-        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.bat")
-        assert runtimes.batch_prompt_problem("agy", "C:/bin/agy.exe") is None
-        assert runtimes.batch_prompt_problem("claude", "C:/bin/claude.cmd") is None  # Prompt on stdin.
-    with patch.object(runtimes.os, "name", "posix"):
-        assert runtimes.batch_prompt_problem("agy", "/bin/agy.cmd") is None
+        assert runtimes.execution_context(str(native)) == {"context": "native"}
+        assert runtimes.execution_context(str(shim)) == {"context": "batch-shim", "launcher": str(shim)}
+        assert runtimes.execution_context(str(forward)) == {"context": "wsl-forwarded", "launcher": str(forward)}
+        assert runtimes.execution_context(None) == {"context": None}
+        assert "keeps Windows and WSL separate" in runtimes._context_limitation("agy", runtimes.execution_context(str(forward)))
+        assert "cannot pass" in runtimes._context_limitation("claude", runtimes.execution_context(str(shim)))
+        assert runtimes._context_limitation("codex", {"context": "native"}) is None
+    with patch.object(runtimes.os, "name", "posix"):  # A .cmd file on POSIX is just a file name.
+        assert runtimes.execution_context(str(forward)) == {"context": "native"}
+
