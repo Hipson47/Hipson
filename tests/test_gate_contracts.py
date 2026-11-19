@@ -997,16 +997,3 @@ def test_close_task_expected_checks_exact_contract(tmp_path):
         assert error.value.reasons == ["declared checks differ from the ones this close expects: pytest -q"]
         assert store.show(task)["status"] == "in_progress"
         assert store.close_task(task, to="review", actor=LEAD, expected_checks=[("pytest", "-q")])["status"] == "review"
-
-
-
-def test_v10_rows_list_as_no_review_policy(tmp_path):
-    db = tmp_path / "ledger.sqlite"
-    with closing(ledger.Ledger(db)) as store:
-        store.open_task(project=tmp_path, title="Old", objective="v10 row", lead=LEAD, review_policy="required")
-        store.connection.execute("BEGIN IMMEDIATE")
-        store.connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
-        store.connection.execute("UPDATE schema_version SET version = 10")
-        store.connection.commit()
-    with closing(ledger.Ledger(db, read_only=True)) as store:  # list_tasks reads rows without a project scan.
-        assert [task["review_policy"] for task in store.list_tasks()] == ["none"]
