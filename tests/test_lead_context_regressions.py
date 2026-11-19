@@ -225,16 +225,19 @@ def test_readme_task_quick_start_executes_to_done(tmp_path):
 
 
 def test_platform_smoke_task_lifecycle_executes_to_done(tmp_path):
-    script = (Path(__file__).resolve().parents[1] / 'scripts/platform_smoke.sh').read_text()
-    block = script.split('# Manual ledger lifecycle', 1)[1].split('# Worker wrapper:', 1)[0]
-    commands = []
-    for line in block.splitlines():
-        if line.startswith('check '):
-            args = shlex.split(line)
-            assert args[:1] == ['check'] and args[2] == '$H'
-            commands.append(args[3:])
-    assert commands, 'Missing smoke lifecycle commands'
-    _run_task_example(tmp_path, commands)
+    # The portable smoke (scripts/platform_smoke.py; platform_smoke.sh is a wrapper) drives the same lifecycle.
+    import io
+
+    from scripts import platform_smoke
+    executable = hipson_cli()
+    assert executable, 'Installed hipson CLI required'
+    report = platform_smoke.Report(io.StringIO(), io.StringIO())
+    smoke = platform_smoke.Smoke(executable, tmp_path, report)
+    smoke.create_project()
+    smoke.manual_lifecycle()
+    assert report.failed == [] and report.passed == 9, report.stream.getvalue()
+    with closing(Ledger(tmp_path / 'ledger.sqlite', read_only=True)) as store:
+        assert store.show('T-0001')['status'] == 'done'
 
 
 def _run_task_example(tmp_path, commands):

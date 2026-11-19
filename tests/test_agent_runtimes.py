@@ -245,8 +245,6 @@ def test_exec_refuses_symlinked_runtime_state(tmp_path):
 
 
 def test_exec_records_launch_oserror_as_provider_error(tmp_path):
-    if sys.platform == "win32":  # The fake agy is a .cmd shim there, which agent exec refuses before launch.
-        raise SkipTest("Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows")
     launch_error = OSError(errno.E2BIG, "Argument list too long")
     stderr = io.StringIO()
     with (_worker(tmp_path) as (_, result, run), redirect_stderr(stderr),
@@ -559,8 +557,8 @@ def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_p
         fresh, _ = runtimes.build_command("codex", mode=mode, **common)
         resumed, _ = runtimes.build_command("codex", mode=mode, resume="0123456789abcdef", **common)
         assert fresh[fresh.index("--sandbox") + 1] == sandbox and "--sandbox" not in resumed
-        assert resumed[:3][1:] == ["exec", "resume"] and f'sandbox_mode="{sandbox}"' in resumed
-        assert resumed[resumed.index(f'sandbox_mode="{sandbox}"') - 1] == "--config"
+        assert resumed[:3][1:] == ["exec", "resume"] and f"sandbox_mode={sandbox}" in resumed
+        assert resumed[resumed.index(f"sandbox_mode={sandbox}") - 1] == "--config"
     # agy: a session-only settings layer grants exactly the declared checks; none without checks.
     argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
                                      **common)
@@ -600,11 +598,71 @@ def test_a_session_whose_resume_failed_is_not_resumed_again(tmp_path):
         assert runtimes._previous_session(result, "claude", task, "builder") is None
 
 
-def test_a_batch_script_agy_is_refused_on_windows_rather_than_cut():
-    with patch.object(runtimes.os, "name", "nt"):
-        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.CMD")
-        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.bat")
-        assert runtimes.batch_prompt_problem("agy", "C:/bin/agy.exe") is None
-        assert runtimes.batch_prompt_problem("claude", "C:/bin/claude.cmd") is None  # Prompt on stdin.
-    with patch.object(runtimes.os, "name", "posix"):
-        assert runtimes.batch_prompt_problem("agy", "/bin/agy.cmd") is None
+def test_windows_execution_contexts_are_detected_and_kept_apart(tmp_path):
+    native, shim, forward = tmp_path / "agy.exe", tmp_path / "codex.cmd", tmp_path / "agy.CMD"
+    native.write_bytes(b"MZ")
+    shim.write_text('@"C:/Program Files/nodejs/node.exe" "%~dp0node_modules/codex/bin/codex.js" %*' + chr(10))
+    forward.write_text("@echo off" + chr(10) + 'for /f %%I in (`wsl.exe -d Ubuntu --exec wslpath -a "%CD%"`) do x' + chr(10))
+    def context(path):
+        return runtimes.execution_context(path, windows=True)
+
+    assert context(str(native)) == {"context": "native"}
+    assert context(str(shim)) == {"context": "batch-shim", "launcher": str(shim)}  # Its node and script are absent.
+    assert context(str(forward)) == {"context": "wsl-forwarded", "launcher": str(forward)}
+    assert context(None) == {"context": None}
+    assert "keeps Windows and WSL separate" in runtimes._context_limitation("agy", context(str(forward)))
+    assert "cannot pass" in runtimes._context_limitation("claude", context(str(shim)))
+    assert runtimes._context_limitation("codex", {"context": "native"}) is None
+    # A .cmd file on POSIX is just a file name.
+    assert runtimes.execution_context(str(forward), windows=False) == {"context": "native"}
+    # An npm launcher whose node and script exist runs them directly (no cmd.exe); so does "python script.py %*".
+    (tmp_path / "node.exe").write_bytes(b"MZ")
+    (tmp_path / "node_modules/@openai/codex/bin").mkdir(parents=True)
+    (tmp_path / "node_modules/@openai/codex/bin/codex.js").write_text("")
+    npm = tmp_path / "codex2.cmd"
+    npm.write_text('@ECHO off\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe")\n'
+                   'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+                   '"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\n')
+    found = context(str(npm))
+    assert found["context"] == "batch-shim" and found["direct"][0] == str(tmp_path / "node.exe")
+    assert found["direct"][1].endswith("codex.js") and os.path.isfile(found["direct"][1])
+    assert runtimes._context_limitation("codex", found) is None
+    (tmp_path / "tool.py").write_text("")
+    py = tmp_path / "tool.cmd"
+    py.write_text(f'@"{sys.executable}" "%~dp0tool.py" %*\n')
+    assert context(str(py))["direct"] == [sys.executable, str(tmp_path / "tool.py")]
+
+
+
+def test_wsl_forwarding_is_recognised_at_command_position_only(tmp_path):
+    cases = {
+        r'@"C:\Program Files\nodejs\node.exe" "%~dp0node_modules\codex\bin\codex.js" %*': "batch-shim",
+        r'node C:\tools\wsl\bin\x.js %*': "batch-shim",                 # A directory named wsl.
+        r'"C:\Users\wsl\AppData\Roaming\npm\node.exe" "%~dp0claude.js" %*': "batch-shim",  # A user named wsl.
+        "REM wsl notes\n@node x.js %*": "batch-shim",                    # Comments do not run anything.
+        ":: run wsl later\n@node x.js %*": "batch-shim",
+        r'node \\wsl$\Ubuntu\home\u\x.js %*': "batch-shim",               # A Windows process reading WSL files.
+        "bash.exe -c agy": "batch-shim",                                  # Git Bash is not WSL.
+        "for /f %%I in (`wsl.exe -d Ubuntu --exec wslpath -a %CD%`) do set X=%%I": "wsl-forwarded",
+        "@wsl.exe -d Ubuntu -- agy %*": "wsl-forwarded",
+        "wsl agy %*": "wsl-forwarded",
+        r'"C:\Windows\System32\wsl.exe" -e agy %*': "wsl-forwarded",
+        "ubuntu2204.exe run agy %*": "wsl-forwarded",
+    }
+    for index, (text, expected) in enumerate(cases.items()):
+        launcher = tmp_path / f"case{index}.cmd"
+        launcher.write_text("@echo off\n" + text + "\n")
+        assert runtimes.execution_context(str(launcher), windows=True)["context"] == expected, text
+
+
+def test_codex_effort_must_be_a_level_name_because_it_is_passed_unquoted(tmp_path):
+    schema, last = tmp_path / "s.json", tmp_path / "l.json"
+    schema.write_text("{}")
+    common = dict(profile="native", mode="rw", prompt="p", schema_path=schema, last_path=last, cwd=str(tmp_path))
+    for effort in ("1", "true", "1.5", "[a]", "x y", "high=1"):
+        with pytest.raises(runtimes.RuntimeFailure) as error:
+            runtimes.build_command("codex", effort=effort, **common)
+        assert error.value.kind == "unsupported" and "level name" in error.value.detail, effort
+    for effort in ("low", "xhigh", "max", "very_high"):
+        argv, _ = runtimes.build_command("codex", effort=effort, **common)
+        assert f"model_reasoning_effort={effort}" in argv

@@ -71,9 +71,9 @@ def test_dry_run_prints_plan_without_launching():
     assert plan["dry_run"] and len(plan["runs"]) == 15
     assert all(row["exit_code"] is None and row["verdict"] == "not-observed" for row in plan["runs"])
     claude, codex, agy = [row["argv"] for row in plan["runs"] if row["path"] == "manual"]
-    assert "--print" in claude and "Bash(python3 tests/check.py)" in claude
+    assert "--print" in claude and f"Bash({probe.PYTHON} tests/check.py)" in claude
     assert codex[1:3] == ["exec", "--cd"] and codex[-1] == "-"
-    assert 'model_reasoning_effort="medium"' in codex
+    assert 'model_reasoning_effort=medium' in codex
     assert agy[agy.index("--print") + 1] == "<prompt>" and "600s" in agy
     assert "Fix the bug" not in output and "Remember this code word" not in output
     assert "<scratch>" in output and str(Path.home()) not in output
@@ -119,8 +119,6 @@ def test_fixture_and_report_with_fake_claude(tmp_path):
 
 
 def test_provider_failures_and_reviewer_write_are_recorded(tmp_path):
-    if sys.platform == "win32":  # agent exec refuses a batch-script agy (see test_agent_runtimes).
-        raise SkipTest("Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows")
     bin_dir = _fake_cli(tmp_path, "codex", "print('usage limit reached', file=sys.stderr); sys.exit(1)")
     _fake_cli(tmp_path, "agy", """from pathlib import Path
 if args[args.index('--mode') + 1] != 'plan':

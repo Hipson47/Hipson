@@ -27,6 +27,10 @@ def batch_command(argv: list[str], env: dict[str, str], prefix: str) -> tuple[st
         return argv, env
     if any('"' in arg or "\n" in arg or "\r" in arg for arg in argv):
         raise ValueError("Cannot pass quotes or newlines to a Windows batch command (.cmd/.bat).")
+    # An empty variable does not exist on Windows (%VAR% would stay literal), and one variable holds at most
+    # 32,767 characters: refuse rather than pass something else.
+    if any(arg == "" or len(arg) > 32000 for arg in argv):
+        raise ValueError("Cannot pass an empty or over-long argument to a Windows batch command (.cmd/.bat).")
     env = dict(env)
     for index, arg in enumerate([resolved, *argv[1:]]):
         # Batch launchers conventionally forward %* to an executable. Escape

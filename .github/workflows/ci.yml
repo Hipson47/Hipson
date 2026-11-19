@@ -47,11 +47,35 @@ jobs:
         run: python -m pytest -q -rfs --tb=short
       - name: Installed CLI ledger and MCP stdio smoke
         run: python -m pytest -q tests/test_cross_platform.py::test_installed_cli_and_mcp_smoke
-      - name: Platform smoke script (what macOS testers run)
-        if: ${{ !cancelled() && runner.os != 'Windows' }}
+      - name: Platform smoke from a clean wheel install
+        if: ${{ !cancelled() }}
+        shell: python
         env:
           SMOKE_SKIP_SUITES: "1"  # The suites already ran above.
-        run: bash scripts/platform_smoke.sh
+        run: |
+          import os
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          checkout = Path.cwd()
+          with tempfile.TemporaryDirectory(prefix="hipson-wheel-") as directory:
+              temp = Path(directory).resolve()
+              wheels = temp / "dist"
+              venv = temp / "venv"
+              subprocess.run(["uv", "build", "--wheel", "--out-dir", str(wheels)], check=True)
+              subprocess.run([sys.executable, "-m", "venv", str(venv)], cwd=temp, check=True)
+              bin_dir = venv / ("Scripts" if os.name == "nt" else "bin")
+              suffix = ".exe" if os.name == "nt" else ""
+              python = bin_dir / f"python{suffix}"
+              hipson = bin_dir / f"hipson{suffix}"
+              (wheel,) = wheels.glob("*.whl")
+              subprocess.run([str(python), "-m", "pip", "install", str(wheel)], cwd=temp, check=True)
+              subprocess.run(
+                  [str(python), str(checkout / "scripts/platform_smoke.py"), "--skip-sync", "--hipson", str(hipson)],
+                  cwd=temp, check=True,
+              )
       - name: Mutation testing
         if: runner.os == 'Linux' && matrix.python-version == '3.12'
         run: |
