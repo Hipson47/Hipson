@@ -245,8 +245,6 @@ def test_exec_refuses_symlinked_runtime_state(tmp_path):
 
 
 def test_exec_records_launch_oserror_as_provider_error(tmp_path):
-    if sys.platform == "win32":  # The fake agy is a .cmd shim there, which agent exec refuses before launch.
-        raise SkipTest("Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows")
     launch_error = OSError(errno.E2BIG, "Argument list too long")
     stderr = io.StringIO()
     with (_worker(tmp_path) as (_, result, run), redirect_stderr(stderr),

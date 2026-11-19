@@ -27,12 +27,16 @@ smoke, `scripts/platform_smoke.py`); **live** = a real agent run on that OS, wit
 ## Native agent runtimes (`hipson agent runtimes` / `agent exec`)
 
 `hipson agent runtimes` reports how each runtime on PATH would execute: `native`, `batch-shim` (a Windows
-`.cmd`/`.bat` launcher) or `wsl-forwarded` (a Windows launcher that runs `wsl.exe`).
+`.cmd`/`.bat` launcher) or `wsl-forwarded` (a Windows launcher that runs `wsl.exe` or a distribution launcher
+at command position; a heuristic). A batch launcher whose command is "interpreter script %*" (npm's cmd-shim
+for `claude`, `codex` or `agy`, or `python script.py %*`) is run as that interpreter and script, without
+cmd.exe, so arguments with quotes and line breaks pass intact; other batch launchers go through
+`batch_command`, which refuses quotes, line breaks, empty and over-long arguments.
 
 | Runtime | Linux (WSL2 here) | macOS | Windows native |
 | --- | --- | --- | --- |
-| Claude Code | live 2.1.319: instructions, skills, hooks, subagents, plan-mode reviewer, resume | unverified | unverified (not installed on the test machine). Native `claude.exe` expected to work; an npm `claude.cmd` is refused because its JSON-schema argument cannot pass through cmd.exe |
-| Codex | live 0.169.0: all probes, including resume with `sandbox_mode` | unverified | **live 0.157.1** (`codex.exe`): builder + check, instructions, skill, read-only reviewer, session resume, Hipson = manual ([report](evals/native-probe-2026-11-19-codex-windows.json)). That CLI rejects `gpt-6.2-sol` and `gpt-6.1-sol` ("not supported", a CLI version issue); `gpt-6-sol` worked. npm `codex.cmd` runs through `batch_command` |
+| Claude Code | live 2.1.319: instructions, skills, hooks, subagents, plan-mode reviewer, resume | unverified | unverified (not installed on the test machine). Native `claude.exe` expected to work; an npm `claude.cmd` runs as its node script (no cmd.exe), covered by tests, not live |
+| Codex | live 0.169.0: all probes, including resume with `sandbox_mode` | unverified | **live 0.157.1** (`codex.exe`): builder + check, instructions, skill, read-only reviewer, session resume, Hipson = manual ([report](evals/native-probe-2026-11-19-codex-windows.json)). That CLI rejects `gpt-6.2-sol` and `gpt-6.1-sol` ("not supported", a CLI version issue); `gpt-6-sol` worked. npm `codex.cmd` runs as its node script |
 | Antigravity | live 1.5.12 (plan mode is not read-only) | unverified | not installed natively here; the only `agy` on PATH is a WSL-forwarding launcher, which `agent exec` refuses: run Hipson inside WSL for it, or install a native Windows build |
 
 Windows and WSL stay apart: a WSL-forwarding launcher runs the WSL installation with WSL's login, configuration

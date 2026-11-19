@@ -7,8 +7,8 @@
   space and non-ASCII characters: ledger lifecycle, `task run` claims, refusal, hard-kill and reap, `task do`,
   `task flow` with a snapshot review, MCP stdio and `agent runtimes`.
 - `hipson agent runtimes` reports each runtime's execution context (`native`, `batch-shim`, `wsl-forwarded`);
-  `agent exec` runs Windows `.cmd` launchers through `batch_command`, refuses arguments cmd.exe cannot carry, and
-  refuses WSL-forwarding launchers (Windows and WSL keep separate logins, configuration and paths). Runtime output
+  `agent exec` runs npm-style Windows `.cmd` launchers as their interpreter and script (no cmd.exe), other
+  launchers through `batch_command` (refusing arguments cmd.exe cannot carry), and refuses WSL-forwarding launchers (Windows and WSL keep separate logins, configuration and paths). Runtime output
   is decoded as UTF-8; Codex config values are passed unquoted. See [docs/PLATFORMS.md](docs/PLATFORMS.md).
 - Immutable review snapshots: a reviewer now reads a private, read-only copy of the exact candidate lead
   verification accepted (a Git checkout of the base commit through alternates, with every covered modified and
