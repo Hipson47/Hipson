@@ -100,7 +100,8 @@ def _repository(project: str, copy: Path, revision: str) -> None:
         raise SnapshotError('could not initialise the snapshot repository')
     source = objects.decode('utf-8', errors='surrogateescape').strip()
     (copy / '.git' / 'objects' / 'info').mkdir(parents=True, exist_ok=True)
-    (copy / '.git' / 'objects' / 'info' / 'alternates').write_text(source + '\n', encoding='utf-8')
+    # Bytes, not text: Windows text mode would end the line with CR, which Git reads as part of the path.
+    (copy / '.git' / 'objects' / 'info' / 'alternates').write_bytes(os.fsencode(source) + b'\n')
     # Line-ending settings decide how Git compares the copied bytes with the base commit: without the project's
     # own, every CRLF file of a Windows checkout would show as changed in the reviewer's diff.
     for key in ('core.autocrlf', 'core.eol', 'core.safecrlf'):

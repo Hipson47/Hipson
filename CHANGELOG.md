@@ -16,7 +16,7 @@
 - `hipson agent exec` hardening: runtime state files (schema, result, meta) are never written through a symlink;
   `--continue-session` uses only regular meta files whose assignment passed in the ledger for the same task and
   role, and identifies the project by `HIPSON_PROJECT` (stable across review snapshots); a launch `OSError` is a
-  `provider_error` with meta; an Antigravity prompt over 100,000 bytes is refused before launch (argv); controlled
+  `provider_error` with meta; an Antigravity prompt over 100,000 bytes, or a batch-script `agy` on Windows, is refused before launch (argv); controlled
   Claude refuses projects with `.claude/settings*.json` (`--setting-sources project` would load them); a runtime
   whose status command reports logged out is refused before launch (`auth_required`).
 - `hipson init` lists the agent CLIs found on PATH (`checks.runtimes`) and ends with `hipson agent runtimes` and

@@ -119,6 +119,8 @@ def test_fixture_and_report_with_fake_claude(tmp_path):
 
 
 def test_provider_failures_and_reviewer_write_are_recorded(tmp_path):
+    if sys.platform == "win32":  # agent exec refuses a batch-script agy (see test_agent_runtimes).
+        raise SkipTest("Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows")
     bin_dir = _fake_cli(tmp_path, "codex", "print('usage limit reached', file=sys.stderr); sys.exit(1)")
     _fake_cli(tmp_path, "agy", """from pathlib import Path
 if args[args.index('--mode') + 1] != 'plan':

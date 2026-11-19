@@ -245,6 +245,8 @@ def test_exec_refuses_symlinked_runtime_state(tmp_path):
 
 
 def test_exec_records_launch_oserror_as_provider_error(tmp_path):
+    if sys.platform == "win32":  # The fake agy is a .cmd shim there, which agent exec refuses before launch.
+        raise SkipTest("Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows")
     launch_error = OSError(errno.E2BIG, "Argument list too long")
     stderr = io.StringIO()
     with (_worker(tmp_path) as (_, result, run), redirect_stderr(stderr),
@@ -596,3 +598,13 @@ def test_a_session_whose_resume_failed_is_not_resumed_again(tmp_path):
         assert runtimes._previous_session(result, "claude", task, "builder") == "session-old"
         meta("build-4", 400, outcome="provider_error", resumed=True, session_requested="session-old", session=None)
         assert runtimes._previous_session(result, "claude", task, "builder") is None
+
+
+def test_a_batch_script_agy_is_refused_on_windows_rather_than_cut():
+    with patch.object(runtimes.os, "name", "nt"):
+        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.CMD")
+        assert "batch script" in runtimes.batch_prompt_problem("agy", "C:/bin/agy.bat")
+        assert runtimes.batch_prompt_problem("agy", "C:/bin/agy.exe") is None
+        assert runtimes.batch_prompt_problem("claude", "C:/bin/claude.cmd") is None  # Prompt on stdin.
+    with patch.object(runtimes.os, "name", "posix"):
+        assert runtimes.batch_prompt_problem("agy", "/bin/agy.cmd") is None

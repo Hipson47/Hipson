@@ -18,7 +18,6 @@ import os
 import re
 import secrets
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
@@ -33,7 +32,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from hipson import agent_runtimes, ledger, task_runner  # noqa: E402
+from hipson import agent_runtimes, ledger, review_snapshot, task_runner  # noqa: E402
 from hipson.init_process import run_contained  # noqa: E402
 from hipson.redaction import REDACTION, redact_incomplete_private_keys, redact_text  # noqa: E402
 
@@ -482,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.keep:
             print(f"Native probe scratch directory {scratch}", file=sys.stderr)
         else:
-            shutil.rmtree(scratch)
+            review_snapshot.remove(scratch)  # Git objects are read-only: a plain rmtree fails on Windows.
     return 0
 
 

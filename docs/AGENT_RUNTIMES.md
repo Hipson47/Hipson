@@ -138,7 +138,8 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   substitute another id of the same runtime (the assignment check still binds task and role).
 - State files (schema, result, meta) are never written through a symlink or to a non-regular file; a launch
   that fails (`OSError`) is a `provider_error` with meta; an Antigravity prompt over 100,000 bytes (it is an argv
-  element) is refused before launch.
+  element) is refused before launch, and so is an agy that resolves to a `.cmd`/`.bat` script on Windows
+  (cmd.exe would cut the multi-line prompt at its first line break).
 
 ## Live runs through Hipson (2026-11-19, one sample each; not a benchmark)
 

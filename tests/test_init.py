@@ -187,7 +187,8 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     assert len([call for call in calls if call["args"][:2] == ["mcp", "add"]]) == 1
     assert all(call["client"] == "claude" and call["cwd"] == str(setup.project) for call in calls)
     steps = report["next_steps"]
-    assert steps[7] == "hipson agent runtimes" and steps[8].startswith("hipson task flow --spec flow.json --check")
+    for index, words in ((7, ("hipson", "agent", "runtimes")), (8, ("task", "flow", "flow.json", "--check"))):
+        assert all(word in steps[index] for word in words), steps[index]  # POSIX or PowerShell quoting.
     assert set(report["checks"]["runtimes"]) == {"claude", "codex", "agy"}
     assert len(steps) == 9 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
     assert "--check" in steps[2] and "--start" in steps[2]

@@ -338,6 +338,14 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     return argv, None
 
 
+def batch_prompt_problem(name: str, executable: str | None) -> str | None:
+    """Why a launch would corrupt the prompt: agy takes it as an argument, which cmd.exe cuts at a line break."""
+    if name == "agy" and os.name == "nt" and (executable or "").lower().endswith((".cmd", ".bat")):
+        return (f"{executable} is a batch script: Antigravity's prompt is an argument and cmd.exe would cut it at "
+                "the first line break; use the native agy executable")
+    return None
+
+
 def _exact_pattern(check: list[str]) -> bool:
     """Grant only a check whose permission pattern names exactly the command the lead runs.
 
@@ -511,6 +519,8 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail(exc.kind, exc.detail)
     if shutil.which(argv[0]) is None:
         return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
+    if problem := batch_prompt_problem(args.runtime, shutil.which(argv[0])):
+        return fail("unsupported", problem)
     # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
     auth = auth_state(args.runtime, argv[0])
     meta["preflight"] = {"auth": auth["state"]}
