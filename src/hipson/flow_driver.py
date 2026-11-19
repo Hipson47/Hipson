@@ -20,6 +20,7 @@ import math
 import os
 import shlex
 import sqlite3
+import stat
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
@@ -431,62 +432,108 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
     return [header, task_context._untrusted_block((shown or '(no tracked changes)') + (chr(10) + listing if listing else ''))]
 
 
-def protected_paths(project: str, spec: dict[str, Any]) -> list[str]:
-    """What a builder must not change: paths the checks name, runtime configuration and spec.protected.
+def _overlaps(path: str, scope: list[str]) -> bool:
+    """Whether `path` and the write scope overlap (either contains the other); '.' covers everything."""
+    parts = Path(path).parts
+    for item in scope:
+        other = Path(item).parts
+        if item == '.' or parts[:len(other)] == other or other[:len(parts)] == parts:
+            return True
+    return False
 
-    A check that runs the builder's own edited test proves nothing, and a check argument naming an existing
-    project path is the closest enforceable reading of "the acceptance checks". Tests a check reaches indirectly
-    (a whole suite) are protected only when the spec lists them.
+
+def protected_paths(project: str, spec: dict[str, Any]) -> list[str]:
+    """What a builder must not change: check-named paths outside its scope, runtime configuration, spec.protected.
+
+    A check that runs a test the builder edited proves nothing, so an existing project path given as a check
+    argument is protected. One that overlaps the builder's scope is not (`ruff check src`, `py_compile` of the file
+    being fixed name what the builder must change): a builder allowed to write the acceptance tests needs them in
+    `spec.protected`. Tests a check reaches indirectly (a whole suite) are protected only when the spec lists them.
     """
     root = Path(project).resolve()
+    scope = spec['builder']['scope']
     named = set()
     for check in spec['checks']:
         for arg in check:
             candidate = Path(arg)
-            if arg and not candidate.is_absolute() and '..' not in candidate.parts and candidate.parts:
-                if (root / candidate).exists() and (root / candidate).resolve() != root:
-                    named.add(candidate.as_posix())
+            if (not arg or len(arg) > 1024 or any(ord(char) < 32 for char in arg) or candidate.is_absolute()
+                    or '..' in candidate.parts or not candidate.parts):
+                continue
+            try:  # A long inline script (python -c "...") is not a path; any error means it is not one here.
+                exists = (root / candidate).exists() and (root / candidate).resolve() != root
+            except (OSError, ValueError):
+                continue
+            if exists and not _overlaps(candidate.as_posix(), scope):
+                named.add(candidate.as_posix())
     return sorted(named | set(RUNTIME_CONFIG) | set(spec['protected']))
 
 
+def _identity(path: Path) -> bytes:
+    """A file's mode class and content, streamed; a link by its target; unreadable content fails closed."""
+    if path.is_symlink():
+        return b'link:' + os.fsencode(os.readlink(path))
+    digest = hashlib.sha256(b'x' if os.name == 'posix' and path.stat().st_mode & stat.S_IXUSR else b'-')
+    with path.open('rb') as stream:
+        while chunk := stream.read(65536):
+            digest.update(chunk)
+    return digest.digest()
+
+
 def protected_state(project: str, paths: list[str]) -> dict[str, str]:
-    """Content identity of each protected path (a directory by every file in it); a missing path is 'missing'."""
+    """Content identity of each protected path (a directory by every file and link in it); 'missing' if absent.
+
+    A path that cannot be read gets a distinct 'unreadable' state, so it never compares equal to readable content.
+    """
     root = Path(project).resolve()
     state = {}
     for name in paths:
         path = root / name
         digest = hashlib.sha256()
-        if path.is_symlink() or path.is_file():
-            digest.update(b'link:' + os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes())
-        elif path.is_dir():
-            for current, dirs, files in os.walk(path, followlinks=False):
-                dirs[:] = sorted(item for item in dirs if not task_verification._is_tool_cache(Path(item), directory=True))
-                for item in sorted(files):
-                    file = Path(current) / item
-                    if task_verification._is_tool_cache(file.relative_to(root)):
-                        continue
-                    data = b'link:' + os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
-                    digest.update(os.fsencode(file.relative_to(root).as_posix()) + b'\0'
-                                  + hashlib.sha256(data).digest())
-        else:
-            state[name] = 'missing'
+        try:
+            if path.is_symlink() or path.is_file():
+                digest.update(_identity(path))
+            elif path.is_dir():
+                for current, dirs, files in os.walk(path, followlinks=False):
+                    links = [item for item in dirs if (Path(current) / item).is_symlink()]
+                    dirs[:] = sorted(item for item in dirs if item not in links and
+                                     not task_verification._is_tool_cache(Path(item), directory=True))
+                    for item in sorted(files + links):
+                        file = Path(current) / item
+                        if task_verification._is_tool_cache(file.relative_to(root)):
+                            continue
+                        digest.update(os.fsencode(file.relative_to(root).as_posix()) + b'\0' + _identity(file))
+            else:
+                state[name] = 'missing'
+                continue
+        except OSError as exc:
+            state[name] = f'unreadable:{type(exc).__name__}'
             continue
         state[name] = digest.hexdigest()
     return state
 
 
 def protected_changes(db: Path, view: ledger.TaskView, spec: dict[str, Any]) -> list[str]:
-    """Protected paths the latest ended builder changed since its launch (from the state saved at launch)."""
+    """Protected paths the latest ended builder changed since its launch (from the state saved at launch).
+
+    Compared once, when the builder has ended and before anything else runs; a clean comparison is recorded
+    (`protected-N.clean`), so a later check that rewrites a file it names is not blamed on the builder.
+    """
     builders = [item for item in view['assignments'] if item['role'] == 'builder']
     if not builders or builders[-1]['status'] == 'active':
         return []
-    saved = _flow_dir(db, view['id']) / f'protected-{len(builders)}.json'
+    directory = _flow_dir(db, view['id'])
+    saved, clean = directory / f'protected-{len(builders)}.json', directory / f'protected-{len(builders)}.clean'
+    if clean.exists():
+        return []
     try:
         before = json.loads(saved.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return []  # A flow started before protection existed, or a launch that never recorded it.
     now = protected_state(view['project'], sorted(before))
-    return [name for name in sorted(before) if before[name] != now.get(name)]
+    changed = [name for name in sorted(before) if before[name] != now.get(name)]
+    if not changed:
+        clean.touch()
+    return changed
 
 
 def _private_dir(db: Path, task: str) -> Path:
@@ -694,10 +741,16 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                 snapshot, problem = snapshot_candidate(db, view)
                 if snapshot is None:
                     step = Step('stop', 'verification_inconclusive', [problem])
-            candidate = str(review_snapshot.workdir(snapshot, review_snapshot.load(snapshot))) if snapshot else None
-            brief = (stage_brief(store, view, records, spec, 'builder' if step.kind == 'build' else 'reviewer',
-                                 step.stage or 'review', step.refs, candidate) if step.kind in ('build', 'review')
-                     else '')
+            try:
+                candidate = (str(review_snapshot.workdir(snapshot, review_snapshot.load(snapshot))) if snapshot
+                             else None)
+                brief = (stage_brief(store, view, records, spec, 'builder' if step.kind == 'build' else 'reviewer',
+                                     step.stage or 'review', step.refs, candidate) if step.kind in ('build', 'review')
+                         else '')
+            except BaseException:
+                if snapshot is not None:
+                    review_snapshot.remove(snapshot)
+                raise
         steps.append(step.kind if not step.stage else f'{step.kind}:{step.stage}')
         if step.kind == 'stop':
             if step.state != 'accepted':
@@ -728,6 +781,7 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                 number = 1 + sum(item['role'] == 'builder' for item in view['assignments'])
                 saved = _private_dir(db, task) / f'protected-{number}.json'
                 saved.unlink(missing_ok=True)
+                saved.with_suffix('.clean').unlink(missing_ok=True)
                 saved.write_text(json.dumps(protected_state(view['project'], protected_paths(view['project'], spec))),
                                  encoding='utf-8')
             seen = len(task_runner.SIGNALS_SEEN)

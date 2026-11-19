@@ -1,69 +1,81 @@
 """Exercise the live comparison with local fake runtimes and the real Hipson ledger."""
 
+import io
 import json
 import os
 import shlex
+import sys
+from contextlib import redirect_stdout
+from unittest import SkipTest
+from unittest.mock import patch
 
-import pytest
+from tests.test_agent_runtimes import _env, _fake
 
-from scripts import flow_compare as compare
-from tests.test_agent_runtimes import _fake
+if sys.platform == "linux":
+    from scripts import flow_compare as compare
+
+LINUX_ONLY_REASON = "agent e2e harness is Linux/WSL2-only: requires /proc, prctl and Linux process groups"
 
 
-@pytest.fixture
-def fake_path(tmp_path, monkeypatch):
+def _fake_path(tmp_path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
 
-@pytest.mark.parametrize("runtime,preferred", [("claude", "codex"), ("codex", "claude"), ("agy", "claude")])
-def test_dry_run_does_not_spawn_processes(runtime, preferred, tmp_path, fake_path, monkeypatch, capsys):
+def test_dry_run_does_not_spawn_processes(tmp_path):
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
+    bin_dir = _fake_path(tmp_path)
     for name in compare.RUNTIMES:
-        _fake(fake_path, name, "raise AssertionError('dry-run launched a runtime')")
+        _fake(bin_dir, name, "raise AssertionError('dry-run launched a runtime')")
 
-    def unexpected_process(*args, **kwargs):
-        pytest.fail("dry-run started a process")
+    for runtime, preferred in (("claude", "codex"), ("codex", "claude"), ("agy", "claude")):
+        destination = tmp_path / f"dry-{runtime}.json"
+        stdout = io.StringIO()
+        with (patch.dict(os.environ, _env(bin_dir)), redirect_stdout(stdout),
+              patch.object(compare.subprocess, "Popen", side_effect=AssertionError(f"{runtime} dry-run started a process"))):
+            assert compare.main(["--live", runtime, "--model", "sample", "--effort", "high",
+                                 "--dry-run", "--output", str(destination)]) == 0, runtime
+        plan = json.loads(stdout.getvalue())
+        assert plan["mode"] == "live" and plan["dry_run"] and not destination.exists(), runtime
+        assert plan["reviewer_runtime"] == preferred, runtime
+        assert [(item["case"], item["strategy"]) for item in plan["plans"]] == [
+            (case, strategy) for case in ("fix", "hidden-trim") for strategy in ("A", "B", "C")
+        ], runtime
+        for direct, previous, flow in (plan["plans"][:3], plan["plans"][3:]):
+            case = (runtime, direct["case"])
+            check = previous["argv"][previous["argv"].index("--check") + 1]
+            assert shlex.split(check)[-1] == ("tests/acceptance.py" if direct["case"] == "fix" else "tests/split.py"), case
+            if runtime == "claude":
+                assert direct["argv"] == ["claude", "--print", "--output-format", "json", "--permission-mode", "acceptEdits",
+                                          "--allowedTools", f"Bash({check})", "--model", "sample", "--effort", "high"], case
+            elif runtime == "codex":
+                assert direct["argv"] == ["codex", "exec", "--json", "--sandbox", "workspace-write", "--cd", direct["cwd"],
+                                          "--model", "sample", "--config", 'model_reasoning_effort="high"', "-"], case
+            else:
+                assert direct["argv"] == ["agy", "--print", "<prompt elided>", "--output-format", "json", "--mode",
+                                          "accept-edits", "--model", "sample", "--effort", "high"], case
+            assert direct["stdin"] == (None if runtime == "agy" else "<prompt elided>"), case
+            assert flow["max_repairs"] == 1 and flow["close_to"] == "done", case
+            assert flow["worker_argv"]["reviewer"][4:] == ["agent", "exec", "--runtime", preferred, "--role", "reviewer",
+                                                         "--timeout", "180", "--model", "sample", "--effort", "high"], case
+            assert previous["argv"][previous["argv"].index("--") + 1:-4] == flow["worker_argv"]["builder"], case
 
-    monkeypatch.setattr(compare.subprocess, "Popen", unexpected_process)
-    destination = tmp_path / "dry.json"
-    assert compare.main(["--live", runtime, "--model", "sample", "--effort", "high",
-                         "--dry-run", "--output", str(destination)]) == 0
-    plan = json.loads(capsys.readouterr().out)
-    assert plan["mode"] == "live" and plan["dry_run"] and not destination.exists()
-    assert plan["reviewer_runtime"] == preferred
-    assert [(item["case"], item["strategy"]) for item in plan["plans"]] == [
-        (case, strategy) for case in ("fix", "hidden-trim") for strategy in ("A", "B", "C")
-    ]
-    for direct, previous, flow in (plan["plans"][:3], plan["plans"][3:]):
-        check = previous["argv"][previous["argv"].index("--check") + 1]
-        assert shlex.split(check)[-1] == ("tests/acceptance.py" if direct["case"] == "fix" else "tests/split.py")
-        if runtime == "claude":
-            assert direct["argv"] == ["claude", "--print", "--output-format", "json", "--permission-mode", "acceptEdits",
-                                      "--allowedTools", f"Bash({check})", "--model", "sample", "--effort", "high"]
-        elif runtime == "codex":
-            assert direct["argv"] == ["codex", "exec", "--json", "--sandbox", "workspace-write", "--cd", direct["cwd"],
-                                      "--model", "sample", "--config", 'model_reasoning_effort="high"', "-"]
-        else:
-            assert direct["argv"] == ["agy", "--print", "<prompt elided>", "--output-format", "json", "--mode",
-                                      "accept-edits", "--model", "sample", "--effort", "high"]
-        assert direct["stdin"] == (None if runtime == "agy" else "<prompt elided>")
-        assert flow["max_repairs"] == 1 and flow["close_to"] == "done"
-        assert flow["worker_argv"]["reviewer"][4:] == ["agent", "exec", "--runtime", preferred, "--role", "reviewer",
-                                                     "--timeout", "180", "--model", "sample", "--effort", "high"]
-        assert previous["argv"][previous["argv"].index("--") + 1:-4] == flow["worker_argv"]["builder"]
 
-
-def test_dry_run_same_runtime_fallback(monkeypatch, capsys):
-    monkeypatch.setattr(compare.shutil, "which", lambda name: name if name == "agy" else None)
-    assert compare.main(["--live", "agy", "--live-case", "fix", "--dry-run"]) == 0
-    plan = json.loads(capsys.readouterr().out)
+def test_dry_run_same_runtime_fallback():
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
+    stdout = io.StringIO()
+    with (patch.object(compare.shutil, "which", side_effect=lambda name: name if name == "agy" else None),
+          redirect_stdout(stdout)):
+        assert compare.main(["--live", "agy", "--live-case", "fix", "--dry-run"]) == 0
+    plan = json.loads(stdout.getvalue())
     assert plan["runtime"] == plan["reviewer_runtime"] == "agy"
     assert set(plan["plans"][-1]["worker_argv"]) == {"builder", "reviewer"}
 
 
-@pytest.mark.parametrize(("runtime", "events", "answer", "tokens", "turns"), [
+RUNTIME_USAGE_CASES = (
     ("claude", [{"type": "result", "result": "Status: completed", "num_turns": 3,
                  "usage": {"input_tokens": 8, "output_tokens": 6, "cache_read_input_tokens": 0,
                            "cache_creation_input_tokens": 21}}], "Status: completed", (8, 6, 0, 21), 3),
@@ -72,21 +84,29 @@ def test_dry_run_same_runtime_fallback(monkeypatch, capsys):
                {"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 5, "cached_input_tokens": 4}},
                {"type": "item.completed", "item": {"type": "agent_message", "text": "Status: incomplete"}},
                {"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 0, "cached_input_tokens": 3}}],
-     "Status: incomplete", (18, 5, 7, None), 2),
+     "Status: incomplete", (11, 5, 7, None), 2),  # Codex input includes cached input: 11-4 + 7-3.
     ("agy", [{"status": "SUCCESS", "response": "Status: completed", "usage": {"input_tokens": 9, "output_tokens": 5}}],
      "Status: completed", (9, 5, None, None), None),
     ("agy", [{"status": "ERROR", "result": "Status: completed", "usage": {"input_tokens": 12,
               "output_tokens": 2, "cache_read_tokens": 0}, "num_turns": 1}], None, (12, 2, 0, None), 1),
     ("claude", [{"subtype": "error_during_execution", "result": "Status: completed"}], None, (None,) * 4, None),
-])
-def test_runtime_json_usage(runtime, events, answer, tokens, turns, fake_path, tmp_path):
-    stream = "\n".join(json.dumps(event) for event in events)
-    _fake(fake_path, runtime, f"print({stream!r})")
-    code, stdout, launched = compare._live_process([runtime], tmp_path, dict(os.environ), None, "A")
-    assert code == 0 and launched
-    message, evidence = compare._runtime_evidence(runtime, stdout)
-    assert message == answer
-    assert evidence == {"tokens": dict(zip(compare.TOKEN_KEYS, tokens, strict=True)), "turns": turns}
+)
+
+
+def test_runtime_json_usage(tmp_path):
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
+    bin_dir = _fake_path(tmp_path)
+    env = {**os.environ, **_env(bin_dir)}
+    for runtime, events, answer, tokens, turns in RUNTIME_USAGE_CASES:
+        case = (runtime, answer)
+        stream = "\n".join(json.dumps(event) for event in events)
+        _fake(bin_dir, runtime, f"print({stream!r})")
+        code, stdout, launched = compare._live_process([runtime], tmp_path, env, None, "A")
+        assert code == 0 and launched, case
+        message, evidence = compare._runtime_evidence(runtime, stdout)
+        assert message == answer, case
+        assert evidence == {"tokens": dict(zip(compare.TOKEN_KEYS, tokens, strict=True)), "turns": turns}, case
 
 
 FAKE_RUN = r"""
@@ -130,25 +150,26 @@ else:
 """
 
 
-def test_live_hidden_trim_measures_review_and_redacts_report(tmp_path, fake_path, monkeypatch, capsys):
+def test_live_hidden_trim_measures_review_and_redacts_report(tmp_path):
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
+    bin_dir = _fake_path(tmp_path)
     for name in ("claude", "agy"):
-        _fake(fake_path, name, f"RUNTIME = {name!r}\n{FAKE_RUN}")
+        _fake(bin_dir, name, f"RUNTIME = {name!r}\n{FAKE_RUN}")
     home = tmp_path / "home"
     outside = tmp_path / "outside.sqlite"
     secret = "raw-secret-from-env"
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
-    monkeypatch.setenv("EXPECTED_HOME", str(home))
-    monkeypatch.setenv("EXPECTED_CODEX_HOME", str(home / ".codex"))
-    monkeypatch.setenv("HIPSON_LEDGER", str(outside))
-    monkeypatch.setenv("HIPSON_ROLE", "worker")
-    monkeypatch.setenv("OUTSIDE_LEDGER", str(outside))
-    monkeypatch.setenv("TEST_TOKEN", secret)
+    env = {**_env(bin_dir), "HOME": str(home), "CODEX_HOME": str(home / ".codex"),
+           "EXPECTED_HOME": str(home), "EXPECTED_CODEX_HOME": str(home / ".codex"),
+           "HIPSON_LEDGER": str(outside), "HIPSON_ROLE": "worker", "OUTSIDE_LEDGER": str(outside),
+           "TEST_TOKEN": secret}
     destination = tmp_path / "report.json"
-    assert compare.main(["--live", "claude", "--reviewer-runtime", "agy", "--live-case", "hidden-trim",
-                         "--model", "fixture-model", "--effort", "high", "--output", str(destination)]) == 0
+    stdout = io.StringIO()
+    with patch.dict(os.environ, env), redirect_stdout(stdout):
+        assert compare.main(["--live", "claude", "--reviewer-runtime", "agy", "--live-case", "hidden-trim",
+                             "--model", "fixture-model", "--effort", "high", "--output", str(destination)]) == 0
     report = destination.read_text()
-    assert report == capsys.readouterr().out
+    assert report == stdout.getvalue()
     assert str(home) not in report and secret not in report and not outside.exists()
     data = json.loads(report)
     assert data["artifact_kind"] == "hipson.flow_compare" and data["mode"] == "live"
@@ -173,20 +194,23 @@ def test_live_hidden_trim_measures_review_and_redacts_report(tmp_path, fake_path
 
 
 def test_live_oracle_reports_removed_acceptance_test(tmp_path):
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
     fixture = compare._setup(tmp_path / "repo", live=True)
     (fixture.workdir / "tests/acceptance.py").unlink()
     truth = compare._live_truth(fixture.workdir, fixture.env)
     assert truth == {"ok": False, "tests_intact": False, "out_of_scope": ["tests/acceptance.py"]}
 
 
-def test_offline_report_contract_is_unchanged(tmp_path, capsys, monkeypatch):
-    def unexpected_live(*args, **kwargs):
-        pytest.fail("offline comparison called the live runner")
-
-    monkeypatch.setattr(compare, "_live_main", unexpected_live)
+def test_offline_report_contract_is_unchanged(tmp_path):
+    if sys.platform != "linux":
+        raise SkipTest(LINUX_ONLY_REASON)
     output = tmp_path / "offline.json"
-    assert compare.main(["--case", "correct", "--strategy", "C", "--output", str(output)]) == 0
-    assert capsys.readouterr().out.startswith("case     C           \ncorrect  ok-done")
+    stdout = io.StringIO()
+    with (patch.object(compare, "_live_main", side_effect=AssertionError("offline comparison called the live runner")),
+          redirect_stdout(stdout)):
+        assert compare.main(["--case", "correct", "--strategy", "C", "--output", str(output)]) == 0
+    assert stdout.getvalue().startswith("case     C           \ncorrect  ok-done")
     data = json.loads(output.read_text())
     assert list(data) == ["artifact_kind", "revision", "dirty", "python", "model", "note", "summary", "runs"]
     assert data["artifact_kind"] == "hipson.flow_compare" and data["model"] is None

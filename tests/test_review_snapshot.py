@@ -240,6 +240,7 @@ def test_a_builder_that_changes_protected_paths_stops_the_flow(tmp_path):
     spec = _spec(tmp_path, project, builder='tamper')
     raw = json.loads(spec.read_text())
     raw['builder']['scope'] = ['src/parser', 'tests']
+    raw['protected'] = ['tests/acceptance.py']  # Inside the scope: protected only when the spec says so.
     spec.write_text(json.dumps(raw))
     proc, result = _flow(project, db, spec)
     assert proc.returncode == 4 and result['state'] == 'needs_lead', result
@@ -264,9 +265,18 @@ def test_a_builder_that_changes_protected_paths_stops_the_flow(tmp_path):
 
 def test_protected_paths_and_state_contract(tmp_path):
     project = _repo(tmp_path)
-    spec = flow_driver.validate_spec({**json.loads(_spec(tmp_path, project).read_text()), 'protected': ['src/x']})
+    base = json.loads(_spec(tmp_path, project).read_text())
+    spec = flow_driver.validate_spec({**base, 'protected': ['src/x']})
     names = flow_driver.protected_paths(str(project), spec)
     assert names == sorted(['tests/acceptance.py', 'src/x', *flow_driver.RUNTIME_CONFIG])
+    # Paths that overlap the write scope name what the builder must change, so they are not protected; a long
+    # inline script is not a path and must not crash the flow (ENAMETOOLONG).
+    checks = [['ruff', 'check', 'src'], [PY, '-m', 'py_compile', 'src/parser/pairs.py'], [PY, '-c', 'x' * 300],
+              [PY, 'tests/acceptance.py']]
+    names = flow_driver.protected_paths(str(project), flow_driver.validate_spec({**base, 'checks': checks}))
+    assert names == sorted(['tests/acceptance.py', *flow_driver.RUNTIME_CONFIG])
+    whole = flow_driver.validate_spec({**base, 'builder': {**base['builder'], 'scope': ['.']}})
+    assert flow_driver.protected_paths(str(project), whole) == sorted(flow_driver.RUNTIME_CONFIG)
     state = flow_driver.protected_state(str(project), ['tests', 'src/x', 'tests/acceptance.py'])
     assert state['src/x'] == 'missing' and len(state['tests']) == 64
     (project / 'tests' / '__pycache__').mkdir()
@@ -276,3 +286,34 @@ def test_protected_paths_and_state_contract(tmp_path):
     assert flow_driver.protected_state(str(project), ['tests'])['tests'] != state['tests']
     with pytest.raises(flow_driver.FlowError, match='spec.protected'):
         flow_driver.validate_spec({**json.loads(_spec(tmp_path, project).read_text()), 'protected': ['../out']})
+
+
+def test_a_check_that_rewrites_a_file_it_names_is_not_blamed_on_the_builder(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    (project / 'reports').mkdir()
+    (project / 'reports/out.txt').write_text('old' + NL)
+    _git(project, 'add', '.')
+    _git(project, '-c', 'user.name=T', '-c', 'user.email=t@e', 'commit', '-qm', 'report')
+    writer = [PY, '-c', "import sys, time; open(sys.argv[1], 'w').write(str(time.time()))", 'reports/out.txt']
+    spec = _spec(tmp_path, project, checks=([PY, 'tests/acceptance.py'], writer))
+    proc, result = _flow(project, db, spec)
+    # The second check rewrites reports/out.txt after the builder was compared clean: no protected-path stop.
+    assert not any('protected' in reason for reason in result['reasons']), result
+    assert (flow_driver._flow_dir(db, 'T-0001') / 'protected-1.clean').exists()
+
+
+def test_a_crlf_checkout_snapshot_shows_only_real_changes(tmp_path):
+    project = tmp_path / 'crlf'
+    project.mkdir()
+    _git(project, 'init', '-q')
+    _git(project, 'config', 'core.autocrlf', 'true')
+    crlf = bytes([13, 10])
+    (project / 'a.txt').write_bytes(b'one' + crlf + b'two' + crlf)
+    (project / 'b.txt').write_bytes(b'x' + crlf)
+    _git(project, 'add', '.')
+    _git(project, '-c', 'user.name=T', '-c', 'user.email=t@e', 'commit', '-qm', 'crlf')
+    (project / 'b.txt').write_bytes(b'y' + crlf)
+    manifest = review_snapshot.create(str(project), tmp_path / 'l.sqlite', tmp_path / 'snap')
+    copy = review_snapshot.workdir(tmp_path / 'snap', manifest)
+    assert _git(copy, 'config', '--get', 'core.autocrlf') == 'true'
+    assert _git(copy, 'status', '--porcelain').strip() == 'M b.txt'

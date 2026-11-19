@@ -22,18 +22,45 @@ Hipson makes the agent CLIs you already have more reliable; it does not replace 
 Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude/settings.json`, a project
 `.codex/config.toml`) are listed under `workspace_executables`: review them before an unattended run.
 
-## Capability matrix (installed versions on 2026-11-19, WSL2)
+## Capability matrix (live evidence, 2026-11-19, WSL2)
 
-| | Claude Code 2.1.319 | Codex CLI 0.169.0 | Antigravity 1.5.5 to 1.5.11 |
+Installed: Claude Code 2.1.319, Codex CLI 0.169.0, Antigravity 1.5.12. "Verified" means a run exercised it and
+the probe observed the effect itself (a file, a hook log line, a re-run check, a recalled code word), not the
+model's report. Evidence: `scripts/native_probe.py` reports in [evals/](evals/) (`native-probe-2026-11-19-*.json`),
+one sample per cell; "Hipson = manual" means the run through `hipson task run ... -- hipson agent exec` and the
+runtime's own non-interactive command on the same fixture showed the same capability.
+
+| | Claude Code | Codex | Antigravity |
 | --- | --- | --- | --- |
-| Non-interactive run | `--print` | `exec` | `--print` |
-| Structured result | `--json-schema` -> `structured_output` (**verified live**) | `--output-schema` + `--output-last-message` (documented; live run blocked by the account's usage limit tonight) | `--json-schema` -> `structured_output` (**verified live**) |
-| Session id | `--session-id` (Hipson sets a fresh uuid4 per run, kept in the run's meta); `--resume` (**verified live**) | `thread.started` event; `exec resume` (documented) | `conversation_id`; `--conversation` (documented) |
-| Usage telemetry | `usage`, `modelUsage`, `total_cost_usd` (a list-price estimate, not a subscription charge) | `turn.completed.usage` with `--json` | `usage` |
-| Read-only / write | `--permission-mode plan` / `acceptEdits` | `--sandbox read-only` / `workspace-write` | `--mode plan` / `accept-edits` |
-| Project instructions | `CLAUDE.md` honoured (**verified live**) | `AGENTS.md` (documented) | `AGENTS.md`/`GEMINI.md` honoured (**verified live**; which file is not isolated) |
-| Controlled isolation | `--setting-sources project --strict-mcp-config --no-session-persistence`; `--bare` needs `ANTHROPIC_API_KEY` | `--ephemeral --ignore-user-config --ignore-rules` | **unsupported**: no documented configuration-free run |
-| Auth status | `claude auth status` (JSON) | `codex login status` | none documented |
+| Structured result | verified (`--json-schema`), Hipson = manual | verified (`--output-schema`); first live Codex runs through Hipson | verified (`--json-schema`) |
+| Project instructions | verified: `CLAUDE.md`, Hipson = manual | verified: `AGENTS.md`, Hipson = manual | verified: `GEMINI.md` (reviewer, sessions, manual builder) |
+| Project skills | verified: `.claude/skills`, Hipson = manual | verified: `.agents/skills`, Hipson = manual | unverified: no documented project skill directory |
+| Hooks | verified: project `PostToolUse` hook ran (8 events), Hipson = manual | not probed | not probed |
+| Native subagents | verified: the worker delegated to `Explore` (hook saw the Agent tool), Hipson = manual | not observed (none requested by the runtime) | not probed |
+| Write mode (builder) | verified: edit + task-scoped grant for the declared check | verified: `workspace-write` | verified: `accept-edits` + session-only grant for exactly the declared checks (`--settings` `permissions.allow: ["command(<check>)"]`; it admits that command and no other) |
+| Read-only mode (reviewer) | verified: plan mode, the write did not happen | verified: read-only sandbox refused the write ("Read-only file system") | **not enforced**: in `--mode plan` the reviewer created the file in 2 of 2 probe runs |
+| Session continuation | verified: `--resume`, code word recalled; also from another working directory (review snapshots) | verified after a fix: `exec resume` refuses `--sandbox`, so Hipson now passes `-c sandbox_mode=...` (same mode) | verified: `--conversation`, code word recalled |
+| A missing session | `No conversation found with session ID` (exit 1): Hipson reports it and the next `--continue-session` starts a new session | refused outside a trusted or Git directory; snapshots are Git checkouts | not probed |
+| Usage telemetry | `usage`, `modelUsage` (models used), turns | `turn.completed.usage` (input includes cached input); no model or turn count in `exec --json` | `usage`, turns; no model name |
+| MCP tools, plugins | configured and listed (`hipson agent runtimes`); not execution-verified | configured and listed; not execution-verified | configured and listed; not execution-verified |
+| Code intelligence, browser, computer use | not exercised by headless workers; unverified | unverified | unverified |
+| Controlled isolation | `--setting-sources project --strict-mcp-config --no-session-persistence`, refused when the project has `.claude/settings*.json` (they would load); `--bare` needs an API key | `--ephemeral --ignore-user-config --ignore-rules` | **unsupported**: no documented configuration-free run |
+| Auth status | `claude auth status` (JSON); logged-out runs are refused before launch | `codex login status`; same preflight | none documented; the first run is the evidence |
+
+Discrepancies found and how they were classified:
+
+- Codex `exec resume` with `--sandbox` failed immediately (implementation defect in Hipson; fixed).
+- Antigravity plan mode does not prevent writes (provider limitation). Hipson's review integrity does not rest on
+  it: a reviewer's write lands in its snapshot, which then fails verification (`snapshot gained ... file(s)` or
+  `changed during the review`), and a write to the project is an observed change by a read-only assignment.
+  Prefer Claude or Codex as reviewers where a write must be prevented rather than detected.
+- Antigravity aborts its whole headless response when any command it tries is not granted (provider
+  limitation): a builder that also runs, say, `git diff` ends `permission_denied` even after fixing the code (2 of
+  2 Hipson probe runs, 1 of 2 manual). The check grant removes the most common cause; `--retry` re-runs it.
+- Codex reports no model or turn count in `exec --json` (provider limitation): those fields are `null`.
+- Claude per-project entries keyed by path (`~/.claude.json` projects) and Codex trusted-project settings do not
+  apply to a review snapshot directory (configuration issue by design of path-keyed trust); files in the
+  project (`CLAUDE.md`, `AGENTS.md`, `.claude/settings.json`, skills) do, since the snapshot contains them.
 
 ## First workflow
 
@@ -102,28 +129,28 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   removed before and after each run so a stale one cannot be ingested. `verified` evidence records the CLI
   version and counts only while that version is installed.
 - Sessions: a new run gets a fresh session id, recorded with its task and assignment in the meta file;
-  `--continue-session` resumes only the latest successful session of the same ledger, project, runtime, task and
-  role, read from meta files beside the result, and only a well-formed id. Another task's context is never reused.
+  `--continue-session` resumes only the latest successful session of the same ledger, project (`HIPSON_PROJECT`,
+  so a reviewer in a snapshot keeps its project identity), runtime, task and role, read from regular meta files
+  beside the result (never through a link) whose assignment passed in the ledger, and only a well-formed id.
+  A session whose later resume failed (gone at the provider) is skipped, so the next run starts a new one.
+  Resuming never widens permissions: the mode comes from the recorded assignment on every run. Limit: the
+  session id itself is not in the ledger, so a process that can write the flow's private directory could
+  substitute another id of the same runtime (the assignment check still binds task and role).
+- State files (schema, result, meta) are never written through a symlink or to a non-regular file; a launch
+  that fails (`OSError`) is a `provider_error` with meta; an Antigravity prompt over 100,000 bytes (it is an argv
+  element) is refused before launch.
 
-## Live run through Hipson (2026-11-19, one sample each; not a benchmark)
+## Live runs through Hipson (2026-11-19, one sample each; not a benchmark)
 
-`hipson task flow` on a two-file fixture (`src/parser/pairs.py`, `tests/acceptance.py`), isolated ledger,
-`max_repairs: 1`, builder `hipson agent exec --runtime claude` (native, model from the user's settings:
-`claude-sonnet-5-5`), reviewer `hipson agent exec --runtime agy --model gemini-3.8-flash-high` (native). Evidence
-copied to `/tmp/hipson-flow-evidence/live-e2e-claude-agy` on the run machine.
-
-| Step | Outcome | Brief (bytes / est. tokens) | Runtime input tokens (incl. cache) | Output tokens | Turns | Permission denials | Time |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| build 1 (no check grant yet) | edited correctly, reported `partial`: could not run the check | 2,682 / 670 | 320,057 | 1,722 | 11 | 6 | 17 s |
-| build 2 (`--retry`, check grant) | `completed`, ran the check itself | 5,391 / 1,347 | 204,306 | 706 | 7 | 2 | 10 s |
-| lead verification | `python3 tests/acceptance.py` exit 0, revision-bound | | | | | | 0.08 s |
-| review 1 (no diff in brief) | agy plan mode tried a command, headless auto-denied: `malformed_output` (now classified `permission_denied`) | 7,987 / 1,996 | n/a | n/a | n/a | n/a | 25 s |
-| review 2 (`--retry`, diff in brief) | passed, no findings, task to `review`; lead `task close` -> `done` | 9,746 / 2,436 | 112,610 | 9,072 | 1 | 0 | 77 s |
-
-Readings: the Hipson brief is under 2% of what the runtimes report as input (their own system prompts, tools and
-cached context dominate). The task-scoped check grant removed the reason for the `partial` report; two
-denials remained for other commands the worker tried. Each resume repeated no completed step. Codex was not run
-live: the account hit its usage limit (`try again at 1:16 AM`).
+- Native probe: see the matrix above and `docs/evals/native-probe-2026-11-19-*.json`. Token use of the same
+  builder brief, Hipson vs manual (one sample each, cache state differs between runs): Claude 41.0k cache-write +
+  198.3k cache-read input vs 26.5k + 170.7k; Codex 57.7k input (38.0k cached) vs 116.8k (96.6k cached).
+- Interrupted flow, then resumed (`task flow`, Claude builder with `--continue-session`, Codex reviewer): SIGTERM
+  5 s into the build stopped the flow with `interrupted` (exit 130) and the builder `cancelled`; `--resume`
+  acknowledged it, re-ran the builder once (not counted as a repair), verified, reviewed the snapshot and stopped
+  in `review` (exit 0); the hidden acceptance check passed. The interrupted session had no successful result, so
+  the re-run started a new session instead of resuming a broken one.
+- Live A/B/C comparison: [FLOW_EVAL.md](FLOW_EVAL.md#live-comparison).
 
 ## Limits
 

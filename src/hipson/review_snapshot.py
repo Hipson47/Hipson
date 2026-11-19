@@ -79,7 +79,10 @@ def _workdir(project: str, revision: str) -> str:
     if top is None:
         raise SnapshotError('could not locate the repository root of the project')
     root = Path(os.fsdecode(top).rstrip('\r\n')).resolve()
-    return Path(project).resolve().relative_to(root).as_posix()
+    try:
+        return Path(project).resolve().relative_to(root).as_posix()
+    except ValueError as exc:  # A path spelling Git and the OS disagree on: fail closed, never crash.
+        raise SnapshotError('the project is not inside the repository Git reports for it') from exc
 
 
 def workdir(directory: Path, manifest: dict[str, Any]) -> Path:
@@ -98,6 +101,18 @@ def _repository(project: str, copy: Path, revision: str) -> None:
     source = objects.decode('utf-8', errors='surrogateescape').strip()
     (copy / '.git' / 'objects' / 'info').mkdir(parents=True, exist_ok=True)
     (copy / '.git' / 'objects' / 'info' / 'alternates').write_text(source + '\n', encoding='utf-8')
+    # Line-ending settings decide how Git compares the copied bytes with the base commit: without the project's
+    # own, every CRLF file of a Windows checkout would show as changed in the reviewer's diff.
+    for key in ('core.autocrlf', 'core.eol', 'core.safecrlf'):
+        value = _git(project, 'config', '--get', key)
+        if value is not None and _git(str(copy), 'config', key, value.decode('utf-8', 'replace').strip()) is None:
+            raise SnapshotError(f'could not copy {key} into the snapshot repository')
+    attributes = _git(project, 'rev-parse', '--path-format=absolute', '--git-path', 'info/attributes')
+    if attributes is not None:
+        source_attributes = Path(attributes.decode('utf-8', errors='surrogateescape').strip())
+        if source_attributes.is_file() and not source_attributes.is_symlink():
+            (copy / '.git' / 'info').mkdir(exist_ok=True)
+            (copy / '.git' / 'info' / 'attributes').write_bytes(source_attributes.read_bytes())
     if (_git(str(copy), 'update-ref', '--no-deref', 'HEAD', revision) is None
             or _git(str(copy), 'read-tree', revision) is None):
         raise SnapshotError(f'could not set the snapshot repository to {revision}')

@@ -343,9 +343,14 @@ def _count(*values: Any) -> int | None:
 
 
 def _tokens(usage: Any) -> dict[str, int | None]:
+    """One meaning for every runtime: `input` is uncached input, `cached_input` is read from cache.
+
+    Codex's `input_tokens` includes its `cached_input_tokens`; Claude's and Antigravity's exclude cache reads.
+    """
     usage = usage if isinstance(usage, dict) else {}
+    raw, cached = _count(usage.get("input_tokens")), _count(usage.get("cached_input_tokens"))
     return {
-        "input": _count(usage.get("input_tokens")),
+        "input": max(0, raw - cached) if raw is not None and cached is not None else raw,
         "output": _count(usage.get("output_tokens")),
         "cached_input": _count(usage.get("cached_input_tokens"), usage.get("cache_read_input_tokens"),
                                usage.get("cache_read_tokens")),

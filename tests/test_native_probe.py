@@ -1,11 +1,16 @@
 """The native probe needs no real provider for fixture, report and command coverage."""
 
+import io
 import json
 import os
+import sys
+from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import SkipTest
+from unittest.mock import patch
 
 from scripts import native_probe as probe
-from tests.test_agent_runtimes import RESULT, _fake_cli
+from tests.test_agent_runtimes import RESULT, _env, _fake_cli
 
 CLAUDE = """
 import re, shlex, subprocess
@@ -54,15 +59,14 @@ print(json.dumps({{'subtype': 'success', 'session_id': session, 'structured_outp
 """
 
 
-def test_dry_run_prints_plan_without_launching(monkeypatch, capsys):
-    def unexpected_launch(*args, **kwargs):
-        raise AssertionError("Dry run launched a provider runner")
-
-    monkeypatch.setattr(probe, "run_contained", unexpected_launch)
-    monkeypatch.setattr(probe.task_runner, "supervise", unexpected_launch)
-    assert probe.main(["--runtime", "claude", "--runtime", "codex", "--runtime", "agy", "--dry-run",
-                       "--model", "sample-model", "--effort", "medium"]) == 0
-    output = capsys.readouterr().out
+def test_dry_run_prints_plan_without_launching():
+    stdout = io.StringIO()
+    unexpected_launch = AssertionError("Dry run launched a provider runner")
+    with (patch.object(probe, "run_contained", side_effect=unexpected_launch),
+          patch.object(probe.task_runner, "supervise", side_effect=unexpected_launch), redirect_stdout(stdout)):
+        assert probe.main(["--runtime", "claude", "--runtime", "codex", "--runtime", "agy", "--dry-run",
+                           "--model", "sample-model", "--effort", "medium"]) == 0
+    output = stdout.getvalue()
     plan = json.loads(output)
     assert plan["dry_run"] and len(plan["runs"]) == 15
     assert all(row["exit_code"] is None and row["verdict"] == "not-observed" for row in plan["runs"])
@@ -81,14 +85,17 @@ def test_dry_run_prints_plan_without_launching(monkeypatch, capsys):
             assert "--continue-session" in row["argv"]
 
 
-def test_fixture_and_report_with_fake_claude(tmp_path, monkeypatch, capsys):
+def test_fixture_and_report_with_fake_claude(tmp_path):
+    if sys.platform == "win32":
+        raise SkipTest("native probe Claude hook requires POSIX directory descriptors and no-follow open flags")
     bin_dir = _fake_cli(tmp_path, "claude", CLAUDE.format(result=repr(RESULT), brief=repr(probe.BUILD)))
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setenv("PROBE_FAKE_SECRET", "fake-value-without-a-secret-shaped-prefix")
-    monkeypatch.setenv("HIPSON_HOME", str(tmp_path / "ambient-hipson"))
+    secret = "fake-value-without-a-secret-shaped-prefix"
+    env = {**_env(bin_dir), "PROBE_FAKE_SECRET": secret, "HIPSON_HOME": str(tmp_path / "ambient-hipson")}
     outfile = tmp_path / "probe.json"
-    assert probe.main(["--runtime", "claude", "--out", str(outfile)]) == 0
-    assert capsys.readouterr().out == ""
+    stdout = io.StringIO()
+    with patch.dict(os.environ, env), redirect_stdout(stdout):
+        assert probe.main(["--runtime", "claude", "--out", str(outfile)]) == 0
+    assert stdout.getvalue() == ""
     output = outfile.read_text()
     builder, manual, reviewer, first, second = json.loads(output)["runs"]
     assert all(row["verdict"] == "execution-verified" for row in (builder, manual, reviewer, first, second))
@@ -107,11 +114,11 @@ def test_fixture_and_report_with_fake_claude(tmp_path, monkeypatch, capsys):
     assert second["evidence"]["resumed"] and second["evidence"]["session_requested_matches"]
     assert second["evidence"]["code_word_present"] and second["evidence"]["summary"] == "<code word>"
     assert "~/file" in output and "/home/sample" not in output
-    assert os.environ["PROBE_FAKE_SECRET"] not in output and "not in report" not in output
+    assert secret not in output and "not in report" not in output
     assert not (tmp_path / "ambient-hipson").exists()
 
 
-def test_provider_failures_and_reviewer_write_are_recorded(tmp_path, monkeypatch, capsys):
+def test_provider_failures_and_reviewer_write_are_recorded(tmp_path):
     bin_dir = _fake_cli(tmp_path, "codex", "print('usage limit reached', file=sys.stderr); sys.exit(1)")
     _fake_cli(tmp_path, "agy", """from pathlib import Path
 if args[args.index('--mode') + 1] != 'plan':
@@ -119,9 +126,10 @@ if args[args.index('--mode') + 1] != 'plan':
     sys.exit(1)
 Path('probe-write.txt').touch()
 print(json.dumps({'status': 'SUCCESS', 'structured_output': """ + repr(RESULT) + "}))")
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    assert probe.main(["--runtime", "codex", "--runtime", "agy"]) == 0
-    rows = json.loads(capsys.readouterr().out)["runs"]
+    stdout = io.StringIO()
+    with patch.dict(os.environ, _env(bin_dir)), redirect_stdout(stdout):
+        assert probe.main(["--runtime", "codex", "--runtime", "agy"]) == 0
+    rows = json.loads(stdout.getvalue())["runs"]
     codex, agy = rows[:5], rows[5:]
     assert {row["evidence"]["failure_class"] for row in codex} == {"rate_limited"}
     assert all(row["verdict"] == "error" for row in codex)

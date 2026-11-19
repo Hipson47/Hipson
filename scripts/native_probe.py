@@ -85,20 +85,24 @@ class ReportText:
     """Sanitize only report values that can contain user or runtime text."""
 
     def __init__(self, env: dict[str, str], scratch: Path) -> None:
-        self.scratch = str(scratch)
+        # Both spellings: macOS /var is a link to /private/var, so a path may arrive resolved or not.
+        self.scratches = sorted({str(scratch), os.path.realpath(scratch)}, key=len, reverse=True)
+        self.scratch = self.scratches[0]
         self.homes = sorted({str(Path.home()), env.get("HOME", ""), env.get("USERPROFILE", "")} - {"", "/"},
                             key=len, reverse=True)
-        values = sorted(set(env.values()) - {"", *self.homes, self.scratch}, key=len, reverse=True)
+        values = sorted(set(env.values()) - {"", *self.homes, *self.scratches}, key=len, reverse=True)
         self.env_values = re.compile("|".join(
             rf"(?<!\w){re.escape(value)}(?!\w)" if len(value) < 4 else re.escape(value) for value in values
         )) if values else None
 
     def __call__(self, value: str) -> str:
-        if self.env_values:
-            value = self.env_values.sub(REDACTION, value)
-        value = value.replace(self.scratch, "<scratch>")
+        # Known paths first: an environment value such as TMPDIR (macOS) is a prefix of the scratch path.
+        for scratch in self.scratches:
+            value = value.replace(scratch, "<scratch>")
         for home in self.homes:
             value = value.replace(home, "~")
+        if self.env_values:
+            value = self.env_values.sub(REDACTION, value)
         value = HOME_PATH.sub("~", value)
         return redact_incomplete_private_keys(redact_text(value))
 

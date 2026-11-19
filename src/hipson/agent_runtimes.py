@@ -533,7 +533,9 @@ def exec_worker(args: argparse.Namespace) -> int:
         report, facts = normalize(args.runtime, code, stdout, stderr, last_path)
     except RuntimeFailure as exc:
         meta["stderr_tail"] = redact_text(stderr[-1500:])
-        return fail(exc.kind, exc.detail)
+        detail = exc.detail + (f"; resuming session {resume} failed, so the next --continue-session run starts a new "
+                               "session" if resume else "")
+        return fail(exc.kind, detail)
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.
     meta.update(facts, outcome="ok")
@@ -605,6 +607,7 @@ def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> 
     if not database:
         return None
     candidates = []
+    failed: dict[str, int] = {}  # Session -> newest failed attempt to resume it (gone at the provider, or broken).
     for path in result_path.parent.glob("*.result.json.meta.json"):
         try:
             _check_state_path(path)
@@ -618,6 +621,9 @@ def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> 
         if not isinstance(data, dict):
             continue
         session, assignment = data.get("session"), data.get("assignment")
+        requested = data.get("session_requested")
+        if data.get("resumed") is True and data.get("outcome") != "ok" and isinstance(requested, str):
+            failed[requested] = max(failed.get(requested, 0), info.st_mtime_ns)
         if (data.get("outcome") == "ok" and data.get("runtime") == runtime and data.get("task") == task
                 and data.get("role") == role and data.get("ledger") == database and data.get("project") == project
                 and isinstance(assignment, str) and isinstance(session, str) and SESSION_PATTERN.fullmatch(session)):
@@ -625,7 +631,9 @@ def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> 
     if candidates:
         try:
             with closing(ledger.Ledger(database, create=False, read_only=True)) as store:
-                for _, session, assignment in sorted(candidates, reverse=True):
+                for stamp, session, assignment in sorted(candidates, reverse=True):
+                    if failed.get(session, -1) >= stamp:  # A later resume of it failed: start a new session.
+                        continue
                     try:
                         item = store.activity(assignment)
                     except ledger.LedgerError:  # The meta may name a nonexistent assignment.

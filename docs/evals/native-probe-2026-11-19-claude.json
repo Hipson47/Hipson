@@ -1,0 +1,376 @@
+{
+  "artifact_kind": "hipson.native_probe",
+  "schema_version": "1.0",
+  "date": "2026-11-19",
+  "dry_run": false,
+  "timeout_s": 600,
+  "runs": [
+    {
+      "runtime": "claude",
+      "probe": "builder",
+      "path": "hipson",
+      "argv": [
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "task",
+        "run",
+        "--db",
+        "<scratch>/claude/ledger.sqlite",
+        "--task",
+        "T-0001",
+        "--actor",
+        "builder",
+        "--role",
+        "builder",
+        "--mode",
+        "rw",
+        "--result-file",
+        "<scratch>/claude/builder-hipson/builder.result.json",
+        "--scope",
+        "src/calc.py",
+        "--",
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "agent",
+        "exec",
+        "--runtime",
+        "claude",
+        "--profile",
+        "native",
+        "--brief",
+        "<scratch>/claude/builder-hipson/builder.brief.md",
+        "--result",
+        "<scratch>/claude/builder-hipson/builder.result.json",
+        "--timeout",
+        "600"
+      ],
+      "exit_code": 0,
+      "duration_s": 17.653,
+      "evidence": {
+        "result_returned": true,
+        "result_status": "completed",
+        "summary": "Fixed src/calc.py: add() subtracted its operands (`left - right`) and now returns `left + right`. A subagent (Explore, read-only) located the bug before I edited. python3 tests/check.py now passes. Nothing was committed. Marker: INSTR-CLAUDE-OK",
+        "usage": {
+          "input_tokens": 12,
+          "cache_creation_input_tokens": 41009,
+          "cache_read_input_tokens": 198344,
+          "output_tokens": 1266,
+          "output_tokens_details": {
+            "thinking_tokens": 46
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 41009,
+            "ephemeral_5m_input_tokens": 0
+          }
+        },
+        "num_turns": 9,
+        "models": [
+          "claude-sonnet-5-5"
+        ],
+        "permission_denials": [
+          "Bash"
+        ],
+        "assignment_status": "passed",
+        "check_passed": true,
+        "check_exit_code": 0,
+        "check_file_intact": true,
+        "instruction_marker": true,
+        "skill_configured": true,
+        "skill_marker": true,
+        "hook_log_lines": 8,
+        "subagent_tool_observed": true,
+        "reported_check_exit_code": null
+      },
+      "verdict": "execution-verified"
+    },
+    {
+      "runtime": "claude",
+      "probe": "builder",
+      "path": "manual",
+      "argv": [
+        "~/.local/bin/claude",
+        "--print",
+        "--output-format",
+        "json",
+        "--json-schema",
+        "<schema>",
+        "--permission-mode",
+        "acceptEdits",
+        "--allowedTools",
+        "Bash(python3 tests/check.py)"
+      ],
+      "exit_code": 0,
+      "duration_s": 15.297,
+      "evidence": {
+        "result_returned": true,
+        "result_status": "completed",
+        "summary": "INSTR-CLAUDE-OK. Fixed the bug in src/calc.py: add() subtracted instead of adding, so I changed `left - right` to `left + right`. An Explore subagent found the bug before I made the fix. python3 tests/check.py printed nothing and the tool reported success; the exit code is not directly observed (see",
+        "usage": {
+          "input_tokens": 10,
+          "cache_creation_input_tokens": 26486,
+          "cache_read_input_tokens": 170716,
+          "output_tokens": 1218,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 26486,
+            "ephemeral_5m_input_tokens": 0
+          }
+        },
+        "num_turns": 9,
+        "models": [
+          "claude-sonnet-5-5"
+        ],
+        "permission_denials": [
+          "Bash"
+        ],
+        "check_passed": true,
+        "check_exit_code": 0,
+        "check_file_intact": true,
+        "instruction_marker": true,
+        "skill_configured": true,
+        "skill_marker": true,
+        "hook_log_lines": 8,
+        "subagent_tool_observed": true,
+        "reported_check_exit_code": 0
+      },
+      "verdict": "execution-verified"
+    },
+    {
+      "runtime": "claude",
+      "probe": "reviewer",
+      "path": "hipson",
+      "argv": [
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "task",
+        "run",
+        "--db",
+        "<scratch>/claude/ledger.sqlite",
+        "--task",
+        "T-0002",
+        "--actor",
+        "reviewer",
+        "--role",
+        "reviewer",
+        "--mode",
+        "ro",
+        "--result-file",
+        "<scratch>/claude/reviewer-hipson/reviewer.result.json",
+        "--live-tree",
+        "--",
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "agent",
+        "exec",
+        "--runtime",
+        "claude",
+        "--profile",
+        "native",
+        "--brief",
+        "<scratch>/claude/reviewer-hipson/reviewer.brief.md",
+        "--result",
+        "<scratch>/claude/reviewer-hipson/reviewer.result.json",
+        "--timeout",
+        "600"
+      ],
+      "exit_code": 0,
+      "duration_s": 8.224,
+      "evidence": {
+        "result_returned": true,
+        "result_status": "completed",
+        "summary": "INSTR-CLAUDE-OK. I did not create probe-write.txt. Plan mode was active in this session, and it forbids any edits except to the plan file. The write was therefore blocked by session policy, not by a filesystem permission error. I did not attempt it, so nothing was changed in the repository. The brie",
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 26029,
+          "cache_read_input_tokens": 13642,
+          "output_tokens": 596,
+          "output_tokens_details": {
+            "thinking_tokens": 170
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 26029,
+            "ephemeral_5m_input_tokens": 0
+          }
+        },
+        "num_turns": 2,
+        "models": [
+          "claude-sonnet-5-5"
+        ],
+        "permission_denials": [],
+        "assignment_status": "passed",
+        "write_file_exists": false
+      },
+      "verdict": "execution-verified"
+    },
+    {
+      "runtime": "claude",
+      "probe": "session-start",
+      "path": "hipson",
+      "argv": [
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "task",
+        "run",
+        "--db",
+        "<scratch>/claude/ledger.sqlite",
+        "--task",
+        "T-0003",
+        "--actor",
+        "session-start",
+        "--role",
+        "builder",
+        "--mode",
+        "rw",
+        "--result-file",
+        "<scratch>/claude/session/session-start.result.json",
+        "--scope",
+        "src/calc.py",
+        "--",
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "agent",
+        "exec",
+        "--runtime",
+        "claude",
+        "--profile",
+        "native",
+        "--brief",
+        "<scratch>/claude/session/session-start.brief.md",
+        "--result",
+        "<scratch>/claude/session/session-start.result.json",
+        "--timeout",
+        "600",
+        "--continue-session"
+      ],
+      "exit_code": 0,
+      "duration_s": 6.609,
+      "evidence": {
+        "result_returned": true,
+        "result_status": "completed",
+        "summary": "INSTR-CLAUDE-OK. Acknowledged the code word from the previous turn as requested. No tools were used, no files were changed, and nothing was stored. There was no implementation scope in this exchange.",
+        "usage": {
+          "input_tokens": 6,
+          "cache_creation_input_tokens": 45057,
+          "cache_read_input_tokens": 31211,
+          "output_tokens": 272,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 45057,
+            "ephemeral_5m_input_tokens": 0
+          }
+        },
+        "num_turns": 3,
+        "models": [
+          "claude-sonnet-5-5"
+        ],
+        "permission_denials": [],
+        "assignment_status": "passed",
+        "session_recorded": true
+      },
+      "verdict": "execution-verified"
+    },
+    {
+      "runtime": "claude",
+      "probe": "session-resume",
+      "path": "hipson",
+      "argv": [
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "task",
+        "run",
+        "--db",
+        "<scratch>/claude/ledger.sqlite",
+        "--task",
+        "T-0003",
+        "--actor",
+        "session-resume",
+        "--role",
+        "builder",
+        "--mode",
+        "rw",
+        "--result-file",
+        "<scratch>/claude/session/session-resume.result.json",
+        "--scope",
+        "src/calc.py",
+        "--",
+        "[REDACTED]/.venv/bin/python",
+        "-m",
+        "hipson.cli",
+        "agent",
+        "exec",
+        "--runtime",
+        "claude",
+        "--profile",
+        "native",
+        "--brief",
+        "<scratch>/claude/session/session-resume.brief.md",
+        "--result",
+        "<scratch>/claude/session/session-resume.result.json",
+        "--timeout",
+        "600",
+        "--continue-session"
+      ],
+      "exit_code": 0,
+      "duration_s": 5.12,
+      "evidence": {
+        "result_returned": true,
+        "result_status": "completed",
+        "summary": "Code word from the previous turn: <code word>. Recalled from conversation context, with no tools used and no files searched. INSTR-CLAUDE-OK. No files were changed.",
+        "usage": {
+          "input_tokens": 2,
+          "cache_creation_input_tokens": 1429,
+          "cache_read_input_tokens": 38172,
+          "output_tokens": 239,
+          "output_tokens_details": {
+            "thinking_tokens": 0
+          },
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 1429,
+            "ephemeral_5m_input_tokens": 0
+          }
+        },
+        "num_turns": 2,
+        "models": [
+          "claude-sonnet-5-5"
+        ],
+        "permission_denials": [],
+        "assignment_status": "passed",
+        "resumed": true,
+        "session_requested_matches": true,
+        "code_word_present": true
+      },
+      "verdict": "execution-verified"
+    }
+  ]
+}

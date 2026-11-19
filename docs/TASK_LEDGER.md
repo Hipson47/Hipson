@@ -447,13 +447,23 @@ coordination guarantee between cooperating processes, not a security boundary. T
 `task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
 not sandbox.
 
-**Protected paths.** Before each build the flow saves the content identity of the paths the declared checks
-name (an existing project path given as a check argument, e.g. `tests/acceptance.py`), the runtime
-configuration native workers load from a project (`.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`,
-`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) and the spec's optional `protected` list. When the builder ends and any
-of them changed, even inside its write scope, the flow stops with `needs_lead` before anything verifies or
-reviews it; restoring them and resuming continues. A test a check reaches only indirectly (a whole suite) is
-protected only when the spec lists it.
+**Protected paths.** Before each build the flow saves the content identity (content and executable bit, links
+by target) of the paths the declared checks name that lie outside the builder's write scope (an existing project
+path given as a check argument, e.g. `tests/acceptance.py`; `ruff check src` or `py_compile` of the file being
+fixed overlap the scope and are not protected), the runtime configuration native workers load from a project
+(`.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) and the spec's
+optional `protected` list. When the builder ends, before anything verifies or reviews its work, the flow
+compares them once; any change, even inside the builder's scope, stops it with `needs_lead`; restoring them and
+resuming continues. A builder allowed to write the acceptance tests needs them listed under `protected`, and a
+test a check reaches only indirectly (a whole suite) is protected only when listed. Later rewrites by the checks
+themselves (a report file they name) are not blamed on the builder.
+
+Snapshot creation fails closed, refusing the reviewer before an assignment exists (`task run` exit 75, the flow
+`verification_inconclusive`), for: content over the fingerprint hash budget, special files, symlinks that point
+out of the project, Git submodules, a repository without a commit, and Git operations that fail or time out
+(the snapshot's `read-tree` uses the same bounded Git helper). `--live-tree` runs such a reviewer anyway, without
+satisfying a required review. The snapshot copies the project's line-ending settings (`core.autocrlf`,
+`core.eol`, `core.safecrlf`, `info/attributes`), so a CRLF checkout shows only real changes.
 
 Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and
 recorded identity); a reviewer that reads the live project by absolute path is outside it. Runtimes may not

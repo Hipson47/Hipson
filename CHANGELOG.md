@@ -9,9 +9,10 @@
   and ends, and records `source=snapshot`; a required review of the live tree, or of a snapshot that changed,
   never qualifies. The flow builds the reviewer's diff from the same copy and refuses to review a tree that is not
   the verified one. Snapshots are removed when the reviewer ends and swept after an interruption.
-- `task flow` protects acceptance and runtime configuration: paths the checks name, `.claude`, `.codex`,
-  `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and the spec's `protected` list. A builder
-  that changes one, even inside its scope, stops the flow with `needs_lead` before verification or review.
+- `task flow` protects acceptance and runtime configuration: check-named paths outside the builder's scope,
+  `.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and the spec's new
+  `protected` list (for tests inside the scope). A builder that changes one, even inside its scope, stops the flow
+  with `needs_lead` before verification or review.
 - `hipson agent exec` hardening: runtime state files (schema, result, meta) are never written through a symlink;
   `--continue-session` uses only regular meta files whose assignment passed in the ledger for the same task and
   role, and identifies the project by `HIPSON_PROJECT` (stable across review snapshots); a launch `OSError` is a

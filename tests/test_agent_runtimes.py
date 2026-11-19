@@ -2,11 +2,12 @@
 
 import argparse
 import errno
+import io
 import json
 import os
 import stat
 import sys
-from contextlib import closing
+from contextlib import chdir, closing, contextmanager, redirect_stderr
 from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
@@ -194,23 +195,19 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'se
 """
 
 
-@pytest.fixture
-def worker(tmp_path, monkeypatch):
+@contextmanager
+def _worker(tmp_path):
     project = tmp_path / "project"
-    project.mkdir()
+    project.mkdir(parents=True)
     db = tmp_path / "ledger.sqlite"
     with closing(ledger.Ledger(db)) as store:
         task = store.open_task(project=project, title="Review", objective="Review project")["id"]
         assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
     brief, result = tmp_path / "brief.md", tmp_path / "first.result.json"
     brief.write_text("review it", encoding="utf-8")
-    for key, value in {"HIPSON_ROLE": "worker", "HIPSON_TASK": task, "HIPSON_ASSIGNMENT": assignment,
-                       "HIPSON_RUN_DB": str(db), "HIPSON_FLOW_BRIEF": str(brief), "HIPSON_FLOW_RESULT": str(result),
-                       "HIPSON_HOME": str(tmp_path / "hh"), "FAKE_LOG": str(tmp_path / "calls.jsonl")}.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.delenv("HIPSON_PROJECT", raising=False)
-    monkeypatch.delenv("FAKE_MODE", raising=False)
-    monkeypatch.chdir(project)
+    env = {"HIPSON_ROLE": "worker", "HIPSON_TASK": task, "HIPSON_ASSIGNMENT": assignment,
+           "HIPSON_RUN_DB": str(db), "HIPSON_FLOW_BRIEF": str(brief), "HIPSON_FLOW_RESULT": str(result),
+           "HIPSON_HOME": str(tmp_path / "hh"), "FAKE_LOG": str(tmp_path / "calls.jsonl")}
     parser = argparse.ArgumentParser()
     runtimes.configure(parser.add_subparsers())
 
@@ -218,85 +215,95 @@ def worker(tmp_path, monkeypatch):
         args = parser.parse_args(["exec", "--runtime", runtime, *options])
         return args.func(args)
 
-    return brief, result, run
+    with patch.dict(os.environ, env), chdir(project):
+        os.environ.pop("HIPSON_PROJECT", None)
+        os.environ.pop("FAKE_MODE", None)
+        yield brief, result, run
 
 
-@pytest.mark.parametrize("filename", ["first.result.schema.json", "first.result.json", "first.result.json.meta.json"])
-def test_exec_refuses_symlinked_runtime_state(worker, tmp_path, capsys, filename):
-    _, result, run = worker
-    target = tmp_path / "untouched.txt"
-    target.write_text("keep this", encoding="utf-8")
-    link = result.with_name(filename)
-    try:
-        link.symlink_to(target)
-    except OSError:
-        if sys.platform != "win32":
-            raise
-        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
-    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", CLAUDE_WORKER))):
-        code = run("claude")
-    assert link.is_symlink() and target.read_text(encoding="utf-8") == "keep this"
-    assert code == runtimes.EXIT["unsupported"] and not (tmp_path / "calls.jsonl").exists()
-    detail = capsys.readouterr().err
-    assert filename in detail and "symlink" in detail and "remove" in detail
+def test_exec_refuses_symlinked_runtime_state(tmp_path):
+    filenames = ("first.result.schema.json", "first.result.json", "first.result.json.meta.json")
+    for index, filename in enumerate(filenames):
+        case_dir = tmp_path / str(index)
+        stderr = io.StringIO()
+        with _worker(case_dir) as (_, result, run):
+            target = case_dir / "untouched.txt"
+            target.write_text("keep this", encoding="utf-8")
+            link = result.with_name(filename)
+            try:
+                link.symlink_to(target)
+            except OSError:
+                if sys.platform != "win32":
+                    raise
+                raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
+            with patch.dict(os.environ, _env(_fake_cli(case_dir, "claude", CLAUDE_WORKER))), redirect_stderr(stderr):
+                code = run("claude")
+            assert link.is_symlink() and target.read_text(encoding="utf-8") == "keep this", filename
+            assert code == runtimes.EXIT["unsupported"] and not (case_dir / "calls.jsonl").exists(), filename
+            detail = stderr.getvalue()
+            assert filename in detail and "symlink" in detail and "remove" in detail, (filename, detail)
 
 
-def test_exec_records_launch_oserror_as_provider_error(worker, tmp_path, capsys):
-    _, result, run = worker
+def test_exec_records_launch_oserror_as_provider_error(tmp_path):
     launch_error = OSError(errno.E2BIG, "Argument list too long")
-    with (patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
+    stderr = io.StringIO()
+    with (_worker(tmp_path) as (_, result, run), redirect_stderr(stderr),
+          patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
           patch.object(runtimes.subprocess, "run", side_effect=launch_error)):
         assert run("agy") == runtimes.EXIT["provider_error"]
     meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
     assert meta["outcome"] == "provider_error" and "Argument list too long" in meta["detail"]
-    assert "could not launch agy" in capsys.readouterr().err
+    assert "could not launch agy" in stderr.getvalue()
     assert not result.exists()
 
 
-def test_exec_preflight_stops_a_logged_out_runtime_before_launch(worker, tmp_path, capsys):
-    _, result, run = worker
+def test_exec_preflight_stops_a_logged_out_runtime_before_launch(tmp_path):
     launched = tmp_path / "launched"
     body = f"open({str(launched)!r}, 'w').write('x'); sys.exit(0)"
-    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", body, auth='{"loggedIn": false}'))):
+    stderr = io.StringIO()
+    with (_worker(tmp_path) as (_, result, run), redirect_stderr(stderr),
+          patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", body, auth='{"loggedIn": false}')))):
         assert run("claude") == runtimes.EXIT["auth_required"]
     assert not launched.exists() and not result.exists()
     meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
     assert meta["outcome"] == "auth_required" and meta["preflight"] == {"auth": "logged_out"}
-    assert "claude reports it is not logged in (auth status)" in capsys.readouterr().err
+    assert "claude reports it is not logged in (auth status)" in stderr.getvalue()
 
 
-def test_exec_refuses_oversize_agy_prompt_before_launch(worker, tmp_path, capsys):
-    brief, result, run = worker
-    brief.write_text("é" * 49_950, encoding="utf-8")  # The worker rules push the full prompt over 100,000 bytes.
-    with (patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
+def test_exec_refuses_oversize_agy_prompt_before_launch(tmp_path):
+    stderr = io.StringIO()
+    with (_worker(tmp_path) as (brief, result, run), redirect_stderr(stderr),
+          patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
           patch.object(runtimes.subprocess, "run", side_effect=AssertionError("unexpected launch")) as launch):
+        brief.write_text("é" * 49_950, encoding="utf-8")  # The worker rules push the prompt over 100,000 bytes.
         assert run("agy") == runtimes.EXIT["unsupported"]
     launch.assert_not_called()
     meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
     assert meta["outcome"] == "unsupported" and "100000 byte" in meta["detail"]
-    assert "100000 byte argv limit" in capsys.readouterr().err
+    assert "100000 byte argv limit" in stderr.getvalue()
 
 
-@pytest.mark.parametrize("filename", ["settings.json", "settings.local.json"])
-def test_controlled_claude_refuses_task_project_settings_in_snapshot(worker, tmp_path, monkeypatch, capsys, filename):
-    _, result, run = worker
-    project = Path.cwd()
-    settings = project / ".claude" / filename
-    settings.parent.mkdir()
-    settings.write_text("{}", encoding="utf-8")
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    monkeypatch.setenv("HIPSON_PROJECT", str(project))
-    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(snapshot))
-    monkeypatch.chdir(snapshot)
-    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", CLAUDE_WORKER))):
-        assert run("claude", "--profile", "controlled") == runtimes.EXIT["unsupported"]
-        assert not (tmp_path / "calls.jsonl").exists()
-        meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
-        assert meta["outcome"] == "unsupported" and str(settings) in meta["detail"]
-        assert "use profile native or remove" in meta["detail"]
-        assert run("claude", "--profile", "native") == 0
-    assert meta["detail"] in capsys.readouterr().err
+def test_controlled_claude_refuses_task_project_settings_in_snapshot(tmp_path):
+    for filename in ("settings.json", "settings.local.json"):
+        case_dir = tmp_path / filename
+        stderr = io.StringIO()
+        with _worker(case_dir) as (_, result, run):
+            project = Path.cwd()
+            settings = project / ".claude" / filename
+            settings.parent.mkdir()
+            settings.write_text("{}", encoding="utf-8")
+            snapshot = case_dir / "snapshot"
+            snapshot.mkdir()
+            env = {**_env(_fake_cli(case_dir, "claude", CLAUDE_WORKER)),
+                   "HIPSON_PROJECT": str(project), "HIPSON_REVIEW_SNAPSHOT": str(snapshot)}
+            with patch.dict(os.environ, env), chdir(snapshot), redirect_stderr(stderr):
+                assert run("claude", "--profile", "controlled") == runtimes.EXIT["unsupported"], filename
+                assert not (case_dir / "calls.jsonl").exists(), filename
+                meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+                assert meta["outcome"] == "unsupported" and str(settings) in meta["detail"], (filename, meta)
+                assert "use profile native or remove" in meta["detail"], (filename, meta)
+                assert run("claude", "--profile", "native") == 0, (filename, stderr.getvalue())
+            assert meta["detail"] in stderr.getvalue(), (filename, stderr.getvalue())
 
 
 def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evidence(tmp_path):
@@ -398,7 +405,7 @@ def test_failed_or_stale_runtime_output_is_never_success(tmp_path):
         runtimes.normalize("codex", 0, "", "", last)
 
 
-def test_session_continuation_requires_a_passed_assignment_of_the_same_task_and_role(tmp_path, monkeypatch):
+def test_session_continuation_requires_a_passed_assignment_of_the_same_task_and_role(tmp_path):
     result = tmp_path / "build-2.result.json"
     # _ledger_path() resolves the ledger, so the recorded paths are resolved ones (C:\... on Windows).
     ledger_a = str((tmp_path / "a.sqlite").resolve())
@@ -437,38 +444,34 @@ def test_session_continuation_requires_a_passed_assignment_of_the_same_task_and_
     meta("wrong-task-assignment", assignment=other_task_assignment)
     meta("wrong-role-assignment", assignment=reviewer)
     (tmp_path / "directory.result.json.meta.json").mkdir()
-    monkeypatch.setenv("HIPSON_RUN_DB", ledger_a)
-    monkeypatch.delenv("HIPSON_PROJECT", raising=False)
-    monkeypatch.chdir(tmp_path)
-    assert runtimes._previous_session(result, "claude", task, "builder") == "session-good"
-    good.unlink()
-    assert runtimes._previous_session(result, "claude", task, "builder") is None
-    (tmp_path / "array.result.json.meta.json").write_text("[1]", encoding="utf-8")
-    assert runtimes._previous_session(result, "claude", task, "builder") is None
+    with patch.dict(os.environ, {"HIPSON_RUN_DB": ledger_a}), chdir(tmp_path):
+        os.environ.pop("HIPSON_PROJECT", None)
+        assert runtimes._previous_session(result, "claude", task, "builder") == "session-good"
+        good.unlink()
+        assert runtimes._previous_session(result, "claude", task, "builder") is None
+        (tmp_path / "array.result.json.meta.json").write_text("[1]", encoding="utf-8")
+        assert runtimes._previous_session(result, "claude", task, "builder") is None
 
 
-def test_session_continuation_ignores_symlinked_meta(worker, tmp_path):
-    _, result, _ = worker
-    task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
-    with closing(ledger.Ledger(db)) as store:
-        store.finish(assignment, result="passed", summary="passed")
-    target = tmp_path / "external.json"
-    target.write_text(json.dumps({"outcome": "ok", "runtime": "claude", "task": task, "role": "reviewer",
-                                 "ledger": str(Path(db).resolve()), "project": os.getcwd(), "assignment": assignment,
-                                 "session": "session-from-link"}), encoding="utf-8")
-    try:
-        (tmp_path / "linked.result.json.meta.json").symlink_to(target)
-    except OSError:
-        if sys.platform != "win32":
-            raise
-        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
-    assert runtimes._previous_session(result, "claude", task, "reviewer") is None
+def test_session_continuation_ignores_symlinked_meta(tmp_path):
+    with _worker(tmp_path) as (_, result, _):
+        task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
+        with closing(ledger.Ledger(db)) as store:
+            store.finish(assignment, result="passed", summary="passed")
+        target = tmp_path / "external.json"
+        target.write_text(json.dumps({"outcome": "ok", "runtime": "claude", "task": task, "role": "reviewer",
+                                      "ledger": str(Path(db).resolve()), "project": os.getcwd(), "assignment": assignment,
+                                      "session": "session-from-link"}), encoding="utf-8")
+        try:
+            (tmp_path / "linked.result.json.meta.json").symlink_to(target)
+        except OSError:
+            if sys.platform != "win32":
+                raise
+            raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
+        assert runtimes._previous_session(result, "claude", task, "reviewer") is None
 
 
-def test_exec_resumes_reviewer_session_across_snapshots_using_task_project(worker, tmp_path, monkeypatch, capsys):
-    _, result, run = worker
-    project = os.getcwd()
-    task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
+def test_exec_resumes_reviewer_session_across_snapshots_using_task_project(tmp_path):
     bin_dir = _fake_cli(tmp_path, "codex", f"""
 assert os.path.samefile(os.getcwd(), os.environ['HIPSON_REVIEW_SNAPSHOT'])
 if args[1] != 'resume':
@@ -480,30 +483,31 @@ with open(args[args.index('--output-last-message') + 1], 'w', encoding='utf-8') 
     json.dump({RESULT!r}, last)
 print(json.dumps({{'type': 'thread.started', 'thread_id': session}}))
 """)
-    monkeypatch.setenv("PATH", _env(bin_dir)["PATH"])
-    monkeypatch.setenv("HIPSON_PROJECT", project)
-    first_snapshot = tmp_path / "snapshot-1"
-    first_snapshot.mkdir()
-    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(first_snapshot))
-    monkeypatch.chdir(first_snapshot)
-    assert run("codex") == 0
-    first = json.loads(result.with_name(result.name + ".meta.json").read_text())
-    assert first["project"] == project and first["session"] == "thread-snapshot"
+    stderr = io.StringIO()
+    with _worker(tmp_path) as (_, result, run), redirect_stderr(stderr):
+        project = os.getcwd()
+        task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
+        env = {**_env(bin_dir), "HIPSON_PROJECT": project}
+        first_snapshot = tmp_path / "snapshot-1"
+        first_snapshot.mkdir()
+        with patch.dict(os.environ, {**env, "HIPSON_REVIEW_SNAPSHOT": str(first_snapshot)}), chdir(first_snapshot):
+            assert run("codex") == 0
+        first = json.loads(result.with_name(result.name + ".meta.json").read_text())
+        assert first["project"] == project and first["session"] == "thread-snapshot"
 
-    with closing(ledger.Ledger(db)) as store:
-        store.finish(assignment, result="passed", summary="passed")
-        next_assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
-    second_snapshot = tmp_path / "snapshot-2"
-    second_snapshot.mkdir()
-    monkeypatch.setenv("HIPSON_ASSIGNMENT", next_assignment)
-    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(second_snapshot))
-    monkeypatch.chdir(second_snapshot)
-    result = result.with_name("second.result.json")
-    assert run("codex", "--continue-session", "--result", str(result)) == 0
-    second = json.loads(result.with_name(result.name + ".meta.json").read_text())
-    assert second["project"] == project and second["resumed"]
-    assert second["session_requested"] == second["session"] == first["session"]
-    assert capsys.readouterr().err.count("codex native session=thread-snapshot") == 2
+        with closing(ledger.Ledger(db)) as store:
+            store.finish(assignment, result="passed", summary="passed")
+            next_assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
+        second_snapshot = tmp_path / "snapshot-2"
+        second_snapshot.mkdir()
+        result = result.with_name("second.result.json")
+        with (patch.dict(os.environ, {**env, "HIPSON_ASSIGNMENT": next_assignment,
+                                     "HIPSON_REVIEW_SNAPSHOT": str(second_snapshot)}), chdir(second_snapshot)):
+            assert run("codex", "--continue-session", "--result", str(result)) == 0
+        second = json.loads(result.with_name(result.name + ".meta.json").read_text())
+        assert second["project"] == project and second["resumed"]
+        assert second["session_requested"] == second["session"] == first["session"]
+    assert stderr.getvalue().count("codex native session=thread-snapshot") == 2
 
 
 def test_grants_skip_environment_assignment_words_and_verified_needs_the_same_version(tmp_path):
@@ -561,3 +565,34 @@ def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_p
     assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(python3 tests/check.py)"]}}
     argv, _ = runtimes.build_command("agy", mode="ro", **common)
     assert "--settings" not in argv
+
+
+def test_a_session_whose_resume_failed_is_not_resumed_again(tmp_path):
+    result = tmp_path / "build-3.result.json"
+    database = str((tmp_path / "l.sqlite").resolve())
+    with closing(ledger.Ledger(database)) as store:
+        task = store.open_task(project=tmp_path, title="Build", objective="Build project")["id"]
+        older, newer = (store.assign(task, actor="test", role="builder", mode="ro")["id"] for _ in range(2))
+        for item in (older, newer):
+            store.finish(item, result="passed", summary="passed")
+
+    def meta(name, stamp, **values):
+        data = {"outcome": "ok", "runtime": "claude", "task": task, "role": "builder", "ledger": database,
+                "project": str(tmp_path), "assignment": older, **values}
+        path = tmp_path / f"{name}.result.json.meta.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        os.utime(path, (stamp, stamp))
+
+    meta("build-1", 100, session="session-old")
+    meta("build-2", 200, session="session-new", assignment=newer)
+    with patch.dict(os.environ, {"HIPSON_RUN_DB": database}), chdir(tmp_path):
+        os.environ.pop("HIPSON_PROJECT", None)
+        assert runtimes._previous_session(result, "claude", task, "builder") == "session-new"
+        # The provider no longer has session-new: that attempt failed, so the older good session is next.
+        meta("build-3", 300, outcome="provider_error", resumed=True, session_requested="session-new", session=None)
+        assert runtimes._previous_session(result, "claude", task, "builder") == "session-old"
+        # A failure older than the success does not count against it.
+        meta("build-0", 50, outcome="provider_error", resumed=True, session_requested="session-old", session=None)
+        assert runtimes._previous_session(result, "claude", task, "builder") == "session-old"
+        meta("build-4", 400, outcome="provider_error", resumed=True, session_requested="session-old", session=None)
+        assert runtimes._previous_session(result, "claude", task, "builder") is None
