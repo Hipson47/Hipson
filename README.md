@@ -25,6 +25,8 @@
 - Verify and close (runs the checks): `hipson task close --task T-0001`
 - One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
 - Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Build, verify, independent review, bounded repair (resumable): `hipson task flow --spec flow.json` ([TASK_LEDGER](https://github.com/Hipson47/Hipson/blob/main/docs/TASK_LEDGER.md#implementation-flow-and-the-review-gate-17))
+- Which agent CLIs are installed, logged in and verified: `hipson agent runtimes` ([AGENT_RUNTIMES](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_RUNTIMES.md))
 
 <table>
 <tr>
@@ -86,7 +88,7 @@ branch `feat/task-ledger`, 2026-10-25:
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
 | Test suite | 735 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (stabilization, 2026-10-28; 404 tests when the ledger landed) |
-| Mutation gate | 73.39%: 1,782 / 2,428 mutants killed across four modules (approvals, evidence, redaction, sandbox); the committed baseline (68.66% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability and checkpoint records (`ledger.py`, `task_verification.py`; 77.31%, 2,262 / 2,926; baseline 77.30% minimum, at most 657 survivors) |
+| Mutation gate | 73.39%: 1,782 / 2,428 mutants killed across four modules (approvals, evidence, redaction, sandbox); the committed baseline (68.66% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; 80.28%, 2,744 / 3,418; baseline 80.28% minimum, at most 667 survivors) |
 | Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |

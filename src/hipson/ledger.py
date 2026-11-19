@@ -6,6 +6,7 @@ lexical coordination records; they do not enforce filesystem access.
 
 from __future__ import annotations
 
+import copy
 import ctypes
 import json
 import os
@@ -25,12 +26,14 @@ from typing import Any, TypedDict, cast
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
 ROLES = ("builder", "reviewer", "explorer", "researcher")
 MODES = ("ro", "rw")
+# 'required': done needs an independent, read-only review of the verified tree (see review_state).
+REVIEW_POLICIES = ("none", "required")
 RESULTS = ("passed", "failed", "cancelled")
 FINDING_SEVERITIES = ("blocking", "major", "minor", "info")
 FINDING_STATUSES = ("open", "fixed", "wontfix", "duplicate")
@@ -104,7 +107,8 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision >= 0),
         checks TEXT NOT NULL DEFAULT '[]',
-        needs TEXT NOT NULL DEFAULT '[]'
+        needs TEXT NOT NULL DEFAULT '[]',
+        review_policy TEXT NOT NULL DEFAULT 'none' CHECK (review_policy IN ('none', 'required'))
     )""",
     """CREATE TABLE assignments (
         id TEXT PRIMARY KEY,
@@ -233,6 +237,20 @@ MIGRATION_V9_TO_V10 = (
     "ALTER TABLE assignments ADD COLUMN needs TEXT",
     "UPDATE schema_version SET version = 10 WHERE singleton = 1",
 )
+MIGRATION_V10_TO_V11 = (
+    "ALTER TABLE tasks ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'none'"
+    " CHECK (review_policy IN ('none', 'required'))",
+    "UPDATE schema_version SET version = 11 WHERE singleton = 1",
+)
+MIGRATIONS = (
+    MIGRATION_V1_TO_V2, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4, MIGRATION_V4_TO_V5, MIGRATION_V5_TO_V6,
+    MIGRATION_V6_TO_V7, MIGRATION_V7_TO_V8, MIGRATION_V8_TO_V9, MIGRATION_V9_TO_V10, MIGRATION_V10_TO_V11,
+)
+# One version per migration, plus the current one. Derived so the Ledger guard and `hipson init`
+# cannot drift apart again, and listing SCHEMA_VERSION separately keeps the refusal fail-closed:
+# bumping it without adding a migration leaves the previous version unsupported and loud, rather
+# than accepting a store this build would silently never migrate.
+SUPPORTED_SCHEMA_VERSIONS = (*range(1, len(MIGRATIONS) + 1), SCHEMA_VERSION)
 MAX_NEEDS = 16
 NEED_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,39}")
 MAX_CHECKS = 16
@@ -250,6 +268,7 @@ class Task(TypedDict):
     acceptance: list[str]
     checks: list[list[str]]
     needs: list[str]
+    review_policy: str
     status: str
     lead: str
     created_at: str
@@ -340,6 +359,7 @@ class TaskView(Task):
     claims: list[Claim]
     findings: list[Finding]
     verification: dict[str, Any]
+    review: dict[str, Any]
 
 
 class TaskEvent(TypedDict):
@@ -369,13 +389,87 @@ class CloseRefusedError(LedgerError):
 RESERVED_EVENT_TYPES = frozenset({
     "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
     "claim_conflict", "reopened", "override", "observed", "routed", "checkpointed", "restored",
+    "review_policy", "flow", "reviewed",
 })
+REVIEWED_PATTERN = re.compile(r": (start|end) revision=(\S+); fingerprint=(\S+?)(?:; source=(live|snapshot))?$")
+VERIFIED_PATTERN = re.compile(r"; revision=(\S+); fingerprint=(\S+); changed=")
 
 
 def reserved_event_type(type: str) -> bool:
     """Lifecycle readers trust these types; free-form events must not forge them."""
     return (type in RESERVED_EVENT_TYPES or type.startswith("finding_")
             or (type.endswith("_override") and type != "project_mismatch_override"))
+
+
+def review_state(policy: str, lead: str, assignments: Sequence[Assignment], assigned_seq: dict[str, int],
+                 builder_seq: int, verified_seq: int, trees: dict[str, dict[str, tuple[str, ...]]] | None = None,
+                 verified_tree: tuple[str, str] | None = None) -> dict[str, Any]:
+    """Decide whether a required independent review covers the current candidate.
+
+    A review qualifies when a read-only reviewer, whose actor label differs from the lead and every builder,
+    passed with a completed structured result, was assigned after both the latest finished builder and the
+    latest accepted lead verification, and saw the verified tree: `task run` gives a reviewer an immutable snapshot
+    of the candidate (review_snapshot) and records its revision and fingerprint, re-hashed from the snapshot, when
+    the reviewer starts and ends (`reviewed` events, source=snapshot); both must equal the accepted verification's.
+    A review of the live working tree (source=live, or older events without a source) never qualifies: equal
+    fingerprints at its start and end do not prove what it read in between. `trees=None` checks ordering only
+    (pure contracts); the ledger view always passes them.
+    Labels are not authenticated: this is a coordination guarantee, not a security boundary.
+    """
+    if policy != "required":
+        return {"required": False, "passing": True, "accepted": None, "current": None, "reasons": []}
+    others = {lead.casefold(), *(item["actor"].casefold() for item in assignments if item["role"] == "builder")}
+
+    def problem(item: Assignment) -> str | None:
+        seq = assigned_seq.get(item["id"], 0)
+        if seq <= builder_seq:
+            return "it started before the latest builder finished"
+        if seq <= verified_seq:
+            return "it started before the accepted lead verification, so it did not review the verified tree"
+        if item["mode"] != "ro":
+            return "it is not read-only"
+        if item["actor"].casefold() in others:
+            return f"actor {item['actor']} is the lead or a builder of this task"
+        if item["status"] != "passed":
+            return f"it is {item['status']}"
+        if item["result"] is None or item["result"]["status"] != "completed":
+            return "it has no completed structured result (task run --result-file)"
+        if trees is not None:
+            tree = trees.get(item["id"], {})
+            if "start" not in tree or "end" not in tree:
+                return "it has no recorded reviewed tree (run reviewers through hipson task run)"
+            if tree["start"][2:] != ("snapshot",) or tree["end"][2:] != ("snapshot",):
+                return ("it read the live working tree, not an immutable snapshot of the verified candidate "
+                        "(run reviewers through hipson task run without --live-tree, or hipson task flow)")
+            if tree["start"] != tree["end"]:
+                return "the reviewed snapshot changed during the review"
+            if verified_tree is not None and tree["start"][:2] != verified_tree:
+                return "it reviewed a different tree than the accepted lead verification"
+        return None
+
+    reviews = sorted((item for item in assignments if item["role"] == "reviewer"),
+                     key=lambda item: assigned_seq.get(item["id"], 0))
+    accepted = next((item["id"] for item in reversed(reviews) if problem(item) is None), None)
+    # The latest review assigned after the latest builder and accepted verification, whatever its outcome.
+    current = next((item["id"] for item in reversed(reviews)
+                    if assigned_seq.get(item["id"], 0) > max(builder_seq, verified_seq)), None)
+    # A later review that ran and did not complete is negative evidence: an earlier pass does not outvote it, and
+    # a newer cancelled (interrupted) one does not hide it.
+    cutoff = assigned_seq.get(accepted, 0) if accepted is not None else 0
+    failed = [item for item in reviews if assigned_seq.get(item["id"], 0) > cutoff and (
+        item["status"] == "failed" or (item["status"] == "passed" and (
+            item["result"] is None or item["result"]["status"] != "completed")))]
+    if accepted is not None and failed:
+        return {"required": True, "passing": False, "accepted": None, "current": current, "reasons": [
+            f"review required: later review {failed[-1]['id']} did not complete ({problem(failed[-1])}) after "
+            f"accepted review {accepted}; run the reviewer again"]}
+    if accepted is not None:
+        return {"required": True, "passing": True, "accepted": accepted, "current": current, "reasons": []}
+    reason = ("review required: no reviewer assignment" if not reviews else
+              f"review required: latest review {reviews[-1]['id']} does not qualify: {problem(reviews[-1])}")
+    return {"required": True, "passing": False, "accepted": None, "current": current,
+            "reasons": [reason + "; run an independent read-only reviewer after the latest builder and lead "
+                                 "verification (hipson task flow, or hipson task run --role reviewer --mode ro)"]}
 
 
 def done_blockers(view: TaskView) -> list[str]:
@@ -391,6 +485,9 @@ def done_blockers(view: TaskView) -> list[str]:
                  for item in view["findings"] if item["severity"] in ("blocking", "major")]
     if view["claims"] and not active:
         blockers.append(f"held claims: hipson task reap --task {task}")
+    review = view.get("review")
+    if review is not None and not review["passing"]:
+        blockers += review["reasons"]
     return blockers
 
 
@@ -826,7 +923,7 @@ class Ledger:
                     for statement in SCHEMA[1:]:
                         self.connection.execute(statement)
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
-                elif version is None or version[0] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, SCHEMA_VERSION):
+                elif version is None or version[0] not in SUPPORTED_SCHEMA_VERSIONS:
                     found = version[0] if version is not None else None
                     raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
                 elif not read_only:
@@ -857,6 +954,9 @@ class Ledger:
                     if version[0] in (1, 2, 3, 4, 5, 6, 7, 8, 9):
                         for statement in MIGRATION_V9_TO_V10:
                             self.connection.execute(statement)
+                    if version[0] in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
+                        for statement in MIGRATION_V10_TO_V11:
+                            self.connection.execute(statement)
         except BaseException:
             self.close()
             raise
@@ -884,7 +984,10 @@ class Ledger:
         lead: str = "claude",
         checks: Sequence[Sequence[str]] = (),
         needs: Sequence[str] = (),
+        review_policy: str = "none",
     ) -> TaskView:
+        if review_policy not in REVIEW_POLICIES:
+            raise LedgerError(f"Review policy must be one of {REVIEW_POLICIES}")
         project_path = str(Path(project).expanduser().resolve())
         if redact_text(project_path) != project_path:
             raise LedgerError("Project paths must not contain secret-shaped text")
@@ -902,13 +1005,16 @@ class Ledger:
             now = _timestamp()
             self.connection.execute(
                 "INSERT INTO tasks (id, project, title, objective, acceptance, status, lead, created_at, updated_at,"
-                " revision, checks, needs) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0, ?, ?)",
+                " revision, checks, needs, review_policy) VALUES (?, ?, ?, ?, ?, 'open', ?, ?, ?, 0, ?, ?, ?)",
                 (task, project_path, title, objective, json.dumps(accepted), lead, now, now, json.dumps(declared),
-                 json.dumps(tags)),
+                 json.dumps(tags), review_policy),
             )
             self._append_event(task, lead, "opened", title, [])
             if declared:
                 self._append_event(task, lead, "checks_set", "acceptance checks: " + checks_text(declared), [])
+            if review_policy == "required":
+                # Fixed at open: no later write can drop it; only an audited done --force can bypass it.
+                self._append_event(task, lead, "review_policy", "independent read-only review required before done", [])
             return self._view(task)
 
     def set_checks(self, task: str, *, checks: Sequence[Sequence[str]], actor: str, reason: str = "") -> TaskView:
@@ -1352,6 +1458,32 @@ class Ledger:
             return self._append_event(task, actor, "routed", redact_text(require_text(summary, "summary")),
                                       [redact_text(ref) for ref in refs])
 
+    def record_review_tree(self, assignment: str, *, phase: str, revision: str, fingerprint: str | None,
+                           source: str = "live") -> TaskEvent:
+        """The runner's record of the tree a reviewer saw when it started and when it ended (reserved type).
+
+        source is "snapshot" when the fingerprint was re-hashed from the reviewer's immutable snapshot, "live" when
+        it is the project's working tree (which a required review never accepts)."""
+        if phase not in ("start", "end"):
+            raise LedgerError("Review tree phase is start or end")
+        if source not in ("live", "snapshot"):
+            raise LedgerError("Review tree source is live or snapshot")
+        with self._transaction():
+            current = self._assignment(assignment)
+            if current["role"] != "reviewer" or current["status"] != "active":
+                raise LedgerError(f"Assignment {assignment} is not an active reviewer")
+            return self._append_event(current["task"], "hipson", "reviewed",
+                                      f"{assignment}: {phase} revision={revision or 'none'}; "
+                                      f"fingerprint={fingerprint or 'none'}; source={source}", [assignment])
+
+    def record_flow(self, task: str, *, actor: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
+        """Record a hipson task flow stage or stop; a reserved type, so free-form events cannot forge one."""
+        actor = redact_text(require_text(actor, "actor"))
+        with self._transaction():
+            self._task(task)
+            return self._append_event(task, actor, "flow", redact_text(require_text(summary, "summary")),
+                                      [redact_text(ref) for ref in refs])
+
     def record_checkpoint(self, assignment: str, *, type: str, summary: str) -> TaskEvent:
         """Record a host-owned checkpoint or restore of an assignment's scope (counts, never contents)."""
         if type not in ("checkpointed", "restored"):
@@ -1369,7 +1501,8 @@ class Ledger:
         with self._transaction():
             return self._set_status_locked(task, to=to, actor=actor, summary=summary, force=force, reason=reason)
 
-    def close_task(self, task: str, *, to: str = "done", actor: str, summary: str = "") -> TaskView:
+    def close_task(self, task: str, *, to: str = "done", actor: str, summary: str = "",
+                   expected_checks: Sequence[Sequence[str]] | None = None) -> TaskView:
         """Move through review (and done) in one transaction; any refused gate rolls back every step."""
         actor = require_text(actor, "actor")
         if to not in ("review", "done"):
@@ -1381,6 +1514,8 @@ class Ledger:
                 raise CloseRefusedError(task, [f"{task} is {status}; close works from open, in_progress or review"
                                                + ("" if status != "review" else " (use --to done)")])
             reasons = [] if view["verification"]["passing"] else list(view["verification"]["reasons"])
+            if expected_checks is not None and view["checks"] != [list(check) for check in expected_checks]:
+                reasons.append("declared checks differ from the ones this close expects: " + checks_text(view["checks"]))
             blockers = done_blockers(view)
             # Review must not race a writer assigned after the caller's own checks either.
             reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]
@@ -1418,6 +1553,7 @@ class Ledger:
             blockers += [f"claim {item['assignment']}:{item['path']}" for item in view["claims"]]
             blockers += [f"open {item['severity']} finding {item['id']}: {item['title']}" for item in severe]
             blockers += [f"unacknowledged result {item['id']}" for item in unread]
+            blockers += [] if view["review"]["passing"] else view["review"]["reasons"]
             if force:
                 blocker_refs = list(dict.fromkeys([
                     *[item["id"] for item in active], *[item["assignment"] for item in view["claims"]],
@@ -1521,16 +1657,28 @@ class Ledger:
 
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):
-            views = [self._view(row['id'], active_only=True) for row in self.connection.execute(
-                'SELECT id FROM tasks ORDER BY created_at, id')]
+            # A finished task stays on the board only while one of its assignments is live or unacknowledged.
+            # Decide that before building the view: a view fingerprints the task's project, and the whole task
+            # history must not pay for it (one large or slow project folder of an old task hung the board).
+            states: dict[str, dict[str, Any]] = {}
+            views = [self._view(row['id'], active_only=True, states=states) for row in self.connection.execute(
+                'SELECT id, status FROM tasks ORDER BY created_at, id').fetchall()
+                if row['status'] not in ('done', 'cancelled') or self._has_live_assignment(row['id'])]
             return [view for view in views if view['status'] not in ('done', 'cancelled') or view['assignments']]
+
+    def _has_live_assignment(self, task: str) -> bool:
+        """The board's own assignment filter (see _view active_only), without fingerprinting the project."""
+        return any(item['status'] == 'active' or item['ack_state'] == 'unacknowledged'
+                   for item in (self._assignment_dict(row) for row in self.connection.execute(
+                       'SELECT * FROM assignments WHERE task = ?', (task,)).fetchall()))
 
     def lead_snapshot(self, *, project: str | Path | None = None) -> list[tuple[TaskView, list[TaskEvent]]]:
         """Read views and events at one ledger revision, without migration or recovery."""
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         with self._transaction(write=False):
+            states: dict[str, dict[str, Any]] = {}
             return [
-                (self._view(row['id']), [self._event_dict(event) for event in self.connection.execute(
+                (self._view(row['id'], states=states), [self._event_dict(event) for event in self.connection.execute(
                     'SELECT * FROM events WHERE task = ? ORDER BY seq', (row['id'],))])
                 for row in self.connection.execute(
                     'SELECT id FROM tasks WHERE (? IS NULL OR project = ?) ORDER BY id',
@@ -1550,12 +1698,20 @@ class Ledger:
             raise LedgerError(f"Assignment not found: {assignment}")
         return self._assignment_dict(row)
 
-    def _view(self, task: str, *, active_only: bool = False) -> TaskView:
+    def _view(self, task: str, *, active_only: bool = False, states: dict[str, dict[str, Any]] | None = None) -> TaskView:
         current = self._task(task)
         from hipson.task_verification import project_state, verification_state
         records = self.verifications(task)
-        verification = verification_state(records, project_state(current['project'], self.path),
-                                          self._builder_finished_seq(task), current['lead'], current['checks'])
+        # One read (board, lead snapshot) fingerprints each project folder once, however many tasks share it.
+        # verification_state may annotate the state it gets, so every view receives its own copy.
+        if states is None:
+            state = project_state(current['project'], self.path)
+        else:
+            if current['project'] not in states:
+                states[current['project']] = project_state(current['project'], self.path)
+            state = copy.deepcopy(states[current['project']])
+        builder_seq = self._builder_finished_seq(task)
+        verification = verification_state(records, state, builder_seq, current['lead'], current['checks'])
         assignments = [
             self._assignment_dict(row)
             for row in self.connection.execute(
@@ -1563,6 +1719,8 @@ class Ledger:
                 (task,),
             )
         ]
+        review = review_state(current['review_policy'], current['lead'], assignments,
+                              *self._review_seqs(task, verification['accepted_ids'], builder_seq))
         if active_only:
             assignments = [item for item in assignments if item['status'] == 'active' or item['ack_state'] == 'unacknowledged']
         claims: list[Claim] = [
@@ -1575,7 +1733,29 @@ class Ledger:
         ]
         return cast(TaskView, redact_value({**current, "assignments": assignments, "claims": claims,
                                           "findings": self._findings(task=task, status="open"),
-                                          "verification": verification}))
+                                          "verification": verification, "review": review}))
+
+    def _review_seqs(self, task: str, accepted: Sequence[str], builder_seq: int) -> tuple[
+            dict[str, int], int, int, dict[str, dict[str, tuple[str, ...]]], tuple[str, str] | None]:
+        """What review_state compares: assignment starts, the accepted verification and the reviewed trees."""
+        assigned: dict[str, int] = {}
+        verified = 0
+        verified_tree: tuple[str, str] | None = None
+        trees: dict[str, dict[str, tuple[str, ...]]] = {}
+        for row in self.connection.execute(
+                "SELECT seq, type, summary, refs FROM events WHERE task = ? AND type IN "
+                "('assigned', 'lead_verified', 'reviewed') ORDER BY seq", (task,)):
+            refs = json.loads(row['refs'])
+            if row['type'] == 'assigned' and refs:
+                assigned.setdefault(refs[0], row['seq'])
+            elif row['type'] == 'lead_verified' and set(refs) & set(accepted):
+                verified = max(verified, row['seq'])
+                found = VERIFIED_PATTERN.search(row['summary'])
+                verified_tree = (found.group(1), found.group(2)) if found else ('', '')
+            elif row['type'] == 'reviewed' and refs and (match := REVIEWED_PATTERN.search(row['summary'])):
+                trees.setdefault(refs[0], {}).setdefault(match.group(1), (match.group(2), match.group(3),
+                                                                          match.group(4) or 'live'))
+        return assigned, builder_seq, verified, trees, verified_tree
 
     def _append_event(self, task: str, actor: str, type: str, summary: str, refs: Sequence[str]) -> TaskEvent:
         now = _timestamp()
@@ -1599,6 +1779,7 @@ class Ledger:
             "acceptance": json.loads(row["acceptance"]),
             "checks": json.loads(row["checks"]) if "checks" in row.keys() else [],
             "needs": json.loads(row["needs"]) if "needs" in row.keys() else [],
+            "review_policy": row["review_policy"] if "review_policy" in row.keys() else "none",
             "status": row["status"],
             "lead": row["lead"],
             "created_at": row["created_at"],

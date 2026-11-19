@@ -9,6 +9,8 @@ import json
 from contextlib import closing
 from unittest.mock import patch
 
+import pytest
+
 from hipson import ledger, task_verification
 from hipson.task_verification import argv_identity, verification_state
 from tests.test_ledger import _error
@@ -616,7 +618,6 @@ def test_v9_schema_constants_are_exact():
 
 
 def test_v10_schema_constants_are_exact():
-    assert ledger.SCHEMA_VERSION == 10
     assert ledger.MIGRATION_V9_TO_V10 == ("ALTER TABLE tasks ADD COLUMN needs TEXT NOT NULL DEFAULT '[]'",
                                           "ALTER TABLE assignments ADD COLUMN needs TEXT",
                                           "UPDATE schema_version SET version = 10 WHERE singleton = 1")
@@ -722,3 +723,304 @@ def _checkpoint_events_contract(tmp_path):
 def test_checkpoint_events_and_case_aware_assign_exact_contract(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         _checkpoint_events_contract(tmp_path)
+
+
+def test_v11_schema_constants_are_exact():
+    assert ledger.SCHEMA_VERSION == 11 and ledger.REVIEW_POLICIES == ("none", "required")
+    assert ledger.MIGRATION_V10_TO_V11 == (
+        "ALTER TABLE tasks ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'none'"
+        " CHECK (review_policy IN ('none', 'required'))",
+        "UPDATE schema_version SET version = 11 WHERE singleton = 1")
+    assert {"review_policy", "flow"} <= ledger.RESERVED_EVENT_TYPES
+
+
+def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):
+    return {"id": id, "actor": actor, "role": role, "mode": mode, "status": status,
+            "result": None if result is None else {"status": result}}
+
+
+REVIEW_TAIL = ("; run an independent read-only reviewer after the latest builder and lead verification "
+               "(hipson task flow, or hipson task run --role reviewer --mode ro)")
+
+
+def test_review_state_exact_contract():
+    builder = _reviewer("A-0001", "Codex", mode="rw", role="builder")
+    off = ledger.review_state("none", "lead", [builder], {}, 0, 0)
+    assert off == {"required": False, "passing": True, "accepted": None, "current": None, "reasons": []}
+    assert ledger.review_state("required", "lead", [builder], {"A-0001": 1}, 2, 3) == {
+        "required": True, "passing": False, "accepted": None, "current": None,
+        "reasons": ["review required: no reviewer assignment" + REVIEW_TAIL]}
+    good = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {"A-0001": 1, "A-0002": 4}, 2, 3)
+    assert good == {"required": True, "passing": True, "accepted": "A-0002", "current": "A-0002", "reasons": []}
+    cases = [
+        ({"A-0002": 2}, _reviewer("A-0002"), "it started before the latest builder finished", None),
+        ({"A-0002": 3}, _reviewer("A-0002"), "it started before the accepted lead verification, so it did not "
+                                             "review the verified tree", None),
+        ({"A-0002": 4}, _reviewer("A-0002", mode="rw"), "it is not read-only", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", "codex"), "actor codex is the lead or a builder of this task", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", "LEAD"), "actor LEAD is the lead or a builder of this task", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", status="failed"), "it is failed", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", status="active"), "it is active", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", result=None),
+         "it has no completed structured result (task run --result-file)", "A-0002"),
+        ({"A-0002": 4}, _reviewer("A-0002", result="partial"),
+         "it has no completed structured result (task run --result-file)", "A-0002"),
+        ({}, _reviewer("A-0002"), "it started before the latest builder finished", None),
+    ]
+    for seqs, review, problem, current in cases:
+        state = ledger.review_state("required", "lead", [builder, review], {"A-0001": 1, **seqs}, 2, 3)
+        assert state == {"required": True, "passing": False, "accepted": None, "current": current,
+                         "reasons": [f"review required: latest review A-0002 does not qualify: {problem}" + REVIEW_TAIL]}
+    # A later review that ran and did not complete blocks; an interrupted (cancelled) or still-active one does not
+    # outvote the accepted review (active work blocks done elsewhere).
+    for status, result, blocks in (("failed", "completed", True), ("passed", "partial", True), ("passed", None, True),
+                                   ("cancelled", None, False), ("active", None, False)):
+        later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"),
+                                                         _reviewer("A-0003", status=status, result=result)],
+                                    {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+        assert later["current"] == "A-0003" and later["passing"] is not blocks, (status, result)
+        if blocks:
+            assert later["accepted"] is None and later["reasons"][0].startswith(
+                "review required: later review A-0003 did not complete (") and later["reasons"][0].endswith(
+                "after accepted review A-0002; run the reviewer again")
+        else:
+            assert later["accepted"] == "A-0002"
+    # Exactly at the boundary is not after it.
+    edge = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {"A-0002": 3}, 3, 0)
+    assert not edge["passing"] and edge["current"] is None
+
+
+def test_done_blockers_include_review_reasons_only_when_failing():
+    view = {"id": "T-0001", "lead": "lead", "assignments": [], "findings": [], "claims": [],
+            "review": {"required": True, "passing": False, "accepted": None, "current": None, "reasons": ["r1"]}}
+    assert ledger.done_blockers(view) == ["r1"]
+    view["review"] = {"required": True, "passing": True, "accepted": "A-0002", "current": None, "reasons": []}
+    assert ledger.done_blockers(view) == []
+    del view["review"]
+    assert ledger.done_blockers(view) == []
+
+
+
+def test_review_state_boundaries_ordering_and_full_refusals():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    # A reviewer without a recorded start is never after anything, even when nothing else happened yet.
+    unseen = ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], {}, 0, 0)
+    assert not unseen["passing"] and unseen["current"] is None
+    # Order follows the recorded start, not list position; a missing start sorts first.
+    ordered = ledger.review_state("required", "lead", [builder, _reviewer("A-0003", status="failed"),
+                                                       _reviewer("A-0002", status="failed")],
+                                  {"A-0003": 6, "A-0002": 5}, 2, 3)
+    assert ordered["reasons"][0].startswith("review required: latest review A-0003 does not qualify")
+    first = ledger.review_state("required", "lead", [builder, _reviewer("A-0002", status="failed"),
+                                                     _reviewer("A-0004", status="failed")], {"A-0002": 1}, 0, 0)
+    assert first["reasons"][0].startswith("review required: latest review A-0002 does not qualify")
+    # A later passed and completed review that does not qualify for another reason does not block.
+    later = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", "codex")],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert later == {"required": True, "passing": True, "accepted": "A-0002", "current": "A-0003", "reasons": []}
+    failed = ledger.review_state("required", "lead", [builder, _reviewer("A-0002"), _reviewer("A-0003", status="failed")],
+                                 {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert failed == {"required": True, "passing": False, "accepted": None, "current": "A-0003", "reasons": [
+        "review required: later review A-0003 did not complete (it is failed) after accepted review A-0002; "
+        "run the reviewer again"]}
+
+
+def test_review_seqs_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Seqs", objective="Event positions", lead=LEAD)["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        build = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        store.finish(build, result="passed", summary="built")
+        assert store._review_seqs(task, [], 9) == ({build: _seq(store, task, "assigned", build)}, 9, 0, {}, None)
+        store._record_verification(_record(id="V-" + "a" * 32, task=task))
+        store._record_verification(_record(id="V-" + "b" * 32, task=task))
+        with store._transaction():  # Another event type with the same refs must not count.
+            store._append_event(task, LEAD, "note", "refs only", [build, "V-" + "c" * 32])
+        review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
+        store.record_review_tree(review, phase="start", revision="r1", fingerprint="f1", source="snapshot")
+        store.record_review_tree(review, phase="end", revision="r2", fingerprint=None)
+        store.record_review_tree(review, phase="end", revision="r3", fingerprint="f3")  # The first record counts.
+        legacy = store.assign(task, actor="old", role="reviewer", mode="ro", scope=[])["id"]
+        with store._transaction():  # An event written before sources were recorded reads as a live-tree review.
+            store._append_event(task, "hipson", "reviewed", f"{legacy}: start revision=r4; fingerprint=f4", [legacy])
+            store._append_event(task, "hipson", "reviewed", f"{legacy}: end revision=r4; fingerprint=f4; source=x",
+                                [legacy])
+        assigned = {build: _seq(store, task, "assigned", build), review: _seq(store, task, "assigned", review),
+                    legacy: _seq(store, task, "assigned", legacy)}
+        trees = {review: {"start": ("r1", "f1", "snapshot"), "end": ("r2", "none", "live")},
+                 legacy: {"start": ("r4", "f4", "live")}}  # An unknown source matches nothing.
+        tree = (STATE["revision"], STATE["fingerprint"])
+        first = _seq(store, task, "lead_verified", "V-" + "a" * 32)
+        assert store._review_seqs(task, ["V-" + "a" * 32], 7) == (assigned, 7, first, trees, tree)
+        assert store._review_seqs(task, ["V-" + "b" * 32, "V-" + "a" * 32], 7) == (
+            assigned, 7, _seq(store, task, "lead_verified", "V-" + "b" * 32), trees, tree)
+        assert store._review_seqs(task, ["V-" + "d" * 32], 7) == (assigned, 7, 0, trees, None)
+        assert 0 < first < assigned[review]
+        _error(lambda: store.record_review_tree(build, phase="start", revision="r", fingerprint="f"),
+               f"Assignment {build} is not an active reviewer")
+        _error(lambda: store.record_review_tree(review, phase="middle", revision="r", fingerprint="f"),
+               "Review tree phase is start or end")
+
+
+def test_review_state_requires_the_verified_tree():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    seqs = {"A-0001": 1, "A-0002": 4}
+    tree = ("r", "f", "snapshot")
+    live = ("it read the live working tree, not an immutable snapshot of the verified candidate (run reviewers "
+            "through hipson task run without --live-tree, or hipson task flow)")
+    def state(trees, verified=("r", "f")):
+        return ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], seqs, 2, 3, trees, verified)
+    assert state({"A-0002": {"start": tree, "end": tree}})["accepted"] == "A-0002"
+    assert state({"A-0002": {"start": tree, "end": tree}}, None)["accepted"] == "A-0002"
+    for trees, problem in (
+            ({}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"start": tree}}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"end": tree}}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"start": ("r", "f", "live"), "end": tree}}, live),
+            ({"A-0002": {"start": tree, "end": ("r", "f", "live")}}, live),
+            ({"A-0002": {"start": ("r", "f"), "end": ("r", "f")}}, live),  # No source: never a snapshot.
+            ({"A-0002": {"start": ("r", "f", "live"), "end": ("r", "f", "live")}}, live),
+            ({"A-0002": {"start": tree + ("x",), "end": tree + ("x",)}}, live),
+            ({"A-0002": {"start": tree, "end": ("r", "g", "snapshot")}}, "the reviewed snapshot changed during the review"),
+            ({"A-0002": {"start": tree, "end": ("q", "f", "snapshot")}}, "the reviewed snapshot changed during the review"),
+            ({"A-0002": {"start": ("r", "g", "snapshot"), "end": ("r", "g", "snapshot")}},
+             "it reviewed a different tree than the accepted lead verification"),
+            ({"A-0002": {"start": ("q", "f", "snapshot"), "end": ("q", "f", "snapshot")}},
+             "it reviewed a different tree than the accepted lead verification")):
+        assert state(trees)["reasons"] == [f"review required: latest review A-0002 does not qualify: {problem}"
+                                           + REVIEW_TAIL], trees
+
+
+def test_a_cancelled_review_does_not_hide_an_earlier_failed_one():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    reviews = [_reviewer("A-0002"), _reviewer("A-0003", status="failed"), _reviewer("A-0004", status="cancelled")]
+    state = ledger.review_state("required", "lead", [builder, *reviews],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5, "A-0004": 6}, 2, 3)
+    assert state == {"required": True, "passing": False, "accepted": None, "current": "A-0004", "reasons": [
+        "review required: later review A-0003 did not complete (it is failed) after accepted review A-0002; "
+        "run the reviewer again"]}
+
+
+def _seq(store, task, kind, ref):
+    return next(event["seq"] for event in store.events(task) if event["type"] == kind and event["refs"][0] == ref)
+
+
+
+def _gate_task(store, tmp_path, policy="required"):
+    task = store.open_task(project=tmp_path, title="Gate", objective="Review gate", lead=LEAD, review_policy=policy)["id"]
+    store.set_status(task, to="in_progress", actor=LEAD)
+    build = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+    store.finish(build, result="passed", summary="built")
+    store.ack(build)
+    store._record_verification(_record(id="V-" + task[2:].rjust(32, "e"), task=task,
+                                       builder_finished_seq=store._builder_finished_seq(task)))
+    return task
+
+
+def _review(store, task, actor="rev", source="snapshot"):
+    # The completed result is written directly: result parsing has its own contracts outside this profile.
+    item = store.assign(task, actor=actor, role="reviewer", mode="ro", scope=[])["id"]
+    for phase in ("start", "end"):  # What task run records around a reviewer: the verified STATE tree.
+        store.record_review_tree(item, phase=phase, revision=STATE["revision"], fingerprint=STATE["fingerprint"],
+                                 source=source)
+    store.finish(item, result="passed", summary="reviewed")
+    with store._transaction():
+        store.connection.execute("UPDATE assignments SET result = ? WHERE id = ?", (json.dumps({
+            "status": "completed", "summary": "ok", "files_changed": [], "commands": [], "findings": [],
+            "risks": []}), item))
+    store.ack(item)
+    return item
+
+
+def test_review_policy_ledger_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = _gate_task(store, tmp_path)
+        policy = [event for event in store.events(task) if event["type"] == "review_policy"]
+        assert [(event["actor"], event["summary"], event["refs"]) for event in policy] == [
+            (LEAD, "independent read-only review required before done", [])]
+        plain = _gate_task(store, tmp_path, policy="none")
+        assert not [event for event in store.events(plain) if event["type"] == "review_policy"]
+        assert store.show(plain)["review_policy"] == "none" and store.show(task)["review_policy"] == "required"
+        store.set_status(task, to="review", actor=LEAD)
+        reason = ("review required: no reviewer assignment; run an independent read-only reviewer after the latest "
+                  "builder and lead verification (hipson task flow, or hipson task run --role reviewer --mode ro)")
+        _error(lambda: store.set_status(task, to="done", actor=LEAD), f"Cannot mark {task} done: {reason}")
+        # Reviews by the lead's label do not count; done_blockers keeps every other blocker too.
+        _review(store, task, actor=LEAD.upper())
+        active = store.assign(task, actor="other", role="explorer", mode="ro", scope=[])["id"]
+        blockers = ledger.done_blockers(store.show(task))
+        assert blockers[0].startswith(f"active assignment {active}") and blockers[-1].startswith(
+            "review required: latest review A-0003 does not qualify: actor LEAD is the lead or a builder of this task")
+        store.finish(active, result="passed", summary="x")
+        store.ack(active)
+        live = _review(store, task, source="live")  # Equal live fingerprints do not prove what was read.
+        assert store.show(task)["review"]["reasons"][0].startswith(
+            f"review required: latest review {live} does not qualify: it read the live working tree")
+        good = _review(store, task)
+        assert store.show(task)["review"] == {"required": True, "passing": True, "accepted": good, "current": good,
+                                              "reasons": []}
+        assert store.set_status(task, to="done", actor=LEAD)["status"] == "done"
+        forced = _gate_task(store, tmp_path)
+        store.set_status(forced, to="review", actor=LEAD)
+        store.set_status(forced, to="done", actor=LEAD, force=True, reason="owner accepted without review")
+        override = [event for event in store.events(forced) if event["type"] == "done_override"]
+        assert override and override[0]["summary"] == f"Reason: owner accepted without review; blockers: {reason}"
+
+
+
+def test_a_failed_review_before_the_accepted_one_does_not_block():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    state = ledger.review_state("required", "lead", [builder, _reviewer("A-0002", status="failed"), _reviewer("A-0003")],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5}, 2, 3)
+    assert state == {"required": True, "passing": True, "accepted": "A-0003", "current": "A-0003", "reasons": []}
+
+
+def test_record_review_tree_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Trees", objective="Reviewed trees", lead=LEAD)["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        builder = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+        review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
+        for phase in ("middle", "START", ""):
+            with pytest.raises(ledger.LedgerError) as error:
+                store.record_review_tree(review, phase=phase, revision="r", fingerprint="f")
+            assert str(error.value) == "Review tree phase is start or end"
+        with pytest.raises(ledger.LedgerError) as error:  # An active builder is not a reviewer.
+            store.record_review_tree(builder, phase="start", revision="r", fingerprint="f")
+        assert str(error.value) == f"Assignment {builder} is not an active reviewer"
+        for source in ("Snapshot", "", "other"):
+            with pytest.raises(ledger.LedgerError) as error:
+                store.record_review_tree(review, phase="start", revision="r", fingerprint="f", source=source)
+            assert str(error.value) == "Review tree source is live or snapshot"
+        event = store.record_review_tree(review, phase="start", revision="", fingerprint=None)
+        assert (event["actor"], event["type"], event["summary"], event["refs"]) == (
+            "hipson", "reviewed", f"{review}: start revision=none; fingerprint=none; source=live", [review])
+        event = store.record_review_tree(review, phase="end", revision="r", fingerprint="f", source="snapshot")
+        assert event["summary"] == f"{review}: end revision=r; fingerprint=f; source=snapshot"
+        assert store._review_seqs(task, [], 0)[3] == {review: {"start": ("none", "none", "live"),
+                                                               "end": ("r", "f", "snapshot")}}
+        with store._transaction():  # A lead_verified record whose summary lacks the pattern binds no tree.
+            store._append_event(task, LEAD, "lead_verified", "V-x: malformed", ["V-" + "9" * 32])
+        assert store._review_seqs(task, ["V-" + "9" * 32], 0)[4] == ("", "")
+        store.finish(review, result="passed", summary="done")
+        with pytest.raises(ledger.LedgerError) as error:
+            store.record_review_tree(review, phase="end", revision="r", fingerprint="f")
+        assert str(error.value) == f"Assignment {review} is not an active reviewer"
+
+
+
+def test_close_task_expected_checks_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Close", objective="Expected checks", lead=LEAD,
+                               checks=[CHECK])["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        store._record_verification(_record(id="V-" + "c" * 32, task=task, builder_finished_seq=0))
+        with pytest.raises(ledger.CloseRefusedError) as error:
+            store.close_task(task, to="review", actor=LEAD, expected_checks=[["pytest"]])
+        assert error.value.reasons == ["declared checks differ from the ones this close expects: pytest -q"]
+        assert store.show(task)["status"] == "in_progress"
+        assert store.close_task(task, to="review", actor=LEAD, expected_checks=[("pytest", "-q")])["status"] == "review"

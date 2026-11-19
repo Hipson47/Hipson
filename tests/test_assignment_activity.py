@@ -52,8 +52,8 @@ def test_assignment_v5_migration_read_only_preservation_idempotence_and_rollback
             for table in ('events', 'claims'):
                 assert after[table] == before[table]
             # v7 appends declared acceptance checks, empty for migrated tasks.
-            assert [row[:-2] for row in after['tasks']] == before['tasks']  # v7 checks, v10 needs
-            assert {row[-1] for row in after['tasks']} == {'[]'}
+            assert [row[:-3] for row in after['tasks']] == before['tasks']  # v7 checks, v10 needs, v11 review_policy
+            assert {row[-2] for row in after['tasks']} == {'[]'} and {row[-1] for row in after['tasks']} == {'none'}
             assert store.activity('A-0002')['ack_state'] == 'not_required'
             assert_strict_schema('task.schema.json', store.show('T-0001'))
         with closing(ledger.Ledger(db)) as store:

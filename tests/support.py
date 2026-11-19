@@ -26,6 +26,8 @@ PLATFORM_SKIP_REASONS = {
         "Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege",
         "requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C",
         "requires POSIX process inspection for verification descendant cleanup",
+        "native probe Claude hook requires POSIX directory descriptors and no-follow open flags",
+        "Antigravity takes its prompt as an argument, which a .cmd test shim cannot carry on Windows",
         "POSIX no-clobber placement only; Windows rename refuses an existing destination",
         "Windows file names cannot contain ':'",
         "requires descriptor-relative filesystem operations (dir_fd); Windows checks each path component instead",

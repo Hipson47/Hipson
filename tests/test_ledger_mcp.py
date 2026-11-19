@@ -36,7 +36,7 @@ TASK_TOOLS = {
                          {"detail", "location", "source_assignment"}),
     "task.finding_update": ({"finding", "status", "actor", "approved"},
                             {"resolution_note", "resolved_by_assignment"}),
-    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "checks", "lead", "needs"}),
+    "task.open": ({"project", "title", "objective", "approved"}, {"acceptance", "checks", "lead", "needs", "require_review"}),
     "task.assign": ({"task", "actor", "role", "mode", "approved"},
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
@@ -383,7 +383,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
         assert not home.exists()
         assert _payload(_call(server_project, "task.show", task=env_task["id"])) == env_task
         assert _payload(_call(server_project, "task.list")) == [
-            {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings", "verification")}
+            {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings", "verification", "review")}
         ]
         assert _payload(_call(server_project, "task.board")) == [env_task]
         assert _payload(_call(server_project, "task.list", project=str(server_project))) == []

@@ -47,8 +47,8 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         for table in ("claims", "events"):
             assert after[table] == before[table]
         # v7 appends declared acceptance checks, empty for migrated tasks.
-        assert [row[:-2] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs
-        assert {row[-1] for row in after["tasks"]} == {"[]"}
+        assert [row[:-3] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs, v11 review_policy
+        assert {row[-2] for row in after["tasks"]} == {"[]"} and {row[-1] for row in after["tasks"]} == {"none"}
         assert [row[:-13] for row in after["assignments"]] == before["assignments"]
         assert all(row[-13:-4] == (None,) * 9 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
         assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
@@ -162,8 +162,8 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         for table in ("claims", "events"):
             assert after[table] == before[table]
         # v7 appends declared acceptance checks, empty for migrated tasks.
-        assert [row[:-2] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs
-        assert {row[-1] for row in after["tasks"]} == {"[]"}
+        assert [row[:-3] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs, v11 review_policy
+        assert {row[-2] for row in after["tasks"]} == {"[]"} and {row[-1] for row in after["tasks"]} == {"none"}
         assert [row[:-8] for row in after["assignments"]] == before["assignments"]
         assert all(row[-8:-4] == (None,) * 4 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
         assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes

@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+- Immutable review snapshots: a reviewer now reads a private, read-only copy of the exact candidate lead
+  verification accepted (a Git checkout of the base commit through alternates, with every covered modified and
+  untracked file copied from the bytes the fingerprint hashes). `task run --role reviewer` snapshots by default
+  (`--snapshot DIR` takes the flow's prepared copy, `--live-tree` opts out; when no snapshot can be made, a task without required review
+  falls back to the live tree with a warning, a required one refuses), re-hashes it when the reviewer starts
+  and ends, and records `source=snapshot`; a required review of the live tree, or of a snapshot that changed,
+  never qualifies. The flow builds the reviewer's diff from the same copy and refuses to review a tree that is not
+  the verified one. Snapshots are removed when the reviewer ends and swept after an interruption.
+- `task flow` protects acceptance and runtime configuration: check-named paths outside the builder's scope,
+  `.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and the spec's new
+  `protected` list (for tests inside the scope). A builder that changes one, even inside its scope, stops the flow
+  with `needs_lead` before verification or review.
+- `hipson agent exec` hardening: runtime state files (schema, result, meta) are never written through a symlink;
+  `--continue-session` uses only regular meta files whose assignment passed in the ledger for the same task and
+  role, and identifies the project by `HIPSON_PROJECT` (stable across review snapshots); a launch `OSError` is a
+  `provider_error` with meta; an Antigravity prompt over 100,000 bytes, or a batch-script `agy` on Windows, is refused before launch (argv); controlled
+  Claude refuses projects with `.claude/settings*.json` (`--setting-sources project` would load them); a runtime
+  whose status command reports logged out is refused before launch (`auth_required`).
+- `hipson init` lists the agent CLIs found on PATH (`checks.runtimes`) and ends with `hipson agent runtimes` and
+  `hipson task flow --spec flow.json --check`.
+- `hipson task flow --spec flow.json [--resume T] [--retry]`: one deterministic implementation workflow over the
+  ledger: builder, lead verification of the declared checks, an independent read-only reviewer, at most
+  `max_repairs` (default 2) evidence-driven repairs, resolution of review findings after a clean re-review, and
+  close (to `review` by default, leaving final acceptance to the lead). Every decision is derived from the
+  ledger, so a resume reconciles instead of repeating; the spec digest and declared checks are locked; stops are
+  machine-readable states with exit codes (`schemas/task-flow.schema.json`, `hipson.task_flow_result`).
+- Review gate: `task open --require-review` (MCP `require_review`) sets `review_policy: required` at open (ledger
+  schema v11, reserved `review_policy` and `flow` events). `done` then needs a passed, read-only, structured
+  review by a label other than the lead and every builder, assigned after the latest builder and the accepted
+  verification. Shown as `review` in `task show` and the JSON views.
+- Fix: with `TMPDIR` inside the project, `task run --observe` attributed the runner's own progress file to the
+  worker as an out-of-scope change, blocking `done` for correct work.
+- `hipson agent runtimes` / `hipson agent exec`: evidence-backed inventory of Claude Code, Codex and Antigravity
+  and a native-first worker adapter for `task run` / `task flow` ([docs/AGENT_RUNTIMES.md](docs/AGENT_RUNTIMES.md)).
+- Workers can no longer acknowledge results, update findings or change task status: `task ack`, `task finding
+  update` and `task status` (CLI and MCP) refuse a known worker context, like `task checks/verify/close`.
+- `task run` keeps its progress files in `.<ledger file>.runs/` beside the ledger instead of `TMPDIR`, so they never
+  enter a fingerprint, an observation or a checkpoint.
+- `task run` records the tree a reviewer saw (reserved `reviewed` event). Upgrade note: `flow`, `review_policy`
+  and `reviewed` are now reserved event types; custom `task event --type` calls using them are refused.
+- Fix: `task board` (and MCP `task.board`) no longer fingerprints the project of every task in history; a
+  finished task is skipped unless an assignment is live or unacknowledged, and one board or lead snapshot
+  fingerprints each project folder once. A project outside Git is walked for at most 20,000 paths or 20 s and
+  then fails closed with an actionable error. One old task on a 226k-file folder under `/mnt/c` hung the board.
 - Opt-in change observation for `task run` / `task do` (`--observe`, or `observe_changes` in project policy):
   a bounded pre-run snapshot of the project tree (path, size, mtime, content hash; never contents) is compared
   after every exit path, including `task reap`. Changes are classified against the assignment's scope and mode
@@ -38,6 +82,11 @@
 - The agent contract and bootstrap lead with the ledger lifecycle (`lead_task_ledger` workflow, first
   command `hipson lead resume`, default policy workflow `lead_task_ledger`); `AGENTS.md` and the
   packaged Codex instructions point at the ledger instead of the Hermes bridge.
+- Fix `hipson init` refusing a ledger at any schema the `Ledger` already migrates: setup accepted only
+  v1-v3 and the current version, so every store written by an earlier release (v4-v9, for example a v6
+  ledger from 1.5.0) stopped setup with "Unsupported task ledger schema; setup has made no changes."
+  while every other command worked. Both guards now read one `ledger.SUPPORTED_SCHEMA_VERSIONS`, and the
+  refusal names the version it found and the one this build expects.
 - Fix `task verify`, `task close` and `task do` in projects with a top-level module named like the standard
   library (e.g. `json.py`): the supervisors Hipson spawns in the project directory now run with `python -P`.
 - A `task close` refusal for a check that ran out of time names the per-check timeout and `--timeout`.

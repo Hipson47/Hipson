@@ -686,3 +686,15 @@ def test_agent_e2e_cli_report_exit_code_and_runs(tmp_path):
         assert harness.main(["--scenario", "recovery"]) == 1
     reports = [json.loads(path.read_text()) for path in (tmp_path / ".agent-e2e").glob("*/report.json")]
     assert len(reports) == 2 and any(r["scenarios"]["recovery"]["runs"] == 2 for r in reports)
+
+
+@_linux_harness
+def test_flow_compare_judges_procedures_by_the_hidden_oracle(tmp_path):
+    from scripts import flow_compare
+    report = tmp_path / "report.json"
+    assert flow_compare.main(["--case", "review-catch", "--strategy", "B", "--strategy", "C",
+                              "--output", str(report)]) == 0
+    runs = {run["strategy"]: run for run in json.loads(report.read_text())["runs"]}
+    # The visible check misses the defect: task do closes it, the flow's review catches and repairs it.
+    assert runs["B"]["accepted"] and runs["B"]["false_completion"] and not runs["B"]["ground_truth_ok"]
+    assert runs["C"]["accepted"] and runs["C"]["ground_truth_ok"] and runs["C"]["worker_runs"] == 4

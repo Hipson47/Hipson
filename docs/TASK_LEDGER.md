@@ -10,6 +10,7 @@
 - Verify and close (runs the checks): `hipson task close --task T-0001`
 - One shot (open, run one worker, verify, close): `hipson task do --title T --check 'pytest -q' --actor codex --scope src -- COMMAND [ARGS...]`
 - Ad-hoc verification: `hipson task verify --task T-0001 -- COMMAND [ARGS...]`
+- Build, verify, independent review, bounded repair: `hipson task flow --spec flow.json` (resume: `--resume T-0001`)
 
 The lead (for example Claude Code or Codex) is the only orchestrator. The lead (or its worker wrappers acting on
 its behalf) writes tasks, assignments, and events for Codex/agy workers. Workers
@@ -345,6 +346,141 @@ which the status event references.
   `task run` (default role `builder`, mode `rw`), and, if the worker exits 0 and its structured result (if
   any) is `completed`, acknowledges that result with a recorded note and closes the task as above.
   Otherwise the task stays `in_progress` and the worker's exit code is returned.
+
+## Implementation flow and the review gate (1.7)
+
+`hipson task flow --spec flow.json` drives one bounded implementation task through build, lead
+verification, independent review, bounded repair and close, with the lead's acceptance kept at the end. It
+is a deterministic procedure, not an agent: it runs workers with `task run` and checks with `task verify`
+(the same supervisors a lead uses by hand), and decides every next step from the ledger (plus one loop guard
+local to the invocation: verification runs at most once per builder), so there is no second source of truth
+and an interrupted flow continues from what was recorded.
+
+The spec (`schemas/task-flow.schema.json`, validated without dependencies; `--check` validates only):
+
+```json
+{"version": 1, "title": "Fix pair parser", "objective": "Split a:b and trim whitespace",
+ "checks": [["python", "-m", "pytest", "-q"]],
+ "builder": {"actor": "codex", "command": ["codex-worker", "{brief}", "{result}"], "scope": ["src/parser"]},
+ "reviewer": {"actor": "agy", "command": ["agy-reviewer", "{brief}", "{result}"]},
+ "max_repairs": 2, "close_to": "review", "check_timeout": 300}
+```
+
+Optional: `objective` (default: title), `acceptance`, `project` (default: the current Git repository), `lead`
+(default `claude`), per worker `observe` (default true), `env` / `env_allow` (as `task run --env`), builder
+`checkpoint`. `max_repairs` is 0-5 (default 2); `close_to` is `review` (default: final acceptance stays with the
+lead, `hipson task close --task T`) or `done`. The reviewer label must differ from the builder and the lead.
+Worker commands receive `HIPSON_FLOW_STAGE` (`build`, `repair`, `review`), `HIPSON_FLOW_BRIEF` and
+`HIPSON_FLOW_RESULT`, and the tokens `{brief}`, `{result}`, `{stage}` are replaced in their arguments. The
+brief is `task brief` plus the stage: for a repair, the failing checks' recorded output and the reviewer
+findings, wrapped as untrusted data. Briefs and results live in private state beside the ledger
+(`.<ledger file>.flows/T-..../`), which verification fingerprints, change observation and checkpoints exclude;
+a result path that already exists is refused rather than ingested.
+
+What the flow does, each step derived from the recorded state:
+
+1. Opens the task with the spec's checks and `review_policy: required`, and records a reserved `flow` event
+   with the spec's SHA-256. A resume (`--resume T`) refuses a different spec, changed declared checks, a task
+   the flow did not start, or another project (`conflict`, exit 65).
+2. Builder (`rw`, the spec's scope, `--observe` by default, `--result-file` always), then acknowledges every
+   ended result after printing it. A failed exit, an invalid or missing structured result, or a `partial` /
+   `blocked` report stops with `worker_failed` (exit 3); `--resume T --retry` runs it once more.
+3. Runs the declared checks that are not current, in order, stopping at the first failure (later checks stay
+   missing until the next run). A current failing check with its record is the evidence for a repair. Verification that is still not current after a run in this invocation stops with
+   `verification_inconclusive` (exit 4) instead of looping.
+4. Reviewer (`ro`, `--observe`). Its brief carries the scoped diff (sanitized like other embedded diffs) and is
+   built only while the tree is the verified one, checked before and after (else `verification_inconclusive`).
+   A failed reviewer stops with `reviewer_failed` (exit 3). Blocking/major
+   findings the reviewer reported in its structured result are evidence for a repair.
+5. A repair is a new builder run whose brief carries that evidence; the `flow` event names the records and
+   findings it acts on. At most `1 + max_repairs` builder attempts, counted from the ledger, so a resume
+   cannot reset the budget: `checks_failed` or `review_blocked` (exit 2) when it is spent.
+6. After a repair, a re-review with no blocking/major finding resolves the earlier review findings as
+   `fixed`, linked to the repair assignment, with the verification records and the re-review in the note.
+7. Closes through `task close` (the ledger's one transaction rechecks every gate) to `close_to`.
+
+Any other open blocking/major finding (an out-of-scope change seen by observation, a finding the lead
+recorded) stops with `needs_lead` (exit 4): the flow never resolves what it did not cause and review. A review
+finding is resolved only after a repair that started after it was reported; otherwise `needs_lead`.
+Success needs the gates even when the task got there outside the flow: a task moved to `review` by hand is
+`accepted` only when verification, review and every `done` blocker pass (else `needs_lead`), and a task that
+reached `review`/`done` through an audited override is `overridden` (exit 4), never `accepted`. A launch that
+`task run` refuses before creating an assignment (claim conflict, project mismatch, invalid option) stops with
+`launch_refused` (exit 75) instead of being retried. One invocation advances a task at a time (an advisory lock
+in the flow's private directory; another one gets `running`), and the declared checks are compared with the spec
+at every step, not only on resume. A live
+assignment stops with `running` (exit 75). SIGINT/SIGTERM stops the running step through its supervisor,
+records `interrupted during ...` (its verification records are then not evidence) and exits 130; a builder or
+reviewer that the flow lost is re-run on resume (at most twice per role) without counting as a repair.
+`--json` prints `hipson.task_flow_result`: `state`, `status`, `steps`, `builder_attempts`, `reviews`, accepted
+verification and review, open findings and the next command. The flow refuses to run in a worker context.
+
+**Review gate.** `task open --require-review` (MCP `task.open` `require_review`; every flow task) sets
+`review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
+bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
+result, and was assigned after the latest finished builder **and** after the accepted lead verification, and
+that read an **immutable snapshot** of the verified candidate. Before a reviewer starts, `task run` (or `task
+flow`, which prepares it so the brief's diff comes from the same copy) copies every covered file of the project,
+tracked, modified and untracked, from the very bytes it hashes, into a private directory beside the ledger
+(`.<ledger>.runs/review-*` or `.<ledger>.flows/<task>/review-N.snapshot`), makes the files read-only and, in a
+Git project, makes the copy a small repository whose HEAD is the base commit (objects read through alternates;
+nothing is written to the project). The reviewer starts there (`HIPSON_REVIEW_SNAPSHOT`; `HIPSON_PROJECT` names
+the task project). The snapshot's fingerprint is the copy's own, and the flow refuses to review when it differs
+from the accepted verification (`verification_inconclusive`). `task run` re-hashes the snapshot from its
+manifest when the reviewer starts and ends (reserved `reviewed` events with `source=snapshot`); both must equal
+the accepted verification's revision and fingerprint, so a review of another tree, or a snapshot that was
+edited, replaced, emptied or gained files during the review (tool caches excepted), never qualifies. A review of
+the live tree (`--live-tree`, or a reviewer run outside `task run`) never qualifies: equal fingerprints at its
+start and end do not prove what it read in between. Snapshot creation fails closed (no assignment) for content
+beyond the hash budget, special files and symlinks that point outside the project. The live project may change
+while the review runs; verification must still be current at close, so such a change is caught as stale and the
+flow stops (`verification_inconclusive`) instead of closing the changed tree under that review. The snapshot is
+removed when its reviewer ends; a flow resume and the next `task run` reviewer remove ones an interrupted run
+left behind. A later review that ran and failed, or returned a `partial` /
+`blocked` result, blocks `done` even when an earlier review passed; an interrupted (cancelled) one does not. The reviewer's label must differ, case-insensitively, from the
+lead and every builder. `task show` prints a `Review:` line and the JSON view carries `review` (`required`,
+`passing`, `accepted`, `current`, `reasons`). In a known worker context (`HIPSON_ROLE=worker` or
+`HIPSON_ASSIGNMENT`), `task ack`, `task finding update` and `task status` refuse on the CLI and MCP, as `task
+checks`, `task verify` and `task close` already did, so a worker cannot acknowledge, dismiss or force what judges
+its work (`task finish` stays available to lead wrappers). Labels are not authenticated: the gate is a
+coordination guarantee between cooperating processes, not a security boundary. The enforced boundaries remain the ones
+`task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
+not sandbox.
+
+**Protected paths.** Before each build the flow saves the content identity (content and executable bit, links
+by target) of the paths the declared checks name that lie outside the builder's write scope (an existing project
+path given as a check argument, e.g. `tests/acceptance.py`; `ruff check src` or `py_compile` of the file being
+fixed overlap the scope and are not protected), the runtime configuration native workers load from a project
+(`.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) and the spec's
+optional `protected` list. When the builder ends, before anything verifies or reviews its work, the flow
+compares them once; any change, even inside the builder's scope, stops it with `needs_lead`; restoring them and
+resuming continues. A builder allowed to write the acceptance tests needs them listed under `protected`, and a
+test a check reaches only indirectly (a whole suite) is protected only when listed. Later rewrites by the checks
+themselves (a report file they name) are not blamed on the builder.
+
+Snapshot creation fails closed, refusing the reviewer before an assignment exists (`task run` exit 75, the flow
+`verification_inconclusive`), for: content over the fingerprint hash budget, special files, symlinks that point
+out of the project, Git submodules, a repository without a commit, and Git operations that fail or time out
+(the snapshot's `read-tree` uses the same bounded Git helper). That refusal applies to tasks that require review
+(and to an explicit `--snapshot DIR`); for a task without the review gate `task run` warns and lets the
+reviewer read the live tree (recorded `source=live`), so ordinary reviews of large repositories keep working.
+`--live-tree` asks for that directly. The snapshot copies the project's line-ending settings (`core.autocrlf`,
+`core.eol`, `core.safecrlf`, `info/attributes`), so a CRLF checkout shows only real changes.
+
+Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and
+recorded identity); a reviewer that reads the live project by absolute path is outside it. Runtimes may not
+apply project-scoped configuration that is keyed by path (trust lists, per-project MCP entries) to a snapshot
+directory; see [AGENT_RUNTIMES.md](AGENT_RUNTIMES.md). Tracked
+files under the ledger's private directories are fingerprinted, but observation still skips those directories.
+An interrupted verification marks every record of that run as non-evidence for repairs,
+but the ledger still counts a check that passed before the signal; the non-Git inventory walk counts files
+under the flow's private directory toward its 20,000-path bound; with `TMPDIR` inside a checkpointed scope the
+runner's progress directory was copied into a checkpoint (fixed: `task run` now keeps its progress files in
+`.<ledger file>.runs/` beside the ledger, excluded from fingerprints, observation and checkpoints).
+
+`scripts/flow_compare.py` compares four lead procedures (worker self-report, self-verify, `task do`,
+`task flow`) over the same scripted `e2e/agents/bin/flow-worker` behaviours with a hidden oracle; results and
+their limits are in [docs/FLOW_EVAL.md](FLOW_EVAL.md).
 
 ## Revision-bound lead verification (1.5)
 

@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Deterministic worker for hipson task flow scenarios: flow-worker ROLE PROFILE; never writes the ledger.
+
+Builders edit src/parser/pairs.py by profile and stage (HIPSON_FLOW_STAGE); the reviewer reads it and reports a
+major finding when elements keep surrounding whitespace. The result goes to HIPSON_FLOW_RESULT.
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+role, profile = sys.argv[1:3]
+if os.environ.get("HIPSON_ROLE") != "worker":
+    raise SystemExit("Launch this worker through hipson task run")
+stage = os.environ.get("HIPSON_FLOW_STAGE", "build")
+result = Path(os.environ.get("HIPSON_FLOW_RESULT") or sys.argv[3])
+source = Path("src/parser/pairs.py")
+SPLIT = "tuple(text.split(':'))"
+TRIM = "tuple(part.strip() for part in text.split(':'))"
+report = {"status": "completed", "summary": f"{role} {profile} {stage}", "files_changed": [], "commands": [],
+          "findings": [], "risks": []}
+
+
+def write(body):
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f"def parse_pair(text):\n    return {body}\n", encoding="utf-8")
+    report["files_changed"].append({"path": str(source), "change": f"{profile} {stage}"})
+
+
+if role == "builder":
+    if profile == "crash":
+        raise SystemExit(5)
+    if profile == "malformed":
+        result.write_text('{"status": "completed", "summary": ', encoding="utf-8")
+        raise SystemExit(0)
+    if profile == "interrupt-once" and not Path("src/parser/.interrupted-once").exists():
+        Path("src/parser/.interrupted-once").touch()
+        Path("src/parser/.worker-ready").touch()
+        time.sleep(60)
+    if profile == "false-green":
+        report["summary"] = "All tests pass"  # Claims success, changes nothing.
+    elif profile == "tamper":
+        write(SPLIT)
+        Path("tests/acceptance.py").write_text("pass\n", encoding="utf-8")
+        report["files_changed"].append({"path": "tests/acceptance.py", "change": "simplified test"})
+    elif profile == "never-fixes":
+        write(SPLIT)
+    elif profile == "hook":  # A correct fix that also plants runtime configuration the next worker would load.
+        write(TRIM)
+        Path(".claude").mkdir(exist_ok=True)
+        Path(".claude/settings.json").write_text('{"hooks": {}}\n', encoding="utf-8")
+    elif profile in ("correct", "interrupt-once"):
+        write(TRIM)
+    else:  # needs-repair: the first build misses trimming; any repair applies it.
+        write(TRIM if stage == "repair" else SPLIT)
+elif role == "reviewer":
+    if profile == "crash":
+        raise SystemExit(6)
+    live = Path(os.environ.get("HIPSON_PROJECT", ".")) / source  # The task project, outside the review snapshot.
+    once = result.parent / ".mutated-once"
+    original = live.read_text(encoding="utf-8") if live.exists() else ""
+    if profile == "aba" or (profile == "mutate-once" and not once.exists()):
+        # Another process edits the live project while the review runs (the documented race).
+        once.touch()
+        live.write_text(f"def parse_pair(text):\n    return {SPLIT}\n", encoding="utf-8")
+    text = source.read_text(encoding="utf-8") if source.exists() else ""
+    if profile == "aba":
+        live.write_text(original, encoding="utf-8")  # ...and restores it before the review ends.
+    report["summary"] += " read " + ("trimmed" if "strip" in text else "untrimmed") + " source"
+    marker = result.parent / ".reported-once"
+    if profile == "report-once" and marker.exists():
+        text = "strip"  # Omits the earlier finding on later runs, whatever the tree holds.
+    marker.touch()
+    if "strip" not in text:
+        title = "Pair elements retain surrounding whitespace"
+        if profile == "secret-title":  # A title the ledger redacts must still match the reviewer's report.
+            title += " (seen with token ghp_" + "a1B2" * 9 + ")"
+        report["findings"].append({"severity": "major", "title": title,
+                                   "detail": "parse_pair(' a : b ') must return ('a', 'b').",
+                                   "location": "src/parser/pairs.py:2"})
+else:
+    raise SystemExit("Usage: flow-worker builder|reviewer PROFILE [RESULT.json]")
+result.write_text(json.dumps(report) + "\n", encoding="utf-8")

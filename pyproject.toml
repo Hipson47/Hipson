@@ -218,12 +218,17 @@ tests = ["tests/test_gate_contracts.py"]
 # measured), survivor cap 644 -> 648.
 # Checkpoint events and case-aware claims add 124 mutants with exact contracts (2802 -> 2926): 77.31% (77.307%
 # measured), survivor cap 648 -> 657.
-measured_on = "2026-10-29"
+# Review policy, reviewed-tree binding and close expected_checks add 492 mutants with exact contracts
+# (2926 -> 3418): 80.28% (2744 killed, 80.281% measured), survivor cap 657 -> 667. Every survivor above the old
+# cap is an equivalent mutant (SQL keyword/identifier case and sqlite3.Row key case in _review_seqs, defaults
+# that a review with a recorded start never reaches in review_state). Measured locally with Python 3.13 on
+# 676a4ff; approved by the owner on 2026-11-19. A CI (3.12) run must still confirm it before merge.
+measured_on = "2026-11-19"
 mutmut_version = "3.8.0"
-python_version = "3.12"
-elapsed_seconds = 389
-min_killed_percent = 77.30
-min_total = 2926
-max_survived = 657
+python_version = "3.13"
+elapsed_seconds = 560
+min_killed_percent = 80.28
+min_total = 3418
+max_survived = 667
 max_no_tests = 7
 max_timeout = 0

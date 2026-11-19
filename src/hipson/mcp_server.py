@@ -282,6 +282,8 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "lead": {"type": "string"},
             "needs": {"type": "array", "maxItems": 16, "items": {"type": "string"},
                       "description": "Capability tags such as code_write or web_research (route.actor ranks by them)"},
+            "require_review": {"type": "boolean",
+                               "description": "done needs an independent read-only review of the verified tree"},
             "approved": {"type": "boolean"},
         },
         "additionalProperties": False,
@@ -867,6 +869,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
                 project=arguments["project"], title=arguments["title"], objective=arguments["objective"],
                 acceptance=arguments.get("acceptance", []), lead=arguments.get("lead", "claude"),
                 checks=arguments.get("checks", []), needs=arguments.get("needs", []),
+                review_policy="required" if arguments.get("require_review") else "none",
             )
         if name == "task.assign":
             return store.assign(
@@ -982,6 +985,9 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments['actor'], 'actor')
         if 'command' in arguments:
             validate(arguments['command'], arguments.get('timeout', 300))
+    if name in ('task.ack', 'task.finding_update', 'task.status'):
+        from hipson.task_verification import invocation_context
+        invocation_context()  # A worker must not acknowledge, dismiss or force what judges its own work.
     if name == "task.status":
         ledger.validate_status_override(to=arguments["to"], force=arguments.get("force", False),
                                         reason=arguments.get("reason", ""))

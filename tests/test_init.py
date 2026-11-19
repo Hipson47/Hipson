@@ -187,12 +187,15 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     assert len([call for call in calls if call["args"][:2] == ["mcp", "add"]]) == 1
     assert all(call["client"] == "claude" and call["cwd"] == str(setup.project) for call in calls)
     steps = report["next_steps"]
-    assert len(steps) == 7 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
+    for index, words in ((7, ("hipson", "agent", "runtimes")), (8, ("task", "flow", "flow.json", "--check"))):
+        assert all(word in steps[index] for word in words), steps[index]  # POSIX or PowerShell quoting.
+    assert set(report["checks"]["runtimes"]) == {"claude", "codex", "agy"}
+    assert len(steps) == 9 and "approve the project MCP server" in steps[0] and str(setup.project) in steps[1]
     assert "--check" in steps[2] and "--start" in steps[2]
     for index, words in ((3, ("task", "run")), (4, ("task", "now")), (5, ("task", "ack", "--assignment")),
                          (6, ("task", "close"))):
         assert all(word in steps[index] for word in words), steps[index]  # POSIX or PowerShell quoting.
-    assert len(second["next_steps"]) == 6  # Nothing new to approve once registered.
+    assert len(second["next_steps"]) == 8  # Nothing new to approve once registered.
 
 
 def test_init_claude_user_scope_backs_up_before_cli_edit(tmp_path):
@@ -255,6 +258,33 @@ def test_init_migration_dry_run_is_read_only_then_apply_backs_up(tmp_path):
         assert backup.execute("SELECT version FROM schema_version").fetchone()[0] == 1
     with closing(ledger.Ledger(setup.db, read_only=True)) as store:
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
+
+
+def test_init_accepts_every_schema_version_the_ledger_migrates(tmp_path):
+    """Setup refused v4-v9 ledgers the Ledger migrates fine, so upgrades could not run init."""
+    assert ledger.SUPPORTED_SCHEMA_VERSIONS[-1] == ledger.SCHEMA_VERSION
+    # A bump without a migration must stay fail-closed, so the chain covers every earlier version.
+    assert len(ledger.MIGRATIONS) == ledger.SCHEMA_VERSION - 1
+    setup = _Setup(tmp_path)
+    setup.db.parent.mkdir()
+    with closing(sqlite3.connect(setup.db)) as connection:
+        connection.executescript((ROOT / "tests/fixtures/task-ledger-v1.sql").read_text(encoding="utf-8"))
+
+    def _stamp(version):
+        with closing(sqlite3.connect(setup.db)) as connection:
+            connection.execute("UPDATE schema_version SET version = ?", (version,))
+            connection.commit()
+
+    for version in ledger.SUPPORTED_SCHEMA_VERSIONS:
+        _stamp(version)
+        assert init_setup._ledger_version(setup.db) == version
+    _stamp(ledger.SCHEMA_VERSION + 1)
+    try:
+        init_setup._ledger_version(setup.db)
+    except ValueError as error:
+        assert "Unsupported task ledger schema" in str(error)
+    else:
+        raise AssertionError("a schema newer than this build supports must stop setup")
 
 
 def test_init_live_wal_dry_run_does_not_change_ledger_or_sidecars(tmp_path):

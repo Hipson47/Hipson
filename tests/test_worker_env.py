@@ -136,6 +136,7 @@ def test_v8_ledgers_open_read_only_and_migrate_to_an_empty_environment_column(tm
     with closing(sqlite3.connect(db)) as connection:
         connection.execute("ALTER TABLE assignments DROP COLUMN needs")
         connection.execute("ALTER TABLE tasks DROP COLUMN needs")
+        connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
         connection.execute("ALTER TABLE assignments DROP COLUMN environment")
         connection.execute("UPDATE schema_version SET version = 8")
         connection.commit()
