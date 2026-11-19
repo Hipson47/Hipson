@@ -231,3 +231,14 @@ def test_a_rate_limited_runtime_is_a_classified_worker_failure(tmp_path):
     meta = json.loads((db.parent / ".ledger.sqlite.flows" / "T-0001" / "build-1.result.json.meta.json").read_text())
     assert meta["outcome"] == "rate_limited"
     assert ledger.TASK_RESULT_SCHEMA["required"] == runtimes.result_schema()["required"]
+
+
+
+def test_check_grants_are_exact_patterns_only(tmp_path):
+    schema = tmp_path / "s.json"
+    schema.write_text("{}")
+    argv, _ = runtimes.build_command("claude", profile="native", mode="rw", prompt="p", schema_path=schema,
+                                     last_path=tmp_path / "l", cwd=str(tmp_path),
+                                     checks=[["pytest", "-q"], ["pytest", "tests/*"], ["python3", "-c", "x)"]])
+    grants = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--allowedTools"]
+    assert grants == ["Bash(pytest -q)"]

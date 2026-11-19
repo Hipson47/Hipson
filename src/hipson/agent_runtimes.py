@@ -269,7 +269,8 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
         argv += ["--model", model] if model else []
         argv += ["--effort", effort] if effort else []
         # Task-scoped grant: exactly the lead's declared checks, on top of the user's own permission rules.
-        argv += [item for check in checks for item in ("--allowedTools", f"Bash({shlex.join(check)})")]
+        argv += [item for check in checks if _exact_pattern(check)
+                 for item in ("--allowedTools", f"Bash({shlex.join(check)})")]
         if profile == "controlled":
             argv += ["--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence"]
         return argv, prompt
@@ -291,6 +292,12 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
     return argv, None
+
+
+def _exact_pattern(check: list[str]) -> bool:
+    """Grant only a check whose permission pattern cannot match more than itself (no wildcard, no closing paren)."""
+    text = shlex.join(check)
+    return not any(char in text for char in "*?()[]{}") and not any(ord(char) < 32 for char in text)
 
 
 def classify(code: int, output: str) -> str:
