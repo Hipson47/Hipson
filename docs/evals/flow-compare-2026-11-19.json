@@ -1,6 +1,6 @@
 {
   "artifact_kind": "hipson.flow_compare",
-  "revision": "5ccd9e2e5f628d1c548e7b99956b4238f31dfd1d",
+  "revision": "46ccff73952f697c3df65721f1217bd3136ee260",
   "dirty": false,
   "python": "3.13.12",
   "model": null,
@@ -18,7 +18,7 @@
       "lead_commands": 10,
       "worker_runs": 10,
       "check_runs": 0,
-      "duration_seconds": 0.216
+      "duration_seconds": 0.206
     },
     "A2": {
       "runs": 9,
@@ -32,7 +32,7 @@
       "lead_commands": 17,
       "worker_runs": 10,
       "check_runs": 7,
-      "duration_seconds": 0.31
+      "duration_seconds": 0.308
     },
     "B": {
       "runs": 9,
@@ -46,7 +46,7 @@
       "lead_commands": 14,
       "worker_runs": 10,
       "check_runs": 6,
-      "duration_seconds": 6.543
+      "duration_seconds": 6.304
     },
     "C": {
       "runs": 9,
@@ -60,7 +60,7 @@
       "lead_commands": 10,
       "worker_runs": 24,
       "check_runs": 12,
-      "duration_seconds": 14.241
+      "duration_seconds": 13.548
     }
   },
   "runs": [
@@ -79,7 +79,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.019,
+      "duration_seconds": 0.018,
       "tokens": null
     },
     {
@@ -97,7 +97,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.031,
+      "duration_seconds": 0.029,
       "tokens": null
     },
     {
@@ -115,7 +115,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.783,
+      "duration_seconds": 0.745,
       "tokens": null
     },
     {
@@ -133,7 +133,7 @@
       "lead_commands": 1,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 1.278,
+      "duration_seconds": 1.311,
       "tokens": null
     },
     {
@@ -151,7 +151,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.02,
       "tokens": null
     },
     {
@@ -187,7 +187,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.655,
+      "duration_seconds": 0.684,
       "tokens": null
     },
     {
@@ -205,7 +205,7 @@
       "lead_commands": 1,
       "worker_runs": 3,
       "check_runs": 3,
-      "duration_seconds": 1.874,
+      "duration_seconds": 1.89,
       "tokens": null
     },
     {
@@ -223,7 +223,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.017,
+      "duration_seconds": 0.018,
       "tokens": null
     },
     {
@@ -241,7 +241,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.037,
+      "duration_seconds": 0.041,
       "tokens": null
     },
     {
@@ -259,7 +259,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.691,
+      "duration_seconds": 0.668,
       "tokens": null
     },
     {
@@ -277,7 +277,7 @@
       "lead_commands": 1,
       "worker_runs": 3,
       "check_runs": 2,
-      "duration_seconds": 1.817,
+      "duration_seconds": 1.729,
       "tokens": null
     },
     {
@@ -295,7 +295,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.017,
       "tokens": null
     },
     {
@@ -313,7 +313,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.028,
+      "duration_seconds": 0.026,
       "tokens": null
     },
     {
@@ -331,7 +331,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.723,
+      "duration_seconds": 0.754,
       "tokens": null
     },
     {
@@ -349,7 +349,7 @@
       "lead_commands": 1,
       "worker_runs": 4,
       "check_runs": 2,
-      "duration_seconds": 2.48,
+      "duration_seconds": 2.266,
       "tokens": null
     },
     {
@@ -367,7 +367,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.016,
       "tokens": null
     },
     {
@@ -385,7 +385,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.028,
+      "duration_seconds": 0.031,
       "tokens": null
     },
     {
@@ -403,7 +403,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.765,
+      "duration_seconds": 0.724,
       "tokens": null
     },
     {
@@ -421,7 +421,7 @@
       "lead_commands": 1,
       "worker_runs": 6,
       "check_runs": 3,
-      "duration_seconds": 3.252,
+      "duration_seconds": 3.059,
       "tokens": null
     },
     {
@@ -439,7 +439,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.019,
+      "duration_seconds": 0.016,
       "tokens": null
     },
     {
@@ -457,7 +457,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.027,
+      "duration_seconds": 0.025,
       "tokens": null
     },
     {
@@ -475,7 +475,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.488,
+      "duration_seconds": 0.458,
       "tokens": null
     },
     {
@@ -493,7 +493,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.585,
+      "duration_seconds": 0.529,
       "tokens": null
     },
     {
@@ -511,84 +511,12 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.017,
       "tokens": null
     },
     {
       "case": "crash",
       "probe": "the worker exits non-zero",
-      "strategy": "A2",
-      "accepted": false,
-      "ground_truth_ok": false,
-      "false_completion": false,
-      "lost_good_work": false,
-      "accepted_scope_violation": false,
-      "accepted_tampered_tests": false,
-      "accepted_without_independent_review": false,
-      "done_without_review_in_ledger": null,
-      "lead_commands": 1,
-      "worker_runs": 1,
-      "check_runs": 0,
-      "duration_seconds": 0.021,
-      "tokens": null
-    },
-    {
-      "case": "crash",
-      "probe": "the worker exits non-zero",
-      "strategy": "B",
-      "accepted": false,
-      "ground_truth_ok": false,
-      "false_completion": false,
-      "lost_good_work": false,
-      "accepted_scope_violation": false,
-      "accepted_tampered_tests": false,
-      "accepted_without_independent_review": false,
-      "done_without_review_in_ledger": 0,
-      "lead_commands": 1,
-      "worker_runs": 1,
-      "check_runs": 0,
-      "duration_seconds": 0.495,
-      "tokens": null
-    },
-    {
-      "case": "crash",
-      "probe": "the worker exits non-zero",
-      "strategy": "C",
-      "accepted": false,
-      "ground_truth_ok": false,
-      "false_completion": false,
-      "lost_good_work": false,
-      "accepted_scope_violation": false,
-      "accepted_tampered_tests": false,
-      "accepted_without_independent_review": false,
-      "done_without_review_in_ledger": 0,
-      "lead_commands": 1,
-      "worker_runs": 1,
-      "check_runs": 0,
-      "duration_seconds": 0.595,
-      "tokens": null
-    },
-    {
-      "case": "malformed",
-      "probe": "the worker writes a malformed result",
-      "strategy": "A1",
-      "accepted": false,
-      "ground_truth_ok": false,
-      "false_completion": false,
-      "lost_good_work": false,
-      "accepted_scope_violation": false,
-      "accepted_tampered_tests": false,
-      "accepted_without_independent_review": false,
-      "done_without_review_in_ledger": null,
-      "lead_commands": 1,
-      "worker_runs": 1,
-      "check_runs": 0,
-      "duration_seconds": 0.021,
-      "tokens": null
-    },
-    {
-      "case": "malformed",
-      "probe": "the worker writes a malformed result",
       "strategy": "A2",
       "accepted": false,
       "ground_truth_ok": false,
@@ -605,6 +533,78 @@
       "tokens": null
     },
     {
+      "case": "crash",
+      "probe": "the worker exits non-zero",
+      "strategy": "B",
+      "accepted": false,
+      "ground_truth_ok": false,
+      "false_completion": false,
+      "lost_good_work": false,
+      "accepted_scope_violation": false,
+      "accepted_tampered_tests": false,
+      "accepted_without_independent_review": false,
+      "done_without_review_in_ledger": 0,
+      "lead_commands": 1,
+      "worker_runs": 1,
+      "check_runs": 0,
+      "duration_seconds": 0.438,
+      "tokens": null
+    },
+    {
+      "case": "crash",
+      "probe": "the worker exits non-zero",
+      "strategy": "C",
+      "accepted": false,
+      "ground_truth_ok": false,
+      "false_completion": false,
+      "lost_good_work": false,
+      "accepted_scope_violation": false,
+      "accepted_tampered_tests": false,
+      "accepted_without_independent_review": false,
+      "done_without_review_in_ledger": 0,
+      "lead_commands": 1,
+      "worker_runs": 1,
+      "check_runs": 0,
+      "duration_seconds": 0.519,
+      "tokens": null
+    },
+    {
+      "case": "malformed",
+      "probe": "the worker writes a malformed result",
+      "strategy": "A1",
+      "accepted": false,
+      "ground_truth_ok": false,
+      "false_completion": false,
+      "lost_good_work": false,
+      "accepted_scope_violation": false,
+      "accepted_tampered_tests": false,
+      "accepted_without_independent_review": false,
+      "done_without_review_in_ledger": null,
+      "lead_commands": 1,
+      "worker_runs": 1,
+      "check_runs": 0,
+      "duration_seconds": 0.017,
+      "tokens": null
+    },
+    {
+      "case": "malformed",
+      "probe": "the worker writes a malformed result",
+      "strategy": "A2",
+      "accepted": false,
+      "ground_truth_ok": false,
+      "false_completion": false,
+      "lost_good_work": false,
+      "accepted_scope_violation": false,
+      "accepted_tampered_tests": false,
+      "accepted_without_independent_review": false,
+      "done_without_review_in_ledger": null,
+      "lead_commands": 1,
+      "worker_runs": 1,
+      "check_runs": 0,
+      "duration_seconds": 0.022,
+      "tokens": null
+    },
+    {
       "case": "malformed",
       "probe": "the worker writes a malformed result",
       "strategy": "B",
@@ -619,7 +619,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.464,
+      "duration_seconds": 0.43,
       "tokens": null
     },
     {
@@ -637,7 +637,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.584,
+      "duration_seconds": 0.529,
       "tokens": null
     },
     {
@@ -655,7 +655,7 @@
       "lead_commands": 2,
       "worker_runs": 2,
       "check_runs": 0,
-      "duration_seconds": 0.068,
+      "duration_seconds": 0.067,
       "tokens": null
     },
     {
@@ -673,7 +673,7 @@
       "lead_commands": 3,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 0.081,
+      "duration_seconds": 0.077,
       "tokens": null
     },
     {
@@ -691,7 +691,7 @@
       "lead_commands": 6,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 1.479,
+      "duration_seconds": 1.403,
       "tokens": null
     },
     {
@@ -709,7 +709,7 @@
       "lead_commands": 2,
       "worker_runs": 3,
       "check_runs": 1,
-      "duration_seconds": 1.776,
+      "duration_seconds": 1.716,
       "tokens": null
     }
   ]
