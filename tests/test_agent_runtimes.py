@@ -616,3 +616,38 @@ def test_windows_execution_contexts_are_detected_and_kept_apart(tmp_path):
     with patch.object(runtimes.os, "name", "posix"):  # A .cmd file on POSIX is just a file name.
         assert runtimes.execution_context(str(forward)) == {"context": "native"}
 
+
+
+def test_wsl_forwarding_is_recognised_at_command_position_only(tmp_path):
+    cases = {
+        r'@"C:\Program Files\nodejs\node.exe" "%~dp0node_modules\codex\bin\codex.js" %*': "batch-shim",
+        r'node C:\tools\wsl\bin\x.js %*': "batch-shim",                 # A directory named wsl.
+        r'"C:\Users\wsl\AppData\Roaming\npm\node.exe" "%~dp0claude.js" %*': "batch-shim",  # A user named wsl.
+        "REM wsl notes\n@node x.js %*": "batch-shim",                    # Comments do not run anything.
+        ":: run wsl later\n@node x.js %*": "batch-shim",
+        r'node \\wsl$\Ubuntu\home\u\x.js %*': "batch-shim",               # A Windows process reading WSL files.
+        "bash.exe -c agy": "batch-shim",                                  # Git Bash is not WSL.
+        "for /f %%I in (`wsl.exe -d Ubuntu --exec wslpath -a %CD%`) do set X=%%I": "wsl-forwarded",
+        "@wsl.exe -d Ubuntu -- agy %*": "wsl-forwarded",
+        "wsl agy %*": "wsl-forwarded",
+        r'"C:\Windows\System32\wsl.exe" -e agy %*': "wsl-forwarded",
+        "ubuntu2204.exe run agy %*": "wsl-forwarded",
+    }
+    with patch.object(runtimes.os, "name", "nt"):
+        for index, (text, expected) in enumerate(cases.items()):
+            launcher = tmp_path / f"case{index}.cmd"
+            launcher.write_text("@echo off\n" + text + "\n")
+            assert runtimes.execution_context(str(launcher))["context"] == expected, text
+
+
+def test_codex_effort_must_be_a_level_name_because_it_is_passed_unquoted(tmp_path):
+    schema, last = tmp_path / "s.json", tmp_path / "l.json"
+    schema.write_text("{}")
+    common = dict(profile="native", mode="rw", prompt="p", schema_path=schema, last_path=last, cwd=str(tmp_path))
+    for effort in ("1", "true", "1.5", "[a]", "x y", "high=1"):
+        with pytest.raises(runtimes.RuntimeFailure) as error:
+            runtimes.build_command("codex", effort=effort, **common)
+        assert error.value.kind == "unsupported" and "level name" in error.value.detail, effort
+    for effort in ("low", "xhigh", "max", "very_high"):
+        argv, _ = runtimes.build_command("codex", effort=effort, **common)
+        assert f"model_reasoning_effort={effort}" in argv

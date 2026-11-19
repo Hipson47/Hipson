@@ -199,6 +199,9 @@ def test_batch_targets_get_their_arguments_through_the_environment_not_cmd_parsi
     assert env['HIPSON_T_1'] == 'a&whoami' and env['HIPSON_T_2'] == '100%' and env['KEEP'] == '1'
     assert batch_command([PY, 'a&b'], {}, 'HIPSON_T_') == ([PY, 'a&b'], {})  # Executables are untouched.
     _error(lambda: batch_command([str(target), 'say "hi"'], {}, 'HIPSON_T_'), 'quotes', ValueError)
+    # An empty variable does not exist on Windows, so %VAR% would reach the launcher literally.
+    _error(lambda: batch_command([str(target), ''], {}, 'HIPSON_T_'), 'empty or over-long', ValueError)
+    _error(lambda: batch_command([str(target), 'x' * 32001], {}, 'HIPSON_T_'), 'empty or over-long', ValueError)
 
 
 def test_read_only_git_reads_disable_configured_filter_drivers(tmp_path):

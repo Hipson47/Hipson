@@ -319,6 +319,9 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
         flags = ["--json", *(["--config", f"sandbox_mode={sandbox}"] if resume else ["--sandbox", sandbox]),
                  "--output-schema", str(schema_path), "--output-last-message", str(last_path)]
         flags += ["--model", model] if model else []
+        # Unquoted, a number or a TOML keyword would be read as another type: only plain level names pass.
+        if effort and (not EFFORT_PATTERN.fullmatch(effort) or effort.lower() in ("true", "false", "inf", "nan")):
+            raise RuntimeFailure("unsupported", f"effort {effort!r} is not a level name (letters, digits, - or _)")
         flags += ["--config", f"model_reasoning_effort={effort}"] if effort else []
         if profile == "controlled":
             flags += ["--ephemeral", "--ignore-user-config", "--ignore-rules"]
@@ -344,7 +347,16 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     return argv, None
 
 
-WSL_FORWARD = re.compile(rb"(?<![\w.-])wsl(?:\.exe)?(?![\w.-])", re.I)  # The command, not a word in a path.
+# A heuristic for what a launcher runs, at command position only: `wsl`/`wsl.exe` (bare, after @ ( ` & | or a
+# quote, or as a path ending in \wsl.exe), or a distribution launcher such as ubuntu.exe. A directory or user
+# named "wsl" in a path, and comment lines, do not count. Git Bash's bash.exe is not WSL, so bash is not matched.
+WSL_FORWARD = re.compile(
+    rb"(?:^|[\s@(`&|\"'])wsl(?:\.exe)?(?=[\s\"'`)&|]|$)"
+    rb"|[\\/]wsl\.exe(?=[\s\"'`)&|]|$)"
+    rb"|(?:^|[\s@(`&|\"'\\/])(?:ubuntu[\w.]*|debian|kali|opensuse[\w.-]*|sles[\w.-]*)\.exe(?=[\s\"'`)&|]|$)",
+    re.I | re.M)
+COMMENT = re.compile(rb"^\s*@?\s*(?:rem(?:\s|$)|::).*$", re.I | re.M)
+EFFORT_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,31}")
 
 
 def execution_context(executable: str | None) -> dict[str, Any]:
@@ -361,7 +373,8 @@ def execution_context(executable: str | None) -> dict[str, Any]:
                 head = stream.read(16384)
         except OSError:
             head = b""
-        return {"context": "wsl-forwarded" if WSL_FORWARD.search(head) else "batch-shim", "launcher": executable}
+        code = COMMENT.sub(b"", head)
+        return {"context": "wsl-forwarded" if WSL_FORWARD.search(code) else "batch-shim", "launcher": executable}
     return {"context": "native"}
 
 
