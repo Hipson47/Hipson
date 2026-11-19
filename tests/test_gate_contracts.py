@@ -846,3 +846,71 @@ def test_review_seqs_exact_contract(tmp_path):
 
 def _seq(store, task, kind, ref):
     return next(event["seq"] for event in store.events(task) if event["type"] == kind and event["refs"][0] == ref)
+
+
+
+def _gate_task(store, tmp_path, policy="required"):
+    task = store.open_task(project=tmp_path, title="Gate", objective="Review gate", lead=LEAD, review_policy=policy)["id"]
+    store.set_status(task, to="in_progress", actor=LEAD)
+    build = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
+    store.finish(build, result="passed", summary="built")
+    store.ack(build)
+    store._record_verification(_record(id="V-" + task[2:].rjust(32, "e"), task=task,
+                                       builder_finished_seq=store._builder_finished_seq(task)))
+    return task
+
+
+def _review(store, task, actor="rev"):
+    item = store.assign(task, actor=actor, role="reviewer", mode="ro", scope=[])["id"]
+    store.finish(item, result="passed", summary="reviewed", worker_result={
+        "status": "completed", "summary": "ok", "files_changed": [], "commands": [], "findings": [], "risks": []})
+    store.ack(item)
+    return item
+
+
+def test_review_policy_ledger_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = _gate_task(store, tmp_path)
+        policy = [event for event in store.events(task) if event["type"] == "review_policy"]
+        assert [(event["actor"], event["summary"], event["refs"]) for event in policy] == [
+            (LEAD, "independent read-only review required before done", [])]
+        plain = _gate_task(store, tmp_path, policy="none")
+        assert not [event for event in store.events(plain) if event["type"] == "review_policy"]
+        assert store.show(plain)["review_policy"] == "none" and store.show(task)["review_policy"] == "required"
+        store.set_status(task, to="review", actor=LEAD)
+        reason = ("review required: no reviewer assignment; run an independent read-only reviewer after the latest "
+                  "builder and lead verification (hipson task flow, or hipson task run --role reviewer --mode ro)")
+        _error(lambda: store.set_status(task, to="done", actor=LEAD), f"Cannot mark {task} done: {reason}")
+        # Reviews by the lead's label do not count; done_blockers keeps every other blocker too.
+        _review(store, task, actor=LEAD.upper())
+        active = store.assign(task, actor="other", role="explorer", mode="ro", scope=[])["id"]
+        blockers = ledger.done_blockers(store.show(task))
+        assert blockers[0].startswith(f"active assignment {active}") and blockers[-1].startswith(
+            "review required: latest review A-0003 does not qualify: actor LEAD is the lead or a builder of this task")
+        store.finish(active, result="passed", summary="x")
+        store.ack(active)
+        good = _review(store, task)
+        assert store.show(task)["review"] == {"required": True, "passing": True, "accepted": good, "current": good,
+                                              "reasons": []}
+        assert store.set_status(task, to="done", actor=LEAD)["status"] == "done"
+        forced = _gate_task(store, tmp_path)
+        store.set_status(forced, to="review", actor=LEAD)
+        store.set_status(forced, to="done", actor=LEAD, force=True, reason="owner accepted without review")
+        override = [event for event in store.events(forced) if event["type"] == "done_override"]
+        assert override and override[0]["summary"] == f"Reason: owner accepted without review; blockers: {reason}"
+
+
+def test_v10_rows_read_as_no_review_policy(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        store.open_task(project=tmp_path, title="Old", objective="v10 row", lead=LEAD, review_policy="required")
+        store.connection.execute("BEGIN IMMEDIATE")
+        store.connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
+        store.connection.execute("UPDATE schema_version SET version = 10")
+        store.connection.commit()
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert store.show("T-0001")["review_policy"] == "none"
+    with closing(ledger.Ledger(db)) as store:
+        assert store.show("T-0001")["review_policy"] == "none"
+        assert store.connection.execute("SELECT review_policy FROM tasks").fetchone()[0] == "none"
