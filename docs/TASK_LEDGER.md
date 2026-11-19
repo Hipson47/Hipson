@@ -461,8 +461,10 @@ themselves (a report file they name) are not blamed on the builder.
 Snapshot creation fails closed, refusing the reviewer before an assignment exists (`task run` exit 75, the flow
 `verification_inconclusive`), for: content over the fingerprint hash budget, special files, symlinks that point
 out of the project, Git submodules, a repository without a commit, and Git operations that fail or time out
-(the snapshot's `read-tree` uses the same bounded Git helper). `--live-tree` runs such a reviewer anyway, without
-satisfying a required review. The snapshot copies the project's line-ending settings (`core.autocrlf`,
+(the snapshot's `read-tree` uses the same bounded Git helper). That refusal applies to tasks that require review
+(and to an explicit `--snapshot DIR`); for a task without the review gate `task run` warns and lets the
+reviewer read the live tree (recorded `source=live`), so ordinary reviews of large repositories keep working.
+`--live-tree` asks for that directly. The snapshot copies the project's line-ending settings (`core.autocrlf`,
 `core.eol`, `core.safecrlf`, `info/attributes`), so a CRLF checkout shows only real changes.
 
 Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and

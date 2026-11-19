@@ -5,7 +5,8 @@
 - Immutable review snapshots: a reviewer now reads a private, read-only copy of the exact candidate lead
   verification accepted (a Git checkout of the base commit through alternates, with every covered modified and
   untracked file copied from the bytes the fingerprint hashes). `task run --role reviewer` snapshots by default
-  (`--snapshot DIR` takes the flow's prepared copy, `--live-tree` opts out), re-hashes it when the reviewer starts
+  (`--snapshot DIR` takes the flow's prepared copy, `--live-tree` opts out; when no snapshot can be made, a task without required review
+  falls back to the live tree with a warning, a required one refuses), re-hashes it when the reviewer starts
   and ends, and records `source=snapshot`; a required review of the live tree, or of a snapshot that changed,
   never qualifies. The flow builds the reviewer's diff from the same copy and refuses to review a tree that is not
   the verified one. Snapshots are removed when the reviewer ends and swept after an interruption.

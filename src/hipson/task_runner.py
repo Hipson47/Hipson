@@ -508,7 +508,8 @@ def run(args: argparse.Namespace) -> int:
     db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
     try:
         with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
-            project = store.show(args.task)["project"]
+            shown = store.show(args.task)
+            project, review_required = shown["project"], shown.get("review_policy") == "required"
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not read task {args.task}: {exc}; worker not started")
         return 75
@@ -536,8 +537,13 @@ def run(args: argparse.Namespace) -> int:
         try:
             review = _review_snapshot(db, args, str(check["expected"]))
         except (review_snapshot.SnapshotError, OSError) as exc:
-            _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; worker not started")
-            return 75
+            if review_required or args.snapshot:
+                # Only a snapshot review can satisfy a required review: never start one that could not count.
+                _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; worker not started")
+                return 75
+            # No review gate depends on it: review the live tree (recorded as source=live) rather than refuse.
+            _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; this task does not "
+                     "require review, so the reviewer reads the live working tree")
     elif getattr(args, "snapshot", None):
         _message("--snapshot needs --role reviewer without --live-tree; worker not started")
         return 64

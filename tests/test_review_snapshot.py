@@ -317,3 +317,30 @@ def test_a_crlf_checkout_snapshot_shows_only_real_changes(tmp_path):
     copy = review_snapshot.workdir(tmp_path / 'snap', manifest)
     assert _git(copy, 'config', '--get', 'core.autocrlf') == 'true'
     assert _git(copy, 'status', '--porcelain').strip() == 'M b.txt'
+
+
+def test_a_task_without_required_review_falls_back_to_the_live_tree_when_a_snapshot_is_impossible(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    result = tmp_path / 'review.json'
+    for required in (False, True):
+        args = ['--require-review'] if required else []
+        run_cli(project, 'task', 'open', '--db', str(db), '--project', str(project), '--title', 'Big',
+                '--objective', 'x', '--lead', 'lead', '--check', PY + ' -c pass', '--start', *args)
+    (project / 'big.bin').write_bytes(b'x' * 64)
+    seen = tmp_path / 'cwd.txt'
+    code = f"import os; open({str(seen)!r}, 'w').write(os.getcwd())"
+    # The CLI runs out of process: lower the hash budget there so big.bin cannot be snapshotted.
+    for task, expected in (('T-0001', 0), ('T-0002', 75)):
+        result.write_text(json.dumps(RESULT))
+        proc = subprocess.run([PY, '-c', (
+            "import sys; from hipson import task_verification, cli; task_verification.FILE_HASH_LIMIT = 16; "
+            "sys.exit(cli.main(sys.argv[1:]))"), 'task', '--db', str(db), 'run', '--task', task, '--actor',
+            'reviewer', '--role', 'reviewer', '--mode', 'ro', '--result-file', str(result), '--', PY, '-c', code],
+            cwd=project, capture_output=True, text=True, timeout=120)
+        assert proc.returncode == expected, (task, proc.stderr)
+        assert 'could not prepare the review snapshot' in proc.stderr, proc.stderr
+    assert Path(seen.read_text()) == project.resolve()  # The fallback reviewer ran in the live project.
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        events = [event['summary'] for event in store.events('T-0001') if event['type'] == 'reviewed']
+        assert len(store.show('T-0002')['assignments']) == 0  # Required review: refused before any assignment.
+    assert events and all(summary.endswith('source=live') for summary in events)
