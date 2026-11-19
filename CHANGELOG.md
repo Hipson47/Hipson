@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- Immutable review snapshots: a reviewer now reads a private, read-only copy of the exact candidate lead
+  verification accepted (a Git checkout of the base commit through alternates, with every covered modified and
+  untracked file copied from the bytes the fingerprint hashes). `task run --role reviewer` snapshots by default
+  (`--snapshot DIR` takes the flow's prepared copy, `--live-tree` opts out), re-hashes it when the reviewer starts
+  and ends, and records `source=snapshot`; a required review of the live tree, or of a snapshot that changed,
+  never qualifies. The flow builds the reviewer's diff from the same copy and refuses to review a tree that is not
+  the verified one. Snapshots are removed when the reviewer ends and swept after an interruption.
+- `task flow` protects acceptance and runtime configuration: paths the checks name, `.claude`, `.codex`,
+  `.agents`, `.gemini`, `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and the spec's `protected` list. A builder
+  that changes one, even inside its scope, stops the flow with `needs_lead` before verification or review.
+- `hipson agent exec` hardening: runtime state files (schema, result, meta) are never written through a symlink;
+  `--continue-session` uses only regular meta files whose assignment passed in the ledger for the same task and
+  role, and identifies the project by `HIPSON_PROJECT` (stable across review snapshots); a launch `OSError` is a
+  `provider_error` with meta; an Antigravity prompt over 100,000 bytes is refused before launch (argv); controlled
+  Claude refuses projects with `.claude/settings*.json` (`--setting-sources project` would load them); a runtime
+  whose status command reports logged out is refused before launch (`auth_required`).
+- `hipson init` lists the agent CLIs found on PATH (`checks.runtimes`) and ends with `hipson agent runtimes` and
+  `hipson task flow --spec flow.json --check`.
 - `hipson task flow --spec flow.json [--resume T] [--retry]`: one deterministic implementation workflow over the
   ledger: builder, lead verification of the declared checks, an independent read-only reviewer, at most
   `max_repairs` (default 2) evidence-driven repairs, resolution of review findings after a clean re-review, and

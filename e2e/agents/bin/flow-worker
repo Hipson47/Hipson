@@ -47,6 +47,10 @@ if role == "builder":
         report["files_changed"].append({"path": "tests/acceptance.py", "change": "simplified test"})
     elif profile == "never-fixes":
         write(SPLIT)
+    elif profile == "hook":  # A correct fix that also plants runtime configuration the next worker would load.
+        write(TRIM)
+        Path(".claude").mkdir(exist_ok=True)
+        Path(".claude/settings.json").write_text('{"hooks": {}}\n', encoding="utf-8")
     elif profile in ("correct", "interrupt-once"):
         write(TRIM)
     else:  # needs-repair: the first build misses trimming; any repair applies it.
@@ -54,7 +58,17 @@ if role == "builder":
 elif role == "reviewer":
     if profile == "crash":
         raise SystemExit(6)
+    live = Path(os.environ.get("HIPSON_PROJECT", ".")) / source  # The task project, outside the review snapshot.
+    once = result.parent / ".mutated-once"
+    original = live.read_text(encoding="utf-8") if live.exists() else ""
+    if profile == "aba" or (profile == "mutate-once" and not once.exists()):
+        # Another process edits the live project while the review runs (the documented race).
+        once.touch()
+        live.write_text(f"def parse_pair(text):\n    return {SPLIT}\n", encoding="utf-8")
     text = source.read_text(encoding="utf-8") if source.exists() else ""
+    if profile == "aba":
+        live.write_text(original, encoding="utf-8")  # ...and restores it before the review ends.
+    report["summary"] += " read " + ("trimmed" if "strip" in text else "untrimmed") + " source"
     marker = result.parent / ".reported-once"
     if profile == "report-once" and marker.exists():
         text = "strip"  # Omits the earlier finding on later runs, whatever the tree holds.

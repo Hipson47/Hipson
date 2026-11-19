@@ -156,6 +156,13 @@
       "type": "number",
       "minimum": 1,
       "maximum": 86400
+    },
+    "protected": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "\\S"
+      }
     }
   }
 }

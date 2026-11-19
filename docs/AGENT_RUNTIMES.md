@@ -35,6 +35,46 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 | Controlled isolation | `--setting-sources project --strict-mcp-config --no-session-persistence`; `--bare` needs `ANTHROPIC_API_KEY` | `--ephemeral --ignore-user-config --ignore-rules` | **unsupported**: no documented configuration-free run |
 | Auth status | `claude auth status` (JSON) | `codex login status` | none documented |
 
+## First workflow
+
+1. `hipson agent runtimes`: which CLIs are installed, whether their own status command says you are logged in
+   (Antigravity has none: its first run is the evidence), and which capabilities are documented or verified.
+   Log in with the runtime itself; Hipson never handles credentials.
+2. Commit the project's current state (verification binds to a commit), then write `flow.json`:
+
+```json
+{
+  "version": 1,
+  "title": "Fix the pair parser",
+  "objective": "parse_pair splits on ':' and trims whitespace around both parts",
+  "checks": [["python3", "tests/acceptance.py"]],
+  "builder": {"actor": "claude", "scope": ["src/parser"],
+              "command": ["hipson", "agent", "exec", "--runtime", "claude", "--role", "builder"]},
+  "reviewer": {"actor": "codex",
+               "command": ["hipson", "agent", "exec", "--runtime", "codex", "--role", "reviewer"]},
+  "max_repairs": 1
+}
+```
+
+3. `hipson task flow --spec flow.json --check` validates it without writing anything; `hipson task flow --spec
+   flow.json` runs it: build, lead verification of the checks, an independent review of an immutable snapshot
+   of the verified tree, at most `max_repairs` repairs, and a stop in `review` for your final `hipson task close`.
+4. Interrupted or stopped: `hipson task show --task T` says why; `hipson task flow --spec flow.json --resume T`
+   continues from the ledger without repeating finished steps (`--retry` re-runs a failed worker once).
+
+Permissions: a builder runs with the runtime's write mode inside its declared scope (Claude `acceptEdits` plus a
+grant for exactly the declared checks; Codex `workspace-write`; Antigravity `accept-edits`), a reviewer with its
+read-only mode, whatever the command line says. Your own permission rules, plugins, skills, MCP servers and
+model defaults apply (profile `native`). The reviewer starts in its snapshot directory, so project settings that
+a runtime keys by path (Claude's per-project entries in `~/.claude.json`, Codex trusted projects) do not apply
+to the review; files in the project (`CLAUDE.md`, `AGENTS.md`, `.claude/settings.json`, skills) do.
+
+Common failures: `auth_required` (log in with the runtime), `rate_limited` (wait, or use another runtime for that
+role), `permission_denied` (the runtime refused a tool: Antigravity's headless plan mode cannot run commands, so
+reviewers get the diff in their brief), `unsupported` (a combination the runtime does not document, e.g.
+controlled Antigravity), `needs_lead` with "changed protected paths" (the builder edited a check's test or
+runtime configuration: restore it with `git checkout -- PATH`, then resume).
+
 ## Profiles
 
 - **native** (default): the runtime runs with the user's own configuration, plugins, skills, MCP servers,

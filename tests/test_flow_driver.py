@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hipson import flow_driver, ledger, task_flow, task_verification
+from hipson import flow_driver, ledger, review_snapshot, task_flow, task_verification
 from tests.test_hipson_helpers import REPO_ROOT, run_cli
 from tests.test_task_verification import _git
 
@@ -174,7 +174,7 @@ def test_tampered_tests_are_caught_as_out_of_scope_and_need_the_lead(tmp_path):
     project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
     proc, result = _flow(project, db, _spec(tmp_path, project, builder='tamper'))
     assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress'
-    assert 'not from a review' in result['reasons'][0]
+    assert 'changed protected paths' in result['reasons'][0] and 'tests/acceptance.py' in result['reasons'][0]
     view, _ = _view(db)
     with closing(ledger.Ledger(db, read_only=True)) as store:
         assert view['findings'][0]['severity'] == 'major' and not store.verifications('T-0001')
@@ -275,7 +275,8 @@ def test_review_policy_gate_on_the_manual_path(tmp_path):
         def review(actor, *, mode='ro', result=True):
             item = store.assign(task, actor=actor, role='reviewer', mode=mode, scope=['src'] if mode == 'rw' else [])['id']
             for phase in ('start', 'end'):
-                store.record_review_tree(item, phase=phase, revision=state['revision'], fingerprint=state['fingerprint'])
+                store.record_review_tree(item, phase=phase, revision=state['revision'], fingerprint=state['fingerprint'],
+                                         source='snapshot')
             store.finish(item, result='passed', summary='reviewed', worker_result={
                 'status': 'completed', 'summary': 'ok', 'files_changed': [], 'commands': [], 'findings': [],
                 'risks': []} if result else None)
@@ -562,9 +563,14 @@ def test_round_two_review_fixes(tmp_path):
     spec = _spec(tmp_path, project, reviewer='crash')
     _flow(project, db, spec)  # Verified, then the reviewer crashed.
     view, _ = _view(db)
-    assert view['verification']['passing'] and flow_driver._on_verified_tree(db, view)
+    snapshot, problem = flow_driver.snapshot_candidate(db, view)
+    assert view['verification']['passing'] and snapshot is not None and problem == ''
+    review_snapshot.remove(snapshot)
     (project / 'src/parser/pairs.py').write_text('B = 2' + nl)  # Between the decision and the brief.
-    assert not flow_driver._on_verified_tree(db, view)
+    assert flow_driver.snapshot_candidate(db, view) == (None, 'the working tree is not the one lead verification '
+                                                              'accepted, so a review now would describe another '
+                                                              'candidate; restore it or re-verify, then resume')
+    assert not list(flow_driver._flow_dir(db, 'T-0001').glob('*.snapshot'))
     # M6: unquoted -z names, so a sensitive untracked name is classified as itself.
     (project / 'src/parser/.ssh').mkdir()
     (project / 'src/parser/.ssh/private note').write_text('k' + nl)

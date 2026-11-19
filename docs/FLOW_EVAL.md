@@ -56,9 +56,12 @@ resume repeated no completed step.
   it like B does; here the scripted reviewer always sees it, which is the best case for C.
 - C costs more: 2.4x the worker runs and about 2x the wall time of B on these cases, because every task gets
   a review and failures get repairs. With real agents each extra run costs model usage.
-- B and C refuse the tampered test only because observation sees a write outside the builder's scope; a
-  worker allowed to write `tests/` would need the lead (or a protected check) to notice.
+- B refuses the tampered test only because observation sees a write outside the builder's scope. C also
+  protects the paths its checks name (and runtime configuration): a builder allowed to write `tests/` that edits
+  `tests/acceptance.py` still stops with `needs_lead` (`tests/test_review_snapshot.py`). A test the check reaches
+  only indirectly is protected only when the spec lists it under `protected`.
 - A1/A2 have no ledger, so procedural violations for them are read from their procedure (no verification,
   no review), not from recorded evidence.
-- Not covered: live models, prompt injection through repository content (scripted workers do not read
-  instructions), concurrent leads, Windows/macOS.
+- Not covered here: live models (see the live mode below), prompt injection through repository content
+  (scripted workers do not read instructions), concurrent leads. The script runs on Linux/WSL2; the flow itself
+  is exercised on Linux, macOS and Windows by the test suite in CI.

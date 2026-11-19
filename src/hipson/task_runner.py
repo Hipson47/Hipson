@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from hipson import ledger, task_activity, task_checkpoint, task_observation, worker_env
+from hipson import ledger, review_snapshot, task_activity, task_checkpoint, task_observation, worker_env
 from hipson.redaction import redact_text
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job, batch_command
@@ -205,6 +205,12 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--result-file")
     parser.add_argument("--rollout", choices=["codex"])
     parser.add_argument("--allow-project-mismatch", action="store_true")
+    parser.add_argument("--snapshot", metavar="DIR",
+                        help="Reviewer: an immutable review snapshot prepared by hipson task flow (by default task "
+                             "run snapshots the project itself before a reviewer starts)")
+    parser.add_argument("--live-tree", action="store_true",
+                        help="Reviewer: read the live working tree instead of a snapshot; such a review cannot "
+                             "satisfy a required-review gate")
     add_observe_arguments(parser)
     add_env_arguments(parser)
     add_needs_arguments(parser, "this run (defaults to the task's)")
@@ -400,7 +406,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         'log_tail': snapshot.get('observations', []), 'reason': summary,
     }
     if getattr(args, "role", None) == "reviewer":
-        _record_review_tree(db, assignment, "end", project)
+        _record_review_tree(db, assignment, "end", project, getattr(args, "review_snapshot", None))
     try:
         with closing(ledger.Ledger(db)) as store:
             try:
@@ -428,14 +434,43 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         _message(f"{assignment} observed changes: {task_observation.summary(observed['changes'])}")
 
 
-def _record_review_tree(db: Path, assignment: str, phase: str, project: str) -> None:
-    """Bind a review to the tree it saw: the same fingerprint lead verification records (best effort)."""
+ReviewTree = tuple[Path, dict[str, Any], bool]  # snapshot directory, its manifest, owned by this runner
+
+
+def _review_snapshot(db: Path, args: argparse.Namespace, project: str) -> ReviewTree:
+    """The reviewer's immutable candidate: the flow's prepared snapshot, or a fresh one owned by this run."""
+    if args.snapshot:
+        directory = Path(args.snapshot).expanduser().resolve()
+        return directory, review_snapshot.load(directory), False
+    runs = db.parent / f'.{db.name}.runs'
+    runs.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for path in runs.glob('review-*'):  # Left by a runner that was killed before it could remove its own.
+        owner = path.name.split('-')[1]
+        if (path.is_dir() and not path.is_symlink() and owner.isdigit() and int(owner) != os.getpid()
+                and not ledger._pid_alive(int(owner))):
+            review_snapshot.remove(path)
+    directory = runs / f'review-{os.getpid()}-{uuid.uuid4().hex[:12]}'
+    return directory, review_snapshot.create(project, db, directory), True
+
+
+def _record_review_tree(db: Path, assignment: str, phase: str, project: str, review: ReviewTree | None) -> None:
+    """Bind a review to the tree it saw: its snapshot re-hashed now, or (--live-tree) the project (best effort)."""
     from hipson import task_verification
     try:
-        state = task_verification.project_state(project, db)
+        if review is not None:
+            directory, manifest, _ = review
+            try:
+                fingerprint: str | None = review_snapshot.verify(directory, manifest)
+            except (review_snapshot.SnapshotError, OSError) as exc:
+                _message(f"review snapshot of {assignment} failed its {phase} check: {exc}")
+                fingerprint = None
+            revision, source = str(manifest['revision']), 'snapshot'
+        else:
+            state = task_verification.project_state(project, db)
+            revision, fingerprint, source = state["revision"], state["fingerprint"], 'live'
         with closing(ledger.Ledger(db)) as store:
-            store.record_review_tree(assignment, phase=phase, revision=state["revision"],
-                                     fingerprint=state["fingerprint"])
+            store.record_review_tree(assignment, phase=phase, revision=revision, fingerprint=fingerprint,
+                                     source=source)
     except (ledger.LedgerError, OSError, sqlite3.Error, ValueError) as exc:
         _message(f"could not record the reviewed tree ({phase}) of {assignment}: {type(exc).__name__}; "
                  "this review cannot satisfy a required-review gate")
@@ -496,7 +531,22 @@ def run(args: argparse.Namespace) -> int:
     except (ValueError, OSError) as exc:
         _message(f"{exc}; worker not started")
         return 64
-    return _execute(db, args, command[1:], mismatch, check, grace)
+    review: ReviewTree | None = None
+    if args.role == "reviewer" and not getattr(args, "live_tree", False):
+        try:
+            review = _review_snapshot(db, args, str(check["expected"]))
+        except (review_snapshot.SnapshotError, OSError) as exc:
+            _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; worker not started")
+            return 75
+    elif getattr(args, "snapshot", None):
+        _message("--snapshot needs --role reviewer without --live-tree; worker not started")
+        return 64
+    args.review_snapshot = review
+    try:
+        return _execute(db, args, command[1:], mismatch, check, grace)
+    finally:
+        if review is not None and review[2]:
+            review_snapshot.remove(review[0])
 
 
 def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: bool,
@@ -615,7 +665,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
             if getattr(args, "role", None) == "reviewer":
-                _record_review_tree(db, assignment, "start", str(check["expected"]))
+                _record_review_tree(db, assignment, "start", str(check["expected"]),
+                                    getattr(args, "review_snapshot", None))
             checkpoint = checkpoint_caps(args)
             if checkpoint is not None:
                 # After the claim, so no other writer changes the scope while it is copied; before launch.
@@ -650,6 +701,10 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
         env = inherited if verifying else {**worker_base, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
                'HIPSON_PROGRESS_FILE': str(progress_path)}
+        review = None if verifying else getattr(args, "review_snapshot", None)
+        if review is not None:  # The reviewer starts in its snapshot; the task project stays identifiable.
+            env.update(HIPSON_REVIEW_SNAPSHOT=str(review_snapshot.workdir(review[0], review[1])),
+                       HIPSON_PROJECT=str(check['expected']))
         with tempfile.TemporaryFile() as brief:
             if args.rollout:
                 # Reading stdin in a daemon keeps cancellation responsive even with an open pipe.
@@ -682,7 +737,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     except ValueError as exc:
                         raise OSError(str(exc)) from exc
                 child = subprocess.Popen(launch, env=env, stdin=brief if args.rollout else None,
-                                         cwd=str(check['expected']) if verifying else None,
+                                         cwd=str(check['expected']) if verifying else
+                                         env.get('HIPSON_REVIEW_SNAPSHOT') if review is not None else None,
                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                          creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP | 4) if windows else 0)  # type: ignore[attr-defined]  # CREATE_SUSPENDED
                 launching = False

@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -101,7 +101,7 @@ def _filter_overrides(project: str) -> list[str]:
     return overrides
 
 
-def project_state(project: str, db: Path) -> dict[str, Any]:
+def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dict[str, Any]:
     """Bind raw content; use Git's built-in normalization only for the dirty flag.
 
     A raw content inventory is used instead of `git diff HEAD`: even --no-textconv
@@ -109,6 +109,10 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
     normalized content. Content reads are bounded; larger files bind lstat metadata
     instead, explicitly reported in the file inventory. Never follow directory symlinks.
     Gitlinks and unreadable/special files fail closed rather than silently omitting content.
+
+    `copy_to` (an existing empty directory) also receives every covered file, written from the very bytes that
+    are hashed, so the returned fingerprint is the copy's (review_snapshot); `entries` then lists raw paths and
+    states. Content beyond the hash budget cannot be copied as bound evidence and fails instead.
     """
     from hipson.lead_context import _git
 
@@ -224,6 +228,9 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
                 raise ValueError('Special file prevents project fingerprinting')
             if size > FILE_HASH_LIMIT or size > TOTAL_HASH_LIMIT - content_bytes:
                 reason = 'file_limit' if size > FILE_HASH_LIMIT else 'total_limit'
+                if copy_to is not None:
+                    raise ValueError(f'Project content exceeds the snapshot budget ({reason}: {FILE_HASH_LIMIT} bytes '
+                                     f'per file, {TOTAL_HASH_LIMIT} in total)')
                 metadata_fallback = True
                 files.append({'path': filename,
                               'state': f'{mode.decode()}:metadata:{reason}:file_limit_bytes={FILE_HASH_LIMIT}:'
@@ -239,11 +246,21 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
             blob_hash = hashlib.new(algorithm, usedforsecurity=False)
             blob_hash.update(f'blob {size}\0'.encode())
             file_hash = hashlib.sha256()
+            target = copy_to / relative if copy_to is not None else None
+            if target is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
             if content is not None:
                 blob_hash.update(content)
                 file_hash.update(content)
+                if target is not None:
+                    link = os.fsdecode(content)
+                    resolved = os.path.normpath(os.path.join(os.path.dirname(filename), link))
+                    if os.path.isabs(link) or resolved == os.pardir or resolved.startswith(os.pardir + os.sep):
+                        # A link out of the tree would let the reviewer read mutable content through the copy.
+                        raise ValueError('A symlink points outside the project, so the snapshot cannot be immutable')
+                    os.symlink(link, target)
             else:
-                with path.open('rb') as stream:
+                with path.open('rb') as stream, (target.open('xb') if target is not None else nullcontext()) as copy:
                     remaining = size
                     while remaining:
                         chunk = stream.read(min(65536, remaining))
@@ -251,7 +268,11 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
                             raise ValueError('Project changed while fingerprinting')
                         blob_hash.update(chunk)
                         file_hash.update(chunk)
+                        if copy is not None:
+                            copy.write(chunk)
                         remaining -= len(chunk)
+                if target is not None:  # The copy's mode is part of its state: keep the executable bit.
+                    target.chmod(0o755 if mode == b'100755' else 0o644)
             content_bytes += size
             blob = blob_hash.hexdigest().encode()
             if git and mode != b'120000' and name in baseline and baseline[name][0] == mode \
@@ -277,6 +298,8 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
         clean_or_unknown = None if metadata_fallback else False
         result.update(files=_stored_files(files), fingerprint=_fingerprint(files),
                       dirty=(True if dirty else clean_or_unknown) if git else bool(files))
+        if copy_to is not None:
+            result['entries'] = [{'path': item['path'], 'state': item['state']} for item in files]
         if git and _git(project, 'rev-parse', '--verify', 'HEAD') != head:
             raise ValueError('HEAD moved while fingerprinting')
     except (OSError, ValueError, UnicodeError) as exc:

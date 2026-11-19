@@ -20,11 +20,13 @@ import re
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
 import tomllib
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +34,12 @@ from hipson import ledger
 from hipson.redaction import redact_text
 
 PROFILES = ("native", "controlled")
+# Observed live (agy 1.5.12, 2026-11-19): a reviewer in --mode plan created a file when its brief asked it to.
+READ_ONLY_GAP = ("--mode plan is not an enforced read-only sandbox (observed live on 1.5.12: a plan-mode reviewer "
+                 "created a file); a review's integrity rests on the immutable review snapshot check and change "
+                 "observation, not on agy")
 MAX_BRIEF_BYTES = 256 * 1024
+MAX_AGY_PROMPT_BYTES = 100_000
 
 # Flags each capability needs, looked up in the runtime's own help output (documented, not verified).
 RUNTIMES: dict[str, dict[str, Any]] = {
@@ -199,6 +206,21 @@ def record_verified(name: str, capability: str, evidence: dict[str, Any]) -> Non
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def auth_state(name: str, executable: str) -> dict[str, Any]:
+    """What the runtime's own status command says (logged_in, logged_out or unknown); never a token or account."""
+    spec = RUNTIMES[name]
+    if not spec["auth"]:
+        return {"state": "unknown", "evidence": None}
+    code, text = _run([executable, *spec["auth"]], timeout=30)
+    parsed = _parse_json(text)
+    if isinstance(parsed, dict) and "loggedIn" in parsed:
+        return {"state": "logged_in" if parsed["loggedIn"] else "logged_out", "method": parsed.get("authMethod"),
+                "evidence": " ".join(spec["auth"])}
+    if code == 0 and re.search(r"logged in", text, re.I) and not re.search(r"not logged in", text, re.I):
+        return {"state": "logged_in", "method": redact_text(text.strip())[:80], "evidence": " ".join(spec["auth"])}
+    return {"state": "logged_out" if code else "unknown", "evidence": " ".join(spec["auth"])}
+
+
 def inventory(name: str, *, project: str | Path = ".") -> dict[str, Any]:
     spec = RUNTIMES[name]
     executable = shutil.which(spec["executable"])
@@ -210,20 +232,11 @@ def inventory(name: str, *, project: str | Path = ".") -> dict[str, Any]:
         return report
     code, text = _run([executable, *spec["version"]])
     report["version"] = text.strip().splitlines()[0] if code == 0 and text.strip() else None
-    if spec["auth"]:
-        code, text = _run([executable, *spec["auth"]], timeout=30)
-        parsed = _parse_json(text)
-        if isinstance(parsed, dict) and "loggedIn" in parsed:
-            report["auth"] = {"state": "logged_in" if parsed["loggedIn"] else "logged_out",
-                              "method": parsed.get("authMethod"), "evidence": " ".join(spec["auth"])}
-        elif code == 0 and re.search(r"logged in", text, re.I) and not re.search(r"not logged in", text, re.I):
-            report["auth"] = {"state": "logged_in", "method": redact_text(text.strip())[:80],
-                              "evidence": " ".join(spec["auth"])}
-        else:
-            report["auth"] = {"state": "logged_out" if code else "unknown", "evidence": " ".join(spec["auth"])}
-    else:
-        report["auth"] = {"state": "unknown", "evidence": None}
+    report["auth"] = auth_state(name, executable)
+    if spec["auth"] is None:
         report["limitations"].append("no documented non-interactive auth status command; a smoke run is the evidence")
+    if name == "agy":
+        report["limitations"].append(READ_ONLY_GAP)
     help_text = "\n".join(_run([executable, *argv])[1] for argv in spec["help"])
     for capability, flags in spec["capabilities"].items():
         if flags is None:
@@ -258,6 +271,10 @@ def session_id() -> str:
     return str(uuid.uuid4())
 
 
+def _project(cwd: str) -> str:
+    return os.environ.get("HIPSON_PROJECT") or cwd
+
+
 def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_path: Path, last_path: Path,
                   cwd: str, model: str | None = None, effort: str | None = None, session: str | None = None,
                   resume: str | None = None, timeout: float = 1800,
@@ -279,10 +296,21 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
         argv += [item for check in checks if _exact_pattern(check)
                  for item in ("--allowedTools", f"Bash({shlex.join(check)})")]
         if profile == "controlled":
+            # A reviewer may launch from a snapshot of the task project.
+            roots = dict.fromkeys((Path(_project(cwd)), Path(cwd)))
+            settings = (root / ".claude" / filename for root in roots
+                        for filename in ("settings.json", "settings.local.json"))
+            present = [str(path) for path in settings if os.path.lexists(path)]
+            if present:
+                raise RuntimeFailure("unsupported", f"controlled Claude refuses project settings: {', '.join(present)}; "
+                                     "use profile native or remove them")
             argv += ["--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence"]
         return argv, prompt
     if name == "codex":
-        flags = ["--json", "--sandbox", "read-only" if mode == "ro" else "workspace-write",
+        sandbox = "read-only" if mode == "ro" else "workspace-write"
+        # `codex exec resume` has no --sandbox flag (0.169: verified live, the flag is refused); the same mode is
+        # set through the documented sandbox_mode key, so a resumed session never runs with wider permissions.
+        flags = ["--json", *(["--config", f'sandbox_mode="{sandbox}"'] if resume else ["--sandbox", sandbox]),
                  "--output-schema", str(schema_path), "--output-last-message", str(last_path)]
         flags += ["--model", model] if model else []
         flags += ["--config", f'model_reasoning_effort="{effort}"'] if effort else []
@@ -293,11 +321,20 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
         return [executable, "exec", "--cd", cwd, *flags, "-"], prompt
     if profile == "controlled":
         raise RuntimeFailure("unsupported", "agy documents no configuration-free run; use profile native")
+    prompt_bytes = len(prompt.encode("utf-8"))
+    if prompt_bytes > MAX_AGY_PROMPT_BYTES:
+        raise RuntimeFailure("unsupported", f"agy prompt is {prompt_bytes} bytes, over the {MAX_AGY_PROMPT_BYTES} byte "
+                             "argv limit; shorten the brief")
     argv = [executable, "--print", prompt, "--output-format", "json", "--json-schema", schema,
             "--mode", "plan" if mode == "ro" else "accept-edits", "--print-timeout", f"{int(timeout)}s"]
     argv += ["--conversation", resume] if resume else []
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
+    # Headless agy auto-denies every command; a session-only settings layer (never saved, the user's settings
+    # stay) grants exactly the declared checks, as --allowedTools does for Claude (verified live on 1.5.12: the
+    # rule admits that command and no other).
+    allowed = [f"command({shlex.join(check)})" for check in checks if _exact_pattern(check)]
+    argv += ["--settings", json.dumps({"permissions": {"allow": allowed}})] if allowed else []
     return argv, None
 
 
@@ -405,7 +442,6 @@ def _ledger_path() -> str | None:
 
 def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[str]]]:
     """The assignment and the task's declared checks, as the ledger recorded them (never the environment)."""
-    from contextlib import closing
     database = _ledger_path()
     if not database:
         raise RuntimeFailure("unsupported", "HIPSON_RUN_DB is not set; run under hipson task run")
@@ -419,16 +455,21 @@ def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[
 def exec_worker(args: argparse.Namespace) -> int:
     """`hipson agent exec`: one native run inside a `task run` assignment; never outside one."""
     def fail(kind: str, detail: str) -> int:
-        print(f"hipson agent exec: {kind}: {redact_text(detail)[:600]}", file=sys.stderr)
-        _write_meta(meta_path, {**meta, "outcome": kind, "detail": redact_text(detail)[:600]})
+        detail = redact_text(detail)[:600]
+        try:
+            _write_meta(meta_path, {**meta, "outcome": kind, "detail": detail})
+        except RuntimeFailure as exc:
+            kind, detail = exc.kind, redact_text(exc.detail)[:600]
+        print(f"hipson agent exec: {kind}: {detail}", file=sys.stderr)
         return EXIT[kind]
 
     task, assignment = os.environ.get("HIPSON_TASK"), os.environ.get("HIPSON_ASSIGNMENT")
     brief_path = args.brief or os.environ.get("HIPSON_FLOW_BRIEF")
     result_path = Path(args.result or os.environ.get("HIPSON_FLOW_RESULT") or "")
     meta_path = result_path.with_name(result_path.name + ".meta.json") if result_path.name else None
+    cwd = os.getcwd()
     meta: dict[str, Any] = {"runtime": args.runtime, "profile": args.profile, "task": task, "assignment": assignment,
-                            "ledger": _ledger_path(), "project": os.getcwd()}
+                            "ledger": _ledger_path(), "project": _project(cwd)}
     if os.environ.get("HIPSON_ROLE") != "worker" or not task or not assignment:
         print("hipson agent exec: run it as a worker command of hipson task run (or task flow), so the ledger "
               "records the assignment", file=sys.stderr)
@@ -444,6 +485,8 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail("unsupported", f"{assignment} is a {item['role']} assignment; --role {args.role} does not match")
     role, mode = item["role"], item["mode"]
     meta.update(role=role, mode=mode)
+    if mode == "ro":  # Claude plan mode and Codex read-only sandbox refused the write in live probes; agy did not.
+        meta["read_only"] = "not enforced by the runtime" if args.runtime == "agy" else "runtime mode"
     brief = Path(brief_path).read_bytes()
     meta["brief_bytes"] = len(brief)
     meta["brief_tokens_estimate"] = len(brief) // 4  # Heuristic only; exact counts come from runtime usage.
@@ -454,17 +497,26 @@ def exec_worker(args: argparse.Namespace) -> int:
     work = result_path.parent
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.{session}.last.json"  # Codex only; unique per run, never pre-existing.
-    schema_path.write_text(json.dumps(result_schema()), encoding="utf-8")
     prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
     try:
+        _check_state_path(result_path)
+        if meta_path is not None:
+            _check_state_path(meta_path)
+        _write_state(schema_path, json.dumps(result_schema()))
         argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
-                                    schema_path=schema_path, last_path=last_path, cwd=os.getcwd(), model=args.model,
+                                    schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
                                     effort=args.effort, session=session, resume=resume, timeout=args.timeout,
                                     checks=checks if mode == "rw" else [])
     except RuntimeFailure as exc:
         return fail(exc.kind, exc.detail)
     if shutil.which(argv[0]) is None:
         return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
+    # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
+    auth = auth_state(args.runtime, argv[0])
+    meta["preflight"] = {"auth": auth["state"]}
+    if auth["state"] == "logged_out":
+        return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
+                    "the runtime itself, then retry")
     meta.update(session_requested=resume or session, resumed=bool(resume))
     started = time.monotonic()
     try:
@@ -472,6 +524,9 @@ def exec_worker(args: argparse.Namespace) -> int:
         code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired as exc:
         code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)
+    except OSError as exc:
+        meta["duration_seconds"] = round(time.monotonic() - started, 3)
+        return fail("provider_error", f"could not launch {args.runtime}: {exc}")
     meta["duration_seconds"] = round(time.monotonic() - started, 3)
     meta["exit_code"] = code
     try:
@@ -482,8 +537,11 @@ def exec_worker(args: argparse.Namespace) -> int:
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.
     meta.update(facts, outcome="ok")
-    result_path.write_text(json.dumps(report) + "\n", encoding="utf-8")
-    _write_meta(meta_path, meta)
+    try:
+        _write_state(result_path, json.dumps(report) + "\n")
+        _write_meta(meta_path, meta)
+    except RuntimeFailure as exc:
+        return fail(exc.kind, exc.detail)
     version = _version(argv[0])
     record_verified(args.runtime, "structured_output", {"task": task, "assignment": assignment,
                                                         "profile": args.profile, "session": facts["session"],
@@ -505,26 +563,78 @@ def _text(value: Any) -> str:
     return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
 
 
+def _check_state_path(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeFailure("unsupported", f"cannot inspect runtime state file {path}: {exc}") from exc
+    if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        raise RuntimeFailure("unsupported", f"runtime state file {path} is a symlink or reparse point; "
+                             "remove it or choose a different result path")
+    if not stat.S_ISREG(info.st_mode):
+        raise RuntimeFailure("unsupported", f"runtime state file {path} must be a regular file")
+
+
+def _open_state_file(path: str, flags: int) -> int:
+    # O_NONBLOCK keeps a path swapped for a FIFO after lstat from blocking the adapter.
+    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0), 0o600)
+
+
+def _write_state(path: Path, text: str) -> None:
+    _check_state_path(path)
+    try:
+        with open(path, "w", encoding="utf-8", opener=_open_state_file) as stream:
+            stream.write(text)
+    except OSError as exc:
+        raise RuntimeFailure("unsupported", f"cannot write runtime state file {path}: {exc}") from exc
+
+
 def _write_meta(path: Path | None, meta: dict[str, Any]) -> None:
     if path is not None:
-        path.write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
+        _write_state(path, json.dumps(meta, indent=2, default=str) + "\n")
 
 
 SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
 
 
 def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> str | None:
-    """The latest session of the same ledger, project, runtime, task and role, from meta files beside the result."""
+    """The latest matching session beside the result whose assignment passed in the ledger."""
+    database, project = _ledger_path(), _project(os.getcwd())
+    if not database:
+        return None
     candidates = []
-    ledger_path, project = _ledger_path(), os.getcwd()
     for path in result_path.parent.glob("*.result.json.meta.json"):
-        data = _json_file(path) or {}
-        session = data.get("session")
+        try:
+            _check_state_path(path)
+            with open(path, encoding="utf-8", opener=_open_state_file) as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                data = json.load(stream)
+        except (RuntimeFailure, OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        session, assignment = data.get("session"), data.get("assignment")
         if (data.get("outcome") == "ok" and data.get("runtime") == runtime and data.get("task") == task
-                and data.get("role") == role and data.get("ledger") == ledger_path and data.get("project") == project
-                and isinstance(session, str) and SESSION_PATTERN.fullmatch(session)):
-            candidates.append((path.stat().st_mtime, session))
-    return max(candidates)[1] if candidates else None
+                and data.get("role") == role and data.get("ledger") == database and data.get("project") == project
+                and isinstance(assignment, str) and isinstance(session, str) and SESSION_PATTERN.fullmatch(session)):
+            candidates.append((info.st_mtime_ns, session, assignment))
+    if candidates:
+        try:
+            with closing(ledger.Ledger(database, create=False, read_only=True)) as store:
+                for _, session, assignment in sorted(candidates, reverse=True):
+                    try:
+                        item = store.activity(assignment)
+                    except ledger.LedgerError:  # The meta may name a nonexistent assignment.
+                        continue
+                    if item["task"] == task and item["role"] == role and item["status"] == "passed":
+                        return session
+        except (ledger.LedgerError, OSError, sqlite3.Error):
+            pass  # Without ledger evidence, start a new session.
+    return None
 
 
 def command_runtimes(args: argparse.Namespace) -> int:

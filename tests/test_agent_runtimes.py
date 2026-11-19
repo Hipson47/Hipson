@@ -1,10 +1,14 @@
 """Native runtime adapters against fake CLIs: inventory levels, profiles, normalization and failure classes."""
 
+import argparse
+import errno
 import json
 import os
 import stat
 import sys
+from contextlib import closing
 from pathlib import Path
+from unittest import SkipTest
 from unittest.mock import patch
 
 import pytest
@@ -190,6 +194,111 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'se
 """
 
 
+@pytest.fixture
+def worker(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=project, title="Review", objective="Review project")["id"]
+        assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
+    brief, result = tmp_path / "brief.md", tmp_path / "first.result.json"
+    brief.write_text("review it", encoding="utf-8")
+    for key, value in {"HIPSON_ROLE": "worker", "HIPSON_TASK": task, "HIPSON_ASSIGNMENT": assignment,
+                       "HIPSON_RUN_DB": str(db), "HIPSON_FLOW_BRIEF": str(brief), "HIPSON_FLOW_RESULT": str(result),
+                       "HIPSON_HOME": str(tmp_path / "hh"), "FAKE_LOG": str(tmp_path / "calls.jsonl")}.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("HIPSON_PROJECT", raising=False)
+    monkeypatch.delenv("FAKE_MODE", raising=False)
+    monkeypatch.chdir(project)
+    parser = argparse.ArgumentParser()
+    runtimes.configure(parser.add_subparsers())
+
+    def run(runtime, *options):
+        args = parser.parse_args(["exec", "--runtime", runtime, *options])
+        return args.func(args)
+
+    return brief, result, run
+
+
+@pytest.mark.parametrize("filename", ["first.result.schema.json", "first.result.json", "first.result.json.meta.json"])
+def test_exec_refuses_symlinked_runtime_state(worker, tmp_path, capsys, filename):
+    _, result, run = worker
+    target = tmp_path / "untouched.txt"
+    target.write_text("keep this", encoding="utf-8")
+    link = result.with_name(filename)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
+    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", CLAUDE_WORKER))):
+        code = run("claude")
+    assert link.is_symlink() and target.read_text(encoding="utf-8") == "keep this"
+    assert code == runtimes.EXIT["unsupported"] and not (tmp_path / "calls.jsonl").exists()
+    detail = capsys.readouterr().err
+    assert filename in detail and "symlink" in detail and "remove" in detail
+
+
+def test_exec_records_launch_oserror_as_provider_error(worker, tmp_path, capsys):
+    _, result, run = worker
+    launch_error = OSError(errno.E2BIG, "Argument list too long")
+    with (patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
+          patch.object(runtimes.subprocess, "run", side_effect=launch_error)):
+        assert run("agy") == runtimes.EXIT["provider_error"]
+    meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert meta["outcome"] == "provider_error" and "Argument list too long" in meta["detail"]
+    assert "could not launch agy" in capsys.readouterr().err
+    assert not result.exists()
+
+
+def test_exec_preflight_stops_a_logged_out_runtime_before_launch(worker, tmp_path, capsys):
+    _, result, run = worker
+    launched = tmp_path / "launched"
+    body = f"open({str(launched)!r}, 'w').write('x'); sys.exit(0)"
+    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", body, auth='{"loggedIn": false}'))):
+        assert run("claude") == runtimes.EXIT["auth_required"]
+    assert not launched.exists() and not result.exists()
+    meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert meta["outcome"] == "auth_required" and meta["preflight"] == {"auth": "logged_out"}
+    assert "claude reports it is not logged in (auth status)" in capsys.readouterr().err
+
+
+def test_exec_refuses_oversize_agy_prompt_before_launch(worker, tmp_path, capsys):
+    brief, result, run = worker
+    brief.write_text("é" * 49_950, encoding="utf-8")  # The worker rules push the full prompt over 100,000 bytes.
+    with (patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", "sys.exit(1)"))),
+          patch.object(runtimes.subprocess, "run", side_effect=AssertionError("unexpected launch")) as launch):
+        assert run("agy") == runtimes.EXIT["unsupported"]
+    launch.assert_not_called()
+    meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert meta["outcome"] == "unsupported" and "100000 byte" in meta["detail"]
+    assert "100000 byte argv limit" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("filename", ["settings.json", "settings.local.json"])
+def test_controlled_claude_refuses_task_project_settings_in_snapshot(worker, tmp_path, monkeypatch, capsys, filename):
+    _, result, run = worker
+    project = Path.cwd()
+    settings = project / ".claude" / filename
+    settings.parent.mkdir()
+    settings.write_text("{}", encoding="utf-8")
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    monkeypatch.setenv("HIPSON_PROJECT", str(project))
+    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(snapshot))
+    monkeypatch.chdir(snapshot)
+    with patch.dict(os.environ, _env(_fake_cli(tmp_path, "claude", CLAUDE_WORKER))):
+        assert run("claude", "--profile", "controlled") == runtimes.EXIT["unsupported"]
+        assert not (tmp_path / "calls.jsonl").exists()
+        meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+        assert meta["outcome"] == "unsupported" and str(settings) in meta["detail"]
+        assert "use profile native or remove" in meta["detail"]
+        assert run("claude", "--profile", "native") == 0
+    assert meta["detail"] in capsys.readouterr().err
+
+
 def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evidence(tmp_path):
     bin_dir = _fake_cli(tmp_path, "claude", CLAUDE_WORKER)
     project, db = _repo(tmp_path), tmp_path / "ledger.sqlite"
@@ -289,22 +398,112 @@ def test_failed_or_stale_runtime_output_is_never_success(tmp_path):
         runtimes.normalize("codex", 0, "", "", last)
 
 
-def test_session_continuation_is_bound_to_ledger_project_role_and_a_valid_id(tmp_path):
-    # Review (Codex) M10.
+def test_session_continuation_requires_a_passed_assignment_of_the_same_task_and_role(tmp_path, monkeypatch):
     result = tmp_path / "build-2.result.json"
     # _ledger_path() resolves the ledger, so the recorded paths are resolved ones (C:\... on Windows).
-    ledger_a, ledger_other = str((tmp_path / "a.sqlite").resolve()), str((tmp_path / "other.sqlite").resolve())
-    def meta(name, **values):
-        data = {"outcome": "ok", "runtime": "claude", "task": "T-0001", "role": "builder", "ledger": ledger_a,
-                "project": str(tmp_path), "session": "session-good-1", **values}
-        (tmp_path / f"{name}.result.json.meta.json").write_text(json.dumps(data))
-    meta("a")
-    meta("b", ledger=ledger_other, session="session-other-ledger")
-    meta("c", project="/elsewhere", session="session-other-project")
-    meta("d", role="reviewer", session="session-reviewer")
-    meta("e", session="--dangerous-flag")
-    with patch.dict(os.environ, {"HIPSON_RUN_DB": ledger_a}), patch.object(os, "getcwd", return_value=str(tmp_path)):
-        assert runtimes._previous_session(result, "claude", "T-0001", "builder") == "session-good-1"
+    ledger_a = str((tmp_path / "a.sqlite").resolve())
+    with closing(ledger.Ledger(ledger_a)) as store:
+        task = store.open_task(project=tmp_path, title="Build", objective="Build project")["id"]
+        other_task = store.open_task(project=tmp_path, title="Other", objective="Other task")["id"]
+
+        def assign(task_id=task, role="builder", status="passed"):
+            assignment = store.assign(task_id, actor="test", role=role, mode="ro")["id"]
+            if status != "active":
+                store.finish(assignment, result=status, summary=status)
+            return assignment
+
+        passed, active, failed = assign(), assign(status="active"), assign(status="failed")
+        other_task_assignment, reviewer = assign(other_task), assign(role="reviewer")
+
+    def meta(name, timestamp=200, **values):
+        data = {"outcome": "ok", "runtime": "claude", "task": task, "role": "builder", "ledger": ledger_a,
+                "project": str(tmp_path), "session": f"session-{name}", "assignment": passed, **values}
+        path = tmp_path / f"{name}.result.json.meta.json"
+        path.write_text(json.dumps(data), encoding="utf-8")
+        os.utime(path, (timestamp, timestamp))
+        return path
+
+    good = meta("good", timestamp=100)
+    meta("other-ledger", ledger=str(tmp_path / "other.sqlite"))
+    meta("other-project", project="/elsewhere")
+    meta("other-runtime", runtime="codex")
+    meta("other-role", role="reviewer")
+    meta("other-task", task=other_task)
+    meta("bad-session", session="--dangerous-flag")
+    meta("missing-assignment", assignment=None)
+    meta("unknown-assignment", assignment="A-9999")
+    meta("active-assignment", assignment=active)
+    meta("failed-assignment", assignment=failed)
+    meta("wrong-task-assignment", assignment=other_task_assignment)
+    meta("wrong-role-assignment", assignment=reviewer)
+    (tmp_path / "directory.result.json.meta.json").mkdir()
+    monkeypatch.setenv("HIPSON_RUN_DB", ledger_a)
+    monkeypatch.delenv("HIPSON_PROJECT", raising=False)
+    monkeypatch.chdir(tmp_path)
+    assert runtimes._previous_session(result, "claude", task, "builder") == "session-good"
+    good.unlink()
+    assert runtimes._previous_session(result, "claude", task, "builder") is None
+    (tmp_path / "array.result.json.meta.json").write_text("[1]", encoding="utf-8")
+    assert runtimes._previous_session(result, "claude", task, "builder") is None
+
+
+def test_session_continuation_ignores_symlinked_meta(worker, tmp_path):
+    _, result, _ = worker
+    task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
+    with closing(ledger.Ledger(db)) as store:
+        store.finish(assignment, result="passed", summary="passed")
+    target = tmp_path / "external.json"
+    target.write_text(json.dumps({"outcome": "ok", "runtime": "claude", "task": task, "role": "reviewer",
+                                 "ledger": str(Path(db).resolve()), "project": os.getcwd(), "assignment": assignment,
+                                 "session": "session-from-link"}), encoding="utf-8")
+    try:
+        (tmp_path / "linked.result.json.meta.json").symlink_to(target)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
+    assert runtimes._previous_session(result, "claude", task, "reviewer") is None
+
+
+def test_exec_resumes_reviewer_session_across_snapshots_using_task_project(worker, tmp_path, monkeypatch, capsys):
+    _, result, run = worker
+    project = os.getcwd()
+    task, db, assignment = (os.environ[key] for key in ("HIPSON_TASK", "HIPSON_RUN_DB", "HIPSON_ASSIGNMENT"))
+    bin_dir = _fake_cli(tmp_path, "codex", f"""
+assert os.path.samefile(os.getcwd(), os.environ['HIPSON_REVIEW_SNAPSHOT'])
+if args[1] != 'resume':
+    assert args[args.index('--cd') + 1] == os.getcwd()
+    session = 'thread-snapshot'
+else:
+    session = args[-2]
+with open(args[args.index('--output-last-message') + 1], 'w', encoding='utf-8') as last:
+    json.dump({RESULT!r}, last)
+print(json.dumps({{'type': 'thread.started', 'thread_id': session}}))
+""")
+    monkeypatch.setenv("PATH", _env(bin_dir)["PATH"])
+    monkeypatch.setenv("HIPSON_PROJECT", project)
+    first_snapshot = tmp_path / "snapshot-1"
+    first_snapshot.mkdir()
+    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(first_snapshot))
+    monkeypatch.chdir(first_snapshot)
+    assert run("codex") == 0
+    first = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert first["project"] == project and first["session"] == "thread-snapshot"
+
+    with closing(ledger.Ledger(db)) as store:
+        store.finish(assignment, result="passed", summary="passed")
+        next_assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
+    second_snapshot = tmp_path / "snapshot-2"
+    second_snapshot.mkdir()
+    monkeypatch.setenv("HIPSON_ASSIGNMENT", next_assignment)
+    monkeypatch.setenv("HIPSON_REVIEW_SNAPSHOT", str(second_snapshot))
+    monkeypatch.chdir(second_snapshot)
+    result = result.with_name("second.result.json")
+    assert run("codex", "--continue-session", "--result", str(result)) == 0
+    second = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert second["project"] == project and second["resumed"]
+    assert second["session_requested"] == second["session"] == first["session"]
+    assert capsys.readouterr().err.count("codex native session=thread-snapshot") == 2
 
 
 def test_grants_skip_environment_assignment_words_and_verified_needs_the_same_version(tmp_path):
@@ -343,3 +542,22 @@ def test_session_lookup_resolves_the_ledger_fallback(tmp_path):
         os.environ.pop("HIPSON_RUN_DB", None)
         assert runtimes._previous_session(result, "claude", "T-0001", "builder") is None
         assert runtimes._ledger_path() == str((tmp_path / "l.sqlite").resolve())
+
+
+def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_path):
+    schema, last = tmp_path / "s.json", tmp_path / "l.json"
+    schema.write_text("{}")
+    common = dict(profile="native", prompt="p", schema_path=schema, last_path=last, cwd=str(tmp_path))
+    # codex exec resume refuses --sandbox; the same mode goes through sandbox_mode, never a wider one.
+    for mode, sandbox in (("ro", "read-only"), ("rw", "workspace-write")):
+        fresh, _ = runtimes.build_command("codex", mode=mode, **common)
+        resumed, _ = runtimes.build_command("codex", mode=mode, resume="0123456789abcdef", **common)
+        assert fresh[fresh.index("--sandbox") + 1] == sandbox and "--sandbox" not in resumed
+        assert resumed[:3][1:] == ["exec", "resume"] and f'sandbox_mode="{sandbox}"' in resumed
+        assert resumed[resumed.index(f'sandbox_mode="{sandbox}"') - 1] == "--config"
+    # agy: a session-only settings layer grants exactly the declared checks; none without checks.
+    argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
+                                     **common)
+    assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(python3 tests/check.py)"]}}
+    argv, _ = runtimes.build_command("agy", mode="ro", **common)
+    assert "--settings" not in argv

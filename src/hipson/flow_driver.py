@@ -27,7 +27,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hipson import ledger, task_activity, task_context, task_flow, task_observation, task_runner, task_verification
+from hipson import (
+    ledger,
+    review_snapshot,
+    task_activity,
+    task_context,
+    task_flow,
+    task_observation,
+    task_runner,
+    task_verification,
+)
 from hipson.project import safe_diff
 from hipson.redaction import redact_text, sanitize_path
 
@@ -78,8 +87,12 @@ SPEC_SCHEMA: dict[str, Any] = {
         'max_repairs': {'type': 'integer', 'minimum': 0, 'maximum': MAX_REPAIRS},
         'close_to': {'type': 'string', 'enum': ['review', 'done']},
         'check_timeout': {'type': 'number', 'minimum': 1, 'maximum': 86400},
+        'protected': {'type': 'array', 'items': {'type': 'string', 'pattern': r'\S'}},
     },
 }
+# Runtime configuration a native worker loads from the project (instructions, hooks, MCP servers, settings):
+# a builder that changes it would change how the next reviewer or repair runs, so the flow protects it.
+RUNTIME_CONFIG = ('.claude', '.codex', '.agents', '.gemini', '.mcp.json', 'CLAUDE.md', 'AGENTS.md', 'GEMINI.md')
 
 
 class FlowError(ledger.LedgerError):
@@ -135,6 +148,7 @@ def validate_spec(raw: object) -> dict[str, Any]:
     spec.setdefault('max_repairs', 2)
     spec.setdefault('close_to', 'review')
     spec.setdefault('check_timeout', 300)
+    spec.setdefault('protected', [])
     for role in ('builder', 'reviewer'):
         spec[role].setdefault('observe', True)
         spec[role].setdefault('env_allow', [])
@@ -147,6 +161,10 @@ def validate_spec(raw: object) -> dict[str, Any]:
         ledger.validate_assignment_scope(spec['builder']['scope'], mode='ro')
     except ledger.LedgerError as exc:
         raise FlowError('invalid_config', [str(exc)]) from exc
+    try:
+        spec['protected'] = ledger.validate_assignment_scope(spec['protected'], mode='ro') if spec['protected'] else []
+    except ledger.LedgerError as exc:
+        raise FlowError('invalid_config', [f'spec.protected: {exc}']) from exc
     labels = {role: spec[role]['actor'].strip().casefold() for role in ('builder', 'reviewer')}
     if labels['reviewer'] in (labels['builder'], spec['lead'].strip().casefold()):
         raise FlowError('invalid_config', ['reviewer.actor must differ from builder.actor and lead: the review '
@@ -348,14 +366,17 @@ def _flow_dir(db: Path, task: str) -> Path:
 
 
 def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str, Any],
-                role: str, stage: str, refs: list[str]) -> str:
+                role: str, stage: str, refs: list[str], candidate: str | None = None) -> str:
+    """The worker's brief; a reviewer's candidate diff comes from `candidate`, its immutable snapshot."""
     base = task_context.render(task_context.brief(store, view['id'], role=role, scope=spec['builder']['scope']))
     lines = [base, '', f'## Flow stage: {stage}']
     if role == 'reviewer':
-        lines += ['Review the current working tree against the objective and acceptance above. Do not edit files.',
+        lines += ['Review the candidate in your working directory against the objective and acceptance above: it is an '
+                  'immutable snapshot of the tree lead verification accepted (a Git checkout whose HEAD is the base '
+                  'commit). Read it there, not in the original project, which may change meanwhile. Do not edit files.',
                   'Report every problem as a finding (blocking/major only for real defects) in the result JSON.',
                   'The candidate change is below, so no shell command is needed; read files if you need more.']
-        lines += candidate_diff(view['project'], spec['builder']['scope'])
+        lines += candidate_diff(candidate or view['project'], spec['builder']['scope'])
         earlier = [finding for items in reviewer_findings(view).values() for finding in items]
         if earlier:
             lines.append('Earlier review findings that a repair addressed; report again any that still apply:')
@@ -410,13 +431,101 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
     return [header, task_context._untrusted_block((shown or '(no tracked changes)') + (chr(10) + listing if listing else ''))]
 
 
-def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, stage: str, brief: str,
-            echo: Callable[[str], None]) -> int:
-    worker = spec[role]
-    directory = _flow_dir(db, view['id'])
+def protected_paths(project: str, spec: dict[str, Any]) -> list[str]:
+    """What a builder must not change: paths the checks name, runtime configuration and spec.protected.
+
+    A check that runs the builder's own edited test proves nothing, and a check argument naming an existing
+    project path is the closest enforceable reading of "the acceptance checks". Tests a check reaches indirectly
+    (a whole suite) are protected only when the spec lists them.
+    """
+    root = Path(project).resolve()
+    named = set()
+    for check in spec['checks']:
+        for arg in check:
+            candidate = Path(arg)
+            if arg and not candidate.is_absolute() and '..' not in candidate.parts and candidate.parts:
+                if (root / candidate).exists() and (root / candidate).resolve() != root:
+                    named.add(candidate.as_posix())
+    return sorted(named | set(RUNTIME_CONFIG) | set(spec['protected']))
+
+
+def protected_state(project: str, paths: list[str]) -> dict[str, str]:
+    """Content identity of each protected path (a directory by every file in it); a missing path is 'missing'."""
+    root = Path(project).resolve()
+    state = {}
+    for name in paths:
+        path = root / name
+        digest = hashlib.sha256()
+        if path.is_symlink() or path.is_file():
+            digest.update(b'link:' + os.fsencode(os.readlink(path)) if path.is_symlink() else path.read_bytes())
+        elif path.is_dir():
+            for current, dirs, files in os.walk(path, followlinks=False):
+                dirs[:] = sorted(item for item in dirs if not task_verification._is_tool_cache(Path(item), directory=True))
+                for item in sorted(files):
+                    file = Path(current) / item
+                    if task_verification._is_tool_cache(file.relative_to(root)):
+                        continue
+                    data = b'link:' + os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
+                    digest.update(os.fsencode(file.relative_to(root).as_posix()) + b'\0'
+                                  + hashlib.sha256(data).digest())
+        else:
+            state[name] = 'missing'
+            continue
+        state[name] = digest.hexdigest()
+    return state
+
+
+def protected_changes(db: Path, view: ledger.TaskView, spec: dict[str, Any]) -> list[str]:
+    """Protected paths the latest ended builder changed since its launch (from the state saved at launch)."""
+    builders = [item for item in view['assignments'] if item['role'] == 'builder']
+    if not builders or builders[-1]['status'] == 'active':
+        return []
+    saved = _flow_dir(db, view['id']) / f'protected-{len(builders)}.json'
+    try:
+        before = json.loads(saved.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return []  # A flow started before protection existed, or a launch that never recorded it.
+    now = protected_state(view['project'], sorted(before))
+    return [name for name in sorted(before) if before[name] != now.get(name)]
+
+
+def _private_dir(db: Path, task: str) -> Path:
+    directory = _flow_dir(db, task)
     if any(path.is_symlink() for path in (directory, directory.parent)):
         raise FlowError('conflict', [f'{directory} or its parent is a link; flow state must be a private directory'])
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return directory
+
+
+def snapshot_candidate(db: Path, view: ledger.TaskView) -> tuple[Path | None, str]:
+    """Snapshot the project for the next review; return it, or why the accepted candidate cannot be reviewed.
+
+    The snapshot's fingerprint is hashed from the copied bytes, so equality with the accepted verification means
+    the reviewer's files are that candidate, whatever happens to the project while the review runs.
+    """
+    accepted = view['verification']['accepted_ids']
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        record = next((item for item in store.verifications(view['id']) if accepted and item['id'] == accepted[-1]),
+                      None)
+    number = 1 + sum(item['role'] == 'reviewer' for item in view['assignments'])
+    directory = _private_dir(db, view['id']) / f'review-{number}.snapshot'
+    review_snapshot.remove(directory)  # Left by a launch that never became an assignment.
+    try:
+        manifest = review_snapshot.create(view['project'], db, directory)
+    except (review_snapshot.SnapshotError, OSError) as exc:
+        return None, (f'the candidate cannot be snapshotted for review: {task_activity.safe_text(exc, 300)}; fix '
+                      'the cause, then resume')
+    if record is None or (manifest['revision'], manifest['fingerprint']) != (record['revision'], record['fingerprint']):
+        review_snapshot.remove(directory)
+        return None, ('the working tree is not the one lead verification accepted, so a review now would describe '
+                      'another candidate; restore it or re-verify, then resume')
+    return directory, ''
+
+
+def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, stage: str, brief: str,
+            echo: Callable[[str], None], snapshot: Path | None = None) -> int:
+    worker = spec[role]
+    directory = _private_dir(db, view['id'])
     number = 1 + sum(item['role'] == role for item in view['assignments'])
     brief_path, result_path = directory / f'{stage}-{number}.brief.md', directory / f'{stage}-{number}.result.json'
     if result_path.exists() or result_path.is_symlink():  # Never ingest a result written before this run.
@@ -436,6 +545,7 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
                f"--actor={worker['actor']}", f'--role={role}', f'--mode={mode}',
                *[f'--scope={path}' for path in spec['builder']['scope']],
                f'--result-file={result_path}',
+               *([f'--snapshot={snapshot}'] if snapshot is not None else []),
                *(['--observe'] if worker['observe'] else []),
                *(['--checkpoint'] if worker.get('checkpoint') else []),
                *(['--env', worker['env']] if worker.get('env') else []),
@@ -445,18 +555,6 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
            'HIPSON_FLOW_RESULT': str(result_path)}
     echo(f'hipson task flow: {view["id"]} {stage} by {worker["actor"]} ({role}, {mode})')
     return task_runner.supervise(command, cwd=view['project'], env=env)[0]
-
-
-def _on_verified_tree(db: Path, view: ledger.TaskView) -> bool:
-    """The project is the tree of the accepted verification (same revision and fingerprint)."""
-    accepted = view['verification']['accepted_ids']
-    if not accepted:
-        return False
-    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
-        record = next((item for item in store.verifications(view['id']) if item['id'] == accepted[-1]), None)
-    state = task_verification.project_state(view['project'], db)
-    return (record is not None and bool(state['fingerprint']) and state['revision'] == record['revision']
-            and state['fingerprint'] == record['fingerprint'])
 
 
 def _current_overrides(events: list[ledger.TaskEvent]) -> list[str]:
@@ -525,6 +623,8 @@ def run(db: Path, spec: dict[str, Any], digest: str, *, resume: str | None = Non
     with _task_lock(db, task) as locked:
         if not locked:
             return _result(db, task, 'running', [f'another hipson task flow is advancing {task}'], [])
+        # A review snapshot outlives only an interrupted flow: nothing reads it once its reviewer has ended.
+        review_snapshot.sweep(_flow_dir(db, task), 'review-*.snapshot')
         if resume is not None:  # Recovery happens under the lock, and only for this task's own orphans.
             with closing(ledger.Ledger(db, create=False)) as store:
                 reaped = store.reap(task=task)
@@ -577,20 +677,27 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                        and event['summary'].startswith('interrupted') for ref in event['refs']}
             overrides = _current_overrides(events)
             records = [record for record in store.verifications(task) if record['id'] not in ignored]
+            changed = protected_changes(db, view, spec)
             if view['checks'] != spec['checks']:  # Acceptance cannot change under a running flow either.
                 step = Step('stop', 'conflict', [f"declared checks changed while the flow ran: "
                                                  f"{ledger.checks_text(view['checks'])}"])
+            elif changed:
+                last = [item for item in view['assignments'] if item['role'] == 'builder'][-1]['id']
+                step = Step('stop', 'needs_lead', [
+                    f"builder {last} changed protected paths (acceptance check inputs or runtime configuration): "
+                    f"{', '.join(task_activity.safe_text(name, 120) for name in changed[:20])}; restore them "
+                    '(git checkout -- PATH) and resume, or start a new flow whose spec you have reviewed'])
             else:
                 step = decide(view, records, spec, verified_for=verified_for, retry=retry, overrides=overrides)
-            if step.kind == 'review' and not _on_verified_tree(db, view):
-                step = Step('stop', 'verification_inconclusive', [
-                    'the working tree is not the one lead verification accepted, so a review brief built now would '
-                    'describe another candidate; restore it or re-verify, then resume'])
+            snapshot: Path | None = None
+            if step.kind == 'review':
+                snapshot, problem = snapshot_candidate(db, view)
+                if snapshot is None:
+                    step = Step('stop', 'verification_inconclusive', [problem])
+            candidate = str(review_snapshot.workdir(snapshot, review_snapshot.load(snapshot))) if snapshot else None
             brief = (stage_brief(store, view, records, spec, 'builder' if step.kind == 'build' else 'reviewer',
-                                 step.stage or 'review', step.refs) if step.kind in ('build', 'review') else '')
-        if step.kind == 'review' and not _on_verified_tree(db, view):  # Changed while the brief was built.
-            step, brief = Step('stop', 'verification_inconclusive', [
-                'the working tree changed while the review brief was built; restore it or re-verify, then resume']), ''
+                                 step.stage or 'review', step.refs, candidate) if step.kind in ('build', 'review')
+                     else '')
         steps.append(step.kind if not step.stage else f'{step.kind}:{step.stage}')
         if step.kind == 'stop':
             if step.state != 'accepted':
@@ -617,8 +724,18 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                     step.refs if step.stage == 'repair' else [])
             if step.reasons and step.reasons[0].startswith('lead retry'):
                 retry = False  # One explicit retry per invocation.
+            if role == 'builder':  # Saved before launch: what the builder must leave as it found it.
+                number = 1 + sum(item['role'] == 'builder' for item in view['assignments'])
+                saved = _private_dir(db, task) / f'protected-{number}.json'
+                saved.unlink(missing_ok=True)
+                saved.write_text(json.dumps(protected_state(view['project'], protected_paths(view['project'], spec))),
+                                 encoding='utf-8')
             seen = len(task_runner.SIGNALS_SEEN)
-            code = _launch(db, spec, view, role, step.stage or 'review', brief, echo)
+            try:
+                code = _launch(db, spec, view, role, step.stage or 'review', brief, echo, snapshot)
+            finally:
+                if snapshot is not None:
+                    review_snapshot.remove(snapshot)
             if len(task_runner.SIGNALS_SEEN) > seen:
                 return _interrupted(db, task, lead, f'{role} run', [], steps)
             with closing(ledger.Ledger(db, create=False, read_only=True)) as store:

@@ -301,6 +301,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
             "platform": sys.platform, "platform_supported": sys.platform in ("linux", "darwin", "win32"),
             "hipson_executable": command, "ledger": str(db), "ledger_schema": version,
             "clients": clients,
+            # Agent CLIs that can run as workers (hipson agent exec); login state: hipson agent runtimes.
+            "runtimes": {name: shutil.which(name) for name in ("claude", "codex", "agy")},
         }
         actions = report["actions"]
         actions.append({
@@ -441,6 +443,11 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
             format_command(["hipson", "task", "now"]),
             format_command(["hipson", "task", "ack", "--assignment", "<assignment-id>", "--note", "<what you checked>"]),
             format_command(["hipson", "task", "close", "--task", "<task-id>"]),
+            # Native agents as workers: what is installed and logged in, then a spec-driven workflow
+            # (build, lead verification, independent review of an immutable snapshot, bounded repair).
+            format_command(["hipson", "agent", "runtimes"]),
+            format_command(["hipson", "task", "flow", "--spec", "flow.json", "--check"])
+            + "  (spec example: docs/AGENT_RUNTIMES.md, First workflow)",
         ]
         if any(item["kind"] == "claude" and item["status"] == "planned" for item in actions):
             report["next_steps"].insert(0, "Restart Claude Code in this project and approve the project MCP server 'hipson' when asked "

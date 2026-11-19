@@ -418,12 +418,25 @@ verification and review, open findings and the next command. The flow refuses to
 **Review gate.** `task open --require-review` (MCP `task.open` `require_review`; every flow task) sets
 `review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
 bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
-result, and was assigned after the latest finished builder **and** after the accepted lead verification, so
-`task run` records the revision and working-tree fingerprint when a reviewer starts and when it ends (reserved
-`reviewed` events, the same fingerprint lead verification records), and both must equal the accepted
-verification's, so a review of another tree (switched before the review and restored after) never qualifies;
-reviewers launched without `task run` have no recorded tree and cannot satisfy the gate. Verification must
-still be current at close, so a tree changed after review is caught as stale. A later review that ran and failed, or returned a `partial` /
+result, and was assigned after the latest finished builder **and** after the accepted lead verification, and
+that read an **immutable snapshot** of the verified candidate. Before a reviewer starts, `task run` (or `task
+flow`, which prepares it so the brief's diff comes from the same copy) copies every covered file of the project,
+tracked, modified and untracked, from the very bytes it hashes, into a private directory beside the ledger
+(`.<ledger>.runs/review-*` or `.<ledger>.flows/<task>/review-N.snapshot`), makes the files read-only and, in a
+Git project, makes the copy a small repository whose HEAD is the base commit (objects read through alternates;
+nothing is written to the project). The reviewer starts there (`HIPSON_REVIEW_SNAPSHOT`; `HIPSON_PROJECT` names
+the task project). The snapshot's fingerprint is the copy's own, and the flow refuses to review when it differs
+from the accepted verification (`verification_inconclusive`). `task run` re-hashes the snapshot from its
+manifest when the reviewer starts and ends (reserved `reviewed` events with `source=snapshot`); both must equal
+the accepted verification's revision and fingerprint, so a review of another tree, or a snapshot that was
+edited, replaced, emptied or gained files during the review (tool caches excepted), never qualifies. A review of
+the live tree (`--live-tree`, or a reviewer run outside `task run`) never qualifies: equal fingerprints at its
+start and end do not prove what it read in between. Snapshot creation fails closed (no assignment) for content
+beyond the hash budget, special files and symlinks that point outside the project. The live project may change
+while the review runs; verification must still be current at close, so such a change is caught as stale and the
+flow stops (`verification_inconclusive`) instead of closing the changed tree under that review. The snapshot is
+removed when its reviewer ends; a flow resume and the next `task run` reviewer remove ones an interrupted run
+left behind. A later review that ran and failed, or returned a `partial` /
 `blocked` result, blocks `done` even when an earlier review passed; an interrupted (cancelled) one does not. The reviewer's label must differ, case-insensitively, from the
 lead and every builder. `task show` prints a `Review:` line and the JSON view carries `review` (`required`,
 `passing`, `accepted`, `current`, `reasons`). In a known worker context (`HIPSON_ROLE=worker` or
@@ -434,9 +447,18 @@ coordination guarantee between cooperating processes, not a security boundary. T
 `task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
 not sandbox.
 
-Known limits (open): the reviewer brief is built from the live tree, checked against the verified fingerprint
-before and after; a concurrent process that swaps the tree and restores it between those reads is not excluded
-(cooperating processes are assumed; building the brief from an immutable snapshot is the planned fix). Tracked
+**Protected paths.** Before each build the flow saves the content identity of the paths the declared checks
+name (an existing project path given as a check argument, e.g. `tests/acceptance.py`), the runtime
+configuration native workers load from a project (`.claude`, `.codex`, `.agents`, `.gemini`, `.mcp.json`,
+`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) and the spec's optional `protected` list. When the builder ends and any
+of them changed, even inside its write scope, the flow stops with `needs_lead` before anything verifies or
+reviews it; restoring them and resuming continues. A test a check reaches only indirectly (a whole suite) is
+protected only when the spec lists it.
+
+Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and
+recorded identity); a reviewer that reads the live project by absolute path is outside it. Runtimes may not
+apply project-scoped configuration that is keyed by path (trust lists, per-project MCP entries) to a snapshot
+directory; see [AGENT_RUNTIMES.md](AGENT_RUNTIMES.md). Tracked
 files under the ledger's private directories are fingerprinted, but observation still skips those directories.
 An interrupted verification marks every record of that run as non-evidence for repairs,
 but the ledger still counts a check that passed before the signal; the non-Git inventory walk counts files
