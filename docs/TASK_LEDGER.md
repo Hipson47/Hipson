@@ -398,7 +398,15 @@ What the flow does, each step derived from the recorded state:
 7. Closes through `task close` (the ledger's one transaction rechecks every gate) to `close_to`.
 
 Any other open blocking/major finding (an out-of-scope change seen by observation, a finding the lead
-recorded) stops with `needs_lead` (exit 4): the flow never resolves what it did not cause and review. A live
+recorded) stops with `needs_lead` (exit 4): the flow never resolves what it did not cause and review. A review
+finding is resolved only after a repair that started after it was reported; otherwise `needs_lead`.
+Success needs the gates even when the task got there outside the flow: a task moved to `review` by hand is
+`accepted` only when verification, review and every `done` blocker pass (else `needs_lead`), and a task that
+reached `review`/`done` through an audited override is `overridden` (exit 4), never `accepted`. A launch that
+`task run` refuses before creating an assignment (claim conflict, project mismatch, invalid option) stops with
+`launch_refused` (exit 75) instead of being retried. One invocation advances a task at a time (an advisory lock
+in the flow's private directory; another one gets `running`), and the declared checks are compared with the spec
+at every step, not only on resume. A live
 assignment stops with `running` (exit 75). SIGINT/SIGTERM stops the running step through its supervisor,
 records `interrupted during ...` (its verification records are then not evidence) and exits 130; a builder or
 reviewer that the flow lost is re-run on resume (at most twice per role) without counting as a repair.
@@ -409,14 +417,25 @@ verification and review, open findings and the next command. The flow refuses to
 `review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
 bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
 result, and was assigned after the latest finished builder **and** after the accepted lead verification, so
-the review saw the tree that verification fingerprinted; verification must still be current at close, so a
-tree changed after review is caught as stale. A later review that ran and failed, or returned a `partial` /
+`task run` records the revision and working-tree fingerprint when a reviewer starts and when it ends (reserved
+`reviewed` events, the same fingerprint lead verification records), and both must equal the accepted
+verification's, so a review of another tree (switched before the review and restored after) never qualifies;
+reviewers launched without `task run` have no recorded tree and cannot satisfy the gate. Verification must
+still be current at close, so a tree changed after review is caught as stale. A later review that ran and failed, or returned a `partial` /
 `blocked` result, blocks `done` even when an earlier review passed; an interrupted (cancelled) one does not. The reviewer's label must differ, case-insensitively, from the
 lead and every builder. `task show` prints a `Review:` line and the JSON view carries `review` (`required`,
-`passing`, `accepted`, `current`, `reasons`). Labels are not authenticated: the gate is a coordination
-guarantee between cooperating processes, not a security boundary. The enforced boundaries remain the ones
+`passing`, `accepted`, `current`, `reasons`). In a known worker context (`HIPSON_ROLE=worker` or
+`HIPSON_ASSIGNMENT`), `task ack`, `task finding update` and `task status` refuse on the CLI and MCP, as `task
+checks`, `task verify` and `task close` already did, so a worker cannot acknowledge, dismiss or force what judges
+its work (`task finish` stays available to lead wrappers). Labels are not authenticated: the gate is a
+coordination guarantee between cooperating processes, not a security boundary. The enforced boundaries remain the ones
 `task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
 not sandbox.
+
+Known limits (open): an interrupted verification marks every record of that run as non-evidence for repairs,
+but the ledger still counts a check that passed before the signal; the non-Git inventory walk counts files
+under the flow's private directory toward its 20,000-path bound; with `TMPDIR` inside a checkpointed scope the
+runner's progress directory can be copied into the checkpoint.
 
 `scripts/flow_compare.py` compares four lead procedures (worker self-report, self-verify, `task do`,
 `task flow`) over the same scripted `e2e/agents/bin/flow-worker` behaviours with a hidden oracle; results and

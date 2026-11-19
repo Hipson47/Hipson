@@ -39,9 +39,10 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 
 - **native** (default): the runtime runs with the user's own configuration, plugins, skills, MCP servers,
   instructions and model defaults. Hipson adds no clean-room flag and never a permission bypass
-  (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for Claude
-  a task-scoped permission for exactly the lead's declared checks (`--allowedTools "Bash(<check>)"`, from
-  `HIPSON_FLOW_CHECKS`), so a worker can run the acceptance command without a wider grant.
+  (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for a
+  Claude writer a task-scoped permission for exactly the task's declared checks, read from the ledger
+  (`--allowedTools "Bash(<check>)"`; a check with a wildcard, bracket or leading `NAME=value` word gets none).
+  The permission mode follows the recorded assignment (`ro` -> plan / read-only / plan mode), whatever flags say.
 - **controlled**: for benchmarks and isolated tests; uses each runtime's documented isolation flags. Antigravity
   refuses it (exit 64, `unsupported`) rather than pretending. The e2e harness keeps its own stronger isolation
   (temporary `HOME`, `CODEX_HOME`, PATH proxy).
@@ -55,11 +56,14 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 - Failure classes from the runtime's own words and exit codes: `rate_limited` (5), `auth_required` (4),
   `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64). `task
   run` records the exit code; the flow stops with `worker_failed` / `reviewer_failed`.
-- Evidence beside the result (`<result>.meta.json`): runtime, profile, role, session, models, usage, permission
-  denials, duration, brief size and a bytes/4 token estimate.
+- Evidence beside the result (`<result>.meta.json`): runtime, profile, role, mode, ledger, project, session,
+  models, usage, the names of denied tools (never their inputs), duration, brief size and a bytes/4 token
+  estimate. A nonzero exit is never a success, even after a valid-looking result; Codex's last-message file is
+  removed before and after each run so a stale one cannot be ingested. `verified` evidence records the CLI
+  version and counts only while that version is installed.
 - Sessions: a new run gets a fresh session id, recorded with its task and assignment in the meta file;
-  `--continue-session` resumes only this flow's latest successful session of the same runtime, task and role,
-  read from this flow's own meta files. Another task's context is never reused.
+  `--continue-session` resumes only the latest successful session of the same ledger, project, runtime, task and
+  role, read from meta files beside the result, and only a well-formed id. Another task's context is never reused.
 
 ## Live run through Hipson (2026-11-19, one sample each; not a benchmark)
 

@@ -985,6 +985,9 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments['actor'], 'actor')
         if 'command' in arguments:
             validate(arguments['command'], arguments.get('timeout', 300))
+    if name in ('task.ack', 'task.finding_update', 'task.status'):
+        from hipson.task_verification import invocation_context
+        invocation_context()  # A worker must not acknowledge, dismiss or force what judges its own work.
     if name == "task.status":
         ledger.validate_status_override(to=arguments["to"], force=arguments.get("force", False),
                                         reason=arguments.get("reason", ""))

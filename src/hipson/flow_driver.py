@@ -21,14 +21,15 @@ import os
 import shlex
 import sqlite3
 import sys
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from hipson import ledger, task_activity, task_context, task_flow, task_observation, task_runner, task_verification
-from hipson.redaction import redact_text
+from hipson.project import safe_diff
+from hipson.redaction import redact_text, sanitize_path
 
 MAX_REPAIRS = 5
 MAX_INTERRUPTED = 2  # Re-runs of a worker the flow lost (reaped or cancelled), per role.
@@ -36,7 +37,7 @@ MAX_STEPS = 64
 LEAD_NOTE = 'acknowledged by hipson task flow after printing the result to the lead'
 
 # Exit codes are part of the contract: scripts and leads branch on them.
-EXIT = {'accepted': 0, 'interrupted': 130, 'close_refused': 1, 'checks_failed': 2, 'review_blocked': 2, 'worker_failed': 3,
+EXIT = {'accepted': 0, 'interrupted': 130, 'close_refused': 1, 'overridden': 4, 'launch_refused': 75, 'checks_failed': 2, 'review_blocked': 2, 'worker_failed': 3,
         'reviewer_failed': 3, 'needs_lead': 4, 'verification_inconclusive': 4, 'invalid_config': 64,
         'conflict': 65, 'running': 75}
 
@@ -102,6 +103,8 @@ def _check_value(value: Any, schema: dict[str, Any], path: str) -> None:
         raise FlowError('invalid_config', [f'{path}: expected one of {schema["enum"]}'])
     if 'pattern' in schema and not value.strip():
         raise FlowError('invalid_config', [f'{path}: must not be empty or blank'])
+    if kind == 'string' and any(ord(char) < 32 and char not in '\t\n\r' for char in value):
+        raise FlowError('invalid_config', [f'{path}: must not contain control characters'])
     if 'minimum' in schema and value < schema['minimum'] or 'maximum' in schema and value > schema['maximum']:
         raise FlowError('invalid_config', [f'{path}: must be between {schema["minimum"]} and {schema["maximum"]}'])
     if kind == 'array':
@@ -220,24 +223,32 @@ def reviewer_findings(view: ledger.TaskView) -> dict[str, list[ledger.Finding]]:
 
 
 def failing_checks(view: ledger.TaskView, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The latest record of each declared check, where that record failed: the diagnostic evidence for repair."""
-    latest: dict[Any, dict[str, Any]] = {}
-    for record in records:
-        latest[record.get('argv_sha256')] = record
-    found = [latest.get(task_verification.argv_identity(check)) for check in view['checks']]
-    return [item for item in found if item is not None and item['exit_code'] != 0]
+    """The current failing record of each declared check (the ledger's own freshness): repair evidence.
+
+    A stale failure of another check, or a run the flow recorded as interrupted (absent from `records`), is not.
+    """
+    current = {state['record'] for state in view['verification']['checks'] if state['freshness'] == 'failing'}
+    return [record for record in records if record['id'] in current]
 
 
 def decide(view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str, Any], *,
-           verified_for: set[str], retry: bool) -> Step:
+           verified_for: set[str], retry: bool, overrides: list[str] | None = None) -> Step:
     """The next step, from recorded state only. Pure, so every branch is testable without processes.
 
     `records` excludes verification runs the flow recorded as interrupted: they are not diagnostic evidence.
     """
     task, status = view['id'], view['status']
-    if status == 'done' or (status == 'review' and spec['close_to'] == 'review'):
-        return Step('stop', 'accepted', [f'{task} is {status}' + (
-            f'; final acceptance is yours: hipson task close --task {task}' if status == 'review' else '')])
+    if status in ('review', 'done') and overrides:
+        return Step('stop', 'overridden', [f"{task} is {status} through an audited override ({', '.join(overrides)}); "
+                                           'the flow did not accept it'])
+    if status == 'done':  # The ledger's close transaction enforced every gate.
+        return Step('stop', 'accepted', [f'{task} is done'])
+    if status == 'review' and spec['close_to'] == 'review':
+        # Review may have been reached outside the flow: success needs the same gates done will need.
+        gaps = ([] if view['verification']['passing'] else view['verification']['reasons']) + ledger.done_blockers(view)
+        if gaps:
+            return Step('stop', 'needs_lead', [f'{task} is in review but its gates are not met'] + gaps)
+        return Step('stop', 'accepted', [f'{task} is review; final acceptance is yours: hipson task close --task {task}'])
     if status == 'cancelled':
         return Step('stop', 'needs_lead', [f'{task} is cancelled'])
     if status == 'blocked':
@@ -322,6 +333,12 @@ def decide(view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str,
                 for finding in blocking] + [f'repair budget spent: {len(counted)} of {budget} builder attempts'])
         return Step('build', reasons=['blocking review findings'], refs=refs, stage='repair')
     if open_review:
+        # Only a repair launched after a finding was reported can have addressed it (counted builders only).
+        unaddressed = [finding for finding in open_review if counted[-1]['started_at'] <= finding['created_at']]
+        if unaddressed:
+            return Step('stop', 'needs_lead', [
+                f"{finding['id']} was reported after the latest builder {counted[-1]['id']} started, so no repair "
+                'addressed it; resolve it yourself or resume with a repair budget' for finding in unaddressed])
         return Step('resolve', refs=[finding['id'] for finding in open_review])
     return Step('close')
 
@@ -371,12 +388,17 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
         overrides = task_verification._filter_overrides(project)  # No clean/process filter may run.
     except ValueError:
         return ['Candidate diff unavailable (Git filter configuration unreadable); inspect the files directly.']
-    status = _git(project, *overrides, 'status', '--porcelain', '--untracked-files=all', '--', *scope)
-    diff = _git(project, *overrides, 'diff', '--no-color', '--no-ext-diff', '--no-textconv', 'HEAD', '--', *scope)
+    # Literal pathspecs: a scope such as ':(glob)**' names a path, never a Git pattern.
+    status = _git(project, '--literal-pathspecs', *overrides, 'status', '--porcelain', '--untracked-files=all', '--',
+                  *scope)
+    diff = _git(project, '--literal-pathspecs', *overrides, 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
+                'HEAD', '--', *scope)
     if status is None or diff is None:
         return ['Candidate diff unavailable (git status/diff failed or exceeded its read limit); inspect the files.']
-    text = diff.decode('utf-8', errors='replace')
-    untracked = [line[3:] for line in status.decode('utf-8', errors='replace').splitlines() if line.startswith('??')]
+    # Sensitive files (.env, keys) leave whole sections and secrets are redacted before truncation can split them.
+    text = safe_diff(diff.decode('utf-8', errors='replace'))
+    untracked = [redact_text(sanitize_path(line[3:])) for line in status.decode('utf-8', errors='replace').splitlines()
+                 if line.startswith('??')]
     shown = text[:DIFF_BUDGET]
     header = f"Candidate diff against HEAD within {', '.join(scope)}" + (
         f' (truncated: first {DIFF_BUDGET} of {len(text)} characters; read the files for the rest)'
@@ -408,17 +430,17 @@ def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, st
         return arg
 
     mode = 'rw' if role == 'builder' else 'ro'
-    command = [sys.executable, '-P', '-m', 'hipson.cli', 'task', 'run', '--db', str(db), '--task', view['id'],
-               '--actor', worker['actor'], '--role', role, '--mode', mode,
-               *[item for path in spec['builder']['scope'] for item in ('--scope', path)],
-               '--result-file', str(result_path),
+    command = [sys.executable, '-P', '-m', 'hipson.cli', 'task', 'run', f'--db={db}', f"--task={view['id']}",
+               f"--actor={worker['actor']}", f'--role={role}', f'--mode={mode}',
+               *[f'--scope={path}' for path in spec['builder']['scope']],
+               f'--result-file={result_path}',
                *(['--observe'] if worker['observe'] else []),
                *(['--checkpoint'] if worker.get('checkpoint') else []),
                *(['--env', worker['env']] if worker.get('env') else []),
                *[item for name in worker['env_allow'] for item in ('--env-allow', name)],
                '--', *[fill(arg) for arg in worker['command']]]
     env = {**os.environ, 'HIPSON_FLOW_STAGE': stage, 'HIPSON_FLOW_BRIEF': str(brief_path),
-           'HIPSON_FLOW_RESULT': str(result_path), 'HIPSON_FLOW_CHECKS': json.dumps(spec['checks'])}
+           'HIPSON_FLOW_RESULT': str(result_path)}
     echo(f'hipson task flow: {view["id"]} {stage} by {worker["actor"]} ({role}, {mode})')
     return task_runner.supervise(command, cwd=view['project'], env=env)[0]
 
@@ -480,16 +502,52 @@ def run(db: Path, spec: dict[str, Any], digest: str, *, resume: str | None = Non
             for reaped in store.reap(task=task):
                 echo(f"hipson task flow: reaped {reaped['assignment']['id']}: {reaped['reason']}")
         task_observation.complete_pending(db)
+    with _task_lock(db, task) as locked:
+        if not locked:
+            return _result(db, task, 'running', [f'another hipson task flow is advancing {task}'], [])
+        return _advance(db, spec, task, retry, echo)
+
+
+@contextmanager
+def _task_lock(db: Path, task: str) -> Iterator[bool]:
+    """One flow invocation advances a task at a time (an advisory lock in the flow's private directory)."""
+    directory = _flow_dir(db, task)
+    if any(path.is_symlink() for path in (directory, directory.parent)):
+        raise FlowError('conflict', [f'{directory} or its parent is a link; flow state must be a private directory'])
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(directory / '.lock', 'a+b') as handle:
+        try:
+            if sys.platform == 'win32':
+                import msvcrt
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        yield True
+
+
+def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Callable[[str], None]) -> dict[str, Any]:
     lead = spec['lead']
     verified_for: set[str] = set()
     steps: list[str] = []
     for _ in range(MAX_STEPS):
         with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
             view = store.show(task)
-            ignored = {ref for event in store.events(task) if event['type'] == 'flow'
+            events = store.events(task)
+            ignored = {ref for event in events if event['type'] == 'flow'
                        and event['summary'].startswith('interrupted') for ref in event['refs']}
+            overrides = [f"{event['type']} event {event['seq']}" for event in events
+                         if event['type'] in ('review_override', 'done_override')]
             records = [record for record in store.verifications(task) if record['id'] not in ignored]
-            step = decide(view, records, spec, verified_for=verified_for, retry=retry)
+            if view['checks'] != spec['checks']:  # Acceptance cannot change under a running flow either.
+                step = Step('stop', 'conflict', [f"declared checks changed while the flow ran: "
+                                                 f"{ledger.checks_text(view['checks'])}"])
+            else:
+                step = decide(view, records, spec, verified_for=verified_for, retry=retry, overrides=overrides)
             brief = (stage_brief(store, view, records, spec, 'builder' if step.kind == 'build' else 'reviewer',
                                  step.stage or 'review', step.refs) if step.kind in ('build', 'review') else '')
         steps.append(step.kind if not step.stage else f'{step.kind}:{step.stage}')
@@ -519,9 +577,15 @@ def run(db: Path, spec: dict[str, Any], digest: str, *, resume: str | None = Non
             if step.reasons and step.reasons[0].startswith('lead retry'):
                 retry = False  # One explicit retry per invocation.
             seen = len(task_runner.SIGNALS_SEEN)
-            _launch(db, spec, view, role, step.stage or 'review', brief, echo)
+            code = _launch(db, spec, view, role, step.stage or 'review', brief, echo)
             if len(task_runner.SIGNALS_SEEN) > seen:
                 return _interrupted(db, task, lead, f'{role} run', [], steps)
+            with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+                launched = len(store.show(task)['assignments']) > len(view['assignments'])
+            if not launched:  # Refused before any assignment (claim conflict, project mismatch, bad option).
+                reason = f'task run refused the {role} before creating an assignment (exit {code}); see its message above'
+                _record(db, task, lead, f'stopped launch_refused: {reason}', [])
+                return _result(db, task, 'launch_refused', [reason], steps)
             if role == 'reviewer' and retry:
                 retry = False
         elif step.kind == 'verify':

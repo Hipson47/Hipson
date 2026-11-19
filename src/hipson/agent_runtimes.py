@@ -229,9 +229,11 @@ def inventory(name: str, *, project: str | Path = ".") -> dict[str, Any]:
             report["capabilities"][capability] = {"state": "unsupported", "evidence": "no documented flag"}
             continue
         missing = [flag for flag in flags if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text)]
-        state = "verified" if capability in report["verified"] else "documented" if not missing else "unsupported"
+        evidence = report["verified"].get(capability) or {}
+        verified = bool(evidence) and evidence.get("version") == report["version"] and not missing
+        state = "verified" if verified else "documented" if not missing else "unsupported"
         report["capabilities"][capability] = {"state": state, "evidence": (
-            report["verified"][capability] if state == "verified" else
+            evidence if state == "verified" else
             f"--help lists {', '.join(flags)}" if not missing else f"--help lacks {', '.join(missing)}")}
     report["configured"] = _configured(name, Path(project).resolve(), executable)
     if name == "claude":
@@ -298,9 +300,14 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
 
 
 def _exact_pattern(check: list[str]) -> bool:
-    """Grant only a check whose permission pattern cannot match more than itself (no wildcard, no closing paren)."""
+    """Grant only a check whose permission pattern names exactly the command the lead runs.
+
+    No wildcard or bracket (they widen a pattern) and no leading NAME=value word (a shell reads it as an
+    environment assignment, while lead verification runs it as the executable).
+    """
     text = shlex.join(check)
-    return not any(char in text for char in "*?()[]{}") and not any(ord(char) < 32 for char in text)
+    return (not any(char in text for char in "*?()[]{}") and not any(ord(char) < 32 for char in text)
+            and "=" not in check[0])
 
 
 def classify(code: int, output: str) -> str:
@@ -324,10 +331,16 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
         if not isinstance(payload, dict):
             raise RuntimeFailure(classify(code, stdout + stderr) if code else _evidence(stdout + stderr)
                                  or "malformed_output", "no JSON result object on stdout")
+        raw_denials = payload.get("permission_denials")
+        denials: list[Any] = raw_denials if isinstance(raw_denials, list) else []
         meta.update(session=payload.get("session_id"), usage=payload.get("usage"),
                     models=sorted((payload.get("modelUsage") or {}).keys()) or None,
                     cost_usd_list=payload.get("total_cost_usd"), num_turns=payload.get("num_turns"),
-                    permission_denials=payload.get("permission_denials"))
+                    # Tool names only: denied inputs can hold credentials.
+                    permission_denials=[redact_text(str(item.get("tool_name", "?")))[:80]
+                                        for item in denials if isinstance(item, dict)])
+        if code:
+            raise RuntimeFailure(classify(code, stdout + stderr), f"claude exited {code} after printing a result")
         if payload.get("is_error") or payload.get("subtype") != "success":
             raise RuntimeFailure(classify(1, json.dumps(payload.get("result", "")) + stderr),
                                  f"subtype={payload.get('subtype')} api_error={payload.get('api_error_status')}")
@@ -343,6 +356,8 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
                 meta["usage"] = event.get("usage")
         if code:
             raise RuntimeFailure(classify(code, stdout + stderr), f"codex exec exit {code}")
+        if not last_path.is_file():
+            raise RuntimeFailure("malformed_output", "codex wrote no --output-last-message file in this run")
         try:
             raw = json.loads(last_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
@@ -376,6 +391,19 @@ WORKER_RULES = ("Worker rules: you are a worker for a Hipson lead. Stay within t
                 "Use partial or blocked only when the work itself is unfinished or impossible.")
 
 
+def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[str]]]:
+    """The assignment and the task's declared checks, as the ledger recorded them (never the environment)."""
+    from contextlib import closing
+    database = os.environ.get("HIPSON_RUN_DB") or os.environ.get("HIPSON_LEDGER")
+    if not database:
+        raise RuntimeFailure("unsupported", "HIPSON_RUN_DB is not set; run under hipson task run")
+    with closing(ledger.Ledger(database, create=False, read_only=True)) as store:
+        item = store.activity(assignment)
+        if item["task"] != task or item["status"] != "active":
+            raise RuntimeFailure("unsupported", f"{assignment} is not an active assignment of {task}")
+        return item, store._task(task)["checks"]
+
+
 def exec_worker(args: argparse.Namespace) -> int:
     """`hipson agent exec`: one native run inside a `task run` assignment; never outside one."""
     def fail(kind: str, detail: str) -> int:
@@ -387,32 +415,41 @@ def exec_worker(args: argparse.Namespace) -> int:
     brief_path = args.brief or os.environ.get("HIPSON_FLOW_BRIEF")
     result_path = Path(args.result or os.environ.get("HIPSON_FLOW_RESULT") or "")
     meta_path = result_path.with_name(result_path.name + ".meta.json") if result_path.name else None
-    meta: dict[str, Any] = {"runtime": args.runtime, "profile": args.profile, "role": args.role, "task": task,
-                            "assignment": assignment}
+    meta: dict[str, Any] = {"runtime": args.runtime, "profile": args.profile, "task": task, "assignment": assignment,
+                            "ledger": os.environ.get("HIPSON_RUN_DB"), "project": os.getcwd()}
     if os.environ.get("HIPSON_ROLE") != "worker" or not task or not assignment:
         print("hipson agent exec: run it as a worker command of hipson task run (or task flow), so the ledger "
               "records the assignment", file=sys.stderr)
         return EXIT["unsupported"]
     if not brief_path or not result_path.name:
         return fail("unsupported", "needs --brief/--result or HIPSON_FLOW_BRIEF/HIPSON_FLOW_RESULT")
+    try:
+        item, checks = _recorded(task, assignment)
+    except (RuntimeFailure, ledger.LedgerError, OSError) as exc:
+        return fail("unsupported", str(exc))
+    # Mode and role come from the recorded assignment: a reviewer assignment never runs with edit permission.
+    if item["role"] not in ("builder", "reviewer") or (args.role and args.role != item["role"]):
+        return fail("unsupported", f"{assignment} is a {item['role']} assignment; --role {args.role} does not match")
+    role, mode = item["role"], item["mode"]
+    meta.update(role=role, mode=mode)
     brief = Path(brief_path).read_bytes()
     meta["brief_bytes"] = len(brief)
     meta["brief_tokens_estimate"] = len(brief) // 4  # Heuristic only; exact counts come from runtime usage.
     if len(brief) > MAX_BRIEF_BYTES:
         return fail("unsupported", f"brief is {len(brief)} bytes, over the {MAX_BRIEF_BYTES} byte budget")
-    mode = "ro" if args.role == "reviewer" else "rw"
-    resume = _previous_session(result_path, args.runtime, task, args.role) if args.continue_session else None
+    resume = _previous_session(result_path, args.runtime, task, role) if args.continue_session else None
     session = session_id()
     work = result_path.parent
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.last.json"
+    last_path.unlink(missing_ok=True)  # Only this invocation's last message can be its result.
     schema_path.write_text(json.dumps(result_schema()), encoding="utf-8")
     prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
     try:
         argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
                                     schema_path=schema_path, last_path=last_path, cwd=os.getcwd(), model=args.model,
                                     effort=args.effort, session=session, resume=resume, timeout=args.timeout,
-                                    checks=_flow_checks())
+                                    checks=checks if mode == "rw" else [])
     except RuntimeFailure as exc:
         return fail(exc.kind, exc.detail)
     if shutil.which(argv[0]) is None:
@@ -431,25 +468,26 @@ def exec_worker(args: argparse.Namespace) -> int:
     except RuntimeFailure as exc:
         meta["stderr_tail"] = redact_text(stderr[-1500:])
         return fail(exc.kind, exc.detail)
+    finally:
+        last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.
     meta.update(facts, outcome="ok")
     result_path.write_text(json.dumps(report) + "\n", encoding="utf-8")
     _write_meta(meta_path, meta)
+    version = _version(argv[0])
     record_verified(args.runtime, "structured_output", {"task": task, "assignment": assignment,
-                                                        "profile": args.profile, "session": facts["session"]})
+                                                        "profile": args.profile, "session": facts["session"],
+                                                        "version": version})
     if resume and facts["session"] == resume:
-        record_verified(args.runtime, "session_resume", {"task": task, "assignment": assignment, "session": resume})
+        record_verified(args.runtime, "session_resume", {"task": task, "assignment": assignment, "session": resume,
+                                                         "version": version})
     print(f"hipson agent exec: {args.runtime} {args.profile} session={facts['session']} "
           f"models={facts['models']} usage={json.dumps(facts['usage'])[:300]}", file=sys.stderr)
     return 0
 
 
-def _flow_checks() -> list[list[str]]:
-    """The lead's declared checks, passed by task flow; anything malformed grants nothing."""
-    try:
-        checks = json.loads(os.environ.get("HIPSON_FLOW_CHECKS") or "[]")
-    except ValueError:
-        return []
-    return [check for check in checks if isinstance(check, list) and check and all(isinstance(arg, str) for arg in check)]
+def _version(executable: str) -> str | None:
+    code, text = _run([executable, "--version"])
+    return text.strip().splitlines()[0] if code == 0 and text.strip() else None
 
 
 def _text(value: Any) -> str:
@@ -461,14 +499,20 @@ def _write_meta(path: Path | None, meta: dict[str, Any]) -> None:
         path.write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
 
 
+SESSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}")
+
+
 def _previous_session(result_path: Path, runtime: str, task: str, role: str) -> str | None:
-    """The latest session of the same runtime, task and role, from this flow's own meta files only."""
+    """The latest session of the same ledger, project, runtime, task and role, from meta files beside the result."""
     candidates = []
+    ledger_path, project = os.environ.get("HIPSON_RUN_DB"), os.getcwd()
     for path in result_path.parent.glob("*.result.json.meta.json"):
         data = _json_file(path) or {}
+        session = data.get("session")
         if (data.get("outcome") == "ok" and data.get("runtime") == runtime and data.get("task") == task
-                and data.get("session") and data.get("role", role) == role):
-            candidates.append((path.stat().st_mtime, data["session"]))
+                and data.get("role") == role and data.get("ledger") == ledger_path and data.get("project") == project
+                and isinstance(session, str) and SESSION_PATTERN.fullmatch(session)):
+            candidates.append((path.stat().st_mtime, session))
     return max(candidates)[1] if candidates else None
 
 
@@ -505,7 +549,7 @@ def configure(agent_sub: Any) -> None:
     runtimes.set_defaults(func=command_runtimes)
     execute = agent_sub.add_parser("exec", help="Worker command: run one native agent turn inside hipson task run")
     execute.add_argument("--runtime", choices=sorted(RUNTIMES), required=True)
-    execute.add_argument("--role", choices=("builder", "reviewer"), help="Default: from HIPSON_FLOW_STAGE")
+    execute.add_argument("--role", choices=("builder", "reviewer"), help="Must match the recorded assignment (default: its role)")
     execute.add_argument("--profile", choices=PROFILES, default="native",
                          help="native keeps the user's configuration; controlled uses the runtime's isolation flags")
     execute.add_argument("--model")
@@ -519,6 +563,4 @@ def configure(agent_sub: Any) -> None:
 
 
 def _exec_entry(args: argparse.Namespace) -> int:
-    if args.role is None:
-        args.role = "reviewer" if os.environ.get("HIPSON_FLOW_STAGE") == "review" else "builder"
-    return exec_worker(args)
+    return exec_worker(args)  # --role, when given, must match the recorded assignment; otherwise it is read from it.

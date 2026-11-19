@@ -271,6 +271,8 @@ def test_review_policy_gate_on_the_manual_path(tmp_path):
 
         def review(actor, *, mode='ro', result=True):
             item = store.assign(task, actor=actor, role='reviewer', mode=mode, scope=['src'] if mode == 'rw' else [])['id']
+            for phase in ('start', 'end'):
+                store.record_review_tree(item, phase=phase, revision=state['revision'], fingerprint=state['fingerprint'])
             store.finish(item, result='passed', summary='reviewed', worker_result={
                 'status': 'completed', 'summary': 'ok', 'files_changed': [], 'commands': [], 'findings': [],
                 'risks': []} if result else None)
@@ -406,3 +408,142 @@ def test_flow_state_reached_through_a_link_is_refused(tmp_path):
     (tmp_path / '.ledger.sqlite.flows').symlink_to(elsewhere, target_is_directory=True)
     proc, result = _flow(project, db, _spec(tmp_path, project))
     assert proc.returncode == 65 and 'is a link' in result['reasons'][0] and not list(elsewhere.iterdir())
+
+
+
+def test_a_review_of_another_tree_cannot_close_the_verified_one(tmp_path):
+    # Review (Codex) B1: verify tree A, review tree B, restore A, close. The reviewed tree must be the verified one.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    source = project / 'src/parser/pairs.py'
+    nl = chr(10)
+    run_cli(project, 'task', 'open', '--db', str(db), '--project', str(project), '--title', 'Switch', '--objective',
+            'x', '--lead', 'lead', '--require-review', '--check', PY + ' -c pass', '--start')
+    build = run_cli(project, 'task', 'run', '--db', str(db), '--task', 'T-0001', '--actor', 'builder', '--role',
+                    'builder', '--mode', 'rw', '--scope', 'src/parser', '--', PY, '-c',
+                    "open('src/parser/pairs.py', 'w').write('A = 1' + chr(10))")
+    assert build.returncode == 0, build.stderr
+    run_cli(project, 'task', 'ack', '--db', str(db), '--assignment', 'A-0001')
+    assert run_cli(project, 'task', 'verify', '--db', str(db), '--task', 'T-0001').returncode == 0
+    source.write_text('B = 2' + nl)  # The tree the reviewer will see.
+    result = tmp_path / 'review.json'
+    result.write_text(json.dumps({'status': 'completed', 'summary': 'ok', 'files_changed': [], 'commands': [],
+                                  'findings': [], 'risks': []}))
+    review = run_cli(project, 'task', 'run', '--db', str(db), '--task', 'T-0001', '--actor', 'reviewer', '--role',
+                     'reviewer', '--mode', 'ro', '--result-file', str(result), '--', PY, '-c', 'pass')
+    assert review.returncode == 0, review.stderr
+    run_cli(project, 'task', 'ack', '--db', str(db), '--assignment', 'A-0002')
+    source.write_text('A = 1' + nl)  # Back to the verified tree: verification is current again.
+    view, _ = _view(db)
+    assert view['verification']['passing']
+    assert view['review']['reasons'][0].startswith('review required: latest review A-0002 does not qualify: '
+                                                   'it reviewed a different tree than the accepted lead verification')
+    closed = run_cli(project, 'task', 'close', '--db', str(db), '--task', 'T-0001')
+    assert closed.returncode == 1 and 'reviewed a different tree' in closed.stderr
+
+
+
+def test_success_needs_the_gates_even_when_review_was_reached_outside_the_flow(tmp_path):
+    # Review (Codex) B2: a manual move to review, or an audited forced done, is not flow acceptance.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, reviewer='crash')
+    proc, first = _flow(project, db, spec)
+    assert proc.returncode == 3 and first['state'] == 'reviewer_failed'
+    assert run_cli(project, 'task', 'close', '--db', str(db), '--task', 'T-0001', '--to', 'review').returncode == 0
+    proc, gated = _flow(project, db, spec, '--resume', 'T-0001')
+    assert proc.returncode == 4 and gated['state'] == 'needs_lead' and gated['status'] == 'review'
+    assert any(reason.startswith('review required:') for reason in gated['reasons'])
+    forced = run_cli(project, 'task', 'status', '--db', str(db), '--task', 'T-0001', '--to', 'done', '--actor', 'lead',
+                     '--force', '--reason', 'owner accepted')
+    assert forced.returncode == 0, forced.stderr
+    proc, overridden = _flow(project, db, spec, '--resume', 'T-0001')
+    assert proc.returncode == 4 and overridden['state'] == 'overridden' and 'done_override' in overridden['reasons'][0]
+
+
+def test_a_review_finding_is_never_resolved_without_a_repair_after_it(tmp_path):
+    # Review (Codex) M4: no repair budget, a fresh verification, then a reviewer that omits the finding.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, builder='never-fixes', reviewer='report-once', checks=(SPLIT_CHECK,),
+                 max_repairs=0)
+    proc, blocked = _flow(project, db, spec)
+    assert proc.returncode == 2 and blocked['state'] == 'review_blocked'
+    assert run_cli(project, 'task', 'verify', '--db', str(db), '--task', 'T-0001').returncode == 0
+    proc, result = _flow(project, db, spec, '--resume', 'T-0001')
+    assert proc.returncode == 4 and result['state'] == 'needs_lead', result
+    assert 'no repair addressed it' in result['reasons'][0]
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert [item['status'] for item in store.findings(task='T-0001')] == ['open']
+
+
+def test_a_launch_refused_before_any_assignment_stops_instead_of_looping(tmp_path):
+    # Review (Codex) M7: task run refuses GIT_DIR in the worker allowlist before creating an assignment.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = json.loads(_spec(tmp_path, project).read_text())
+    spec['builder'].update(env='minimal', env_allow=['GIT_DIR'])
+    path = tmp_path / 'refused.json'
+    path.write_text(json.dumps(spec))
+    proc, result = _flow(project, db, path)
+    assert proc.returncode == 75 and result['state'] == 'launch_refused' and 'exit 64' in result['reasons'][0]
+    assert result['steps'] == ['start', 'build:build', 'stop'] or result['steps'][-1] == 'build:build'
+    assert not _view(db)[0]['assignments']
+
+
+def test_one_flow_invocation_advances_a_task_at_a_time(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project, builder='crash')
+    _flow(project, db, spec)
+    with flow_driver._task_lock(db, 'T-0001') as held:  # Another invocation holds it.
+        assert held
+        proc, result = _flow(project, db, spec, '--resume', 'T-0001', '--retry')
+    assert proc.returncode == 75 and result['state'] == 'running' and 'another hipson task flow' in result['reasons'][0]
+    assert len(_view(db)[0]['assignments']) == 1
+
+
+def test_spec_strings_that_cannot_reach_a_process_are_invalid():
+    base = {'version': 1, 'title': 't', 'checks': [['true']], 'reviewer': {'actor': 'r', 'command': ['x']},
+            'builder': {'actor': 'b', 'command': ['x', 'a' + chr(0)], 'scope': ['src']}}
+    with pytest.raises(flow_driver.FlowError, match='must not contain control characters'):
+        flow_driver.validate_spec(base)
+    assert flow_driver.validate_spec({**base, 'objective': 'two' + chr(10) + 'lines',
+                                      'builder': {**base['builder'], 'command': ['x']}})['objective'].count(chr(10)) == 1
+
+
+
+def test_workers_cannot_acknowledge_dismiss_or_force_their_own_work(tmp_path):
+    # Review (Codex) M5: lead-owned ledger writes refuse a known worker context, on CLI and MCP.
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    _flow(project, db, _spec(tmp_path, project, builder='never-fixes', checks=(SPLIT_CHECK,), max_repairs=0))
+    worker = {'HIPSON_ROLE': 'worker', 'HIPSON_ASSIGNMENT': 'A-0001'}
+    for args in (('ack', '--assignment', 'A-0001'),
+                 ('finding', 'update', '--finding', 'F-0001', '--status', 'wontfix', '--actor', 'w',
+                  '--resolution-note', 'x'),
+                 ('status', '--task', 'T-0001', '--to', 'blocked', '--actor', 'w')):
+        proc = run_cli(project, 'task', args[0], '--db', str(db), *args[1:], env=worker)
+        assert proc.returncode == 1 and 'worker context' in proc.stderr, (args, proc.stderr)
+    from tests.test_ledger_mcp import _call
+    with patch.dict(os.environ, {**worker, 'HIPSON_LEDGER': str(db)}):
+        for name, arguments in (('task.ack', {'assignment': 'A-0001'}),
+                                ('task.finding_update', {'finding': 'F-0001', 'status': 'wontfix', 'actor': 'w',
+                                                         'resolution_note': 'x'}),
+                                ('task.status', {'task': 'T-0001', 'to': 'blocked', 'actor': 'w'})):
+            response = _call(project, name, approved=True, **arguments)
+            assert 'worker context' in json.dumps(response), (name, response)
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert store.findings(task='T-0001')[0]['status'] == 'open' and store.show('T-0001')['status'] == 'in_progress'
+
+
+
+def test_reviewer_diff_drops_sensitive_files_redacts_secrets_and_reads_scope_literally(tmp_path):
+    # Review (Codex) M6.
+    project, nl = _repo(tmp_path), chr(10)
+    (project / 'src/parser/.env').write_text('API_TOKEN=supersecret' + nl)
+    _git(project, 'add', '-f', 'src/parser/.env')
+    _git(project, '-c', 'user.name=T', '-c', 'user.email=t@e', 'commit', '-qm', 'env')
+    (project / 'src/parser/.env').write_text('API_TOKEN=changed-secret-value' + nl)
+    (project / 'src/parser/pairs.py').write_text('TOKEN = "ghp_' + 'a1B2' * 9 + '"' + nl)
+    (project / 'outside.py').write_text('x = 1' + nl)
+    lines = flow_driver.candidate_diff(str(project), ['src/parser'])
+    text = ' '.join(lines)
+    assert 'changed-secret-value' not in text and 'supersecret' not in text and 'a1B2a1B2' not in text
+    assert 'TOKEN' in text and 'outside.py' not in text
+    glob = flow_driver.candidate_diff(str(project), [':(glob)**'])
+    assert 'outside.py' not in ' '.join(glob) and 'TOKEN' not in ' '.join(glob)

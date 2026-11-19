@@ -14,6 +14,12 @@
   verification. Shown as `review` in `task show` and the JSON views.
 - Fix: with `TMPDIR` inside the project, `task run --observe` attributed the runner's own progress file to the
   worker as an out-of-scope change, blocking `done` for correct work.
+- `hipson agent runtimes` / `hipson agent exec`: evidence-backed inventory of Claude Code, Codex and Antigravity
+  and a native-first worker adapter for `task run` / `task flow` ([docs/AGENT_RUNTIMES.md](docs/AGENT_RUNTIMES.md)).
+- Workers can no longer acknowledge results, update findings or change task status: `task ack`, `task finding
+  update` and `task status` (CLI and MCP) refuse a known worker context, like `task checks/verify/close`.
+- `task run` records the tree a reviewer saw (reserved `reviewed` event). Upgrade note: `flow`, `review_policy`
+  and `reviewed` are now reserved event types; custom `task event --type` calls using them are refused.
 - Fix: `task board` (and MCP `task.board`) no longer fingerprints the project of every task in history; a
   finished task is skipped unless an assignment is live or unacknowledged, and one board or lead snapshot
   fingerprints each project folder once. A project outside Git is walked for at most 20,000 paths or 20 s and

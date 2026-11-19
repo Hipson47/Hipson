@@ -34,8 +34,9 @@ Everything else (findings, verification records, events, briefs) is already read
    with `approved`) need an explicit user confirmation in the chat UI. The UI, not the model, sets
    `approved: true`.
 2. **Model -> Hipson:** tool arguments are untrusted input; the core already validates them (spec schema,
-   check argv rules, redaction). The model cannot weaken acceptance: checks and the review policy are fixed at
-   open, and a flow resume refuses a changed spec.
+   check argv rules, redaction). The review policy is fixed at open. Declared checks can be replaced by the lead
+   (`task checks --reason`, audited, refused in worker contexts), so the app must treat `task.checks` as a
+   consequential write needing user approval; a running or resumed flow stops with `conflict` when they change.
 3. **Hipson -> workers:** unchanged: `task run` supervision, claims, observation, `--env minimal` where chosen.
    The chat app never talks to worker CLIs directly.
 4. **Evidence -> model:** worker summaries, verification output and repository text come back as data. The app

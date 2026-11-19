@@ -389,8 +389,10 @@ class CloseRefusedError(LedgerError):
 RESERVED_EVENT_TYPES = frozenset({
     "opened", "assigned", "status", "finished", "reaped", "acknowledged", "lead_verified", "checks_set",
     "claim_conflict", "reopened", "override", "observed", "routed", "checkpointed", "restored",
-    "review_policy", "flow",
+    "review_policy", "flow", "reviewed",
 })
+REVIEWED_PATTERN = re.compile(r": (start|end) revision=(\S+); fingerprint=(\S+)$")
+VERIFIED_PATTERN = re.compile(r"; revision=(\S+); fingerprint=(\S+); changed=")
 
 
 def reserved_event_type(type: str) -> bool:
@@ -400,13 +402,16 @@ def reserved_event_type(type: str) -> bool:
 
 
 def review_state(policy: str, lead: str, assignments: Sequence[Assignment], assigned_seq: dict[str, int],
-                 builder_seq: int, verified_seq: int) -> dict[str, Any]:
+                 builder_seq: int, verified_seq: int, trees: dict[str, dict[str, tuple[str, str]]] | None = None,
+                 verified_tree: tuple[str, str] | None = None) -> dict[str, Any]:
     """Decide whether a required independent review covers the current candidate.
 
     A review qualifies when a read-only reviewer, whose actor label differs from the lead and every builder,
-    passed with a completed structured result and was assigned after both the latest finished builder and the
-    latest accepted lead verification, so it saw the tree that verification fingerprinted. Labels are not
-    authenticated: this is a coordination guarantee, not a security boundary.
+    passed with a completed structured result, was assigned after both the latest finished builder and the
+    latest accepted lead verification, and saw the verified tree: `task run` records the revision and working-tree
+    fingerprint when the reviewer starts and ends (`reviewed` events), and both must equal the accepted
+    verification's. `trees=None` checks ordering only (pure contracts); the ledger view always passes them.
+    Labels are not authenticated: this is a coordination guarantee, not a security boundary.
     """
     if policy != "required":
         return {"required": False, "passing": True, "accepted": None, "current": None, "reasons": []}
@@ -426,6 +431,14 @@ def review_state(policy: str, lead: str, assignments: Sequence[Assignment], assi
             return f"it is {item['status']}"
         if item["result"] is None or item["result"]["status"] != "completed":
             return "it has no completed structured result (task run --result-file)"
+        if trees is not None:
+            tree = trees.get(item["id"], {})
+            if "start" not in tree or "end" not in tree:
+                return "it has no recorded reviewed tree (run reviewers through hipson task run)"
+            if tree["start"] != tree["end"]:
+                return "the working tree changed during the review"
+            if verified_tree is not None and tree["start"] != verified_tree:
+                return "it reviewed a different tree than the accepted lead verification"
         return None
 
     reviews = sorted((item for item in assignments if item["role"] == "reviewer"),
@@ -434,14 +447,16 @@ def review_state(policy: str, lead: str, assignments: Sequence[Assignment], assi
     # The latest review assigned after the latest builder and accepted verification, whatever its outcome.
     current = next((item["id"] for item in reversed(reviews)
                     if assigned_seq.get(item["id"], 0) > max(builder_seq, verified_seq)), None)
-    later = next((item for item in reviews if item["id"] == current), None) if current != accepted else None
-    if accepted is not None and later is not None and (
-            later["status"] == "failed" or (later["status"] == "passed" and (
-                later["result"] is None or later["result"]["status"] != "completed"))):
-        # A later review that ran and did not complete is negative evidence: an earlier pass does not outvote it.
+    # A later review that ran and did not complete is negative evidence: an earlier pass does not outvote it, and
+    # a newer cancelled (interrupted) one does not hide it.
+    cutoff = assigned_seq.get(accepted, 0) if accepted is not None else 0
+    failed = [item for item in reviews if assigned_seq.get(item["id"], 0) > cutoff and (
+        item["status"] == "failed" or (item["status"] == "passed" and (
+            item["result"] is None or item["result"]["status"] != "completed")))]
+    if accepted is not None and failed:
         return {"required": True, "passing": False, "accepted": None, "current": current, "reasons": [
-            f"review required: later review {current} did not complete ({problem(later)}) after accepted review "
-            f"{accepted}; run the reviewer again"]}
+            f"review required: later review {failed[-1]['id']} did not complete ({problem(failed[-1])}) after "
+            f"accepted review {accepted}; run the reviewer again"]}
     if accepted is not None:
         return {"required": True, "passing": True, "accepted": accepted, "current": current, "reasons": []}
     reason = ("review required: no reviewer assignment" if not reviews else
@@ -1437,6 +1452,18 @@ class Ledger:
             return self._append_event(task, actor, "routed", redact_text(require_text(summary, "summary")),
                                       [redact_text(ref) for ref in refs])
 
+    def record_review_tree(self, assignment: str, *, phase: str, revision: str, fingerprint: str | None) -> TaskEvent:
+        """The runner's record of the tree a reviewer saw when it started and when it ended (reserved type)."""
+        if phase not in ("start", "end"):
+            raise LedgerError("Review tree phase is start or end")
+        with self._transaction():
+            current = self._assignment(assignment)
+            if current["role"] != "reviewer" or current["status"] != "active":
+                raise LedgerError(f"Assignment {assignment} is not an active reviewer")
+            return self._append_event(current["task"], "hipson", "reviewed",
+                                      f"{assignment}: {phase} revision={revision or 'none'}; "
+                                      f"fingerprint={fingerprint or 'none'}", [assignment])
+
     def record_flow(self, task: str, *, actor: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
         """Record a hipson task flow stage or stop; a reserved type, so free-form events cannot forge one."""
         actor = redact_text(require_text(actor, "actor"))
@@ -1693,19 +1720,26 @@ class Ledger:
                                           "findings": self._findings(task=task, status="open"),
                                           "verification": verification, "review": review}))
 
-    def _review_seqs(self, task: str, accepted: Sequence[str], builder_seq: int) -> tuple[dict[str, int], int, int]:
-        """Event positions review_state compares: each assignment's start and the accepted verification."""
+    def _review_seqs(self, task: str, accepted: Sequence[str], builder_seq: int) -> tuple[
+            dict[str, int], int, int, dict[str, dict[str, tuple[str, str]]], tuple[str, str] | None]:
+        """What review_state compares: assignment starts, the accepted verification and the reviewed trees."""
         assigned: dict[str, int] = {}
         verified = 0
+        verified_tree: tuple[str, str] | None = None
+        trees: dict[str, dict[str, tuple[str, str]]] = {}
         for row in self.connection.execute(
-                "SELECT seq, type, refs FROM events WHERE task = ? AND type IN ('assigned', 'lead_verified') ORDER BY seq",
-                (task,)):
+                "SELECT seq, type, summary, refs FROM events WHERE task = ? AND type IN "
+                "('assigned', 'lead_verified', 'reviewed') ORDER BY seq", (task,)):
             refs = json.loads(row['refs'])
             if row['type'] == 'assigned' and refs:
                 assigned.setdefault(refs[0], row['seq'])
             elif row['type'] == 'lead_verified' and set(refs) & set(accepted):
                 verified = max(verified, row['seq'])
-        return assigned, builder_seq, verified
+                found = VERIFIED_PATTERN.search(row['summary'])
+                verified_tree = (found.group(1), found.group(2)) if found else ('', '')
+            elif row['type'] == 'reviewed' and refs and (match := REVIEWED_PATTERN.search(row['summary'])):
+                trees.setdefault(refs[0], {}).setdefault(match.group(1), (match.group(2), match.group(3)))
+        return assigned, builder_seq, verified, trees, verified_tree
 
     def _append_event(self, task: str, actor: str, type: str, summary: str, refs: Sequence[str]) -> TaskEvent:
         now = _timestamp()

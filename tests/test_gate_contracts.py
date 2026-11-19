@@ -830,19 +830,59 @@ def test_review_seqs_exact_contract(tmp_path):
         store.set_status(task, to="in_progress", actor=LEAD)
         build = store.assign(task, actor="codex", role="builder", mode="rw", scope=["src"])["id"]
         store.finish(build, result="passed", summary="built")
-        assert store._review_seqs(task, [], 9) == ({build: _seq(store, task, "assigned", build)}, 9, 0)
+        assert store._review_seqs(task, [], 9) == ({build: _seq(store, task, "assigned", build)}, 9, 0, {}, None)
         store._record_verification(_record(id="V-" + "a" * 32, task=task))
         store._record_verification(_record(id="V-" + "b" * 32, task=task))
         with store._transaction():  # Another event type with the same refs must not count.
             store._append_event(task, LEAD, "note", "refs only", [build, "V-" + "c" * 32])
         review = store.assign(task, actor="rev", role="reviewer", mode="ro", scope=[])["id"]
+        store.record_review_tree(review, phase="start", revision="r1", fingerprint="f1")
+        store.record_review_tree(review, phase="end", revision="r2", fingerprint=None)
+        store.record_review_tree(review, phase="end", revision="r3", fingerprint="f3")  # The first record counts.
         assigned = {build: _seq(store, task, "assigned", build), review: _seq(store, task, "assigned", review)}
+        trees = {review: {"start": ("r1", "f1"), "end": ("r2", "none")}}
+        tree = (STATE["revision"], STATE["fingerprint"])
         first = _seq(store, task, "lead_verified", "V-" + "a" * 32)
-        assert store._review_seqs(task, ["V-" + "a" * 32], 7) == (assigned, 7, first)
+        assert store._review_seqs(task, ["V-" + "a" * 32], 7) == (assigned, 7, first, trees, tree)
         assert store._review_seqs(task, ["V-" + "b" * 32, "V-" + "a" * 32], 7) == (
-            assigned, 7, _seq(store, task, "lead_verified", "V-" + "b" * 32))
-        assert store._review_seqs(task, ["V-" + "d" * 32], 7) == (assigned, 7, 0)
+            assigned, 7, _seq(store, task, "lead_verified", "V-" + "b" * 32), trees, tree)
+        assert store._review_seqs(task, ["V-" + "d" * 32], 7) == (assigned, 7, 0, trees, None)
         assert 0 < first < assigned[review]
+        _error(lambda: store.record_review_tree(build, phase="start", revision="r", fingerprint="f"),
+               f"Assignment {build} is not an active reviewer")
+        _error(lambda: store.record_review_tree(review, phase="middle", revision="r", fingerprint="f"),
+               "Review tree phase is start or end")
+
+
+def test_review_state_requires_the_verified_tree():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    seqs = {"A-0001": 1, "A-0002": 4}
+    tree = ("r", "f")
+    def state(trees, verified=tree):
+        return ledger.review_state("required", "lead", [builder, _reviewer("A-0002")], seqs, 2, 3, trees, verified)
+    assert state({"A-0002": {"start": tree, "end": tree}})["accepted"] == "A-0002"
+    assert state({"A-0002": {"start": tree, "end": tree}}, None)["accepted"] == "A-0002"
+    for trees, problem in (
+            ({}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"start": tree}}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"end": tree}}, "it has no recorded reviewed tree (run reviewers through hipson task run)"),
+            ({"A-0002": {"start": tree, "end": ("r", "g")}}, "the working tree changed during the review"),
+            ({"A-0002": {"start": ("r", "g"), "end": ("r", "g")}},
+             "it reviewed a different tree than the accepted lead verification"),
+            ({"A-0002": {"start": ("q", "f"), "end": ("q", "f")}},
+             "it reviewed a different tree than the accepted lead verification")):
+        assert state(trees)["reasons"] == [f"review required: latest review A-0002 does not qualify: {problem}"
+                                           + REVIEW_TAIL], trees
+
+
+def test_a_cancelled_review_does_not_hide_an_earlier_failed_one():
+    builder = _reviewer("A-0001", "codex", mode="rw", role="builder")
+    reviews = [_reviewer("A-0002"), _reviewer("A-0003", status="failed"), _reviewer("A-0004", status="cancelled")]
+    state = ledger.review_state("required", "lead", [builder, *reviews],
+                                {"A-0001": 1, "A-0002": 4, "A-0003": 5, "A-0004": 6}, 2, 3)
+    assert state == {"required": True, "passing": False, "accepted": None, "current": "A-0004", "reasons": [
+        "review required: later review A-0003 did not complete (it is failed) after accepted review A-0002; "
+        "run the reviewer again"]}
 
 
 def _seq(store, task, kind, ref):
@@ -864,6 +904,8 @@ def _gate_task(store, tmp_path, policy="required"):
 def _review(store, task, actor="rev"):
     # The completed result is written directly: result parsing has its own contracts outside this profile.
     item = store.assign(task, actor=actor, role="reviewer", mode="ro", scope=[])["id"]
+    for phase in ("start", "end"):  # What task run records around a reviewer: the verified STATE tree.
+        store.record_review_tree(item, phase=phase, revision=STATE["revision"], fingerprint=STATE["fingerprint"])
     store.finish(item, result="passed", summary="reviewed")
     with store._transaction():
         store.connection.execute("UPDATE assignments SET result = ? WHERE id = ?", (json.dumps({

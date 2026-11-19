@@ -399,6 +399,8 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         'duration_seconds': max(0, time.time() - started),
         'log_tail': snapshot.get('observations', []), 'reason': summary,
     }
+    if args.role == "reviewer":
+        _record_review_tree(db, assignment, "end", project)
     try:
         with closing(ledger.Ledger(db)) as store:
             try:
@@ -424,6 +426,19 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         return
     if observed is not None:
         _message(f"{assignment} observed changes: {task_observation.summary(observed['changes'])}")
+
+
+def _record_review_tree(db: Path, assignment: str, phase: str, project: str) -> None:
+    """Bind a review to the tree it saw: the same fingerprint lead verification records (best effort)."""
+    from hipson import task_verification
+    try:
+        state = task_verification.project_state(project, db)
+        with closing(ledger.Ledger(db)) as store:
+            store.record_review_tree(assignment, phase=phase, revision=state["revision"],
+                                     fingerprint=state["fingerprint"])
+    except (ledger.LedgerError, OSError, sqlite3.Error, ValueError) as exc:
+        _message(f"could not record the reviewed tree ({phase}) of {assignment}: {type(exc).__name__}; "
+                 "this review cannot satisfy a required-review gate")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -596,6 +611,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     raise OSError(f"could not take the observation baseline: {exc}") from exc
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
+            if args.role == "reviewer":
+                _record_review_tree(db, assignment, "start", str(check["expected"]))
             checkpoint = checkpoint_caps(args)
             if checkpoint is not None:
                 # After the claim, so no other writer changes the scope while it is copied; before launch.

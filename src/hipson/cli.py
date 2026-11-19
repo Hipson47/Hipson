@@ -1866,6 +1866,10 @@ def command_task(args: argparse.Namespace) -> int:
             args.scope = ledger.normalize_scope(args.scope)
         elif args.task_command == "status":
             ledger.validate_status_override(to=args.to, force=args.force, reason=args.reason)
+        if args.task_command in ("ack", "status") or (args.task_command == "finding"
+                                                      and args.finding_command == "update"):
+            # A worker must not acknowledge, dismiss or force what judges its own work (lead-owned writes).
+            task_verification.invocation_context()
         checks = [task_flow.parse_check(item) for item in args.check] if args.task_command == "open" else []
         report = (
             ledger.load_task_result(args.result_file)

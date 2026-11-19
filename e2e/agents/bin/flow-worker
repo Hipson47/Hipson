@@ -55,6 +55,10 @@ elif role == "reviewer":
     if profile == "crash":
         raise SystemExit(6)
     text = source.read_text(encoding="utf-8") if source.exists() else ""
+    marker = result.parent / ".reported-once"
+    if profile == "report-once" and marker.exists():
+        text = "strip"  # Omits the earlier finding on later runs, whatever the tree holds.
+    marker.touch()
     if "strip" not in text:
         title = "Pair elements retain surrounding whitespace"
         if profile == "secret-title":  # A title the ledger redacts must still match the reviewer's report.
