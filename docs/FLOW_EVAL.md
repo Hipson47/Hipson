@@ -17,7 +17,7 @@ how a live model follows a prompt (a careful agent may do better than A1/A2, a c
 quality, or tokens. It uses no model; `tokens` is `null` in every run. One run per cell: the procedures and
 workers are deterministic, so repetition adds no information here; it is not a statistical sample.
 
-## Results (revision a83b9c2 + this document, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2)
+## Results (revision 5ccd9e2, clean tree, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2; first run on a83b9c2 gave the same outcomes)
 
 Raw report: [evals/flow-compare-2026-11-19.json](evals/flow-compare-2026-11-19.json).
 Reproduce: `.venv/bin/python scripts/flow_compare.py --output report.json` (Linux/WSL2, about 30 s).
@@ -39,11 +39,11 @@ Reproduce: `.venv/bin/python scripts/flow_compare.py --output report.json` (Linu
 | Correct outcome (accepted iff the oracle passes) | 4 | 6 | 7 | **9** |
 | False completions | 5 | 3 | 2 | **0** |
 | Good work refused | 0 | 0 | 0 | 0 |
-| Accepted without independent review | 7 | 5 | 4 | 0 |
+| Accepted without an independent review (from the ledger for B and C) | 7 | 5 | 4 | 0 |
 | Lead commands issued (tool calls of a model lead) | 10 | 17 | 14 | 10 |
 | Worker runs | 10 | 10 | 10 | 24 |
 | Lead check runs | 0 | 7 | 6 | 12 |
-| Wall time, s | 0.2 | 0.3 | 6.2 | 12.9 |
+| Wall time, s | 0.2 | 0.3 | 6.5 | 14.2 |
 
 Recovery after an interrupted build: B's documented manual path took 6 lead commands (`reap`, `ack`, `run`,
 `ack`, `close` after the interrupted `do`); C took 2 (the interrupted `flow`, then `flow --resume`), and the

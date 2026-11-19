@@ -1,7 +1,7 @@
 {
   "artifact_kind": "hipson.flow_compare",
-  "revision": "a83b9c2694a0ef4a6690e8566b5013384a4224ab",
-  "dirty": true,
+  "revision": "5ccd9e2e5f628d1c548e7b99956b4238f31dfd1d",
+  "dirty": false,
   "python": "3.13.12",
   "model": null,
   "note": "A hidden oracle judges the final repository: colon splitting and whitespace trimming both work, the\nacceptance test is unchanged and nothing outside src/parser changed. This measures what each procedure\nenforces against fixed behaviours. It does not measure how a live model follows a prompt, uses no model and\nreports no tokens. Fixtures come from scripts/agent_e2e.prepare_fixture (isolated HOME, ledger and PATH).",
@@ -18,7 +18,7 @@
       "lead_commands": 10,
       "worker_runs": 10,
       "check_runs": 0,
-      "duration_seconds": 0.208
+      "duration_seconds": 0.216
     },
     "A2": {
       "runs": 9,
@@ -32,7 +32,7 @@
       "lead_commands": 17,
       "worker_runs": 10,
       "check_runs": 7,
-      "duration_seconds": 0.293
+      "duration_seconds": 0.31
     },
     "B": {
       "runs": 9,
@@ -46,7 +46,7 @@
       "lead_commands": 14,
       "worker_runs": 10,
       "check_runs": 6,
-      "duration_seconds": 6.19
+      "duration_seconds": 6.543
     },
     "C": {
       "runs": 9,
@@ -60,7 +60,7 @@
       "lead_commands": 10,
       "worker_runs": 24,
       "check_runs": 12,
-      "duration_seconds": 12.898
+      "duration_seconds": 14.241
     }
   },
   "runs": [
@@ -79,7 +79,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.019,
       "tokens": null
     },
     {
@@ -97,7 +97,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.027,
+      "duration_seconds": 0.031,
       "tokens": null
     },
     {
@@ -115,7 +115,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.706,
+      "duration_seconds": 0.783,
       "tokens": null
     },
     {
@@ -133,7 +133,7 @@
       "lead_commands": 1,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 1.145,
+      "duration_seconds": 1.278,
       "tokens": null
     },
     {
@@ -169,7 +169,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.037,
+      "duration_seconds": 0.038,
       "tokens": null
     },
     {
@@ -187,7 +187,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.65,
+      "duration_seconds": 0.655,
       "tokens": null
     },
     {
@@ -205,7 +205,7 @@
       "lead_commands": 1,
       "worker_runs": 3,
       "check_runs": 3,
-      "duration_seconds": 1.804,
+      "duration_seconds": 1.874,
       "tokens": null
     },
     {
@@ -223,7 +223,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.018,
+      "duration_seconds": 0.017,
       "tokens": null
     },
     {
@@ -241,7 +241,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.038,
+      "duration_seconds": 0.037,
       "tokens": null
     },
     {
@@ -259,7 +259,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.663,
+      "duration_seconds": 0.691,
       "tokens": null
     },
     {
@@ -277,7 +277,7 @@
       "lead_commands": 1,
       "worker_runs": 3,
       "check_runs": 2,
-      "duration_seconds": 1.731,
+      "duration_seconds": 1.817,
       "tokens": null
     },
     {
@@ -295,7 +295,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.016,
+      "duration_seconds": 0.018,
       "tokens": null
     },
     {
@@ -313,7 +313,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.026,
+      "duration_seconds": 0.028,
       "tokens": null
     },
     {
@@ -331,7 +331,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.699,
+      "duration_seconds": 0.723,
       "tokens": null
     },
     {
@@ -349,7 +349,7 @@
       "lead_commands": 1,
       "worker_runs": 4,
       "check_runs": 2,
-      "duration_seconds": 2.069,
+      "duration_seconds": 2.48,
       "tokens": null
     },
     {
@@ -367,7 +367,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.017,
+      "duration_seconds": 0.018,
       "tokens": null
     },
     {
@@ -385,7 +385,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.027,
+      "duration_seconds": 0.028,
       "tokens": null
     },
     {
@@ -403,7 +403,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.728,
+      "duration_seconds": 0.765,
       "tokens": null
     },
     {
@@ -421,7 +421,7 @@
       "lead_commands": 1,
       "worker_runs": 6,
       "check_runs": 3,
-      "duration_seconds": 2.865,
+      "duration_seconds": 3.252,
       "tokens": null
     },
     {
@@ -439,7 +439,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.017,
+      "duration_seconds": 0.019,
       "tokens": null
     },
     {
@@ -457,7 +457,7 @@
       "lead_commands": 2,
       "worker_runs": 1,
       "check_runs": 1,
-      "duration_seconds": 0.025,
+      "duration_seconds": 0.027,
       "tokens": null
     },
     {
@@ -475,7 +475,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.479,
+      "duration_seconds": 0.488,
       "tokens": null
     },
     {
@@ -493,31 +493,13 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.521,
+      "duration_seconds": 0.585,
       "tokens": null
     },
     {
       "case": "crash",
       "probe": "the worker exits non-zero",
       "strategy": "A1",
-      "accepted": false,
-      "ground_truth_ok": false,
-      "false_completion": false,
-      "lost_good_work": false,
-      "accepted_scope_violation": false,
-      "accepted_tampered_tests": false,
-      "accepted_without_independent_review": false,
-      "done_without_review_in_ledger": null,
-      "lead_commands": 1,
-      "worker_runs": 1,
-      "check_runs": 0,
-      "duration_seconds": 0.017,
-      "tokens": null
-    },
-    {
-      "case": "crash",
-      "probe": "the worker exits non-zero",
-      "strategy": "A2",
       "accepted": false,
       "ground_truth_ok": false,
       "false_completion": false,
@@ -535,6 +517,24 @@
     {
       "case": "crash",
       "probe": "the worker exits non-zero",
+      "strategy": "A2",
+      "accepted": false,
+      "ground_truth_ok": false,
+      "false_completion": false,
+      "lost_good_work": false,
+      "accepted_scope_violation": false,
+      "accepted_tampered_tests": false,
+      "accepted_without_independent_review": false,
+      "done_without_review_in_ledger": null,
+      "lead_commands": 1,
+      "worker_runs": 1,
+      "check_runs": 0,
+      "duration_seconds": 0.021,
+      "tokens": null
+    },
+    {
+      "case": "crash",
+      "probe": "the worker exits non-zero",
       "strategy": "B",
       "accepted": false,
       "ground_truth_ok": false,
@@ -547,7 +547,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.415,
+      "duration_seconds": 0.495,
       "tokens": null
     },
     {
@@ -565,7 +565,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.551,
+      "duration_seconds": 0.595,
       "tokens": null
     },
     {
@@ -583,7 +583,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.019,
+      "duration_seconds": 0.021,
       "tokens": null
     },
     {
@@ -619,7 +619,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.415,
+      "duration_seconds": 0.464,
       "tokens": null
     },
     {
@@ -637,7 +637,7 @@
       "lead_commands": 1,
       "worker_runs": 1,
       "check_runs": 0,
-      "duration_seconds": 0.54,
+      "duration_seconds": 0.584,
       "tokens": null
     },
     {
@@ -673,7 +673,7 @@
       "lead_commands": 3,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 0.076,
+      "duration_seconds": 0.081,
       "tokens": null
     },
     {
@@ -691,7 +691,7 @@
       "lead_commands": 6,
       "worker_runs": 2,
       "check_runs": 1,
-      "duration_seconds": 1.435,
+      "duration_seconds": 1.479,
       "tokens": null
     },
     {
@@ -709,7 +709,7 @@
       "lead_commands": 2,
       "worker_runs": 3,
       "check_runs": 1,
-      "duration_seconds": 1.672,
+      "duration_seconds": 1.776,
       "tokens": null
     }
   ]
