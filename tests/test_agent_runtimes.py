@@ -5,7 +5,6 @@ import os
 import stat
 import sys
 from pathlib import Path
-from unittest import SkipTest
 from unittest.mock import patch
 
 import pytest
@@ -25,15 +24,20 @@ HELP = {
 
 
 def _fake(bin_dir, name, body):
+    source = f"import json, os, sys\n{body}\n"
+    if os.name == "nt":
+        # Windows has no shebangs: a .cmd shim, like npm-installed runtimes, runs the script with this Python.
+        (bin_dir / f"{name}.py").write_text(source)
+        path = bin_dir / f"{name}.cmd"
+        path.write_text(f'@"{sys.executable}" "%~dp0{name}.py" %*\n')
+        return path
     path = bin_dir / name
-    path.write_text(f"#!{sys.executable}\nimport json, os, sys\n{body}\n")
+    path.write_text(f"#!{sys.executable}\n{source}")
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
     return path
 
 
 def _fake_cli(tmp_path, name, run_body, *, help_text=None, auth=None, plugins="[]"):
-    if os.name == "nt":
-        raise SkipTest("fake runtime executables use POSIX shebangs")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _fake(bin_dir, name, f"""
@@ -288,16 +292,18 @@ def test_failed_or_stale_runtime_output_is_never_success(tmp_path):
 def test_session_continuation_is_bound_to_ledger_project_role_and_a_valid_id(tmp_path):
     # Review (Codex) M10.
     result = tmp_path / "build-2.result.json"
+    # _ledger_path() resolves the ledger, so the recorded paths are resolved ones (C:\... on Windows).
+    ledger_a, ledger_other = str((tmp_path / "a.sqlite").resolve()), str((tmp_path / "other.sqlite").resolve())
     def meta(name, **values):
-        data = {"outcome": "ok", "runtime": "claude", "task": "T-0001", "role": "builder", "ledger": "/l/a.sqlite",
+        data = {"outcome": "ok", "runtime": "claude", "task": "T-0001", "role": "builder", "ledger": ledger_a,
                 "project": str(tmp_path), "session": "session-good-1", **values}
         (tmp_path / f"{name}.result.json.meta.json").write_text(json.dumps(data))
     meta("a")
-    meta("b", ledger="/l/other.sqlite", session="session-other-ledger")
+    meta("b", ledger=ledger_other, session="session-other-ledger")
     meta("c", project="/elsewhere", session="session-other-project")
     meta("d", role="reviewer", session="session-reviewer")
     meta("e", session="--dangerous-flag")
-    with patch.dict(os.environ, {"HIPSON_RUN_DB": "/l/a.sqlite"}), patch.object(os, "getcwd", return_value=str(tmp_path)):
+    with patch.dict(os.environ, {"HIPSON_RUN_DB": ledger_a}), patch.object(os, "getcwd", return_value=str(tmp_path)):
         assert runtimes._previous_session(result, "claude", "T-0001", "builder") == "session-good-1"
 
 
@@ -320,7 +326,8 @@ def test_verified_needs_a_known_version_on_both_sides(tmp_path):
     (home / "runtimes").mkdir(parents=True)
     (home / "runtimes" / "agy.verified.json").write_text(json.dumps({"structured_output": {"version": None}}))
     bin_dir = _fake_cli(tmp_path, "agy", "sys.exit(0)")
-    (bin_dir / "agy").write_text((bin_dir / "agy").read_text().replace("print('agy 9.9.9'); sys.exit(0)", "sys.exit(1)"))
+    script = bin_dir / ("agy.py" if os.name == "nt" else "agy")  # The script itself, not the Windows .cmd shim.
+    script.write_text(script.read_text().replace("print('agy 9.9.9'); sys.exit(0)", "sys.exit(1)"))
     with patch.dict(os.environ, {**_env(bin_dir), "HIPSON_HOME": str(home)}):
         report = runtimes.inventory("agy", project=tmp_path)
     assert report["version"] is None and report["capabilities"]["structured_output"]["state"] == "documented"

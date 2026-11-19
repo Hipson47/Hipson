@@ -129,8 +129,8 @@ def test_failing_checks_drive_one_repair_with_their_diagnostic_output(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert result['state'] == 'accepted' and result['status'] == 'done' and result['builder_attempts'] == 2
     view, events = _view(db)
-    failed = [record for record in task_verification.ledger.Ledger(db, read_only=True).verifications('T-0001')
-              if record['exit_code'] != 0]
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        failed = [record for record in store.verifications('T-0001') if record['exit_code'] != 0]
     assert len(failed) == 1
     repair = [event for event in events if event['type'] == 'flow' and event['summary'].startswith('repair attempt 2 of 3')]
     assert repair and repair[0]['refs'] == [failed[0]['id']]
@@ -176,7 +176,8 @@ def test_tampered_tests_are_caught_as_out_of_scope_and_need_the_lead(tmp_path):
     assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress'
     assert 'not from a review' in result['reasons'][0]
     view, _ = _view(db)
-    assert view['findings'][0]['severity'] == 'major' and not ledger.Ledger(db, read_only=True).verifications('T-0001')
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert view['findings'][0]['severity'] == 'major' and not store.verifications('T-0001')
 
 
 def test_worker_failures_stop_with_actionable_states_and_retry_is_explicit(tmp_path):
@@ -218,8 +219,10 @@ def test_a_worker_cannot_run_or_resume_the_flow_that_judges_it(tmp_path):
     assert event.returncode != 0
 
 
-@pytest.mark.skipif(sys.platform == 'win32', reason='requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C')
 def test_an_interrupted_flow_resumes_without_repeating_completed_work(tmp_path):
+    # A skip inside the body, so the standalone runner (which ignores pytest marks) skips it too.
+    if sys.platform == 'win32':
+        raise SkipTest('requires POSIX signals to interrupt hipson task do; Windows shares console Ctrl+C')
     project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
     spec = _spec(tmp_path, project, builder='interrupt-once', close_to='done')
     env = {**os.environ, 'PYTHONPATH': str(REPO_ROOT / 'src'), 'AGENT_RUN_GRACE_SECONDS': '1'}
@@ -304,8 +307,8 @@ def test_review_policy_gate_on_the_manual_path(tmp_path):
         plain = store.open_task(project=project, title='Plain', objective='No gate')['id']
         assert store.show(plain)['review'] == {'required': False, 'passing': True, 'accepted': None, 'current': None,
                                                'reasons': []}
-    with pytest.raises(ledger.LedgerError, match='Review policy must be one of'):
-        ledger.Ledger(db).open_task(project=project, title='x', objective='x', review_policy='optional')
+    with closing(ledger.Ledger(db)) as store, pytest.raises(ledger.LedgerError, match='Review policy must be one of'):
+        store.open_task(project=project, title='x', objective='x', review_policy='optional')
 
 
 def test_v10_ledgers_migrate_to_the_review_policy_column(tmp_path):
@@ -332,8 +335,6 @@ def test_decide_is_pure_and_stops_on_live_work():
     spec = {'close_to': 'review', 'max_repairs': 2}
     step = flow_driver.decide(view, [], spec, verified_for=set(), retry=False)
     assert step.kind == 'stop' and step.state == 'running' and flow_driver.EXIT[step.state] == 75
-    if sys.platform == 'win32':
-        raise SkipTest('remaining cases are platform independent and covered above')
 
 
 def test_runner_progress_state_inside_the_project_is_not_attributed_to_the_worker(tmp_path):
@@ -399,13 +400,17 @@ def test_a_brief_left_by_a_launch_that_never_started_does_not_wedge_resume(tmp_p
     assert proc.returncode == 65 and 'build-3.result.json already exists' in refused['reasons'][0]
 
 
-@pytest.mark.skipif(sys.platform == 'win32', reason='Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege')
 def test_flow_state_reached_through_a_link_is_refused(tmp_path):
     # Review F-08.
     project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
     elsewhere = tmp_path / 'elsewhere'
     elsewhere.mkdir()
-    (tmp_path / '.ledger.sqlite.flows').symlink_to(elsewhere, target_is_directory=True)
+    try:
+        (tmp_path / '.ledger.sqlite.flows').symlink_to(elsewhere, target_is_directory=True)
+    except OSError:
+        if sys.platform != 'win32':
+            raise
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege') from None
     proc, result = _flow(project, db, _spec(tmp_path, project))
     assert proc.returncode == 65 and 'is a link' in result['reasons'][0] and not list(elsewhere.iterdir())
 
@@ -612,9 +617,11 @@ def test_round_three_review_fixes(tmp_path):
     # The close refuses before running anything when the declared checks are not the expected ones.
     spec = _spec(tmp_path, project, reviewer='crash')
     _flow(project, db, spec)
-    records = len(ledger.Ledger(db, read_only=True).verifications('T-0001'))
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        records = len(store.verifications('T-0001'))
     closed = task_flow.close(db, 'T-0001', to='review', actor='lead', expected_checks=[['other']])
     assert not closed['closed'] and closed['records'] == [] and 'declared checks differ' in closed['reasons'][0]
-    assert len(ledger.Ledger(db, read_only=True).verifications('T-0001')) == records
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert len(store.verifications('T-0001')) == records
     # Accepted only while the task is still review/done when the result is read.
     assert flow_driver._result(db, 'T-0001', 'accepted', ['x'], [])['state'] == 'needs_lead'
