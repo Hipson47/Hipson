@@ -7,7 +7,7 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 735, zero CI skips](https://img.shields.io/badge/tests-735%20%7C%200%20CI%20skips-2ea043)
+![Tests: 1067, zero Linux CI skips](https://img.shields.io/badge/tests-1067%20%7C%200%20Linux%20CI%20skips-2ea043)
 ![Bounded mutation score: 68.66%](https://img.shields.io/badge/bounded%20mutation-68.66%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
@@ -87,8 +87,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 735 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py` (stabilization, 2026-10-28; 404 tests when the ledger landed) |
-| Mutation gate | 73.39%: 1,782 / 2,428 mutants killed across four modules (approvals, evidence, redaction, sandbox); the committed baseline (68.66% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; 80.28%, 2,744 / 3,418; baseline 80.28% minimum, at most 667 survivors) |
+| Test suite | 1,067 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py`, plus a clean-wheel platform smoke on Linux, macOS and Windows (1.7.0, 2026-11-19; 404 tests when the ledger landed) |
+| Mutation gate | 73.39%: 1,782 / 2,428 mutants killed across four modules (approvals, evidence, redaction, sandbox); the committed baseline (68.66% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; 80.46%, 2,776 / 3,450; baseline 80.28% minimum, at most 667 survivors) |
 | Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
@@ -137,7 +137,7 @@ can install Python for you. Install for your OS, then run `hipson init` from you
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 cd /path/to/your/project
 hipson init
@@ -150,7 +150,7 @@ Install Git first (`xcode-select --install` if missing). In Terminal:
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 cd /path/to/your/project
 hipson init
@@ -169,7 +169,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 Reopen PowerShell, then:
 
 ```powershell
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 $env:Path = "$(uv tool dir --bin);$env:Path"
 Set-Location C:\path\to\your\project
@@ -178,7 +178,8 @@ hipson init
 
 Run workers directly with `hipson task run` (example below). It records the assignment and
 process outcome, forwards console interrupts and contains descendants in a Windows Job Object.
-The Bash example and Linux agent e2e harness still require WSL2.
+No WSL or Bash is needed; only the optional Bash wrapper example and the Linux deep-evaluation harnesses
+use them. Per-platform evidence and limits: [docs/PLATFORMS.md](https://github.com/Hipson47/Hipson/blob/main/docs/PLATFORMS.md).
 
 ### Windows WSL2
 
@@ -194,6 +195,18 @@ plan and asks before making changes. Use `--dry-run` to preview, `--yes` for una
 Claude defaults to project scope (`.mcp.json`); `--scope user` selects its user config. Codex uses
 `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Existing registrations are left alone;
 config edits get unique backups first. Restart the lead client after setup, then open your first task below.
+
+### Upgrade from 1.6
+
+```bash
+uv tool upgrade hipson        # or: pip install --upgrade hipson
+hipson init --client none     # migrates the ledger (schema 10 -> 11) after taking a backup
+```
+
+1.7 reads a 1.6 ledger before migrating; `hipson init` migrates it and writes a `ledger.sqlite.backup-*` copy
+next to it first. After the migration 1.6 can no longer open the ledger, so upgrade every Hipson that shares it
+(for example the one your MCP client starts) and restart the lead client. Tasks, assignments, evidence and
+events carry over unchanged. To track unreleased work instead, install `git+https://github.com/Hipson47/Hipson`.
 
 ### Run from a clone instead
 
@@ -232,6 +245,11 @@ then moves the task to `review` and `done`; if anything blocks (a failing check,
 major finding) it changes nothing and prints the command that clears each blocker. `hipson task checks`
 changes the checks later (replacing them needs `--reason`, and workers cannot), `hipson task verify --task T`
 without a command runs them all, and `--force --reason` on `task status` stays the audited override.
+
+To let Hipson drive a coding agent through build, your checks, an independent review of exactly the verified
+tree and bounded repairs, see `hipson task flow` in
+[docs/AGENT_RUNTIMES.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_RUNTIMES.md#first-workflow).
+It works with a single agent: the same runtime can build and, under another actor label, review.
 
 For one bounded job, `task do` does it all in one command: open with checks, run the worker, acknowledge
 its result, run the checks and close. If the worker fails or reports partial work, the task stays

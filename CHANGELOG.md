@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 1.7.0 - 2026-11-19
+
+Release notes: [docs/release-1.7.md](docs/release-1.7.md). Upgrading from 1.6: `hipson init` migrates the
+ledger to schema 11 after a backup; 1.6 cannot open it afterwards.
+
+- Fix: `hipson init --client claude` on a machine where Claude Code had never run reported "Configuration
+  changed since planning" although the registration succeeded: `claude mcp add` creates Claude Code's own
+  `~/.claude.json` on its first run. A user config that was absent when planned may now be created by that
+  step; one that existed is still guarded against concurrent edits.
 - Cross-platform: `scripts/platform_smoke.py` replaces the Bash-only platform smoke (the `.sh` file stays as a
   wrapper) and runs in CI on Linux, macOS and Windows from a clean wheel install, in a work directory with a
   space and non-ASCII characters: ledger lifecycle, `task run` claims, refusal, hard-kill and reap, `task do`,

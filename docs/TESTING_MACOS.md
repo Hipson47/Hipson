@@ -49,7 +49,7 @@ folder is written as `~` and your login name as `<user>`; still glance over it b
 ## 4. Optional: try it as a real tool
 
 ```bash
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell   # then reopen Terminal
 hipson --help
 ```

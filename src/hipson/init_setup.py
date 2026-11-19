@@ -334,6 +334,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
                     "command": [claude, "mcp", "add", "--transport", "stdio", "--scope", scope, "hipson", *env_args, "--", command, *server_args],
                     "env": environment,
                     "cwd": str(project), "status": "planned", "detail": "register stdio MCP server",
+                    # `claude mcp add` creates Claude Code's own user config on its first run.
+                    "client_config": str(user_config),
                 }
                 if registrations:
                     existing_scope, existing = registrations[0]
@@ -502,6 +504,12 @@ def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None
             result = _run(action["command"], project)
             if result.returncode:
                 raise ValueError(f"Claude MCP registration failed (exit {result.returncode}).")
+            client_config = Path(action.get("client_config") or path)
+            if client_config != path and plan.snapshots.get(client_config) is not None \
+                    and plan.snapshots[client_config].content is None:
+                # Absent when planned and created by the Claude CLI itself during this step (a first Claude run):
+                # that is the client initialising, not a concurrent edit. A file that existed stays checked.
+                plan.snapshots[client_config] = snapshot(client_config)
             parsed = json.loads(path.read_bytes())
             entry = parsed.get("mcpServers", {}).get("hipson")
             if not isinstance(entry, dict) or entry.get("env", {}) != action["env"]:

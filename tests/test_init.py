@@ -36,6 +36,11 @@ if args[:2] == ["mcp", "add"]:
     if environment:
         config["mcpServers"]["hipson"]["env"] = environment
     path.parent.mkdir(parents=True, exist_ok=True)
+    if os.environ.get("INIT_CLIENT_STATE"):  # The real CLI creates (or updates) its own user config.
+        user_config.parent.mkdir(parents=True, exist_ok=True)
+        state = json.loads(user_config.read_text(encoding="utf-8")) if user_config.exists() else {}
+        state["numStartups"] = state.get("numStartups", 0) + 1
+        user_config.write_text(json.dumps(state), encoding="utf-8")
     if os.environ.get("INIT_ADD_PARTIAL"):
         path.write_bytes(b'{"partial":')
         raise SystemExit("add failed after writing")
@@ -70,7 +75,8 @@ class _Setup:
             "CODEX_HOME": str(self.codex_home), "CODEX_USER_HOME": "", "HIPSON_HOME": str(self.db.parent),
             "HIPSON_LEDGER": str(self.db), "XDG_CONFIG_HOME": str(root / "xdg"),
             "CLAUDE_CONFIG_DIR": str(self.claude_config.parent), "INIT_CLIENT_LOG": str(self.log),
-            "INIT_MISSING_RESPONSE": "", "INIT_ADD_PARTIAL": "", "INIT_ADD_ERROR": "", "PYTHONDONTWRITEBYTECODE": "1",
+            "INIT_MISSING_RESPONSE": "", "INIT_ADD_PARTIAL": "", "INIT_ADD_ERROR": "", "INIT_CLIENT_STATE": "",
+            "PYTHONDONTWRITEBYTECODE": "1",
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
         }
         source = self.bin / "client.py"
@@ -622,3 +628,22 @@ def test_init_warns_when_the_project_repository_has_no_commit(tmp_path):
                     "commit", "-q", "--allow-empty", "-m", "Initial"], check=True, env=env, timeout=10)
     report = setup.run("--client", "none", "--dry-run", "--json")
     assert not any("no commits yet" in warning for warning in report["checks"].get("warnings", []))
+
+
+def test_a_first_claude_run_creating_its_user_config_is_not_a_concurrent_edit(tmp_path):
+    # Seen in the 1.7.0 first-user journey: with no ~/.claude.json yet, `claude mcp add --scope project` creates
+    # it, and init reported "Configuration changed since planning" although the registration had succeeded.
+    setup = _Setup(tmp_path / "first")
+    setup.env["INIT_CLIENT_STATE"] = "1"
+    assert not setup.claude_config.exists()
+    report = setup.run("--client", "claude", "--yes", "--json")
+    assert report["ok"] and report["verification"]["status"] == "passed", report
+    written = json.loads((setup.project / ".mcp.json").read_text(encoding="utf-8"))["mcpServers"]["hipson"]
+    assert setup.claude_config.exists() and {k: written[k] for k in ("command", "args")} == setup.registration()
+    # A user config that existed when planned is still guarded: a change to it during setup stops it.
+    second = _Setup(tmp_path / "second")
+    second.env["INIT_CLIENT_STATE"] = "1"
+    second.claude_config.parent.mkdir()
+    second.claude_config.write_text(json.dumps({"numStartups": 3}), encoding="utf-8")
+    report = second.run("--client", "claude", "--yes", "--json", expected=1)
+    assert any("Configuration changed since planning" in error for error in report["errors"]), report
