@@ -1,8 +1,11 @@
-# Boundary for a future conversational product (design, not implemented)
+# Boundary for Hipson Studio, a future conversational client (design, not implemented)
 
-Status: proposal for the next phase. Nothing here is built yet. It does not revive `hipson chat` or the
-gateway; those are deprecated for the failure modes in [DEPRECATIONS.md](DEPRECATIONS.md) (lost tool output and
-history, success reported after a provider failure).
+Status: proposal for the next phase. Nothing here is built yet. Hipson Studio is a separate, optional client of
+the Hipson core, not part of it. It does not revive `hipson chat` or the gateway; those are deprecated for the
+failure modes in [DEPRECATIONS.md](DEPRECATIONS.md) (lost tool output and history, success reported after a
+provider failure). Phase 2 (programmable harness hardening) used no model API: every live run went through the
+runtimes' own subscriptions and CLIs. Whether Studio talks to a model through a paid API, or drives the same
+native runtimes, is an owner decision for its first task (see below).
 
 ## Goal and constraint
 
@@ -14,8 +17,8 @@ without changing any core module, and the core must not import an API SDK.
 ## The boundary: the existing MCP server, plus one supervised launcher
 
 The smallest stable boundary already exists: `hipson mcp serve` (stdio JSON-RPC) with the ledger tools
-(`task.open`, `task.show`, `task.board`, `task.now`-equivalent `task.board`, `task.verify`, `task.close`,
-`task.findings`, `task.events`, `lead.resume`, `route.actor`, ...). Every write tool already requires
+(`task.open`, `task.show`, `task.board`, `task.list`, `task.verify`, `task.close`, `task.findings`,
+`task.events`, `task.activity`, `lead.resume`, ...; `hipson mcp serve --help` lists them all). Every write tool already requires
 `approved: true`, and MCP launches no workers. The chat app should be an MCP client of that server and add only:
 
 | Proposed tool | Contract | Why it is separate |
@@ -65,7 +68,17 @@ Everything else (findings, verification records, events, briefs) is already read
 Send the model the task view (`task.show`, bounded), the latest flow result and the open findings, not raw logs.
 `lead.resume` already produces a deterministic, size-capped recovery text (4,096 bytes) for exactly this.
 
-## What tomorrow's API integration needs
+## What Phase 2 changed for this boundary
+
+- Reviews in a flow read an immutable snapshot, so `flow.status` can report *which* candidate was reviewed
+  (the `reviewed` events carry its revision and fingerprint) instead of trusting the transcript.
+- `hipson agent runtimes` already separates documented, configured, authorized and verified capabilities; the
+  proposed `agent.runtimes` tool should pass that through unchanged, including the documented gaps (e.g.
+  Antigravity's plan mode does not prevent writes).
+- Protected paths make a builder's change to the acceptance tests or runtime configuration a `needs_lead`
+  stop: the client must surface it as a decision for the user, never resolve it itself.
+
+## What a first Studio task needs
 
 1. An Anthropic API key in the app's own environment (never in Hipson config, briefs or the ledger).
 2. A thin client: Messages API with tool use, the five proposed tools plus the read-only `task.*` tools, and the
