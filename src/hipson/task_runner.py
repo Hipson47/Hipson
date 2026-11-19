@@ -399,7 +399,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         'duration_seconds': max(0, time.time() - started),
         'log_tail': snapshot.get('observations', []), 'reason': summary,
     }
-    if args.role == "reviewer":
+    if getattr(args, "role", None) == "reviewer":
         _record_review_tree(db, assignment, "end", project)
     try:
         with closing(ledger.Ledger(db)) as store:
@@ -611,7 +611,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     raise OSError(f"could not take the observation baseline: {exc}") from exc
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
-            if args.role == "reviewer":
+            if getattr(args, "role", None) == "reviewer":
                 _record_review_tree(db, assignment, "start", str(check["expected"]))
             checkpoint = checkpoint_caps(args)
             if checkpoint is not None:
