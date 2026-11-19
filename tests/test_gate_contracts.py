@@ -982,3 +982,18 @@ def test_record_review_tree_exact_contract(tmp_path):
         with pytest.raises(ledger.LedgerError) as error:
             store.record_review_tree(review, phase="end", revision="r", fingerprint="f")
         assert str(error.value) == f"Assignment {review} is not an active reviewer"
+
+
+
+def test_close_task_expected_checks_exact_contract(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Close", objective="Expected checks", lead=LEAD,
+                               checks=[CHECK])["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        store._record_verification(_record(id="V-" + "c" * 32, task=task, builder_finished_seq=0))
+        with pytest.raises(ledger.CloseRefusedError) as error:
+            store.close_task(task, to="review", actor=LEAD, expected_checks=[["pytest"]])
+        assert error.value.reasons == ["declared checks differ from the ones this close expects: pytest -q"]
+        assert store.show(task)["status"] == "in_progress"
+        assert store.close_task(task, to="review", actor=LEAD, expected_checks=[("pytest", "-q")])["status"] == "review"

@@ -194,9 +194,10 @@ def project_state(project: str, db: Path) -> dict[str, Any]:
             if relative.is_absolute() or '..' in relative.parts:
                 raise ValueError('Invalid repository path in content inventory')
             path = root / relative
-            if path in excluded or flows in path.parents or runs in path.parents:
-                continue  # The verification's own ledger writes must not invalidate it.
             tracked = name in baseline or name in indexed
+            # The verification's own ledger writes must not invalidate it; private state never hides tracked content.
+            if path in excluded or (not tracked and (flows in path.parents or runs in path.parents)):
+                continue
             filename = os.fsdecode(name)
             if not tracked and _is_tool_cache(relative):
                 continue  # Earlier test runs' caches must not become covered project content.

@@ -185,9 +185,7 @@ def ledger_facts(fixture: Any) -> dict[str, Any]:
         views = [store.show(task["id"]) for task in tasks]
         checks = sum(len(store.verifications(task["id"])) for task in tasks)
     return {"workers": sum(len(view["assignments"]) for view in views), "checks_run": checks,
-            "done_without_review": sum(view["status"] == "done" and not any(
-                item["role"] == "reviewer" and item["status"] == "passed" for item in view["assignments"])
-                for view in views),
+            "done_without_review": sum(view["status"] == "done" and not view["review"]["accepted"] for view in views),
             # Measured from the ledger, not assumed from the strategy: an accepted independent review.
             "reviewed": any(view["review"]["accepted"] for view in views)}
 

@@ -434,7 +434,11 @@ coordination guarantee between cooperating processes, not a security boundary. T
 `task run` has (process containment, `--env minimal`, redaction); observation and claims detect, they do
 not sandbox.
 
-Known limits (open): an interrupted verification marks every record of that run as non-evidence for repairs,
+Known limits (open): the reviewer brief is built from the live tree, checked against the verified fingerprint
+before and after; a concurrent process that swaps the tree and restores it between those reads is not excluded
+(cooperating processes are assumed; building the brief from an immutable snapshot is the planned fix). Tracked
+files under the ledger's private directories are fingerprinted, but observation still skips those directories.
+An interrupted verification marks every record of that run as non-evidence for repairs,
 but the ledger still counts a check that passed before the signal; the non-Git inventory walk counts files
 under the flow's private directory toward its 20,000-path bound; with `TMPDIR` inside a checkpointed scope the
 runner's progress directory was copied into a checkpoint (fixed: `task run` now keeps its progress files in

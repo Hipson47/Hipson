@@ -404,9 +404,10 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
     header = f"Candidate diff against HEAD within {', '.join(scope)}" + (
         f' (truncated: first {DIFF_BUDGET} of {len(text)} characters; read the files for the rest)'
         if len(text) > DIFF_BUDGET else '')
-    return [header, task_context._untrusted_block(shown or '(no tracked changes)')] + (
-        [f"Untracked files in scope: {', '.join(untracked[:50])}" + (' ...' if len(untracked) > 50 else '')]
-        if untracked else [])
+    listing = ('Untracked files in scope:' + chr(10) + chr(10).join(untracked[:50])
+               + (chr(10) + '...' if len(untracked) > 50 else '')) if untracked else ''
+    # File names are repository content too: they stay inside the data block, never on their own prompt lines.
+    return [header, task_context._untrusted_block((shown or '(no tracked changes)') + (chr(10) + listing if listing else ''))]
 
 
 def _launch(db: Path, spec: dict[str, Any], view: ledger.TaskView, role: str, stage: str, brief: str,
@@ -529,10 +530,16 @@ def run(db: Path, spec: dict[str, Any], digest: str, *, resume: str | None = Non
                 reaped = store.reap(task=task)
             for item in reaped:
                 echo(f"hipson task flow: reaped {item['assignment']['id']}: {item['reason']}")
+            # Every ended assignment of this task with a waiting baseline (reaped now, or a supervisor that died
+            # after finishing), and only this task's: other tasks' runners may still be completing theirs.
+            with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+                waiting = [item['id'] for item in store.show(task)['assignments']
+                           if item['status'] != 'active' and item['id'] in task_observation.pending(db)]
+            for assignment in waiting:
                 try:
-                    task_observation.complete(db, item['assignment']['id'])
+                    task_observation.complete(db, assignment)
                 except (ledger.LedgerError, OSError, sqlite3.Error):
-                    pass  # Unobserved or already completed: nothing waiting.
+                    pass  # Already completed meanwhile.
         return _advance(db, spec, task, retry, echo)
 
 
@@ -664,6 +671,8 @@ def _interrupted(db: Path, task: str, lead: str, what: str, refs: list[str], ste
 def _result(db: Path, task: str, state: str, reasons: list[str], steps: list[str]) -> dict[str, Any]:
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
         view = store.show(task)
+    if state == 'accepted' and view['status'] not in ('review', 'done'):  # Moved meanwhile by another writer.
+        state, reasons = 'needs_lead', [f"{task} is {view['status']} again; resume to continue"]
     builders = [item for item in view['assignments'] if item['role'] == 'builder']
     return {'artifact_kind': 'hipson.task_flow_result', 'schema_version': '1.0', 'task': task, 'state': state,
             'status': view['status'], 'exit_code': EXIT[state], 'reasons': reasons, 'steps': steps,

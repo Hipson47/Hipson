@@ -395,7 +395,12 @@ WORKER_RULES = ("Worker rules: you are a worker for a Hipson lead. Stay within t
 
 def _ledger_path() -> str | None:
     database = os.environ.get("HIPSON_RUN_DB") or os.environ.get("HIPSON_LEDGER")
-    return str(Path(database).expanduser().resolve()) if database else None
+    if not database:
+        return None
+    try:
+        return str(Path(database).expanduser().resolve())
+    except (OSError, RuntimeError):  # An unresolvable ~user: keep the raw text; the ledger read then fails cleanly.
+        return database
 
 
 def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[str]]]:

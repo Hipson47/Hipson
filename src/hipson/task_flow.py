@@ -59,6 +59,9 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
         raise ledger.LedgerError('close target must be review or done')
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
         view = store.show(task)
+    if expected_checks is not None and view['checks'] != expected_checks:  # Run nothing under changed acceptance.
+        return _refused(task, db, ['declared checks differ from the ones this close expects: '
+                                   + ledger.checks_text(view['checks'])], [])
     actor = actor or view['lead']
     if view['status'] not in ('open', 'in_progress', 'review'):
         raise ledger.LedgerError(f"Cannot close {task} from status {view['status']}")
