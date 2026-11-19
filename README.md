@@ -7,7 +7,7 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 1067, zero Linux CI skips](https://img.shields.io/badge/tests-1067%20%7C%200%20Linux%20CI%20skips-2ea043)
+![Tests: 1068, zero Linux CI skips](https://img.shields.io/badge/tests-1068%20%7C%200%20Linux%20CI%20skips-2ea043)
 ![Bounded mutation score: 68.66%](https://img.shields.io/badge/bounded%20mutation-68.66%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
@@ -87,8 +87,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 1,067 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py`, plus a clean-wheel platform smoke on Linux, macOS and Windows (1.7.0, 2026-11-19; 404 tests when the ledger landed) |
-| Mutation gate | 73.39%: 1,782 / 2,428 mutants killed across four modules (approvals, evidence, redaction, sandbox); the committed baseline (68.66% minimum, at most 727 survivors, 0 without tests, 0 timeouts) fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; 80.46%, 2,776 / 3,450; baseline 80.28% minimum, at most 667 survivors) |
+| Test suite | 1,068 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py`, plus a clean-wheel platform smoke on Linux, macOS and Windows (1.7.0, 2026-11-19; 404 tests when the ledger landed) |
+| Mutation gate | Four modules (approvals, evidence, redaction, sandbox): committed baseline 68.66% (1,593 / 2,320 killed; at most 727 survivors, 0 without tests, 0 timeouts), which fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; committed baseline 80.28%, 2,744 / 3,418 killed, at most 667 survivors). Both gates run on Linux, Python 3.12, in every CI run |
 | Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |

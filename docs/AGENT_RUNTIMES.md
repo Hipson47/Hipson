@@ -83,7 +83,11 @@ Discrepancies found and how they were classified:
 }
 ```
 
-   With only one coding agent, use it for both roles under two labels; the reviewer still runs read-only on a
+   On Windows write the check as `["python", "tests/acceptance.py"]`: `python3` there is usually the Microsoft
+   Store alias, which runs no Python.
+
+   With only one coding agent, use it for both roles under two labels (replace the `builder` and `reviewer`
+   entries above); the reviewer still runs read-only on a
    snapshot and must differ from the builder's label (verified live with Claude Code on 2026-11-19: accepted in
    24 s, review recorded `source=snapshot`):
 
