@@ -19,7 +19,7 @@ Install Git using your distribution's package manager if needed. Install uv, the
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 cd /path/to/your/project
 hipson init
@@ -33,7 +33,7 @@ Command Line Tools installation. Then:
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 cd /path/to/your/project
 hipson init
@@ -56,7 +56,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 Reopen PowerShell so the installer PATH change takes effect, then:
 
 ```powershell
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 $env:Path = "$(uv tool dir --bin);$env:Path"
 Set-Location C:\path\to\your\project
@@ -108,7 +108,7 @@ mkdir -p ~/code
 cd ~/code
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
-uv tool install --python 3.12 git+https://github.com/Hipson47/Hipson
+uv tool install --python 3.12 hipson
 uv tool update-shell
 cd ~/code/your-project
 hipson init

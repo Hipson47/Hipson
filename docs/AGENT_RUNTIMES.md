@@ -83,6 +83,21 @@ Discrepancies found and how they were classified:
 }
 ```
 
+   On Windows write the check as `["python", "tests/acceptance.py"]`: `python3` there is usually the Microsoft
+   Store alias, which runs no Python.
+
+   With only one coding agent, use it for both roles under two labels (replace the `builder` and `reviewer`
+   entries above); the reviewer still runs read-only on a
+   snapshot and must differ from the builder's label (verified live with Claude Code on 2026-11-19: accepted in
+   24 s, review recorded `source=snapshot`):
+
+```json
+  "builder": {"actor": "claude", "scope": ["src/parser"],
+              "command": ["hipson", "agent", "exec", "--runtime", "claude", "--role", "builder"]},
+  "reviewer": {"actor": "claude-reviewer",
+               "command": ["hipson", "agent", "exec", "--runtime", "claude", "--role", "reviewer"]}
+```
+
 3. `hipson task flow --spec flow.json --check` validates it without writing anything; `hipson task flow --spec
    flow.json` runs it: build, lead verification of the checks, an independent review of an immutable snapshot
    of the verified tree, at most `max_repairs` repairs, and a stop in `review` for your final `hipson task close`.
