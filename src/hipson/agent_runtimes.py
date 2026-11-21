@@ -23,10 +23,12 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import uuid
-from contextlib import closing
+import weakref
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +82,7 @@ RUNTIMES: dict[str, dict[str, Any]] = {
 EXIT = {"ok": 0, "malformed_output": 2, "provider_error": 3, "auth_required": 4, "rate_limited": 5,
         "permission_denied": 6, "unsupported": 64, "model_unavailable": 64, "timeout": 124}
 AGY_MODEL_REJECTION = re.compile(r"invalid model selection|not recognized as a known model", re.I)
+MAX_AGY_DIAGNOSTIC_CHARS = 600
 _PATTERNS = [  # Order matters: the most specific evidence wins.
     ("rate_limited", re.compile(r"usage limit|rate.?limit|\b429\b|quota", re.I)),
     ("auth_required", re.compile(r"not logged in|please (run )?/?login|unauthori[sz]ed|\b401\b|authentication", re.I)),
@@ -293,11 +296,16 @@ def _agy_user_allow() -> list[str] | None:
     return allow if isinstance(allow, list) and all(isinstance(rule, str) for rule in allow) else None
 
 
+class _SettingsArgv(list[str]):
+    """Own the temporary settings file when a direct caller has no launch cleanup stack."""
+
+
 def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_path: Path, last_path: Path,
                   cwd: str, model: str | None = None, effort: str | None = None, session: str | None = None,
                   resume: str | None = None, timeout: float = 1800,
-                  checks: list[list[str]] | None = None) -> tuple[list[str], str | None]:
-    """argv and stdin for one non-interactive run; raises RuntimeFailure('unsupported') rather than pretending."""
+                  checks: list[list[str]] | None = None,
+                  settings_files: ExitStack | None = None) -> tuple[list[str], str | None]:
+    """Build argv and stdin. Keep the cleanup stack or the returned argv alive through launch."""
     if profile not in PROFILES or mode not in ledger.MODES:
         raise RuntimeFailure("unsupported", f"profile {profile!r} / mode {mode!r}")
     spec = RUNTIMES[name]
@@ -353,11 +361,22 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     argv += ["--conversation", resume] if resume else []
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
-    # agy replaces permission arrays in the session layer. Carry over the user's allow rules and let agy
-    # inherit the deny rules directly. Headless command grants are restricted to the lead's exact checks.
+    # The layer overrides only allow. Deny inheritance depends on agy's settings merge.
     allowed = [f"command({shlex.join(check)})" for check in checks if mode == "rw" and _exact_pattern(check)]
     if allowed and (user_allow := _agy_user_allow()) is not None:
-        argv += ["--settings", json.dumps({"permissions": {"allow": list(dict.fromkeys(user_allow + allowed))}})]
+        try:
+            fd, filename = tempfile.mkstemp(prefix="hipson-agy-", suffix=".json")
+            unlink = Path(filename).unlink
+            if settings_files is None:
+                argv = _SettingsArgv(argv)
+                weakref.finalize(argv, unlink, missing_ok=True)
+            else:
+                settings_files.callback(unlink, missing_ok=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"permissions": {"allow": list(dict.fromkeys(user_allow + allowed))}}, stream)
+        except OSError as exc:
+            raise RuntimeFailure("unsupported", f"cannot write agy session settings: {exc}") from exc
+        argv += ["--settings", filename]
     return argv, None
 
 
@@ -461,18 +480,16 @@ def _evidence(output: str) -> str | None:
     return next((kind for kind, pattern in _PATTERNS if pattern.search(output)), None)
 
 
-def _agy_model_diagnostic(payload: Any, stdout: str, stderr: str) -> str | None:
+def _agy_model_diagnostic(payload: Any, stderr: str) -> str | None:
+    messages: list[object] = [stderr]
     if isinstance(payload, dict):
         error = payload.get("error")
-        messages = [error.get("message") if isinstance(error, dict) else error,
-                    payload.get("message"), payload.get("result")]
-    else:
-        messages = [stdout]
-    for text in [stderr, *messages]:
+        messages.extend((error.get("message") if isinstance(error, dict) else error, payload.get("message")))
+    for text in messages:
         if isinstance(text, str) and (match := AGY_MODEL_REJECTION.search(text)):
             # Keep the diagnostic and its model list, skipping any unrelated lines before it.
             detail = text[text.rfind("\n", 0, match.start()) + 1:].strip()
-            return redact_incomplete_private_keys(redact_text(detail))
+            return redact_incomplete_private_keys(redact_text(detail))[:MAX_AGY_DIAGNOSTIC_CHARS]
     return None
 
 
@@ -520,11 +537,13 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
     else:
         payload = _parse_json(stdout)
         if code or not isinstance(payload, dict) or payload.get("status") != "SUCCESS":
-            if code != 124 and (diagnostic := _agy_model_diagnostic(payload, stdout, stderr)):
-                raise RuntimeFailure("model_unavailable", diagnostic)
+            output = stdout + "\n" + stderr
+            kind = (classify(code or 1, output) if code or isinstance(payload, dict)
+                    else _evidence(output) or "malformed_output")
+            if kind not in ("timeout", "rate_limited", "auth_required"):
+                if diagnostic := _agy_model_diagnostic(payload, stderr):
+                    raise RuntimeFailure("model_unavailable", diagnostic)
             detail = payload.get("status") if isinstance(payload, dict) else f"exit {code}"
-            kind = (classify(code or 1, stdout + stderr) if code or isinstance(payload, dict)
-                    else _evidence(stdout + stderr) or "malformed_output")
             raise RuntimeFailure(kind, f"agy {detail}")
         meta.update(session=payload.get("conversation_id"), usage=payload.get("usage"),
                     num_turns=payload.get("num_turns"))
@@ -616,52 +635,53 @@ def exec_worker(args: argparse.Namespace) -> int:
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.{session}.last.json"  # Codex only; unique per run, never pre-existing.
     prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
-    try:
-        _check_state_path(result_path)
-        if meta_path is not None:
-            _check_state_path(meta_path)
-        _write_state(schema_path, json.dumps(result_schema()))
-        argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
-                                    schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
-                                    effort=args.effort, session=session, resume=resume, timeout=args.timeout,
-                                    checks=checks if mode == "rw" else [])
-    except RuntimeFailure as exc:
-        return fail(exc.kind, exc.detail)
-    if shutil.which(argv[0]) is None:
-        return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
-    context = execution_context(shutil.which(argv[0]))
-    meta["execution_context"] = context["context"]
-    if context["context"] == "wsl-forwarded":
-        return fail("unsupported", _context_limitation(args.runtime, context) or "")
-    launch: str | list[str] = argv
-    env = dict(os.environ)
-    if context.get("direct"):  # The launcher's own interpreter and script: no cmd.exe, so every argument passes.
-        launch = [*context["direct"], *argv[1:]]
-        meta["execution_context"] = "batch-shim (direct)"
-    elif context["context"] == "batch-shim":
-        from hipson.task_windows import batch_command
-        try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
-            launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
-        except ValueError:
+    with ExitStack() as settings_files:
+        try:
+            _check_state_path(result_path)
+            if meta_path is not None:
+                _check_state_path(meta_path)
+            _write_state(schema_path, json.dumps(result_schema()))
+            argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
+                                        schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
+                                        effort=args.effort, session=session, resume=resume, timeout=args.timeout,
+                                        checks=checks if mode == "rw" else [], settings_files=settings_files)
+        except RuntimeFailure as exc:
+            return fail(exc.kind, exc.detail)
+        if shutil.which(argv[0]) is None:
+            return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
+        context = execution_context(shutil.which(argv[0]))
+        meta["execution_context"] = context["context"]
+        if context["context"] == "wsl-forwarded":
             return fail("unsupported", _context_limitation(args.runtime, context) or "")
-    # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
-    auth = auth_state(args.runtime, argv[0])
-    meta["preflight"] = {"auth": auth["state"]}
-    if auth["state"] == "logged_out":
-        return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
-                    "the runtime itself, then retry")
-    meta.update(session_requested=resume or session, resumed=bool(resume))
-    started = time.monotonic()
-    try:
-        # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
-        proc = subprocess.run(launch, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=args.timeout, check=False, env=env)
-        code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as exc:
-        code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)
-    except OSError as exc:
-        meta["duration_seconds"] = round(time.monotonic() - started, 3)
-        return fail("provider_error", f"could not launch {args.runtime}: {exc}")
+        launch: str | list[str] = argv
+        env = dict(os.environ)
+        if context.get("direct"):  # The launcher's own interpreter and script: no cmd.exe, so every argument passes.
+            launch = [*context["direct"], *argv[1:]]
+            meta["execution_context"] = "batch-shim (direct)"
+        elif context["context"] == "batch-shim":
+            from hipson.task_windows import batch_command
+            try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
+                launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
+            except ValueError:
+                return fail("unsupported", _context_limitation(args.runtime, context) or "")
+        # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
+        auth = auth_state(args.runtime, argv[0])
+        meta["preflight"] = {"auth": auth["state"]}
+        if auth["state"] == "logged_out":
+            return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
+                        "the runtime itself, then retry")
+        meta.update(session_requested=resume or session, resumed=bool(resume))
+        started = time.monotonic()
+        try:
+            # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
+            proc = subprocess.run(launch, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=args.timeout, check=False, env=env)
+            code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)
+        except OSError as exc:
+            meta["duration_seconds"] = round(time.monotonic() - started, 3)
+            return fail("provider_error", f"could not launch {args.runtime}: {exc}")
     meta["duration_seconds"] = round(time.monotonic() - started, 3)
     meta["exit_code"] = code
     try:

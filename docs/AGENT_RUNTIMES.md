@@ -125,9 +125,11 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for a
   Claude or Antigravity writer a task-scoped permission for exactly the task's declared checks, read from the
   ledger. Claude uses `--allowedTools "Bash(<check>)"`. Antigravity adds `command(<check>)` to the
-  `permissions.allow` from `~/.gemini/antigravity-cli/settings.json` in an inline `--settings` layer, inherits
-  the user's deny rules, and leaves the settings file untouched. If Hipson cannot parse an existing allow list,
-  it omits the layer. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
+  `permissions.allow` from `~/.gemini/antigravity-cli/settings.json` in a temporary `--settings` file with
+  mode `0600` on POSIX. Hipson passes the file path, removes the file after the run, and leaves the user's
+  settings untouched. If Hipson cannot parse an existing allow list, it omits the layer. The layer contains
+  only `permissions.allow`. Deny inheritance depends on Antigravity's layer merge and is a live check for the
+  lead. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
   The permission mode follows the recorded assignment (`ro` -> plan / read-only / plan mode), whatever flags say.
 - **controlled**: for benchmarks and isolated tests; uses each runtime's documented isolation flags. Antigravity
   refuses it (exit 64, `unsupported`) rather than pretending. The e2e harness keeps its own stronger isolation

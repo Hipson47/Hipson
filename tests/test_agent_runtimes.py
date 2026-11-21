@@ -2,13 +2,15 @@
 
 import argparse
 import errno
+import gc
 import io
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
-from contextlib import chdir, closing, contextmanager, redirect_stderr
+from contextlib import ExitStack, chdir, closing, contextmanager, redirect_stderr
 from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
@@ -25,7 +27,7 @@ HELP = {
               "--setting-sources --strict-mcp-config --plugin-dir --mcp-config --agents",
     "codex": "exec resume plugin mcp --model --config --sandbox --output-schema --output-last-message --ephemeral "
              "--ignore-user-config --ignore-rules --json",
-    "agy": "--print --output-format --json-schema --conversation --model --effort --mode plugin mcp",
+    "agy": "--print --output-format --json-schema --conversation --model --effort --mode --settings plugin mcp",
 }
 
 
@@ -197,13 +199,14 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'se
 
 
 @contextmanager
-def _worker(tmp_path):
+def _worker(tmp_path, *, checks=()):
     project = tmp_path / "project"
     project.mkdir(parents=True)
     db = tmp_path / "ledger.sqlite"
     with closing(ledger.Ledger(db)) as store:
-        task = store.open_task(project=project, title="Review", objective="Review project")["id"]
-        assignment = store.assign(task, actor="reviewer", role="reviewer", mode="ro")["id"]
+        task = store.open_task(project=project, title="Worker test", objective="Work on project", checks=list(checks))["id"]
+        role, mode = ("builder", "rw") if checks else ("reviewer", "ro")
+        assignment = store.assign(task, actor=role, role=role, mode=mode, scope=["."] if checks else [])["id"]
     brief, result = tmp_path / "brief.md", tmp_path / "first.result.json"
     brief.write_text("review it", encoding="utf-8")
     env = {"HIPSON_ROLE": "worker", "HIPSON_TASK": task, "HIPSON_ASSIGNMENT": assignment,
@@ -283,26 +286,114 @@ def test_t0155_agy_unavailable_model_reports_redacted_cli_diagnostic(tmp_path):
         assert not result.exists()
 
 
-def test_t0160_agy_session_allow_merges_user_rules_and_exact_checks(tmp_path):
-    settings = tmp_path / ".gemini" / "antigravity-cli" / "settings.json"
+def test_agy_rate_limit_and_auth_take_precedence_over_quoted_model_rejection(tmp_path):
+    quote = 'The test quotes "invalid model selection".'
+    cases = [("429", "rate_limited"), ("401 Unauthorized", "auth_required"),
+             ("429 and 401 Unauthorized", "rate_limited")]
+    for evidence, kind in cases:
+        stdout = json.dumps({"status": "ERROR", "result": quote})
+        with pytest.raises(runtimes.RuntimeFailure) as failure:
+            runtimes.normalize("agy", 1, stdout, quote + "\n" + evidence, tmp_path / "last")
+        assert failure.value.kind == kind
+
+
+def test_agy_model_rejection_uses_only_error_channels_and_bounds_the_diagnostic(tmp_path):
+    phrase = "invalid model selection"
+    last = tmp_path / "last"
+    for stdout in (phrase, json.dumps({"status": "ERROR", "result": phrase})):
+        with pytest.raises(runtimes.RuntimeFailure) as failure:
+            runtimes.normalize("agy", 1, stdout, "", last)
+        assert failure.value.kind == "provider_error"
+
+    secret = "ghp_" + "a1B2" * 9
+    diagnostic = f"{phrase}: token={secret}\n" + "example-model " * 100
+    for payload, stderr in (({"status": "ERROR", "message": diagnostic}, ""),
+                            ({"status": "ERROR", "error": {"message": diagnostic}}, ""),
+                            ({"status": "ERROR"}, diagnostic)):
+        with pytest.raises(runtimes.RuntimeFailure) as failure:
+            runtimes.normalize("agy", 1, json.dumps(payload), stderr, last)
+        assert failure.value.kind == "model_unavailable"
+        detail = failure.value.detail
+        assert detail.startswith(phrase) and "[REDACTED]" in detail and secret not in detail
+        assert len(detail) == 600
+
+
+def _agy_user_settings(home, content):
+    settings = home / ".gemini" / "antigravity-cli" / "settings.json"
     settings.parent.mkdir(parents=True)
+    settings.write_text(content, encoding="utf-8")
+    return settings
+
+
+def test_t0160_agy_session_allow_merges_user_rules_and_exact_checks_without_copying_deny(tmp_path):
     user_allow = ["read_file(src/**)", "command(pytest -q)"]
-    original = json.dumps({"permissions": {"allow": user_allow, "deny": ["read_file(.env)"]}, "toolPermission": "ask"})
-    settings.write_text(original, encoding="utf-8")
+    user_deny = ["read_file(.env)", "command(python3 private_check.py)"]
+    original = json.dumps({"permissions": {"allow": user_allow, "deny": user_deny}, "toolPermission": "ask"})
+    settings = _agy_user_settings(tmp_path, original)
     schema = tmp_path / "schema.json"
     schema.write_text("{}")
     options = dict(profile="native", prompt="p", schema_path=schema, last_path=tmp_path / "last", cwd=str(tmp_path))
     checks = [["pytest", "-q"], ["python3", "tests/check.py"], ["pytest", "tests/*"]]
-    with patch.object(Path, "home", return_value=tmp_path):
-        argv, _ = runtimes.build_command("agy", mode="rw", checks=checks, **options)
+    with patch.object(Path, "home", return_value=tmp_path), ExitStack() as files:
+        argv, _ = runtimes.build_command("agy", mode="rw", checks=checks, settings_files=files, **options)
         review, _ = runtimes.build_command("agy", mode="ro", checks=checks, **options)
         no_checks, _ = runtimes.build_command("agy", mode="rw", **options)
         assert settings.read_text(encoding="utf-8") == original
-        settings.write_text("{unreadable", encoding="utf-8")
-        unreadable, _ = runtimes.build_command("agy", mode="rw", checks=checks, **options)
-    assert json.loads(argv[argv.index("--settings") + 1]) == {
-        "permissions": {"allow": [*user_allow, "command(python3 tests/check.py)"]}}
-    assert all("--settings" not in command for command in (review, no_checks, unreadable))
+        layer = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+    assert layer == {"permissions": {"allow": [*user_allow, "command(python3 tests/check.py)"]}}
+    assert "deny" not in layer["permissions"] and set(user_deny).isdisjoint(layer["permissions"]["allow"])
+    assert all("--settings" not in command for command in (review, no_checks))
+
+
+def test_agy_omits_session_settings_when_user_allow_cannot_be_merged(tmp_path):
+    settings_dir = tmp_path / "home"
+    settings = _agy_user_settings(settings_dir, "")
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    bad_settings = [[], {"permissions": []}, {"permissions": {"allow": "command(x)"}},
+                    {"permissions": {"allow": ["command(x)", 7]}}, {"permissions": {"allow": None}}]
+    for content in ["{unreadable", *(json.dumps(value) for value in bad_settings)]:
+        settings.write_text(content, encoding="utf-8")
+        with patch.object(Path, "home", return_value=settings_dir), ExitStack() as files:
+            argv, _ = runtimes.build_command("agy", profile="native", mode="rw", prompt="p", schema_path=schema,
+                                            last_path=tmp_path / "last", cwd=str(tmp_path), checks=[["pytest", "-q"]],
+                                            settings_files=files)
+        assert "--settings" not in argv, content
+        assert settings.read_text(encoding="utf-8") == content
+
+
+def test_agy_settings_are_private_and_removed_after_success_failure_and_timeout(tmp_path):
+    user_rule = "read_file(personal-notes/**)"
+    _agy_user_settings(tmp_path, json.dumps({"permissions": {"allow": [user_rule]}}))
+    for outcome in ("ok", "provider_error", "timeout", "launch_error"):
+        paths = []
+
+        def launch(argv, *, outcome=outcome, paths=paths, **kwargs):
+            path = Path(argv[argv.index("--settings") + 1])
+            paths.append(path)
+            assert path.is_file() and all(user_rule not in arg for arg in argv)
+            assert json.loads(path.read_text(encoding="utf-8")) == {
+                "permissions": {"allow": [user_rule, "command(pytest -q)"]}}
+            if os.name == "posix":
+                assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            if outcome == "timeout":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if outcome == "launch_error":
+                raise OSError(errno.E2BIG, "Argument list too long")
+            if outcome == "provider_error":
+                return subprocess.CompletedProcess(argv, 1, "", "Run failed")
+            payload = {"status": "SUCCESS", "structured_output": RESULT}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+        with (_worker(tmp_path / outcome, checks=[["pytest", "-q"]]) as (_, result, run),
+              patch.object(Path, "home", return_value=tmp_path),
+              patch.object(runtimes.shutil, "which", return_value=sys.executable),
+              patch.object(runtimes, "_version", return_value="agy test"),
+              patch.object(runtimes.subprocess, "run", side_effect=launch)):
+            expected = "provider_error" if outcome == "launch_error" else outcome
+            assert run("agy") == runtimes.EXIT[expected]
+        assert len(paths) == 1 and not paths[0].exists(), outcome
+        assert result.exists() == (outcome == "ok")
 
 
 def test_exec_preflight_stops_a_logged_out_runtime_before_launch(tmp_path):
@@ -381,6 +472,46 @@ def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evid
     assert verified["structured_output"]["assignment"] == "A-0002"
     view, _ = _view(db)
     assert view["review"]["passing"] and view["status"] == "review"
+
+
+def test_flow_grants_agy_checks_to_the_builder_only(tmp_path):
+    fake = f"""
+from pathlib import Path
+
+mode = args[args.index('--mode') + 1]
+layer = None
+if '--settings' in args:
+    path = Path(args[args.index('--settings') + 1])
+    layer = json.loads(path.read_text(encoding='utf-8'))
+with open(os.environ['FAKE_LOG'], 'a', encoding='utf-8') as log:
+    log.write(json.dumps([mode, layer]) + '\\n')
+result = {RESULT!r}
+if mode == 'accept-edits':
+    Path('src/parser/pairs.py').write_text(
+        "def parse_pair(text):\\n    return tuple(part.strip() for part in text.split(':'))\\n")
+    result['files_changed'] = [{{'path': 'src/parser/pairs.py', 'change': 'split and trim'}}]
+print(json.dumps({{'status': 'SUCCESS', 'structured_output': result}}))
+"""
+    bin_dir = _fake_cli(tmp_path, "agy", fake)
+    project, db = _repo(tmp_path), tmp_path / "ledger.sqlite"
+    path = _spec(tmp_path, project)
+    spec = json.loads(path.read_text())
+    hipson = [PY, "-m", "hipson.cli", "agent", "exec", "--runtime", "agy"]
+    for role in ("builder", "reviewer"):
+        spec[role]["command"] = [*hipson, "--role", role]
+    path.write_text(json.dumps(spec))
+    home = tmp_path / "home"
+    home.mkdir()
+    log = tmp_path / "agy-calls.jsonl"
+    env = {**_env(bin_dir), "FAKE_LOG": str(log), "HIPSON_HOME": str(tmp_path / "hh"),
+           "HOME": str(home), "USERPROFILE": str(home)}
+    proc, result = _flow(project, db, path, env=env)
+    assert proc.returncode == 0 and result["state"] == "accepted", (proc.stderr, result)
+    grant = f"command({shlex.join(spec['checks'][0])})"
+    assert [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] == [
+        ["accept-edits", {"permissions": {"allow": [grant]}}],
+        ["plan", None],
+    ]
 
 
 def test_a_rate_limited_runtime_is_a_classified_worker_failure(tmp_path):
@@ -607,11 +738,16 @@ def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_p
         assert fresh[fresh.index("--sandbox") + 1] == sandbox and "--sandbox" not in resumed
         assert resumed[:3][1:] == ["exec", "resume"] and f"sandbox_mode={sandbox}" in resumed
         assert resumed[resumed.index(f"sandbox_mode={sandbox}") - 1] == "--config"
-    # agy: a session-only settings layer grants exactly the declared checks; none without checks.
+    # Direct callers such as the native probe keep the settings file alive with argv for the launch.
     with patch.object(Path, "home", return_value=tmp_path):
         argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
                                          **common)
-    assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(python3 tests/check.py)"]}}
+    settings = Path(argv[argv.index("--settings") + 1])
+    layer = json.loads(settings.read_text(encoding="utf-8"))
+    assert layer == {"permissions": {"allow": ["command(python3 tests/check.py)"]}}
+    del argv
+    gc.collect()
+    assert not settings.exists()
     argv, _ = runtimes.build_command("agy", mode="ro", **common)
     assert "--settings" not in argv
 

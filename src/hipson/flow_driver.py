@@ -436,6 +436,7 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
 
 
 DIFF_BUDGET = 16_000
+MAX_UNTRACKED_FILES = 200
 _BINARY_CONTROL = re.compile(rb'[\x00-\x08\x0e-\x1f\x7f]')
 
 
@@ -502,7 +503,8 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
         root = Path(project).resolve()
         sections.append('Untracked files in scope:')
         remaining, notes_budget, omitted = DIFF_BUDGET - len(shown), DIFF_BUDGET, 0
-        for entry in untracked.rstrip(b'\0').split(b'\0'):
+        entries = untracked.rstrip(b'\0').split(b'\0')
+        for entry in entries[:MAX_UNTRACKED_FILES]:
             name = os.fsdecode(entry)
             label = redact_text(sanitize_path(entry.decode('utf-8', errors='replace'))).replace('\n', r'\n')
             body, reason = _untracked_text(root, name, scope, remaining)
@@ -519,6 +521,8 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
                 omitted += 1
         if omitted:
             sections.append(f'{omitted} additional skipped file(s) omitted from the listing (listing budget exhausted).')
+        if (unexamined := len(entries) - MAX_UNTRACKED_FILES) > 0:
+            sections.append(f'{unexamined} untracked file(s) not examined (limit of {MAX_UNTRACKED_FILES} files).')
     # File names and all content stay inside the data block.
     return [header, task_context._untrusted_block('\n'.join(sections))]
 
@@ -909,7 +913,8 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                     store.update_finding(finding, status='fixed', actor=lead, resolved_by_assignment=accepted,
                                          resolution_note=(f'repair {latest} passed lead verification '
                                                           f"{', '.join(view['verification']['accepted_ids'])} and "
-                                                          f're-review {accepted} found no recurrence'))
+                                                          f'accepted re-review {accepted} reported no finding '
+                                                          "matching the prior finding's ID, title, detail or location"))
             _record(db, task, lead, f"resolved {', '.join(step.refs)} after re-review {accepted}",
                     [*step.refs, accepted])
         elif step.kind == 'close':

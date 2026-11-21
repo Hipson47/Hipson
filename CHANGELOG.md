@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Antigravity reports unavailable models with the redacted CLI diagnostic and
-  preserves user allow rules when granting declared checks. Flow review briefs include bounded, redacted contents
-  of new in-scope text files, and a verified re-review resolves earlier findings that no longer apply.
+- Antigravity gives rate-limit and login evidence priority over model rejection and reports a bounded, redacted
+  model diagnostic from the CLI's error channels. A private temporary settings file preserves user allow rules
+  when granting declared checks to builders. Flow review briefs include bounded, redacted contents of new
+  in-scope text files and report any unexamined paths after the 200-file limit. Resolution notes identify the
+  accepted re-review and record which finding fields the flow compared.
 
 ## 1.7.0 - 2026-11-19
 

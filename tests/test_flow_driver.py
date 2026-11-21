@@ -152,6 +152,8 @@ def test_review_finding_drives_repair_and_is_resolved_only_after_a_clean_re_revi
         findings = store.findings(task='T-0001')
     assert [(item['status'], item['source_assignment'], item['resolved_by_assignment']) for item in findings] == [
         ('fixed', 'A-0002', 'A-0004')]
+    assert findings[0]['resolution_note'].endswith(
+        "accepted re-review A-0004 reported no finding matching the prior finding's ID, title, detail or location")
     brief = (db.parent / '.ledger.sqlite.flows' / 'T-0001' / 'review-2.brief.md').read_text()
     assert findings[0]['id'] in brief
 
@@ -194,6 +196,58 @@ Path(os.environ['HIPSON_FLOW_RESULT']).write_text(json.dumps({
         (findings[title]['id'], result['review']) for title in fixed_titles}
     assert all(findings[title]['resolved_by_assignment'] == result['review'] for title in fixed_titles)
     assert all(findings[title]['status'] == 'open' for title in findings.keys() - fixed_titles)
+
+
+def _use_scripted_reviews(spec, first_findings, second_findings):
+    reviewer = spec.parent / 'scripted-reviewer.py'
+    reviewer.write_text(f'''
+import json
+import os
+from pathlib import Path
+
+repaired = 'strip' in Path('src/parser/pairs.py').read_text()
+findings = {second_findings!r} if repaired else {first_findings!r}
+Path(os.environ['HIPSON_FLOW_RESULT']).write_text(json.dumps({{
+    'status': 'completed', 'summary': 'Reviewed the candidate', 'files_changed': [],
+    'commands': [], 'findings': findings, 'risks': []}}))
+''', encoding='utf-8')
+    config = json.loads(spec.read_text())
+    config['reviewer']['command'] = [PY, str(reviewer)]
+    spec.write_text(json.dumps(config))
+
+
+def test_re_reported_defect_with_new_title_and_path_matches_only_if_detail_is_retained(tmp_path):
+    detail = 'Empty input returns a one-element tuple.'
+    first = {'severity': 'major', 'title': 'Empty input is accepted', 'detail': detail, 'location': 'src/parser/pairs.py:2'}
+    for retains_detail in (True, False):
+        case = tmp_path / str(retains_detail)
+        project, db = _repo(case), case / 'ledger.sqlite'
+        second = {'severity': 'major', 'title': 'Parser accepts a blank string', 'location': 'src/parser/input.py:9',
+                  'detail': detail if retains_detail else 'A blank string is returned as a single field.'}
+        spec = _spec(case, project, builder='needs-repair', checks=(SPLIT_CHECK,), max_repairs=1, close_to='done')
+        _use_scripted_reviews(spec, [first], [second])
+        proc, result = _flow(project, db, spec)
+        assert proc.returncode == 2 and result['state'] == 'review_blocked', result
+        with closing(ledger.Ledger(db, read_only=True)) as store:
+            findings = {item['title']: item for item in store.findings(task='T-0001')}
+        # This matcher cannot infer that two completely reworded reports describe the same defect.
+        assert findings[first['title']]['status'] == ('open' if retains_detail else 'fixed')
+        assert findings[second['title']]['status'] == 'open'
+        assert ('resolve' in result['steps']) is not retains_detail
+        assert 'close' not in result['steps']
+
+
+def test_duplicate_identical_major_reviewer_findings_need_the_lead(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    spec = _spec(tmp_path, project)
+    finding = {'severity': 'major', 'title': 'Empty input is accepted',
+               'detail': 'Empty input returns a one-element tuple.', 'location': 'src/parser/pairs.py:2'}
+    _use_scripted_reviews(spec, [], [finding, finding])
+    proc, result = _flow(project, db, spec)
+    assert proc.returncode == 4 and result['state'] == 'needs_lead', result
+    view, _ = _view(db)
+    assert len(view['findings']) == 2 and all(item['status'] == 'open' for item in view['findings'])
+    assert 'resolve' not in result['steps'] and 'close' not in result['steps']
 
 
 def test_budget_exhaustion_and_false_green_never_reach_review(tmp_path):
@@ -438,6 +492,34 @@ def test_t0159_reviewer_diff_includes_bounded_redacted_untracked_text(tmp_path):
     (files / 'pairs.py').write_text('CHANGED = 1\n' * flow_driver.DIFF_BUDGET, encoding='utf-8')
     full = '\n'.join(flow_driver.candidate_diff(str(project), scope))
     assert 'new.py (skipped: diff budget' in full and 'unique_code = 42' not in full
+
+
+def test_review_diff_omits_in_tree_link_targets_outside_scope_or_sensitive(tmp_path):
+    if os.name != 'posix':
+        raise SkipTest('Windows symlinks require Developer Mode or SeCreateSymbolicLinkPrivilege')
+    project = _repo(tmp_path)
+    files = project / 'src/parser'
+    (project / 'outside_scope.txt').write_text('OUT_OF_SCOPE_TARGET_CONTENT', encoding='utf-8')
+    (files / '.env').write_text('SENSITIVE_TARGET_CONTENT', encoding='utf-8')
+    (files / 'out_of_scope.txt').symlink_to('../../outside_scope.txt')
+    (files / 'looks_safe.txt').symlink_to('.env')
+
+    brief = '\n'.join(flow_driver.candidate_diff(str(project), ['src/parser']))
+    assert 'out_of_scope.txt (skipped: link target outside the scope)' in brief
+    assert 'looks_safe.txt (skipped: sensitive link target)' in brief
+    assert 'OUT_OF_SCOPE_TARGET_CONTENT' not in brief and 'SENSITIVE_TARGET_CONTENT' not in brief
+
+
+def test_review_diff_caps_untracked_file_examination_and_reports_remaining_count(tmp_path):
+    project = _repo(tmp_path)
+    scope = 'src/parser'
+    for index in range(203):
+        (project / scope / f'new-{index:03}.txt').write_text('new text', encoding='utf-8')
+    with patch.object(flow_driver, '_untracked_text', wraps=flow_driver._untracked_text) as examine:
+        brief = '\n'.join(flow_driver.candidate_diff(str(project), [scope]))
+    assert examine.call_count == 200
+    assert 'new-199.txt' in brief and 'new-200.txt' not in brief
+    assert '3 untracked file(s) not examined (limit of 200 files).' in brief
 
 
 def test_a_failing_first_check_drives_repair_when_later_checks_did_not_run(tmp_path):

@@ -22,13 +22,16 @@ workers are deterministic, so repetition adds no information here; it is not a s
 The reviewer brief renders the tracked diff and new in-scope UTF-8 files from the verified snapshot in one
 untrusted data block. They share a 16,000-character content budget, with the tracked diff first. The brief
 redacts secrets and lists why files were skipped, including binary data, oversized files, and links outside
-the tree or write scope. Sensitive paths are masked. If the skip listing itself exceeds its budget, the brief
-reports how many entries were omitted.
+the tree or write scope. Sensitive paths are masked. The brief examines up to 200 untracked paths and reports
+how many remain unexamined. It also reports how many skip entries exceeded the listing budget.
 
-After a repair, the flow compares open structured findings with the accepted re-review. It records fixes
-against that review assignment, including fixes confirmed by a review that reports a different defect. The
-reviewer is asked to cite the earlier ID for recurring findings. Repeated or ambiguous reports stay open. New
-and unresolved blocking or major findings still prevent closure.
+After a repair passes lead verification, the flow compares open structured findings with the accepted
+re-review. It marks an earlier finding fixed when the re-review reports no match by ID, title, detail or
+location. The reviewer is asked to cite the earlier ID for recurring findings. A report with a different
+title and file still matches if it retains the same detail. If it also rewords the detail and omits the ID,
+the flow can mark the earlier finding fixed and leave the new finding open even when both describe the same
+defect. Duplicate identical major or blocking reports require the lead to intervene. New and unresolved
+blocking or major findings still prevent closure.
 
 ## Results (revision 46ccff7, clean tree, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2; earlier runs on 5ccd9e2 and a83b9c2 gave the same outcomes)
 
