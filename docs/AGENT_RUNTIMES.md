@@ -124,12 +124,14 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   instructions and model defaults. Hipson adds no clean-room flag and never a permission bypass
   (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for a
   Claude or Antigravity writer a task-scoped permission for exactly the task's declared checks, read from the
-  ledger. Claude uses `--allowedTools "Bash(<check>)"`. Antigravity adds `command(<check>)` to the
-  `permissions.allow` from `~/.gemini/antigravity-cli/settings.json` in a temporary `--settings` file with
-  mode `0600` on POSIX. Hipson passes the file path, removes the file after the run, and leaves the user's
-  settings untouched. If Hipson cannot parse an existing allow list, it omits the layer. The layer contains
-  only `permissions.allow`. Deny inheritance depends on Antigravity's layer merge and is a live check for the
-  lead. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
+  ledger. Claude uses `--allowedTools "Bash(<check>)"`. Antigravity's temporary `--settings` file carries the
+  user's `permissions.allow` and `permissions.deny` lists from `~/.gemini/antigravity-cli/settings.json`,
+  with the exact `command(<check>)` grants added to `allow`. Antigravity applies the deny rules. A live
+  check on agy 1.5.14 confirmed that a user deny rule blocked `git status` with the layer present.
+  The file has mode `0600` on POSIX. Hipson passes the file path, removes the file after the run, and leaves
+  the user's settings untouched. If Hipson cannot read the user's settings or validate either permission
+  list, it omits the layer and records the reason in `check_grants_note` in the run meta and in the failure
+  detail if the run fails. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
   The permission mode follows the recorded assignment (`ro` -> plan / read-only / plan mode), whatever flags say.
 - **controlled**: for benchmarks and isolated tests; uses each runtime's documented isolation flags. Antigravity
   refuses it (exit 64, `unsupported`) rather than pretending. The e2e harness keeps its own stronger isolation

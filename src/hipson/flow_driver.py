@@ -910,7 +910,7 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
             latest = [item for item in view['assignments'] if item['role'] == 'builder'][-1]['id']
             with closing(ledger.Ledger(db, create=False)) as store:
                 for finding in step.refs:
-                    store.update_finding(finding, status='fixed', actor=lead, resolved_by_assignment=accepted,
+                    store.update_finding(finding, status='fixed', actor=lead, resolved_by_assignment=latest,
                                          resolution_note=(f'repair {latest} passed lead verification '
                                                           f"{', '.join(view['verification']['accepted_ids'])} and "
                                                           f'accepted re-review {accepted} reported no finding '

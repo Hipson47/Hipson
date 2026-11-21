@@ -283,17 +283,30 @@ def _project(cwd: str) -> str:
     return os.environ.get("HIPSON_PROJECT") or cwd
 
 
-def _agy_user_allow() -> list[str] | None:
-    """Read only the allow rules. None means a merge would risk replacing an unreadable list."""
+def _agy_user_permissions() -> dict[str, list[str]] | str:
+    """Read the user's allow and deny lists, or return a reason to omit the layer."""
     try:
         settings = json.loads(_home(".gemini", "antigravity-cli", "settings.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return []
-    except (OSError, ValueError, RuntimeError):
-        return None
-    permissions = settings.get("permissions", {}) if isinstance(settings, dict) else None
-    allow = permissions.get("allow", []) if isinstance(permissions, dict) else None
-    return allow if isinstance(allow, list) and all(isinstance(rule, str) for rule in allow) else None
+        return {}
+    except (OSError, RuntimeError):
+        return "agy user settings could not be read"
+    except ValueError:
+        return "agy user settings are malformed JSON"
+    if not isinstance(settings, dict):
+        return "agy user settings must be a JSON object"
+    permissions = settings.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return "agy user settings permissions must be an object"
+    rules: dict[str, list[str]] = {}
+    for field in ("allow", "deny"):
+        if field not in permissions:
+            continue
+        entries = permissions[field]
+        if not isinstance(entries, list) or not all(isinstance(rule, str) for rule in entries):
+            return f"agy user settings permissions.{field} must be a list of strings"
+        rules[field] = entries
+    return rules
 
 
 class _SettingsArgv(list[str]):
@@ -304,8 +317,12 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
                   cwd: str, model: str | None = None, effort: str | None = None, session: str | None = None,
                   resume: str | None = None, timeout: float = 1800,
                   checks: list[list[str]] | None = None,
-                  settings_files: ExitStack | None = None) -> tuple[list[str], str | None]:
-    """Build argv and stdin. Keep the cleanup stack or the returned argv alive through launch."""
+                  settings_files: ExitStack | None = None,
+                  run_meta: dict[str, Any] | None = None) -> tuple[list[str], str | None]:
+    """Build argv and stdin.
+
+    Direct callers that omit ``settings_files`` must keep the returned argv object alive through launch.
+    """
     if profile not in PROFILES or mode not in ledger.MODES:
         raise RuntimeFailure("unsupported", f"profile {profile!r} / mode {mode!r}")
     spec = RUNTIMES[name]
@@ -361,9 +378,15 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     argv += ["--conversation", resume] if resume else []
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
-    # The layer overrides only allow. Deny inheritance depends on agy's settings merge.
+    # Keep the user's deny rules in the same layer as every allow rule and let agy enforce them.
     allowed = [f"command({shlex.join(check)})" for check in checks if mode == "rw" and _exact_pattern(check)]
-    if allowed and (user_allow := _agy_user_allow()) is not None:
+    if allowed:
+        permissions = _agy_user_permissions()
+        if isinstance(permissions, str):
+            if run_meta is not None:
+                run_meta["check_grants_note"] = f"Check grants were not passed because {permissions}."
+            return argv, None
+        permissions["allow"] = list(dict.fromkeys(permissions.get("allow", []) + allowed))
         try:
             fd, filename = tempfile.mkstemp(prefix="hipson-agy-", suffix=".json")
             unlink = Path(filename).unlink
@@ -373,7 +396,7 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
             else:
                 settings_files.callback(unlink, missing_ok=True)
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump({"permissions": {"allow": list(dict.fromkeys(user_allow + allowed))}}, stream)
+                json.dump({"permissions": permissions}, stream)
         except OSError as exc:
             raise RuntimeFailure("unsupported", f"cannot write agy session settings: {exc}") from exc
         argv += ["--settings", filename]
@@ -592,6 +615,8 @@ def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[
 def exec_worker(args: argparse.Namespace) -> int:
     """`hipson agent exec`: one native run inside a `task run` assignment; never outside one."""
     def fail(kind: str, detail: str) -> int:
+        if note := meta.get("check_grants_note"):
+            detail = f"{note} {detail}"
         detail = redact_text(detail)[:600]
         try:
             _write_meta(meta_path, {**meta, "outcome": kind, "detail": detail})
@@ -644,7 +669,8 @@ def exec_worker(args: argparse.Namespace) -> int:
             argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
                                         schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
                                         effort=args.effort, session=session, resume=resume, timeout=args.timeout,
-                                        checks=checks if mode == "rw" else [], settings_files=settings_files)
+                                        checks=checks if mode == "rw" else [], settings_files=settings_files,
+                                        run_meta=meta)
         except RuntimeFailure as exc:
             return fail(exc.kind, exc.detail)
         if shutil.which(argv[0]) is None:

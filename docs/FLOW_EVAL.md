@@ -28,10 +28,11 @@ how many remain unexamined. It also reports how many skip entries exceeded the l
 After a repair passes lead verification, the flow compares open structured findings with the accepted
 re-review. It marks an earlier finding fixed when the re-review reports no match by ID, title, detail or
 location. The reviewer is asked to cite the earlier ID for recurring findings. A report with a different
-title and file still matches if it retains the same detail. If it also rewords the detail and omits the ID,
-the flow can mark the earlier finding fixed and leave the new finding open even when both describe the same
-defect. Duplicate identical major or blocking reports require the lead to intervene. New and unresolved
-blocking or major findings still prevent closure.
+title and file still matches if it retains the same detail. This rule is weaker than resolving only after a
+clean re-review. If a re-report omits the ID and changes the title, detail and location, the flow can mark
+the earlier finding fixed even when both describe the same defect. The re-report is itself an open finding,
+so a major or blocking re-report still prevents closure. Duplicate identical major or blocking reports
+require the lead to intervene.
 
 ## Results (revision 46ccff7, clean tree, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2; earlier runs on 5ccd9e2 and a83b9c2 gave the same outcomes)
 

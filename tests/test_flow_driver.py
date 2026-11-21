@@ -139,7 +139,7 @@ def test_failing_checks_drive_one_repair_with_their_diagnostic_output(tmp_path):
     assert "tuple(part.strip()" in (project / 'src/parser/pairs.py').read_text()
 
 
-def test_review_finding_drives_repair_and_is_resolved_only_after_a_clean_re_review(tmp_path):
+def test_review_finding_drives_repair_and_records_builder_and_clean_re_review(tmp_path):
     project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
     # The visible check misses trimming; only the independent review catches it.
     proc, result = _flow(project, db, _spec(tmp_path, project, builder='needs-repair', checks=(SPLIT_CHECK,),
@@ -151,7 +151,8 @@ def test_review_finding_drives_repair_and_is_resolved_only_after_a_clean_re_revi
     with closing(ledger.Ledger(db, read_only=True)) as store:
         findings = store.findings(task='T-0001')
     assert [(item['status'], item['source_assignment'], item['resolved_by_assignment']) for item in findings] == [
-        ('fixed', 'A-0002', 'A-0004')]
+        ('fixed', 'A-0002', 'A-0003')]
+    assert findings[0]['resolution_note'].startswith('repair A-0003 passed lead verification ')
     assert findings[0]['resolution_note'].endswith(
         "accepted re-review A-0004 reported no finding matching the prior finding's ID, title, detail or location")
     brief = (db.parent / '.ledger.sqlite.flows' / 'T-0001' / 'review-2.brief.md').read_text()
@@ -190,11 +191,13 @@ Path(os.environ['HIPSON_FLOW_RESULT']).write_text(json.dumps({
     with closing(ledger.Ledger(db, read_only=True)) as store:
         findings = {item['title']: item for item in store.findings(task='T-0001')}
         resolved = [event for event in store.events('T-0001') if event['type'] == 'finding_resolved']
+        latest_builder = [item['id'] for item in store.show('T-0001')['assignments'] if item['role'] == 'builder'][-1]
     fixed_titles = {'Missing trimming', 'Prior edge case'}
     assert {title for title, item in findings.items() if item['status'] == 'fixed'} == fixed_titles
     assert {(event['refs'][0], event['refs'][1]) for event in resolved} == {
-        (findings[title]['id'], result['review']) for title in fixed_titles}
-    assert all(findings[title]['resolved_by_assignment'] == result['review'] for title in fixed_titles)
+        (findings[title]['id'], latest_builder) for title in fixed_titles}
+    assert all(findings[title]['resolved_by_assignment'] == latest_builder for title in fixed_titles)
+    assert all(f"accepted re-review {result['review']}" in findings[title]['resolution_note'] for title in fixed_titles)
     assert all(findings[title]['status'] == 'open' for title in findings.keys() - fixed_titles)
 
 

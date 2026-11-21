@@ -325,9 +325,9 @@ def _agy_user_settings(home, content):
     return settings
 
 
-def test_t0160_agy_session_allow_merges_user_rules_and_exact_checks_without_copying_deny(tmp_path):
+def test_t0160_agy_session_layer_merges_exact_checks_and_preserves_user_denies(tmp_path):
     user_allow = ["read_file(src/**)", "command(pytest -q)"]
-    user_deny = ["read_file(.env)", "command(python3 private_check.py)"]
+    user_deny = ["read_file(.env)", "command(python3 private_check.py)", "read_file(.env)"]
     original = json.dumps({"permissions": {"allow": user_allow, "deny": user_deny}, "toolPermission": "ask"})
     settings = _agy_user_settings(tmp_path, original)
     schema = tmp_path / "schema.json"
@@ -340,18 +340,32 @@ def test_t0160_agy_session_allow_merges_user_rules_and_exact_checks_without_copy
         no_checks, _ = runtimes.build_command("agy", mode="rw", **options)
         assert settings.read_text(encoding="utf-8") == original
         layer = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
-    assert layer == {"permissions": {"allow": [*user_allow, "command(python3 tests/check.py)"]}}
-    assert "deny" not in layer["permissions"] and set(user_deny).isdisjoint(layer["permissions"]["allow"])
+    assert layer == {"permissions": {"allow": [*user_allow, "command(python3 tests/check.py)"], "deny": user_deny}}
     assert all("--settings" not in command for command in (review, no_checks))
 
 
-def test_agy_omits_session_settings_when_user_allow_cannot_be_merged(tmp_path):
+def test_agy_session_layer_passes_overlapping_check_allow_and_user_deny(tmp_path):
+    deny = "command(git status)"
+    _agy_user_settings(tmp_path, json.dumps({"permissions": {"allow": ["command(git *)"], "deny": [deny]}}))
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    with patch.object(Path, "home", return_value=tmp_path), ExitStack() as files:
+        argv, _ = runtimes.build_command("agy", profile="native", mode="rw", prompt="p", schema_path=schema,
+                                        last_path=tmp_path / "last", cwd=str(tmp_path), checks=[["git", "status"]],
+                                        settings_files=files)
+        layer = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+    assert layer == {"permissions": {"allow": ["command(git *)", deny], "deny": [deny]}}
+
+
+def test_agy_omits_session_settings_when_user_permissions_cannot_be_merged(tmp_path):
     settings_dir = tmp_path / "home"
     settings = _agy_user_settings(settings_dir, "")
     schema = tmp_path / "schema.json"
     schema.write_text("{}")
     bad_settings = [[], {"permissions": []}, {"permissions": {"allow": "command(x)"}},
-                    {"permissions": {"allow": ["command(x)", 7]}}, {"permissions": {"allow": None}}]
+                    {"permissions": {"allow": ["command(x)", 7]}}, {"permissions": {"allow": None}},
+                    {"permissions": {"allow": ["command(git *)"], "deny": "command(git push *)"}},
+                    {"permissions": {"deny": ["command(x)", 7]}}, {"permissions": {"deny": None}}]
     for content in ["{unreadable", *(json.dumps(value) for value in bad_settings)]:
         settings.write_text(content, encoding="utf-8")
         with patch.object(Path, "home", return_value=settings_dir), ExitStack() as files:
@@ -360,6 +374,37 @@ def test_agy_omits_session_settings_when_user_allow_cannot_be_merged(tmp_path):
                                             settings_files=files)
         assert "--settings" not in argv, content
         assert settings.read_text(encoding="utf-8") == content
+
+
+def test_agy_records_omitted_check_grants_in_meta_and_failure_detail(tmp_path):
+    malformed = tmp_path / "malformed"
+    _agy_user_settings(malformed, '{"permissions":{"deny":[7]}}')
+    unreadable = tmp_path / "unreadable"
+    (unreadable / ".gemini" / "antigravity-cli" / "settings.json").mkdir(parents=True)
+    for settings_home, reason in ((malformed, "permissions.deny must be a list of strings"),
+                                  (unreadable, "user settings could not be read")):
+        for outcome in ("ok", "provider_error"):
+            def launch(argv, *, outcome=outcome, **kwargs):
+                assert "--settings" not in argv
+                if outcome == "provider_error":
+                    return subprocess.CompletedProcess(argv, 1, "", "Run failed")
+                payload = {"status": "SUCCESS", "structured_output": RESULT}
+                return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+
+            stderr = io.StringIO()
+            with (_worker(settings_home / outcome, checks=[["git", "status"]]) as (_, result, run),
+                  redirect_stderr(stderr), patch.object(Path, "home", return_value=settings_home),
+                  patch.object(runtimes.shutil, "which", return_value=sys.executable),
+                  patch.object(runtimes, "_version", return_value="agy test"),
+                  patch.object(runtimes.subprocess, "run", side_effect=launch)):
+                assert run("agy") == runtimes.EXIT[outcome]
+            meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+            note = meta["check_grants_note"]
+            assert meta["outcome"] == outcome and "Check grants were not passed" in note and reason in note
+            if outcome == "provider_error":
+                assert note in meta["detail"] and note in stderr.getvalue()
+            else:
+                assert "detail" not in meta and result.is_file()
 
 
 def test_agy_settings_are_private_and_removed_after_success_failure_and_timeout(tmp_path):
