@@ -203,6 +203,51 @@ Each slice runs as a Hipson task, with declared checks and an independent review
 used where a worker builds the slice. Slices that change what the MCP server exposes (P0-1, P1-3, P2-6) also get
 a separate security review.
 
+## Work plan
+
+### Branches and worktrees
+
+- **Integration.** Branch `feat/1.8-agent-ux` in worktree `../Hipson-1.8`, cut from `main`, with a draft PR to `main`
+  so that CI runs on all three OSes on every push. Slices S0 to S5 and S7 to S9 land on it one at a time.
+- **Defects track.** Branch `fix/1.8-dogfood` in worktree `../Hipson-1.8-defects`, for S6. It is merged into the
+  integration branch after its own review.
+- **Merging.** Nothing is merged into `main`, tagged or published without the owner's approval.
+- **Worktree removal.** A worktree is removed only after every ledger task bound to it is done. This is the
+  2026-11-20 lesson.
+
+### Per-slice loop
+
+1. **Ledger task.** Each slice gets its own task, with `require_review` and these declared checks: `ruff check .`,
+   `mypy src/hipson`, `bandit -q -r src -c pyproject.toml`, `python scripts/run_tests.py` and `python -m pytest -q`,
+   all through `uv run`.
+2. **Builder.** Codex (`gpt-6.2-sol`, effort `xhigh`) works in the slice's worktree with `workspace-write` and a
+   declared scope. Its brief points to this plan, the slice's acceptance criteria and the files it owns.
+3. **Lead check.** The lead reads the diff and runs the declared checks through `hipson task verify`, plus the
+   slice's own measurements.
+4. **Review.** A read-only reviewer reviews the verified snapshot. It runs as the Claude reviewer runtime
+   (`hipson agent exec --runtime claude --role reviewer`), because Codex has refused correctness and security
+   reviews of this repository. A security review is added for S2, S4 and S7.
+5. **Repair.** At most two repair rounds by the builder. After that, the lead stops and reports.
+6. **Close.** The lead commits the slice, pushes it and closes the task with `hipson task close`.
+
+### Slices
+
+| Slice | Item | Owns | Depends on | Builder |
+| --- | --- | --- | --- | --- |
+| S0 | Baselines: fixture ledger shaped like the baseline, a measurement script, the 1.7.0 e2e "lead resumes mid-task" artifact | `scripts/`, `tests/fixtures/`, `docs/evals/` | none | Codex |
+| S1 | P0-1a projection core: `task_projection.py`, field contract, free-text bounds, size budget and truncation, no fingerprinting, gate-isolation test | new `task_projection.py`, read helpers in `ledger.py` | S0 | Codex |
+| S2 | P0-1b wiring: `detail` on the MCP tools and CLI, `show --section/--limit/--cursor`, `view_schema` and version, resume without the `_view` fingerprint, internal readers, `docs/TASK_LEDGER.md` | `mcp_server.py`, `cli.py`, `lead_context.py`, `task_context.py`, docs | S1 | Codex |
+| S3 | P0-2 `next_actions` and the schema-validation test | new `next_actions.py`, projection hook | S2 | Codex |
+| S4 | P1-3 error codes, fix calls, MCP error body, inventory test, 15 fixes | `ledger.py`, `task_flow.py`, `task_verification.py`, `task_runner.py`, `cli.py`, `mcp_server.py` | S3 | Codex |
+| S5 | P1-5 stale-task flag, `task cleanup` | `next_actions.py`, `cli.py`, read helpers | S4 | Codex |
+| S6 | P1-4 defects T-0155, T-0159, T-0160, findings resolved after repair | `agent_runtimes.py`, `flow_driver.py`, brief builder | none (parallel) | Codex |
+| S7 | P2-6 `lead` MCP profile | `mcp_server.py` | S5 | Codex |
+| S8 | P2-7 usage per task | `agent_runtimes.py`, `task_runner.py`, `ledger.py` (new columns, migration) | S5, S6 | Codex |
+| S9 | Release 1.8.0 RC: re-measure the baseline, changelog, docs, version, release notes | docs, version files | all P0 and P1; P2 if done | lead |
+
+At most two builders run at once: one on the integration branch and S6 on its own branch. If a slice grows beyond
+roughly 1,500 changed lines, it is split before it is reviewed.
+
 ## Not in 1.8
 
 - A human dashboard or web UI.
