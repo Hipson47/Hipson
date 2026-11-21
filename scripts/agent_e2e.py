@@ -121,9 +121,10 @@ def hipson_proxy(workdir: str, expected_ledger: str) -> int:
         before = snapshot(db, root)
         started = time.monotonic()
         proc = subprocess.run([sys.executable, "-c", "from hipson.cli import main; raise SystemExit(main())",
-                               *sys.argv[1:]], capture_output=True, text=True, check=False)
+                               *sys.argv[1:]], capture_output=True, text=True, encoding="utf-8", check=False)
         entry = {"args": sys.argv[1:], "exit_code": proc.returncode, "output": proc.stdout + proc.stderr,
                  "duration_seconds": time.monotonic() - started,
+                 "output_bytes": len(proc.stdout.encode("utf-8")) + len(proc.stderr.encode("utf-8")),
                  "ledger": os.environ.get("HIPSON_LEDGER"), "before": before, "after": snapshot(db, root)}
         with (root / ".harness" / "cli.jsonl").open("a", encoding="utf-8") as log:
             log.write(json.dumps(scrub_value(entry)) + "\n")
@@ -219,6 +220,13 @@ def workflow_command(args: list[str]) -> str:
     return ' '.join(['task', *args[index:index + 1]])
 
 
+def _output_bytes(entries: list[dict[str, Any]] | None) -> int | None:
+    # Older saved runs lack pre-redaction output sizes.
+    if entries is None or any("output_bytes" not in entry for entry in entries):
+        return None
+    return sum(entry["output_bytes"] for entry in entries)
+
+
 def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
     """Command choices measure discoverability/friction, never scenario acceptance."""
     reads = ('lead resume', 'task now', 'task show', 'task events', 'task board',
@@ -226,6 +234,7 @@ def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
     calls = [(i, workflow_command(e['args']), e) for i, e in enumerate(audit or [])
              if e['exit_code'] == 0 and '--help' not in e['args'] and '-h' not in e['args']]
     counts = Counter(command for _, command, _ in calls if command in reads)
+    read_entries = [entry for _, command, entry in calls if command in reads] if audit is not None else None
     failure_reads = []
     for index, _, entry in calls:
         before = {a['id']: (t['id'], a) for t in entry.get('before', {}).get('tasks', []) for a in t['assignments']}
@@ -240,6 +249,7 @@ def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
             'used_task_now': bool(counts['task now']) if audit is not None else None,
             'first_hipson_command': calls[0][1] if calls else None,
             'read_commands': {command: counts[command] for command in reads},
+            'hipson_read_output_bytes': _output_bytes(read_entries),
             'task_history_lookups': sum(counts[command] for command in reads if command not in ('lead resume', 'task now')),
             'failure_journal_read_before_recovery': all(failure_reads) if failure_reads else None}
 
@@ -254,6 +264,7 @@ def metrics(transcript: Transcript, duration: float, audit: list[dict[str, Any]]
                  "first_error_line": first_error(c.get("aggregated_output", ""))}
                 for c in invocations if c.get("exit_code") not in (0, None)]
     return {"total_commands": len(transcript.commands), "hipson_invocations": len(invocations),
+            "hipson_output_bytes": _output_bytes(audit),
             "failing_invocations": failures,
             "help_lookups": sum(bool(re.search(r"(?:--help|\s-h)(?![\w-])", c.get("command", "")))
                                 for c in transcript.commands),
