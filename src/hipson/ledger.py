@@ -1655,6 +1655,77 @@ class Ledger:
             )
         ]))
 
+    def projection_rows(self, *, task: str | None = None, project: str | Path | None = None,
+                        include_terminal: bool = False) -> list[dict[str, Any]]:
+        """Load compact read inputs from one SQLite snapshot."""
+        project_path = str(Path(project).expanduser().resolve()) if project is not None else None
+        with self._transaction(write=False):
+            version = self.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0]
+            checks = "checks" if version >= 7 else "'[]' AS checks"
+            policy = "review_policy" if version >= 11 else "'none' AS review_policy"
+            # Only schema-dependent column expressions vary. Filter values are bound.
+            tasks = [dict(row) for row in self.connection.execute(
+                f"""SELECT id, project, title, objective, status, lead, created_at, updated_at,
+                           {checks}, {policy},
+                           (SELECT MAX(timestamp) FROM events WHERE task = tasks.id) AS last_event_at
+                    FROM tasks WHERE (? IS NULL OR id = ?) AND (? IS NULL OR project = ?)
+                      AND (? OR status NOT IN ('done', 'cancelled'))
+                    ORDER BY created_at, id""",  # nosec B608
+                (task, task, project_path, project_path, task is not None or include_terminal),
+            )]
+            if task is not None and not tasks:
+                raise LedgerError(f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)")
+
+            result = ("json_extract(result, '$.status') AS result_status, "
+                      "json_extract(result, '$.summary') AS result_summary" if version >= 3 else
+                      "NULL AS result_status, NULL AS result_summary")
+            activity = ("acknowledged_at, ack_note, json_extract(activity, '$.heartbeat_at') AS heartbeat_at"
+                        if version >= 5 else "NULL AS heartbeat_at")
+            for row in tasks:
+                task_id = row["id"]
+                row["checks"] = json.loads(row["checks"])
+                assignments = self.connection.execute(
+                    f"""SELECT id, task, actor, role, mode, scope, status, started_at, ended_at, {result}, {activity}
+                        FROM assignments WHERE task = ? ORDER BY started_at, id""",  # nosec B608
+                    (task_id,),
+                )
+                row["assignments"] = [
+                    {**{key: item[key] for key in ("id", "actor", "role", "status", "started_at", "ended_at",
+                                                   "result_status", "result_summary", "heartbeat_at")},
+                     "ack_state": self._assignment_dict(item)["ack_state"]}
+                    for item in assignments
+                ]
+                row["findings"] = [dict(item) for item in self.connection.execute(
+                    "SELECT id, severity FROM findings WHERE task = ? AND status = 'open' ORDER BY created_at, id",
+                    (task_id,),
+                )] if version >= 3 else []
+                row["verifications"] = [dict(item) for item in self.connection.execute(
+                    """SELECT id, json_extract(evidence, '$.argv_sha256') AS argv_sha256,
+                              json_extract(evidence, '$.actor') AS actor,
+                              CASE WHEN json_type(evidence, '$.context') = 'object'
+                                   THEN json_extract(evidence, '$.context') END AS context,
+                              json_extract(evidence, '$.command') AS command,
+                              json_extract(evidence, '$.exit_code') AS exit_code,
+                              json_extract(evidence, '$.finished_at') AS recorded_at,
+                              json_extract(evidence, '$.revision') AS revision,
+                              json_type(evidence, '$.fingerprint') = 'text' AS fingerprint_available,
+                              json_extract(evidence, '$.error') AS error,
+                              json_extract(evidence, '$.builder_finished_seq') AS builder_finished_seq,
+                              json_extract(evidence, '$.coverage') = 'partial'
+                                OR json_type(evidence, '$.metadata_fallback_paths[0]') IS NOT NULL AS partial,
+                              json_extract(evidence, '$.state_changed') AS state_changed,
+                              json_extract(evidence, '$.cleanup_confirmed') AS cleanup_confirmed
+                       FROM verifications WHERE task = ? ORDER BY seq""",
+                    (task_id,),
+                )] if version >= 6 else []
+                row["builder_finished_seq"] = self._builder_finished_seq(task_id)
+                if any(item["role"] == "reviewer" for item in row["assignments"]):
+                    assigned, _, _, trees, _ = self._review_seqs(task_id, (), row["builder_finished_seq"])
+                    row["review_assignments"], row["review_trees"] = assigned, trees
+                else:
+                    row["review_assignments"], row["review_trees"] = {}, {}
+        return tasks
+
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):
             # A finished task stays on the board only while one of its assignments is live or unacknowledged.

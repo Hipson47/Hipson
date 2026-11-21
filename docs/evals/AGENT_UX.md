@@ -15,10 +15,16 @@ The 1.7.0 artifact uses 22 live tasks across three projects. Twelve tasks share 
 
 When measuring a later checkout, choose a new `--output` path. For surface measurements alone, omit `--resume-e2e-report`. Pass `--db PATH` to read an existing ledger. `task show` then uses the live task with the largest last recorded inventory by file count, falling back to terminal tasks if there are no live tasks. Use `--task ID` to select it explicitly. Omit `--output` to print the report.
 
+Use `uv run python scripts/agent_ux_measure.py --projection` to measure the S1 projection core
+directly against the fixture. It measures both list orders and one task without CLI or MCP dispatch.
+The fixture checks require all 22 tasks in each list, at most 32,000 bytes for board, 48,000 for now,
+and 4,000 for the heavy task. All three reads must run zero project fingerprints.
+
 ## Reading the report
 
-- `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.
+- `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `git_dirty` records whether the checkout has changes when measurement begins. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.
 - `reads` contains `full` and `compact` measurements for `task.board`, `task.now`, `lead.resume`, and `task.show`. The script checks CLI help and MCP tool schemas for `detail` and passes it explicitly where supported. A missing surface is `null`. If neither surface supports a mode, `available` is `false`. The `full` entry uses the default on 1.7.0.
+- In `--projection` mode, `projection` supplies `bytes`, `project_state_calls`, and `wall_seconds` for `task.board`, `task.now`, and `task.show`. The byte count uses default JSON serialization without a trailing newline.
 - `cli_json` and `cli_text` count UTF-8 stdout bytes, including the final newline and any JSON indentation. `mcp_json` counts UTF-8 bytes of the JSON text returned by `tools/call` before JSON-RPC envelope encoding.
 - Each surface has its own `project_state_calls` and `wall_seconds`. The count covers calls to the full `task_verification.project_state` fingerprint. Resume's separate stat-only Git checks contribute to elapsed time. Wall time includes command parsing or request dispatch, reads and rendering. Both entry points run in-process with one sample per surface and mode. Fixture setup and process startup are outside the timed calls. Compare timings on the same machine.
 - `resume_e2e` holds `scenario`, `driver`, the oracle result `passed`, and `measurement_valid` for the harness recording. `hipson_invocations` counts audited CLI calls. `read_commands` counts successful workflow reads by command, and `task_history_lookups` counts reads beyond `lead resume` and `task now`. `used_lead_resume`, `used_task_now`, and `first_hipson_command` describe how the driver found its context. `help_lookups` and `docs_lookups` count matching transcript commands.

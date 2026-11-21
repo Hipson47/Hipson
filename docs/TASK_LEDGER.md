@@ -145,6 +145,42 @@ use the **ledger watermark** (latest task update or heartbeat) to keep repeated 
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
 
+## Compact projection (view_schema 1)
+
+The projection core reads one SQLite snapshot and exposes the following fields. S1 provides it
+through `hipson.task_projection`. S2 defines the CLI and MCP calls.
+
+| Area | Kept or added |
+| --- | --- |
+| Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes task timestamps, events, verification times, assignment start/end and recorded heartbeats. |
+| Checks | Declared argv in order, or the latest ad hoc run when no checks are declared. Each check has `command`, `state`, `record_id`, `exit_code`, `recorded_at` (the run's finish time), `recorded_revision`, and `head_matches`. Declared checks match the newest record by full argv identity. |
+| Freshness | `freshness_source: "recorded"` and a note pointing to `task verify` or a verification section read for a content re-check. Check states are `missing`, `stale`, `failing`, `partial`, `unknown`, or `passed`, based on recorded evidence and builder completion history. |
+| Review | `assignment_id` and the latest reviewer attempt's state from the recorded assignment and review events. States are `not_required`, `missing`, `pending`, `incomplete`, `live`, `changed`, and `snapshot_recorded` (a completed review with matching snapshot start/end records). |
+| Assignments | `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and a one-line `summary` from the structured worker result. When no structured result exists, its status and summary are null. |
+| Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` hold the IDs of open findings at those severities. |
+| Bounds and version | Every task and list carries `view_schema`. Each task carries `reasons`, `omitted_reasons`, and `truncated_fields`. |
+
+Dropped fields include file inventories, output tails, full verification records, content fingerprints,
+worker journals, full worker results, event text, finding text, claims, and task acceptance text. Gates continue to use
+the full view. The projection compares HEAD at most once per project with a short timeout.
+`head_matches` is null when either revision is unavailable. The comparison is a separate observation
+from the recorded check state. Worktree edits can leave HEAD unchanged.
+
+Character limits count Unicode code points, including the final ellipsis. Titles have a limit of 160,
+objectives 400, reasons 240 each, and assignment summaries 200. Summaries join line breaks with spaces.
+Each task keeps the first five check reasons and counts the remainder in `omitted_reasons`.
+`truncated_fields` names shortened fields by field path with zero-based list indices.
+
+The board orders tasks by creation time, then ID. The now list puts unacknowledged results first, then
+blocked tasks or tasks with blocking/major findings, active assignments, tasks in review, and other live
+tasks. Included terminal tasks without pending results come last. ID breaks ties. Lists default to live
+tasks. The core can also include terminal tasks or project one task by ID regardless of status.
+
+The default list budgets are 32,000 bytes for board and 48,000 for now, measured as UTF-8 bytes of
+Python's default JSON serialization. Over-budget lists drop whole tasks from the end. The envelope
+reports `truncated: true`, `omitted`, and `more: {"kind": ..., "offset": ...}`. S2 will define the
+continuation call for the same filters. A budget must fit the empty envelope with its metadata.
+
 ## Change observation against scope (opt-in, 1.7)
 
 Claims stop two writers from starting on the same paths; change observation checks afterwards what

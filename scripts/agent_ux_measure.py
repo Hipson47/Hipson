@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure Hipson's CLI and MCP read surfaces offline."""
+"""Measure Hipson's CLI, MCP and compact projection reads offline."""
 
 from __future__ import annotations
 
@@ -103,17 +103,37 @@ def _select_task(db: Path) -> str:
         return max(live or tasks, key=inventory_size)["id"]
 
 
-def measure(db: Path, *, task: str | None = None, ledger_source: str = "provided") -> dict[str, Any]:
+def _measure_projection(db: Path, task: str) -> dict[str, Any]:
+    from hipson import task_projection
+
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        return {
+            "task.board": _measure(lambda: json.dumps(task_projection.project_list(store, kind="task.board"))),
+            "task.now": _measure(lambda: json.dumps(task_projection.project_list(store, kind="task.now"))),
+            "task.show": _measure(lambda: json.dumps(task_projection.project_task(store, task))),
+        }
+
+
+def measure(db: Path, *, task: str | None = None, ledger_source: str = "provided",
+            projection: bool = False) -> dict[str, Any]:
     db = db.expanduser().resolve(strict=True)
     task = task or _select_task(db)
     revision = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"],
                               capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+    dirty = bool(subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(ROOT), "-c", "core.fsmonitor=false", "status",
+         "--porcelain", "--untracked-files=normal"],
+        capture_output=True, check=True, timeout=10,
+    ).stdout)
+    report = {"schema_version": 1, "hipson_version": __version__, "git_revision": revision, "git_dirty": dirty,
+              "ledger_source": ledger_source, "task_show_id": task}
+    if projection:
+        return {**report, "projection": _measure_projection(db, task)}
     with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
         detail_tools = {tool["name"] for tool in _mcp("tools/list", {})["tools"]
                         if "detail" in tool["inputSchema"].get("properties", {})}
         reads = {name: _measure_read(name, task, mcp_detail=name in detail_tools) for name in READS}
-    return {"schema_version": 1, "hipson_version": __version__, "git_revision": revision,
-            "ledger_source": ledger_source, "task_show_id": task, "reads": reads}
+    return {**report, "reads": reads}
 
 
 def _resume_e2e(path: Path) -> dict[str, Any]:
@@ -129,17 +149,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, help="Existing SQLite ledger (default: generate a temporary fixture)")
     parser.add_argument("--task", help="Task ID to use for task show (default: select a heavy task)")
+    parser.add_argument("--projection", action="store_true", help="Measure the compact projection core directly")
     parser.add_argument("--output", type=Path, help="Write the JSON report to this path (default: stdout)")
     parser.add_argument("--resume-e2e-report", type=Path, help="Include metrics from agent_e2e.py's report.json")
     args = parser.parse_args(argv)
     try:
         resume = _resume_e2e(args.resume_e2e_report) if args.resume_e2e_report else None
         if args.db:
-            report = measure(args.db, task=args.task)
+            report = measure(args.db, task=args.task, projection=args.projection)
         else:
             with TemporaryDirectory(prefix="hipson-agent-ux-") as directory:
                 fixture = build(Path(directory))
-                report = measure(fixture.db, task=args.task or fixture.heavy_task, ledger_source="fixture")
+                report = measure(fixture.db, task=args.task or fixture.heavy_task,
+                                 ledger_source="fixture", projection=args.projection)
         report["resume_e2e"] = resume
         output = json.dumps(report, indent=2) + "\n"
         if args.output:

@@ -7,6 +7,7 @@ from unittest.mock import call, patch
 
 from hipson import __version__
 from hipson.ledger import Ledger
+from hipson.task_projection import project_list
 from scripts import agent_ux_measure
 from tests.fixtures.agent_ux_ledger import build
 
@@ -47,10 +48,11 @@ def test_agent_ux_fixture_and_report(tmp_path):
     output = tmp_path / "measurements.json"
     assert agent_ux_measure.main(["--db", str(fixture.db), "--output", str(output)]) == 0
     report = json.loads(output.read_text(encoding="utf-8"))
-    assert report.keys() == {"schema_version", "hipson_version", "git_revision", "ledger_source",
+    assert report.keys() == {"schema_version", "hipson_version", "git_revision", "git_dirty", "ledger_source",
                              "task_show_id", "reads", "resume_e2e"}
     assert report["schema_version"] == 1 and report["hipson_version"] == __version__
     assert len(report["git_revision"]) in {40, 64} and int(report["git_revision"], 16) > 0
+    assert isinstance(report["git_dirty"], bool)
     assert report["ledger_source"] == "provided" and report["resume_e2e"] is None
     assert report["task_show_id"] == fixture.heavy_task
     assert report["reads"].keys() == {"task.board", "task.now", "lead.resume", "task.show"}
@@ -58,6 +60,7 @@ def test_agent_ux_fixture_and_report(tmp_path):
     for read in report["reads"].values():
         assert read.keys() == {"full", "compact"}
         assert read["full"]["available"] is True
+        assert all(read["full"][channel]["project_state_calls"] > 0 for channel in channels)
         for measurement in read.values():
             assert measurement.keys() == {"available", *channels}
             stats = [measurement[channel] for channel in channels if measurement[channel] is not None]
@@ -74,6 +77,26 @@ def test_agent_ux_fixture_and_report(tmp_path):
         assert board["full"]["mcp_json"]["project_state_calls"] == 3
         assert board["full"]["cli_json"]["project_state_calls"] == 3
         assert 0 < board["full"]["cli_text"]["bytes"] < 10_000
+
+    assert agent_ux_measure.main(["--db", str(fixture.db), "--projection", "--output", str(output)]) == 0
+    compact = json.loads(output.read_text(encoding="utf-8"))
+    assert compact["git_revision"] == report["git_revision"] and compact["git_dirty"] == report["git_dirty"]
+    assert compact["task_show_id"] == fixture.heavy_task
+    budgets = {"task.board": 32_000, "task.now": 48_000, "task.show": 4_000}
+    assert compact["projection"].keys() == budgets.keys()
+    for name, budget in budgets.items():
+        stats = compact["projection"][name]
+        assert 0 < stats["bytes"] <= budget
+        assert stats["project_state_calls"] == 0 and stats["wall_seconds"] >= 0
+    with closing(Ledger(fixture.db, read_only=True)) as store:
+        for kind in ("task.board", "task.now"):
+            projection = project_list(store, kind=kind)
+            by_id = {task["id"]: task for task in projection["tasks"]}
+            assert set(by_id) == {task["id"] for task in tasks}
+            assert projection["truncated"] is False and projection["omitted"] == 0
+            assert by_id[fixture.heavy_task]["checks"][0]["head_matches"] is True
+            assert by_id[stale["id"]]["checks"][0]["head_matches"] is False
+            assert by_id[stale["id"]]["checks"][0]["state"] == "passed"
 
 
 def test_agent_ux_detail_is_explicit_on_supported_surfaces():
