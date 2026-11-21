@@ -1656,75 +1656,151 @@ class Ledger:
         ]))
 
     def projection_rows(self, *, task: str | None = None, project: str | Path | None = None,
-                        include_terminal: bool = False) -> list[dict[str, Any]]:
-        """Load compact read inputs from one SQLite snapshot."""
+                        include_terminal: bool = False, inventory_limit: int = 32) -> list[dict[str, Any]]:
+        """Load compact read inputs in batches from one SQLite snapshot."""
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         with self._transaction(write=False):
             version = self.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0]
             checks = "checks" if version >= 7 else "'[]' AS checks"
             policy = "review_policy" if version >= 11 else "'none' AS review_policy"
-            # Only schema-dependent column expressions vary. Filter values are bound.
-            tasks = [dict(row) for row in self.connection.execute(
-                f"""SELECT id, project, title, objective, status, lead, created_at, updated_at,
-                           {checks}, {policy},
-                           (SELECT MAX(timestamp) FROM events WHERE task = tasks.id) AS last_event_at
+            unread = "OR (COALESCE(acknowledged_at, '') = '' AND ack_note <> ?)" if version >= 5 else ""
+            tasks = {row["id"]: dict(row) for row in self.connection.execute(
+                f"""SELECT id, project, title, objective, status, lead, created_at, updated_at, {checks}, {policy}
                     FROM tasks WHERE (? IS NULL OR id = ?) AND (? IS NULL OR project = ?)
-                      AND (? OR status NOT IN ('done', 'cancelled'))
+                      AND (? OR status NOT IN ('done', 'cancelled') OR EXISTS (
+                          SELECT 1 FROM assignments WHERE task = tasks.id AND (status = 'active' {unread})))
                     ORDER BY created_at, id""",  # nosec B608
-                (task, task, project_path, project_path, task is not None or include_terminal),
-            )]
+                (task, task, project_path, project_path, task is not None or include_terminal,
+                 *((LEGACY_ACK_NOTE,) if version >= 5 else ())),
+            )}
             if task is not None and not tasks:
                 raise LedgerError(f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)")
+
+            def select(sql: str, *args: Any) -> Iterator[sqlite3.Row]:
+                # The only interpolation here is a bounded list of parameter placeholders.
+                ids = list(tasks)
+                for start in range(0, len(ids), 500):
+                    batch = ids[start:start + 500]
+                    yield from self.connection.execute(sql.format(ids=", ".join("?" for _ in batch)), (*batch, *args))
+
+            for row in tasks.values():
+                row.update(checks=json.loads(row["checks"]), assignments=[], verifications=[], findings=[],
+                           last_event_at=None, assigned={}, delivery={}, closure=None, review_trees={},
+                           latest_verification_seq=0, verification_events=[])
+            for event in select(
+                """SELECT * FROM (
+                       SELECT task, seq, type, summary, refs,
+                              MAX(timestamp) OVER (PARTITION BY task) AS last_event_at,
+                              MAX(seq) OVER (PARTITION BY task) AS last_seq
+                       FROM events WHERE task IN ({ids})
+                   ) WHERE seq = last_seq OR type IN ('assigned', 'lead_verified', 'reviewed', 'finished', 'reaped', 'status')
+                   ORDER BY seq"""
+            ):
+                row = tasks[event["task"]]
+                row["last_event_at"] = event["last_event_at"]
+                refs = json.loads(event["refs"])
+                if event["type"] == "assigned" and refs:
+                    row["assigned"].setdefault(refs[0], event["seq"])
+                elif event["type"] in ("finished", "reaped"):
+                    row["delivery"].update(dict.fromkeys(refs, event["seq"]))
+                elif event["type"] == "status" and any(
+                    event["summary"].startswith(f"{previous} -> {row['status']}") for previous in STATUSES
+                ):
+                    row["closure"] = event["seq"]
+                elif event["type"] == "lead_verified":
+                    row["latest_verification_seq"] = event["seq"]
+                    match = VERIFIED_PATTERN.search(event["summary"])
+                    tree = match.groups() if match else ("", "")
+                    row["verification_events"].append((refs, tree))
+                elif event["type"] == "reviewed" and refs and (match := REVIEWED_PATTERN.search(event["summary"])):
+                    phase, revision, fingerprint, source = match.groups()
+                    row["review_trees"].setdefault(refs[0], {}).setdefault(phase, (revision, fingerprint, source or "live"))
 
             result = ("json_extract(result, '$.status') AS result_status, "
                       "json_extract(result, '$.summary') AS result_summary" if version >= 3 else
                       "NULL AS result_status, NULL AS result_summary")
             activity = ("acknowledged_at, ack_note, json_extract(activity, '$.heartbeat_at') AS heartbeat_at"
-                        if version >= 5 else "NULL AS heartbeat_at")
-            for row in tasks:
-                task_id = row["id"]
-                row["checks"] = json.loads(row["checks"])
-                assignments = self.connection.execute(
-                    f"""SELECT id, task, actor, role, mode, scope, status, started_at, ended_at, {result}, {activity}
-                        FROM assignments WHERE task = ? ORDER BY started_at, id""",  # nosec B608
-                    (task_id,),
-                )
-                row["assignments"] = [
-                    {**{key: item[key] for key in ("id", "actor", "role", "status", "started_at", "ended_at",
-                                                   "result_status", "result_summary", "heartbeat_at")},
-                     "ack_state": self._assignment_dict(item)["ack_state"]}
-                    for item in assignments
-                ]
-                row["findings"] = [dict(item) for item in self.connection.execute(
-                    "SELECT id, severity FROM findings WHERE task = ? AND status = 'open' ORDER BY created_at, id",
-                    (task_id,),
-                )] if version >= 3 else []
-                row["verifications"] = [dict(item) for item in self.connection.execute(
-                    """SELECT id, json_extract(evidence, '$.argv_sha256') AS argv_sha256,
-                              json_extract(evidence, '$.actor') AS actor,
-                              CASE WHEN json_type(evidence, '$.context') = 'object'
-                                   THEN json_extract(evidence, '$.context') END AS context,
-                              json_extract(evidence, '$.command') AS command,
-                              json_extract(evidence, '$.exit_code') AS exit_code,
-                              json_extract(evidence, '$.finished_at') AS recorded_at,
-                              json_extract(evidence, '$.revision') AS revision,
-                              json_type(evidence, '$.fingerprint') = 'text' AS fingerprint_available,
-                              json_extract(evidence, '$.error') AS error,
-                              json_extract(evidence, '$.builder_finished_seq') AS builder_finished_seq,
-                              json_extract(evidence, '$.coverage') = 'partial'
-                                OR json_type(evidence, '$.metadata_fallback_paths[0]') IS NOT NULL AS partial,
-                              json_extract(evidence, '$.state_changed') AS state_changed,
-                              json_extract(evidence, '$.cleanup_confirmed') AS cleanup_confirmed
-                       FROM verifications WHERE task = ? ORDER BY seq""",
-                    (task_id,),
-                )] if version >= 6 else []
-                row["builder_finished_seq"] = self._builder_finished_seq(task_id)
-                if any(item["role"] == "reviewer" for item in row["assignments"]):
-                    assigned, _, _, trees, _ = self._review_seqs(task_id, (), row["builder_finished_seq"])
-                    row["review_assignments"], row["review_trees"] = assigned, trees
-                else:
-                    row["review_assignments"], row["review_trees"] = {}, {}
-        return tasks
+                        if version >= 5 else "NULL AS acknowledged_at, NULL AS ack_note, NULL AS heartbeat_at")
+            for assignment in select(
+                f"""SELECT task, id, actor, role, mode, status, started_at, ended_at, {result}, {activity}
+                    FROM assignments WHERE task IN ({{ids}}) ORDER BY started_at, id"""  # nosec B608
+            ):
+                row = tasks[assignment["task"]]
+                delivery = row["delivery"].get(assignment["id"])
+                historical = (row["status"] in ("done", "cancelled") and row["closure"] is not None
+                              and delivery is not None and delivery < row["closure"])
+                # Match the board's acknowledgement semantics, including outcomes delivered before closure.
+                ack_state = ("not_required" if assignment["status"] == "active" else
+                             "acknowledged" if assignment["acknowledged_at"] else "not_required"
+                             if version < 5 or assignment["ack_note"] == LEGACY_ACK_NOTE or historical else
+                             "unacknowledged")
+                row["assignments"].append({**dict(assignment), "ack_state": ack_state})
+
+            for task_id, row in list(tasks.items()):
+                row["has_active"] = any(item["status"] == "active" for item in row["assignments"])
+                row["has_unacknowledged"] = any(item["ack_state"] == "unacknowledged" for item in row["assignments"])
+                if (task is None and not include_terminal and row["status"] in ("done", "cancelled")
+                        and not (row["has_active"] or row["has_unacknowledged"])):
+                    del tasks[task_id]
+                    continue
+                row["builder_finished_seq"] = max(
+                    (row["delivery"].get(item["id"], 0) for item in row["assignments"]
+                     if item["role"] == "builder" and item["status"] != "active"), default=0)
+
+            if version >= 3:
+                for finding in select(
+                    """SELECT task, id, severity, total FROM (
+                           SELECT task, id, severity, COUNT(*) OVER by_severity AS total,
+                                  ROW_NUMBER() OVER (by_severity ORDER BY created_at, id) AS position
+                           FROM findings WHERE task IN ({ids}) AND status = 'open'
+                           WINDOW by_severity AS (PARTITION BY task, severity)
+                       ) WHERE position <= CASE WHEN severity IN ('blocking', 'major') THEN 10 ELSE 1 END
+                       ORDER BY position"""
+                ):
+                    tasks[finding["task"]]["findings"].append(dict(finding))
+
+            if version >= 6:
+                # Rank just the identities, then extract display fields and inspect metadata on the selected rows.
+                # An unidentifiable record has its own group so it can conservatively shadow older evidence.
+                declared = "json_array_length(tasks.checks) > 0" if version >= 7 else "0"
+                for verification in select(
+                    f"""WITH identities AS (
+                            SELECT seq, v.task, CASE WHEN {declared} THEN (
+                                SELECT CASE WHEN type = 'text' AND length(CAST(value AS BLOB)) = 64
+                                                  AND value NOT GLOB '*[^0-9a-f]*' THEN value END
+                                FROM json_each(CASE WHEN json_valid(evidence) THEN evidence END)
+                                WHERE key = 'argv_sha256' ORDER BY id DESC LIMIT 1
+                            ) END AS identity
+                            FROM verifications v JOIN tasks ON tasks.id = v.task WHERE v.task IN ({{ids}})
+                        ), latest AS (
+                            SELECT MAX(seq) AS seq, identity FROM identities GROUP BY task, identity
+                        ), selected AS (
+                            SELECT v.task, v.id, v.seq, latest.identity, CASE WHEN json_valid(evidence) THEN
+                                CASE WHEN json_type(evidence) = 'object' THEN evidence END END AS body
+                            FROM latest JOIN verifications v USING (seq)
+                        )
+                        SELECT task, id, seq, identity,
+                               CAST(json_remove(body, '$.output_tail', '$.generated_files', '$.changes', '$.untrusted_fields',
+                                   '$.metadata_fallback_paths', '$.subject',
+                                   CASE WHEN json_array_length(body, '$.files') <= ?
+                                             AND length(json_extract(body, '$.files')) <= 32768
+                                        THEN '$.__unused_inventory_limit' ELSE '$.files' END) AS BLOB) AS evidence,
+                               json_type(body, '$.files') AS files_type,
+                               json_type(body, '$.metadata_fallback_paths') AS fallback_type,
+                               EXISTS (SELECT 1 FROM json_each(body, '$.metadata_fallback_paths')
+                                       WHERE type <> 'text') AS malformed_fallback,
+                               EXISTS (SELECT 1 FROM json_each(body)
+                                       GROUP BY key HAVING COUNT(*) > 1) AS duplicate_fields,
+                               COALESCE(json_array_length(body, '$.metadata_fallback_paths'), 0) > 0 OR EXISTS (
+                                   SELECT 1 FROM json_each(body, '$.files') AS file WHERE
+                                       CASE WHEN file.type = 'object' THEN
+                                           instr(json_extract(file.value, '$.state'), ':metadata:') > 0 END
+                               ) AS metadata_fallback
+                        FROM selected ORDER BY seq""",  # nosec B608
+                    inventory_limit,
+                ):
+                    tasks[verification["task"]]["verifications"].append(dict(verification))
+        return list(tasks.values())
 
     def board(self) -> list[TaskView]:
         with self._transaction(write=False):

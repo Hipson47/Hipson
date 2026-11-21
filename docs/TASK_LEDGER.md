@@ -147,39 +147,44 @@ for wall-clock activity ages. Git and ledger are separate observations, not an a
 
 ## Compact projection (view_schema 1)
 
-The projection core reads one SQLite snapshot and exposes the following fields. S1 provides it
-through `hipson.task_projection`. S2 defines the CLI and MCP calls.
+The projection core reads one SQLite snapshot. S1 provides it through `hipson.task_projection`.
+S2 defines the CLI and MCP calls. Task and list views carry `gate: "not_evaluated"` and
+`gate_note: "task verify / task close evaluate the gates"`.
 
-| Area | Kept or added |
+| Area | Fields and interpretation |
 | --- | --- |
-| Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes task timestamps, events, verification times, assignment start/end and recorded heartbeats. |
-| Checks | Declared argv in order, or the latest ad hoc run when no checks are declared. Each check has `command`, `state`, `record_id`, `exit_code`, `recorded_at` (the run's finish time), `recorded_revision`, and `head_matches`. Declared checks match the newest record by full argv identity. |
-| Freshness | `freshness_source: "recorded"` and a note pointing to `task verify` or a verification section read for a content re-check. Check states are `missing`, `stale`, `failing`, `partial`, `unknown`, or `passed`, based on recorded evidence and builder completion history. |
-| Review | `assignment_id` and the latest reviewer attempt's state from the recorded assignment and review events. States are `not_required`, `missing`, `pending`, `incomplete`, `live`, `changed`, and `snapshot_recorded` (a completed review with matching snapshot start/end records). |
-| Assignments | `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and a one-line `summary` from the structured worker result. When no structured result exists, its status and summary are null. |
-| Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` hold the IDs of open findings at those severities. |
-| Bounds and version | Every task and list carries `view_schema`. Each task carries `reasons`, `omitted_reasons`, and `truncated_fields`. |
+| Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes event timestamps, selected verification finish times, and assignment start, end, and heartbeat times. |
+| Checks | Up to 16 declared argv lists in order, matched to the newest record by full argv identity. A task without declared checks shows its latest ad hoc record if one exists. Each check shows `command`, `state`, `record_id`, `exit_code`, `recorded_at`, `recorded_revision`, and `head_matches`. |
+| Freshness | `freshness_source: "recorded"` and `freshness_note`. Check states are `recorded_ok`, `stale`, `failing`, `partial`, `missing`, and `unknown`. A different HEAD makes the evidence stale. An unavailable HEAD is represented by a null `head_matches`. |
+| Review | `assignment_id` and the latest reviewer attempt's state. States are `not_required`, `missing`, `pending`, `ineligible`, `incomplete`, `live`, `changed`, and `recorded_snapshot`. An eligible reviewer is independent of the lead and builders, ran in read-only mode, and started after the latest finished builder and recorded verification. |
+| Assignments | The newest eight in chronological order and an `omitted_assignments` count. Each has `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and the structured result's one-line `summary`. A successful assignment outcome displays as `completed`. |
+| Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` each list at most 10 open IDs. Use `open_findings` for their total counts. |
 
-Dropped fields include file inventories, output tails, full verification records, content fingerprints,
-worker journals, full worker results, event text, finding text, claims, and task acceptance text. Gates continue to use
-the full view. The projection compares HEAD at most once per project with a short timeout.
-`head_matches` is null when either revision is unavailable. The comparison is a separate observation
-from the recorded check state. Worktree edits can leave HEAD unchanged.
+Gates use the full view. To report `recorded_ok`, the projection must corroborate the recorded evidence
+against raw content in a clean Git tree of at most 32 regular files and 256 KiB. It reports `unknown`
+when a matching HEAD cannot establish current content within these bounds. HEAD reads run concurrently
+under a one-second batch deadline. The Git observations happen separately from the SQLite snapshot.
 
-Character limits count Unicode code points, including the final ellipsis. Titles have a limit of 160,
-objectives 400, reasons 240 each, and assignment summaries 200. Summaries join line breaks with spaces.
-Each task keeps the first five check reasons and counts the remainder in `omitted_reasons`.
-`truncated_fields` names shortened fields by field path with zero-based list indices.
+Character limits count Unicode code points, including the ellipsis. Each argv element has a 200-character
+limit, with 400 characters for the command including spaces between arguments. Titles allow 160
+characters, objectives 400, and projects, leads, actors and assignment summaries 200 each. Worker text has
+display controls escaped. Summaries join line breaks with spaces. Each task keeps the first five check
+reasons, at 240 characters each, and counts the remainder in `omitted_reasons`. `truncated_fields`
+names shortened fields by path with zero-based list indices.
 
-The board orders tasks by creation time, then ID. The now list puts unacknowledged results first, then
-blocked tasks or tasks with blocking/major findings, active assignments, tasks in review, and other live
-tasks. Included terminal tasks without pending results come last. ID breaks ties. Lists default to live
-tasks. The core can also include terminal tasks or project one task by ID regardless of status.
+Board orders tasks by creation time and ID. Now prioritizes unacknowledged results, blocked tasks
+and tasks with blocking or major findings, active assignments, tasks in review, and other live tasks.
+Included terminal tasks without unread results come last. ID breaks ties. Both default lists include
+terminal tasks that still have active or unacknowledged assignments. The core can include all
+terminal tasks or project any single task by ID.
 
-The default list budgets are 32,000 bytes for board and 48,000 for now, measured as UTF-8 bytes of
-Python's default JSON serialization. Over-budget lists drop whole tasks from the end. The envelope
-reports `truncated: true`, `omitted`, and `more: {"kind": ..., "offset": ...}`. S2 will define the
-continuation call for the same filters. A budget must fit the empty envelope with its metadata.
+Use `task_projection.dumps(obj)` for compact JSON with `ensure_ascii=False` and compact separators.
+The default budgets count UTF-8 bytes of that output, with 32,000 bytes for board and 48,000 for now.
+`project_list` accepts `offset` and a positive `limit`. A bounded page includes `truncated: true`,
+`omitted`, and a continuation `more: {"kind": ..., "offset": ...}` while rows remain. If the first
+task cannot fit, the page returns its ID, status, title, `too_large: true`, and a `task show` hint
+and advances the offset. The budget must fit the envelope and a minimal stub when a task remains.
+Use the same filters and ordering when continuing a page.
 
 ## Change observation against scope (opt-in, 1.7)
 

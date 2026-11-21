@@ -2,23 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
-from collections.abc import Sequence
+import sys
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict
+from pathlib import Path
+from time import monotonic
+from typing import Any, Literal, TypedDict, TypeVar, cast
 
-from hipson.ledger import FINDING_SEVERITIES, Ledger
+from hipson.display import escape_display_controls
+from hipson.lead_context import GIT_READ_LIMIT
+from hipson.ledger import FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
 from hipson.redaction import redact_text
-from hipson.task_verification import argv_identity
+from hipson.task_verification import _changes, _fingerprint, _stored_files, _worker_context, argv_identity
 
 VIEW_SCHEMA = 1
 ListKind = Literal["task.board", "task.now"]
 LIST_BUDGETS: dict[ListKind, int] = {"task.board": 32_000, "task.now": 48_000}
 TERMINAL = ("done", "cancelled")
+GATE_NOTE = "task verify / task close evaluate the gates"
 REASON_LIMIT = 5
+ASSIGNMENT_LIMIT = 8
+GIT_TIMEOUT = 1
+PROOF_FILES = 32
+PROOF_BYTES = 256 * 1024
+REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+T = TypeVar("T")
+SelectedRecord = tuple[int, str | None, dict[str, Any] | None]
 
 
 class CheckProjection(TypedDict):
@@ -50,6 +66,8 @@ class ReviewProjection(TypedDict):
 
 class TaskProjection(TypedDict):
     view_schema: int
+    gate: Literal["not_evaluated"]
+    gate_note: str
     id: str
     project: str
     title: str
@@ -62,6 +80,7 @@ class TaskProjection(TypedDict):
     freshness_note: str
     review: ReviewProjection
     assignments: list[AssignmentProjection]
+    omitted_assignments: int
     open_findings: dict[str, int]
     blocking_findings: list[str]
     major_findings: list[str]
@@ -73,198 +92,448 @@ class TaskProjection(TypedDict):
     last_activity_at: str
 
 
+class TaskStub(TypedDict):
+    id: str
+    status: str
+    title: str
+    too_large: Literal[True]
+    hint: str
+
+
 class ListProjection(TypedDict):
     view_schema: int
+    gate: Literal["not_evaluated"]
+    gate_note: str
     kind: ListKind
-    tasks: Sequence[TaskProjection]
+    tasks: Sequence[TaskProjection | TaskStub]
     truncated: bool
     omitted: int
     more: dict[str, str | int] | None
 
 
-def _head(project: str) -> str | None:
+def dumps(obj: object) -> str:
+    """Serialize a compact view. Budgets count the UTF-8 bytes of this string."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _size(obj: object) -> int:
+    return len(dumps(obj).encode("utf-8"))
+
+
+def _git(project: str, *args: str, timeout: float = GIT_TIMEOUT) -> bytes | None:
+    # Match lead_context._git hardening, with the compact read's shorter timeout.
+    if timeout <= 0:
+        return None
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "-c", "protocol.allow=never", "-C", project, "rev-parse", "--verify", "HEAD"],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=1, check=True,
+            ["git", "--no-pager", "--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false",
+             "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C", project, *args],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, check=False,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    sha = result.stdout.strip()
-    return sha.decode("ascii") if re.fullmatch(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) else None
+    return result.stdout if result.returncode == 0 and len(result.stdout) <= GIT_READ_LIMIT else None
 
 
-def _bound(text: str, limit: int, field: str, truncated: list[str]) -> str:
-    text = redact_text(text)
-    if len(text) <= limit:
-        return text
+def _head(project: str) -> str | None:
+    raw = _git(project, "rev-parse", "--verify", "HEAD")
+    sha = raw.strip().decode("ascii", errors="replace") if raw else ""
+    return sha if REVISION.fullmatch(sha) else None
+
+
+def _raw_regular_file(path: Path, before: os.stat_result) -> bytes:
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, os.O_RDONLY | flags), "rb") as stream:
+        opened = os.fstat(stream.fileno())
+        if not os.path.samestat(opened, before) or not stat.S_ISREG(opened.st_mode):
+            raise ValueError("File was replaced during the compact read")
+        data = stream.read(before.st_size + 1)
+    after = path.lstat()
+    if (len(data) != before.st_size or before.st_size != after.st_size or
+            (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns, before.st_ctime_ns) !=
+            (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns)):
+        raise ValueError("File changed during the compact read")
+    return data
+
+
+def _clean_tree(project: str, head: str, db: Path) -> dict[str, Any] | None:
+    """Corroborate a small, clean Git tree by reading raw files, without a full gate scan."""
+    deadline = monotonic() + GIT_TIMEOUT
+
+    def git(cwd: str, *args: str) -> bytes | None:
+        return _git(cwd, *args, timeout=deadline - monotonic())
+
+    try:
+        top = git(project, "rev-parse", "--show-toplevel")
+        if not top:
+            return None
+        top_path = os.fsdecode(top).removesuffix("\n")
+        if sys.platform == "win32":
+            top_path = top_path.removesuffix("\r")
+        root = Path(top_path).resolve(strict=True)
+        tree = git(str(root), "ls-tree", "-r", "-z", "--full-tree", head)
+        if tree is None or tree.count(b"\0") > PROOF_FILES:
+            return None
+        if git(str(root), "ls-files", "--others", "--exclude-standard", "-z") != b"":
+            return None
+        index = []
+        files = []
+        remaining = PROOF_BYTES
+        excluded = {db, *(Path(str(db) + suffix) for suffix in ("-wal", "-shm", "-journal"))}
+        algorithm = "sha256" if len(head) == 64 else "sha1"
+        for entry in sorted(tree.split(b"\0")[:-1], key=lambda item: item.split(b"\t", 1)[1]):
+            metadata, name = entry.split(b"\t", 1)
+            mode, kind, blob = metadata.split()
+            filename = os.fsdecode(name)
+            relative = Path(filename)
+            if (kind != b"blob" or mode not in (b"100644", b"100755") or relative.is_absolute()
+                    or ".." in relative.parts or monotonic() >= deadline):
+                return None
+            path = root / relative
+            if path in excluded or any(
+                parent.is_symlink() for parent in path.parents if parent != root and parent.is_relative_to(root)
+            ):
+                return None
+            info = path.lstat()
+            actual_mode = b"100755" if os.name == "posix" and info.st_mode & stat.S_IXUSR else b"100644"
+            if not stat.S_ISREG(info.st_mode) or info.st_size > remaining or mode != actual_mode:
+                return None
+            data = _raw_regular_file(path, info)
+            remaining -= len(data)
+            digest = hashlib.new(algorithm, b"blob " + str(len(data)).encode() + b"\0" + data, usedforsecurity=False)
+            if digest.hexdigest().encode() != blob:
+                return None
+            index.append(mode + b" " + blob + b" 0\t" + name + b"\0")
+            files.append({"path": filename, "state": mode.decode() + ":" + hashlib.sha256(data).hexdigest()})
+        if git(str(root), "ls-files", "--stage", "-z") != b"".join(index):
+            return None
+        current_head = git(project, "rev-parse", "--verify", "HEAD")
+        if not current_head or current_head.strip() != head.encode():
+            return None
+        return {"files": _stored_files(files), "fingerprint": _fingerprint(files)}
+    except (OSError, ValueError, RuntimeError, IndexError):
+        return None
+
+
+def _observe(projects: Sequence[str], read: Callable[[str], T]) -> dict[str, T]:
+    if not projects:
+        return {}
+    pool = ThreadPoolExecutor(max_workers=min(4, len(projects)))
+    try:
+        pending = {project: pool.submit(read, project) for project in projects}
+        done, _ = wait(pending.values(), timeout=GIT_TIMEOUT)
+        return {project: future.result() for project, future in pending.items() if future in done}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _text(value: str) -> str:
+    return escape_display_controls(redact_text(value))
+
+
+def _bound(value: str, limit: int, field: str, truncated: list[str]) -> str:
+    value = _text(value)
+    if len(value) <= limit:
+        return value
     truncated.append(field)
-    return text[:limit - 1] + "…"
+    return value[:limit - 1] + "…"
 
 
-def _check_reasons(record: dict[str, Any] | None, lead: str, builder_seq: int) -> list[tuple[str, str]]:
-    if record is None:
-        return [("missing", "No recorded verification")]
+def _command(argv: list[str], index: int, truncated: list[str]) -> list[str]:
+    command: list[str] = []
+    available = 400
+    shortened = False
+    for arg in argv:
+        if available <= 0:
+            shortened = True
+            break
+        arg = _text(arg)
+        limit = min(200, available)
+        if len(arg) > limit:
+            arg = arg[:limit - 1] + "…"
+            shortened = True
+        command.append(arg)
+        available -= len(arg) + 1  # Space between arguments.
+    if shortened:
+        truncated.append(f"checks.{index}.command")
+    return command
+
+
+def _timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or len(value) > 64 or not value.isprintable():
+        return None
+    try:
+        stamp = datetime.fromisoformat(value)
+        return stamp.astimezone(UTC) if stamp.tzinfo is not None else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def _argv(value: object) -> bool:
+    return isinstance(value, list) and bool(value) and all(isinstance(part, str) for part in value)
+
+
+def _record(row: dict[str, Any]) -> dict[str, Any] | None:
+    body = row["evidence"]
+    if not isinstance(body, bytes) or len(body) > 65_536 or row["duplicate_fields"]:
+        return None
+    try:
+        record = json.loads(body.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return None
+    record_id, exit_code, revision = record.get("id"), record.get("exit_code"), record.get("revision")
+    builder_seq, context, files = record.get("builder_finished_seq"), record.get("context"), record.get("files")
+    cleanup, fingerprint = record.get("cleanup_confirmed"), record.get("fingerprint")
+    if (not isinstance(record_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", record_id) or record_id != row["id"]
+            or type(exit_code) is not int or not -(2**31) <= exit_code < 2**32
+            or not isinstance(revision, str) or (revision != "none" and not REVISION.fullmatch(revision))
+            or _timestamp(record.get("finished_at")) is None or not _argv(record.get("command"))
+            or type(builder_seq) is not int or builder_seq < 0
+            or type(record.get("state_changed")) is not bool
+            or (cleanup is not None and type(cleanup) is not bool)
+            or not isinstance(record.get("actor"), str)
+            or not isinstance(context, dict) or set(context) != {"role", "assignment", "task"}
+            or any(value is not None and not isinstance(value, str) for value in context.values())
+            or (fingerprint is not None and not isinstance(fingerprint, str))
+            or record.get("coverage") not in (None, "complete", "partial")
+            or row["fallback_type"] not in (None, "array") or row["malformed_fallback"]
+            or row["files_type"] not in (None, "array")):
+        return None
+    if files is not None and any(
+        not isinstance(item, dict) or not isinstance(item.get("state"), str)
+        or not isinstance(item.get("path"), str) or (item.get("key") and not isinstance(item["key"], str))
+        for item in files
+    ):
+        return None
+    record["metadata_fallback"] = row["metadata_fallback"] or any(
+        ":metadata:" in item["state"] for item in files or []
+    )
+    record["inventory_omitted"] = row["files_type"] == "array" and files is None
+    return record
+
+
+def _check_reasons(record: dict[str, Any], lead: str, builder_seq: int, head_matches: bool | None,
+                   current: dict[str, Any] | None) -> list[tuple[str, str]]:
     reasons = []
+    if head_matches is False:
+        reasons.append(("stale", "HEAD moved since verification"))
     if record["state_changed"]:
         reasons.append(("stale", "Project changed during verification or cleanup was unconfirmed"))
-    if (record["builder_finished_seq"] or 0) < builder_seq:
+    if record["builder_finished_seq"] < builder_seq:
         reasons.append(("stale", "Verification predates the latest finished builder assignment"))
     if record["exit_code"] != 0:
         reasons.append(("failing", f"Verification exit code: {record['exit_code']}"))
-    if record["partial"]:
+    if record.get("coverage") == "partial" or record["metadata_fallback"]:
         reasons.append(("partial", "Verification recorded partial content coverage"))
-    if not record["fingerprint_available"]:
-        error = record["error"] or "cause unavailable"
-        reasons.append(("unknown", f"Verification recorded no working-tree fingerprint: {error}"))
-    if record["cleanup_confirmed"] == 0:
+    if not record.get("fingerprint"):
+        error = record.get("error")
+        detail = error if isinstance(error, str) and error else "cause unavailable"
+        reasons.append(("unknown", f"Verification recorded no working-tree fingerprint: {detail}"))
+    if record.get("cleanup_confirmed") is False:
         reasons.append(("unknown", "Verification process cleanup was unconfirmed"))
-    context = json.loads(record["context"]) if record["context"] else None
-    if (record["actor"] != lead or not isinstance(context, dict)
-            or set(context) != {"role", "assignment", "task"} or context["assignment"] is not None
-            or str(context["role"] or "").strip().lower() == "worker"):
+    if record["actor"] != lead or _worker_context(record["context"]):
         reasons.append(("unknown", "Verification was recorded without the task lead's verification context"))
-    return reasons
+    if reasons:
+        return reasons
+    if head_matches is not True or current is None or record["inventory_omitted"]:
+        return [("unknown", "Current working-tree content could not be corroborated in the compact view")]
+    files = record.get("files")
+    changed = _changes({"files": files}, current) if files is not None else record["fingerprint"] != current["fingerprint"]
+    return [("stale", "Working tree differs from the recorded verification")] if changed else []
 
 
-def _checks(row: dict[str, Any], head: str | None, reasons: list[str]) -> list[CheckProjection]:
-    records = row["verifications"]
-    latest = {record["argv_sha256"]: record for record in records}
-    pairs = [(command, latest.get(argv_identity(command))) for command in row["checks"]]
-    if not pairs and records:
-        pairs = [(json.loads(records[-1]["command"]), records[-1])]
+def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None, current: dict[str, Any] | None,
+            reasons: list[str], truncated: list[str]) -> list[CheckProjection]:
+    latest = {identity: (seq, item) for seq, identity, item in records if identity is not None}
+    ambiguous = max((seq for seq, identity, _ in records if identity is None), default=0)
+    declared = row["checks"]
+    pairs = [(command, *latest.get(argv_identity(command), (0, None))) for command in declared[:MAX_CHECKS]]
+    if len(declared) > MAX_CHECKS:
+        truncated.append("checks")
+    if not declared and records:
+        seq, _, record = records[-1]
+        pairs = [(record["command"] if record is not None else [], seq, record)]
     checks = []
-    for number, (command, record) in enumerate(pairs, 1):
-        problems = _check_reasons(record, row["lead"], row["builder_finished_seq"])
-        reasons.extend(f"Check {number}: {reason}" for _, reason in problems)
-        revision = record["revision"] if record else None
+    for index, (command, seq, record) in enumerate(pairs):
+        revision = record["revision"] if record is not None else None
+        matches = head == revision if head is not None and revision is not None else None
+        if (declared and ambiguous > seq) or (record is None and seq > 0):
+            record, revision, matches = None, None, None
+            problems = [("unknown", "Recorded verification is malformed or has no usable identity")]
+        elif record is None:
+            problems = [("missing", "No recorded verification")]
+        else:
+            try:
+                problems = _check_reasons(record, row["lead"], row["builder_finished_seq"], matches, current)
+            except (ValueError, TypeError):
+                record, revision, matches = None, None, None
+                problems = [("unknown", "Recorded verification inventory is malformed")]
+        reasons.extend(f"Check {index + 1}: {reason}" for _, reason in problems)
         checks.append(CheckProjection(
-            command=[redact_text(arg) for arg in command],
-            state=problems[0][0] if problems else "passed",
-            record_id=record["id"] if record else None,
+            command=_command(command, index, truncated),
+            state=problems[0][0] if problems else "recorded_ok",
+            record_id=_text(record["id"]) if record else None,
             exit_code=record["exit_code"] if record else None,
-            recorded_at=record["recorded_at"] if record else None,
+            recorded_at=record["finished_at"] if record else None,
             recorded_revision=revision,
-            head_matches=head == revision if head and revision and revision != "none" else None,
+            head_matches=matches,
         ))
     return checks
 
 
-def _review(row: dict[str, Any]) -> ReviewProjection:
-    assigned = row["review_assignments"]
+def _review(row: dict[str, Any], records: list[SelectedRecord]) -> ReviewProjection:
+    assigned = row["assigned"]
     reviewer = max((item for item in row["assignments"] if item["role"] == "reviewer"),
                    key=lambda item: assigned.get(item["id"], 0), default=None)
     if reviewer is None:
         state = "missing" if row["review_policy"] == "required" else "not_required"
         return {"state": state, "assignment_id": None}
     assignment = reviewer["id"]
-    trees = row["review_trees"].get(assignment, {})
-    start, end = trees.get("start"), trees.get("end")
-    if reviewer["status"] == "active":
+    # review_state only uses the actor/role on builders and these result fields on the reviewer.
+    builders = [cast(Assignment, item) for item in row["assignments"] if item["role"] == "builder"]
+    completed = {"status": "completed"}
+    candidate = cast(Assignment, {**reviewer, "status": "passed", "result": completed})
+    seqs = (assigned, row["builder_finished_seq"], row["latest_verification_seq"])
+    trees = row["review_trees"]
+    start, end = trees.get(assignment, {}).get("start"), trees.get(assignment, {}).get("end")
+    if not review_state("required", row["lead"], [*builders, candidate], *seqs)["passing"]:
+        state = "ineligible"
+    elif reviewer["status"] == "active":
         state = "pending"
     elif reviewer["status"] != "passed" or reviewer["result_status"] != "completed" or not start or not end:
         state = "incomplete"
-    elif start[2] != "snapshot" or end[2] != "snapshot":
+    elif start[2:] != ("snapshot",) or end[2:] != ("snapshot",):
         state = "live"
     elif start != end:
         state = "changed"
     else:
-        state = "snapshot_recorded"
+        if any(record is None for _, _, record in records):
+            return {"state": "incomplete", "assignment_id": assignment}
+        wanted = {argv_identity(command) for command in row["checks"]}
+        # The full gate uses either all selected check records or none. Require the
+        # snapshot to match the latest applicable recorded tree in either case.
+        ids = {item["id"] for _, identity, item in records if item is not None and (not wanted or identity in wanted)}
+        verified_tree = next((tree for refs, tree in reversed(row["verification_events"]) if ids.intersection(refs)), None)
+        state = ("recorded_snapshot" if
+                 review_state("required", row["lead"], [*builders, candidate], *seqs, trees, verified_tree)["passing"]
+                 else "changed")
     return {"state": state, "assignment_id": assignment}
 
 
-def _activity_order(value: str) -> datetime:
-    try:
-        stamp = datetime.fromisoformat(value)
-        if stamp.tzinfo is not None:
-            return stamp
-    except (ValueError, OverflowError):
-        pass
-    return datetime.min.replace(tzinfo=UTC)
-
-
-def _project(row: dict[str, Any], head: str | None) -> TaskProjection:
+def _project(row: dict[str, Any], head: str | None, current: dict[str, Any] | None) -> TaskProjection:
     truncated: list[str] = []
     reasons: list[str] = []
-    checks = _checks(row, head, reasons)
+    records = [(item["seq"], item["identity"], _record(item)) for item in row["verifications"]]
+    checks = _checks(row, records, head, current, reasons, truncated)
     assignments = []
     activity = [row["updated_at"], row["created_at"], row["last_event_at"]]
-    activity.extend(record["recorded_at"] for record in row["verifications"])
-    for index, item in enumerate(row["assignments"]):
+    activity.extend(check["recorded_at"] for check in checks)
+    for item in row["assignments"]:
+        activity.extend((item["started_at"], item["ended_at"], item["heartbeat_at"]))
+    for index, item in enumerate(row["assignments"][-ASSIGNMENT_LIMIT:]):
         summary = item["result_summary"]
         assignments.append(AssignmentProjection(
-            id=item["id"], role=item["role"], actor=redact_text(item["actor"]), status=item["status"],
-            ack_state=item["ack_state"], started_at=item["started_at"], ended_at=item["ended_at"],
-            result_status=item["result_status"],
+            id=item["id"], role=item["role"], actor=_bound(item["actor"], 200, f"assignments.{index}.actor", truncated),
+            status="completed" if item["status"] == "passed" else item["status"], ack_state=item["ack_state"],
+            started_at=item["started_at"], ended_at=item["ended_at"], result_status=item["result_status"],
             summary=_bound(" ".join(summary.splitlines()), 200, f"assignments.{index}.summary", truncated)
-            if summary is not None else None,
+            if isinstance(summary, str) else None,
         ))
-        activity.extend((item["started_at"], item["ended_at"], item["heartbeat_at"]))
     counts = dict.fromkeys(FINDING_SEVERITIES, 0)
     for finding in row["findings"]:
-        counts[finding["severity"]] += 1
+        counts[finding["severity"]] = finding["total"]
     return TaskProjection(
-        view_schema=VIEW_SCHEMA, id=row["id"], project=redact_text(row["project"]), status=row["status"],
-        lead=redact_text(row["lead"]), review_policy=row["review_policy"],
-        title=_bound(row["title"], 160, "title", truncated),
-        objective=_bound(row["objective"], 400, "objective", truncated),
-        checks=checks, freshness_source="recorded",
-        freshness_note="For a content re-check, run task verify or read the verification section.",
-        review=_review(row), assignments=assignments, open_findings=counts,
+        view_schema=VIEW_SCHEMA, gate="not_evaluated", gate_note=GATE_NOTE, id=row["id"], status=row["status"],
+        project=_bound(row["project"], 200, "project", truncated), lead=_bound(row["lead"], 200, "lead", truncated),
+        title=_bound(row["title"], 160, "title", truncated), objective=_bound(row["objective"], 400, "objective", truncated),
+        review_policy=row["review_policy"], checks=checks, freshness_source="recorded",
+        freshness_note="Check freshness uses recorded evidence and bounded Git observations.",
+        review=_review(row, records), assignments=assignments, omitted_assignments=len(row["assignments"]) - len(assignments),
+        open_findings=counts,
         blocking_findings=[item["id"] for item in row["findings"] if item["severity"] == "blocking"],
         major_findings=[item["id"] for item in row["findings"] if item["severity"] == "major"],
         reasons=[_bound(reason, 240, f"reasons.{index}", truncated)
                  for index, reason in enumerate(reasons[:REASON_LIMIT])],
         omitted_reasons=max(0, len(reasons) - REASON_LIMIT), truncated_fields=truncated,
         created_at=row["created_at"], updated_at=row["updated_at"],
-        last_activity_at=max(filter(None, activity), key=_activity_order),
+        last_activity_at=max((item for item in activity if _timestamp(item) is not None),
+                             key=lambda item: _timestamp(item) or datetime.min.replace(tzinfo=UTC),
+                             default=row["updated_at"]),
     )
 
 
+def _project_rows(rows: Sequence[dict[str, Any]], db: Path) -> list[TaskProjection]:
+    heads = _observe(list(dict.fromkeys(row["project"] for row in rows)), _head)
+    candidates = list(dict.fromkeys(row["project"] for row in rows
+                                    if row["verifications"] and heads.get(row["project"]) is not None))
+
+    def clean_tree(project: str) -> dict[str, Any] | None:
+        head = heads[project]
+        return _clean_tree(project, head, db) if head is not None else None
+
+    current = _observe(candidates, clean_tree)
+    return [_project(row, heads.get(row["project"]), current.get(row["project"])) for row in rows]
+
+
 def project_task(store: Ledger, task: str) -> TaskProjection:
-    row, = store.projection_rows(task=task)
-    return _project(row, _head(row["project"]))
+    result, = _project_rows(store.projection_rows(task=task, inventory_limit=PROOF_FILES), store.path)
+    return result
 
 
-def _now_priority(task: TaskProjection) -> int:
-    if any(item["ack_state"] == "unacknowledged" for item in task["assignments"]):
+def _now_priority(row: dict[str, Any]) -> int:
+    if row["has_unacknowledged"]:
         return 0
-    if task["status"] in TERMINAL:
+    if row["status"] in TERMINAL:
         return 5
-    if task["status"] == "blocked" or task["blocking_findings"] or task["major_findings"]:
+    if row["status"] == "blocked" or any(item["severity"] in ("blocking", "major") for item in row["findings"]):
         return 1
-    if any(item["status"] == "active" for item in task["assignments"]):
+    if row["has_active"]:
         return 2
-    return 3 if task["status"] == "review" else 4
+    return 3 if row["status"] == "review" else 4
 
 
-def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int) -> ListProjection:
-    # Default JSON dumps uses ASCII escapes and ", " between items. Size the
-    # envelope separately so trimming the suffix serializes each task only once.
-    sizes = [len(json.dumps(task)) for task in tasks]
-    payload_size = sum(sizes) + 2 * max(0, len(tasks) - 1)
-    count = len(tasks)
-    while count >= 0:
-        omitted = len(tasks) - count
-        view = ListProjection(view_schema=VIEW_SCHEMA, kind=kind, tasks=[], truncated=omitted > 0,
-                              omitted=omitted, more={"kind": kind, "offset": count} if omitted else None)
-        if len(json.dumps(view)) + payload_size <= budget:
-            view["tasks"] = tasks[:count]
-            return view
-        if count:
-            payload_size -= sizes[count - 1] + (2 if count > 1 else 0)
-        count -= 1
-    raise ValueError("Byte budget is too small for the projection envelope")
+def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, remaining: int) -> ListProjection:
+    def envelope(count: int, *, stub: bool = False) -> ListProjection:
+        omitted = remaining - count
+        return ListProjection(view_schema=VIEW_SCHEMA, gate="not_evaluated", gate_note=GATE_NOTE,
+                              kind=kind, tasks=[], truncated=omitted > 0 or stub, omitted=omitted,
+                              more={"kind": kind, "offset": offset + count} if omitted else None)
+
+    view = envelope(0)
+    count = 0
+    used = 0
+    for task in tasks:
+        candidate = envelope(count + 1)
+        next_size = used + bool(count) + _size(task)
+        if _size(candidate) + next_size > budget:
+            break
+        view, used = candidate, next_size
+        count += 1
+    if count:
+        view["tasks"] = tasks[:count]
+    elif tasks:
+        first = tasks[0]
+        stub = TaskStub(id=first["id"], status=first["status"], title=first["title"], too_large=True,
+                        hint=f"Read with task show --task {first['id']}")
+        view = envelope(1, stub=True)
+        view["tasks"] = [stub]
+        while stub["title"] and _size(view) > budget:
+            stub["title"] = stub["title"][:len(stub["title"]) // 2]
+    if _size(view) > budget:
+        raise ValueError("Byte budget is too small for the projection envelope or task stub")
+    return view
 
 
-def project_list(store: Ledger, *, kind: ListKind, project: str | None = None,
-                 include_terminal: bool = False, byte_budget: int | None = None) -> ListProjection:
+def project_list(store: Ledger, *, kind: ListKind, project: str | None = None, include_terminal: bool = False,
+                 byte_budget: int | None = None, offset: int = 0, limit: int | None = None) -> ListProjection:
     """Project tasks in board creation order or now attention order."""
-    rows = store.projection_rows(project=project, include_terminal=include_terminal)
-    heads = {project: _head(project) for project in dict.fromkeys(row["project"] for row in rows)}
-    tasks = [_project(row, heads[row["project"]]) for row in rows]
+    if offset < 0 or (limit is not None and limit < 1):
+        raise ValueError("Projection offset must be nonnegative and limit must be positive")
+    rows = store.projection_rows(project=project, include_terminal=include_terminal, inventory_limit=PROOF_FILES)
     if kind == "task.now":
-        tasks.sort(key=lambda task: (_now_priority(task), task["id"]))
-    return _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget)
+        rows.sort(key=lambda row: (_now_priority(row), row["id"]))
+    tasks = _project_rows(rows[offset:None if limit is None else offset + limit], store.path)
+    return _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget,
+                offset, max(0, len(rows) - offset))

@@ -108,9 +108,9 @@ def _measure_projection(db: Path, task: str) -> dict[str, Any]:
 
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
         return {
-            "task.board": _measure(lambda: json.dumps(task_projection.project_list(store, kind="task.board"))),
-            "task.now": _measure(lambda: json.dumps(task_projection.project_list(store, kind="task.now"))),
-            "task.show": _measure(lambda: json.dumps(task_projection.project_task(store, task))),
+            "task.board": _measure(lambda: task_projection.dumps(task_projection.project_list(store, kind="task.board"))),
+            "task.now": _measure(lambda: task_projection.dumps(task_projection.project_list(store, kind="task.now"))),
+            "task.show": _measure(lambda: task_projection.dumps(task_projection.project_task(store, task))),
         }
 
 

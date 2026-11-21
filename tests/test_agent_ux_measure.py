@@ -7,9 +7,10 @@ from unittest.mock import call, patch
 
 from hipson import __version__
 from hipson.ledger import Ledger
-from hipson.task_projection import project_list
+from hipson.task_projection import dumps, project_list
 from scripts import agent_ux_measure
 from tests.fixtures.agent_ux_ledger import build
+from tests.test_task_projection import _assert_gate_parity
 
 
 def test_agent_ux_fixture_and_report(tmp_path):
@@ -89,14 +90,19 @@ def test_agent_ux_fixture_and_report(tmp_path):
         assert 0 < stats["bytes"] <= budget
         assert stats["project_state_calls"] == 0 and stats["wall_seconds"] >= 0
     with closing(Ledger(fixture.db, read_only=True)) as store:
+        full = {task["id"]: store.show(task["id"]) for task in tasks}
         for kind in ("task.board", "task.now"):
             projection = project_list(store, kind=kind)
             by_id = {task["id"]: task for task in projection["tasks"]}
             assert set(by_id) == {task["id"] for task in tasks}
             assert projection["truncated"] is False and projection["omitted"] == 0
+            assert len(dumps(projection).encode("utf-8")) <= budgets[kind]
+            assert max(len(dumps(task).encode("utf-8")) for task in by_id.values()) <= budgets["task.show"]
+            for task_id, projected in by_id.items():
+                _assert_gate_parity(full[task_id], projected)
             assert by_id[fixture.heavy_task]["checks"][0]["head_matches"] is True
             assert by_id[stale["id"]]["checks"][0]["head_matches"] is False
-            assert by_id[stale["id"]]["checks"][0]["state"] == "passed"
+            assert by_id[stale["id"]]["checks"][0]["state"] == "stale"
 
 
 def test_agent_ux_detail_is_explicit_on_supported_surfaces():
