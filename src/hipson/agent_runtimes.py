@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from hipson import ledger
-from hipson.redaction import redact_text
+from hipson.redaction import redact_incomplete_private_keys, redact_text
 
 PROFILES = ("native", "controlled")
 # Observed live (agy 1.5.12, 2026-11-19): a reviewer in --mode plan created a file when its brief asked it to.
@@ -78,7 +78,8 @@ RUNTIMES: dict[str, dict[str, Any]] = {
     },
 }
 EXIT = {"ok": 0, "malformed_output": 2, "provider_error": 3, "auth_required": 4, "rate_limited": 5,
-        "permission_denied": 6, "unsupported": 64, "timeout": 124}
+        "permission_denied": 6, "unsupported": 64, "model_unavailable": 64, "timeout": 124}
+AGY_MODEL_REJECTION = re.compile(r"invalid model selection|not recognized as a known model", re.I)
 _PATTERNS = [  # Order matters: the most specific evidence wins.
     ("rate_limited", re.compile(r"usage limit|rate.?limit|\b429\b|quota", re.I)),
     ("auth_required", re.compile(r"not logged in|please (run )?/?login|unauthori[sz]ed|\b401\b|authentication", re.I)),
@@ -279,6 +280,19 @@ def _project(cwd: str) -> str:
     return os.environ.get("HIPSON_PROJECT") or cwd
 
 
+def _agy_user_allow() -> list[str] | None:
+    """Read only the allow rules. None means a merge would risk replacing an unreadable list."""
+    try:
+        settings = json.loads(_home(".gemini", "antigravity-cli", "settings.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError, RuntimeError):
+        return None
+    permissions = settings.get("permissions", {}) if isinstance(settings, dict) else None
+    allow = permissions.get("allow", []) if isinstance(permissions, dict) else None
+    return allow if isinstance(allow, list) and all(isinstance(rule, str) for rule in allow) else None
+
+
 def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_path: Path, last_path: Path,
                   cwd: str, model: str | None = None, effort: str | None = None, session: str | None = None,
                   resume: str | None = None, timeout: float = 1800,
@@ -339,11 +353,11 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     argv += ["--conversation", resume] if resume else []
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
-    # Headless agy auto-denies every command; a session-only settings layer (never saved, the user's settings
-    # stay) grants exactly the declared checks, as --allowedTools does for Claude (verified live on 1.5.12: the
-    # rule admits that command and no other).
-    allowed = [f"command({shlex.join(check)})" for check in checks if _exact_pattern(check)]
-    argv += ["--settings", json.dumps({"permissions": {"allow": allowed}})] if allowed else []
+    # agy replaces permission arrays in the session layer. Carry over the user's allow rules and let agy
+    # inherit the deny rules directly. Headless command grants are restricted to the lead's exact checks.
+    allowed = [f"command({shlex.join(check)})" for check in checks if mode == "rw" and _exact_pattern(check)]
+    if allowed and (user_allow := _agy_user_allow()) is not None:
+        argv += ["--settings", json.dumps({"permissions": {"allow": list(dict.fromkeys(user_allow + allowed))}})]
     return argv, None
 
 
@@ -447,6 +461,21 @@ def _evidence(output: str) -> str | None:
     return next((kind for kind, pattern in _PATTERNS if pattern.search(output)), None)
 
 
+def _agy_model_diagnostic(payload: Any, stdout: str, stderr: str) -> str | None:
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        messages = [error.get("message") if isinstance(error, dict) else error,
+                    payload.get("message"), payload.get("result")]
+    else:
+        messages = [stdout]
+    for text in [stderr, *messages]:
+        if isinstance(text, str) and (match := AGY_MODEL_REJECTION.search(text)):
+            # Keep the diagnostic and its model list, skipping any unrelated lines before it.
+            detail = text[text.rfind("\n", 0, match.start()) + 1:].strip()
+            return redact_incomplete_private_keys(redact_text(detail))
+    return None
+
+
 def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -> tuple[ledger.TaskResult, dict[str, Any]]:
     """Validate the structured result against the task-result contract and collect session/usage evidence."""
     meta: dict[str, Any] = {"session": None, "usage": None, "models": None, "cost_usd_list": None,
@@ -491,6 +520,8 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
     else:
         payload = _parse_json(stdout)
         if code or not isinstance(payload, dict) or payload.get("status") != "SUCCESS":
+            if code != 124 and (diagnostic := _agy_model_diagnostic(payload, stdout, stderr)):
+                raise RuntimeFailure("model_unavailable", diagnostic)
             detail = payload.get("status") if isinstance(payload, dict) else f"exit {code}"
             kind = (classify(code or 1, stdout + stderr) if code or isinstance(payload, dict)
                     else _evidence(stdout + stderr) or "malformed_output")
@@ -636,9 +667,12 @@ def exec_worker(args: argparse.Namespace) -> int:
     try:
         report, facts = normalize(args.runtime, code, stdout, stderr, last_path)
     except RuntimeFailure as exc:
-        meta["stderr_tail"] = redact_text(stderr[-1500:])
-        detail = exc.detail + (f"; resuming session {resume} failed, so the next --continue-session run starts a new "
-                               "session" if resume else "")
+        meta["stderr_tail"] = redact_incomplete_private_keys(redact_text(stderr))[-1500:]
+        detail = exc.detail
+        if exc.kind == "model_unavailable" and args.model and args.model not in detail:
+            detail = f"agy model {args.model!r}: {detail}"
+        if resume:
+            detail += f"; resuming session {resume} failed, so the next --continue-session run starts a new session"
         return fail(exc.kind, detail)
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.

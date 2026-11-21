@@ -6,6 +6,7 @@ import io
 import json
 import os
 import stat
+import subprocess
 import sys
 from contextlib import chdir, closing, contextmanager, redirect_stderr
 from pathlib import Path
@@ -255,6 +256,53 @@ def test_exec_records_launch_oserror_as_provider_error(tmp_path):
     assert meta["outcome"] == "provider_error" and "Argument list too long" in meta["detail"]
     assert "could not launch agy" in stderr.getvalue()
     assert not result.exists()
+
+
+def test_t0155_agy_unavailable_model_reports_redacted_cli_diagnostic(tmp_path):
+    # T-0155 and the native probe have no verbatim rejection. The installed CLI
+    # contains both message fragments below; the available models are fixture data.
+    secret = "ghp_" + "a1B2" * 9
+    message = ("invalid model selection (--model \"missing-model\" --effort \"\"): "
+               "model missing-model is not recognized as a known model or custom model in settings\n"
+               f"Available models: example-pro, example-flash (token={secret})")
+    cases = [(1, '{"status":"ERROR"}', message),
+             (0, json.dumps({"status": "ERROR", "error": message.split(": ", 1)[1]}), "")]
+    for index, (exit_code, stdout, diagnostic) in enumerate(cases):
+        case_dir = tmp_path / str(index)
+        stderr = io.StringIO()
+        process = subprocess.CompletedProcess([], exit_code, stdout, diagnostic)
+        with (_worker(case_dir) as (_, result, run), redirect_stderr(stderr),
+              patch.object(runtimes.shutil, "which", return_value=sys.executable),
+              patch.object(runtimes.subprocess, "run", return_value=process)):
+            assert run("agy", "--model", "missing-model") == 64, stderr.getvalue()
+        meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+        assert meta["outcome"] == "model_unavailable"
+        for output in (stderr.getvalue(), json.dumps(meta)):
+            assert "missing-model" in output and "example-pro, example-flash" in output
+            assert "[REDACTED]" in output and secret not in output
+        assert not result.exists()
+
+
+def test_t0160_agy_session_allow_merges_user_rules_and_exact_checks(tmp_path):
+    settings = tmp_path / ".gemini" / "antigravity-cli" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    user_allow = ["read_file(src/**)", "command(pytest -q)"]
+    original = json.dumps({"permissions": {"allow": user_allow, "deny": ["read_file(.env)"]}, "toolPermission": "ask"})
+    settings.write_text(original, encoding="utf-8")
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    options = dict(profile="native", prompt="p", schema_path=schema, last_path=tmp_path / "last", cwd=str(tmp_path))
+    checks = [["pytest", "-q"], ["python3", "tests/check.py"], ["pytest", "tests/*"]]
+    with patch.object(Path, "home", return_value=tmp_path):
+        argv, _ = runtimes.build_command("agy", mode="rw", checks=checks, **options)
+        review, _ = runtimes.build_command("agy", mode="ro", checks=checks, **options)
+        no_checks, _ = runtimes.build_command("agy", mode="rw", **options)
+        assert settings.read_text(encoding="utf-8") == original
+        settings.write_text("{unreadable", encoding="utf-8")
+        unreadable, _ = runtimes.build_command("agy", mode="rw", checks=checks, **options)
+    assert json.loads(argv[argv.index("--settings") + 1]) == {
+        "permissions": {"allow": [*user_allow, "command(python3 tests/check.py)"]}}
+    assert all("--settings" not in command for command in (review, no_checks, unreadable))
 
 
 def test_exec_preflight_stops_a_logged_out_runtime_before_launch(tmp_path):
@@ -560,8 +608,9 @@ def test_resume_and_check_grants_follow_each_runtimes_documented_interface(tmp_p
         assert resumed[:3][1:] == ["exec", "resume"] and f"sandbox_mode={sandbox}" in resumed
         assert resumed[resumed.index(f"sandbox_mode={sandbox}") - 1] == "--config"
     # agy: a session-only settings layer grants exactly the declared checks; none without checks.
-    argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
-                                     **common)
+    with patch.object(Path, "home", return_value=tmp_path):
+        argv, _ = runtimes.build_command("agy", mode="rw", checks=[["python3", "tests/check.py"], ["rm", "-rf", "*"]],
+                                         **common)
     assert json.loads(argv[argv.index("--settings") + 1]) == {"permissions": {"allow": ["command(python3 tests/check.py)"]}}
     argv, _ = runtimes.build_command("agy", mode="ro", **common)
     assert "--settings" not in argv

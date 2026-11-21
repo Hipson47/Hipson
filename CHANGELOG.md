@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Antigravity reports unavailable models with the redacted CLI diagnostic and
+  preserves user allow rules when granting declared checks. Flow review briefs include bounded, redacted contents
+  of new in-scope text files, and a verified re-review resolves earlier findings that no longer apply.
+
 ## 1.7.0 - 2026-11-19
 
 Release notes: [docs/release-1.7.md](docs/release-1.7.md). Upgrading from 1.6: `hipson init` migrates the

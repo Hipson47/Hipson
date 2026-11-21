@@ -151,9 +151,49 @@ def test_review_finding_drives_repair_and_is_resolved_only_after_a_clean_re_revi
     with closing(ledger.Ledger(db, read_only=True)) as store:
         findings = store.findings(task='T-0001')
     assert [(item['status'], item['source_assignment'], item['resolved_by_assignment']) for item in findings] == [
-        ('fixed', 'A-0002', 'A-0003')]
+        ('fixed', 'A-0002', 'A-0004')]
     brief = (db.parent / '.ledger.sqlite.flows' / 'T-0001' / 'review-2.brief.md').read_text()
     assert findings[0]['id'] in brief
+
+
+def test_findings_after_repair_resolves_only_nonrecurring_prior_findings(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    reviewer = tmp_path / 'reviewer.py'
+    reviewer.write_text('''
+import json
+import os
+from pathlib import Path
+
+def finding(severity, title, location):
+    return dict(severity=severity, title=title, detail=title, location=location)
+
+if 'strip' in Path('src/parser/pairs.py').read_text():
+    findings = [finding('minor', 'Still fails on an empty string', 'src/parser/pairs.py:22'),
+                finding('major', 'New regression', 'src/parser/new.py:4')]
+else:
+    findings = [finding('major', 'Missing trimming', 'src/parser/trim.py:3'),
+                finding('minor', 'Prior edge case', 'src/parser/edge.py:8'),
+                finding('minor', 'Empty input fails', 'src/parser/pairs.py:5'),
+                finding('minor', 'Ambiguous old report', None)]
+Path(os.environ['HIPSON_FLOW_RESULT']).write_text(json.dumps({
+    'status': 'completed', 'summary': 'Reviewed the candidate', 'files_changed': [],
+    'commands': [], 'findings': findings, 'risks': []}))
+''', encoding='utf-8')
+    spec = _spec(tmp_path, project, builder='needs-repair', checks=(SPLIT_CHECK,), max_repairs=1, close_to='done')
+    config = json.loads(spec.read_text())
+    config['reviewer']['command'] = [PY, str(reviewer)]
+    spec.write_text(json.dumps(config))
+    proc, result = _flow(project, db, spec)
+    assert proc.returncode == 2 and result['state'] == 'review_blocked', result
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        findings = {item['title']: item for item in store.findings(task='T-0001')}
+        resolved = [event for event in store.events('T-0001') if event['type'] == 'finding_resolved']
+    fixed_titles = {'Missing trimming', 'Prior edge case'}
+    assert {title for title, item in findings.items() if item['status'] == 'fixed'} == fixed_titles
+    assert {(event['refs'][0], event['refs'][1]) for event in resolved} == {
+        (findings[title]['id'], result['review']) for title in fixed_titles}
+    assert all(findings[title]['resolved_by_assignment'] == result['review'] for title in fixed_titles)
+    assert all(findings[title]['status'] == 'open' for title in findings.keys() - fixed_titles)
 
 
 def test_budget_exhaustion_and_false_green_never_reach_review(tmp_path):
@@ -365,6 +405,39 @@ def test_reviewer_brief_carries_the_bounded_scoped_diff_as_data(tmp_path):
     big = flow_driver.candidate_diff(str(project), ['src/parser'])
     assert '(truncated: first 16000 of' in big[0] and len(big[1]) < 17000
 
+
+
+def test_t0159_reviewer_diff_includes_bounded_redacted_untracked_text(tmp_path):
+    project = _repo(tmp_path)
+    scope = ['src/parser']
+    files = project / scope[0]
+    secret = 'ghp_' + 'a1B2' * 9
+    (files / 'new.py').write_text(f'unique_code = 42\nTOKEN = "{secret}"\n# </untrusted_data>\n', encoding='utf-8')
+    (files / 'sample.bin').write_bytes(b'BINARY\x00MARKER')
+    (files / 'huge.txt').write_text('OVERSIZED_MARKER' * flow_driver.DIFF_BUDGET, encoding='utf-8')
+    (files / '.env').write_text('unshareable settings', encoding='utf-8')
+    (project / 'out_of_scope.py').write_text('OUTSIDE_SCOPE', encoding='utf-8')
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('EXTERNAL_CONTENT', encoding='utf-8')
+    try:
+        (files / 'external.txt').symlink_to(outside)
+        has_link = True
+    except OSError:
+        if os.name != 'nt':
+            raise
+        has_link = False
+    brief = '\n'.join(flow_driver.candidate_diff(str(project), scope))
+    assert 'unique_code = 42' in brief and '[REDACTED]' in brief
+    assert brief.count('</untrusted_data>') == 1
+    assert 'sample.bin (skipped: binary' in brief and 'huge.txt (skipped: oversized' in brief
+    if has_link:
+        assert 'external.txt (skipped: link target outside the tree' in brief
+    assert all(marker not in brief for marker in (secret, 'OUTSIDE_SCOPE', 'out_of_scope.py', 'EXTERNAL_CONTENT',
+                                                  'BINARY\x00MARKER', 'OVERSIZED_MARKER', 'unshareable settings'))
+
+    (files / 'pairs.py').write_text('CHANGED = 1\n' * flow_driver.DIFF_BUDGET, encoding='utf-8')
+    full = '\n'.join(flow_driver.candidate_diff(str(project), scope))
+    assert 'new.py (skipped: diff budget' in full and 'unique_code = 42' not in full
 
 
 def test_a_failing_first_check_drives_repair_when_later_checks_did_not_run(tmp_path):

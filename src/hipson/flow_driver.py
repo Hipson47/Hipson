@@ -18,10 +18,12 @@ import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import sqlite3
 import stat
 import sys
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
@@ -39,7 +41,7 @@ from hipson import (
     task_verification,
 )
 from hipson.project import safe_diff
-from hipson.redaction import redact_text, sanitize_path
+from hipson.redaction import is_sensitive_path, redact_incomplete_private_keys, redact_text, sanitize_path
 
 MAX_REPAIRS = 5
 MAX_INTERRUPTED = 2  # Re-runs of a worker the flow lost (reaped or cancelled), per role.
@@ -224,21 +226,44 @@ def _worker_problem(item: ledger.Assignment) -> str:
             + task_activity.safe_text(report['summary'], 300))
 
 
+def _finding_key(item: ledger.Finding | ledger.ResultFinding) -> tuple[str, str, str, str]:
+    return item['severity'], redact_text(item['title']), redact_text(item['detail']), redact_text(item['location'] or '')
+
+
 def reviewer_findings(view: ledger.TaskView) -> dict[str, list[ledger.Finding]]:
-    """Open blocking/major findings a reviewer reported in its structured result, by reviewer assignment.
+    """Open findings that can be tied uniquely to a reviewer's structured result, by assignment.
 
     Findings the runner raised on a reviewer (out-of-scope changes) are not review findings: they need the lead.
     """
-    reported = {item['id']: {(finding['severity'], redact_text(finding['title']))
-                             for finding in item['result']['findings']}
+    reported = {item['id']: Counter(_finding_key(finding) for finding in item['result']['findings'])
                 for item in view['assignments'] if item['role'] == 'reviewer' and item['result'] is not None}
+    opened = Counter((finding['source_assignment'], _finding_key(finding)) for finding in view['findings'])
     grouped: dict[str, list[ledger.Finding]] = {}
     for finding in view['findings']:
         source = finding['source_assignment']
-        if (finding['severity'] in ('blocking', 'major') and source in reported
-                and (finding['severity'], finding['title']) in reported[source]):
+        key = _finding_key(finding)
+        if source in reported and reported[source][key] == opened[source, key] == 1:
             grouped.setdefault(source, []).append(finding)
     return grouped
+
+
+def _finding_path(location: str | None) -> str:
+    # Locations are free text. Trust path-like references only, ignoring shifted line and column numbers.
+    path = re.sub(r'(?::\d+)+$', '', (location or '').strip()).replace('\\', '/').removeprefix('./')
+    return path.casefold() if re.fullmatch(r'[\w./-]+', path) and Path(path).suffix else ''
+
+
+def _possible_recurrence(prior: ledger.Finding, reported: ledger.ResultFinding) -> bool:
+    if re.search(rf'\b{re.escape(prior["id"])}\b', reported['title'] + '\n' + reported['detail'], re.I):
+        return True
+    for old, new in ((prior['title'], reported['title']), (prior['detail'], reported['detail'])):
+        previous = old.strip().casefold()
+        if previous and previous == new.strip().casefold():
+            return True
+    previous_path, current_path = _finding_path(prior['location']), _finding_path(reported['location'])
+    # Same-file and missing-location comparisons are ambiguous unless the reviewer omits all findings.
+    return (not previous_path or not current_path or previous_path == current_path
+            or previous_path.endswith('/' + current_path) or current_path.endswith('/' + previous_path))
 
 
 def failing_checks(view: ledger.TaskView, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -302,8 +327,9 @@ def decide(view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str,
     last = builders[-1]
     evidence = failing_checks(view, records)
     open_review = [finding for items in by_review.values() for finding in items]
+    open_blocking = [finding for finding in open_review if finding['severity'] in ('blocking', 'major')]
     refs = [record['id'] for record in evidence] + [finding['id'] for finding in open_review]
-    stage = 'repair' if refs else 'build'
+    stage = 'repair' if evidence or open_blocking else 'build'
     if last['status'] == 'cancelled':
         if len(builders) - len(counted) > MAX_INTERRUPTED:
             return Step('stop', 'needs_lead', [f'builders were interrupted {len(builders) - len(counted)} times; '
@@ -344,21 +370,28 @@ def decide(view: ledger.TaskView, records: list[dict[str, Any]], spec: dict[str,
             return Step('stop', 'needs_lead', [f'{len(reviewers)} reviews ran; inspect hipson task show --task {task}'])
         return Step('review')
     accepted = review['accepted']
-    blocking = by_review.get(accepted, [])
+    accepted_result = next((item['result'] for item in reviewers if item['id'] == accepted), None)
+    if accepted_result is not None:
+        resolved = [finding['id'] for finding in open_review if finding['source_assignment'] != accepted
+                    and finding['created_at'] < last['started_at']
+                    and not any(_possible_recurrence(finding, reported) for reported in accepted_result['findings'])]
+        if resolved:
+            return Step('resolve', refs=resolved)
+    blocking = [finding for finding in open_blocking if finding['source_assignment'] == accepted]
     if blocking:
         if len(counted) >= budget:
             return Step('stop', 'review_blocked', [
                 f"{finding['id']} [{finding['severity']}]: {task_activity.safe_text(finding['title'], 200)}"
                 for finding in blocking] + [f'repair budget spent: {len(counted)} of {budget} builder attempts'])
         return Step('build', reasons=['blocking review findings'], refs=refs, stage='repair')
-    if open_review:
-        # Only a repair launched after a finding was reported can have addressed it (counted builders only).
-        unaddressed = [finding for finding in open_review if counted[-1]['started_at'] <= finding['created_at']]
-        if unaddressed:
-            return Step('stop', 'needs_lead', [
-                f"{finding['id']} was reported after the latest builder {counted[-1]['id']} started, so no repair "
-                'addressed it; resolve it yourself or resume with a repair budget' for finding in unaddressed])
-        return Step('resolve', refs=[finding['id'] for finding in open_review])
+    if open_blocking:
+        # The accepted review must clear each earlier blocker before the flow can close.
+        return Step('stop', 'needs_lead', [
+            (f"{finding['id']} was reported after the latest builder {last['id']} started, so no repair "
+             'addressed it; resolve it yourself or resume with a repair budget'
+             if last['started_at'] <= finding['created_at'] else
+             f"{finding['id']} may still apply after re-review {accepted}; inspect and update the finding")
+            for finding in open_blocking])
     return Step('close')
 
 
@@ -380,8 +413,10 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
         lines += candidate_diff(candidate or view['project'], spec['builder']['scope'])
         earlier = [finding for items in reviewer_findings(view).values() for finding in items]
         if earlier:
-            lines.append('Earlier review findings that a repair addressed; report again any that still apply:')
-            lines += [f"- {finding['id']} [{finding['severity']}] {finding['title']}" for finding in earlier]
+            lines.append('Re-check these earlier findings. If one still applies, include its ID in the finding title.')
+            lines.append(task_context._untrusted_block('\n'.join(
+                f"{finding['id']} [{finding['severity']}] at {finding['location'] or '?'}: "
+                f"{finding['title']}\n{finding['detail']}" for finding in earlier)))
     else:
         lines.append(f"Write only within: {', '.join(spec['builder']['scope'])}. Do not change the acceptance checks.")
         if stage == 'repair':
@@ -401,6 +436,45 @@ def stage_brief(store: ledger.Ledger, view: ledger.TaskView, records: list[dict[
 
 
 DIFF_BUDGET = 16_000
+_BINARY_CONTROL = re.compile(rb'[\x00-\x08\x0e-\x1f\x7f]')
+
+
+def _untracked_text(root: Path, name: str, scope: list[str], budget: int) -> tuple[str, str]:
+    """Read bounded UTF-8 text from a regular, in-scope file in the snapshot, or explain the omission."""
+    if is_sensitive_path(name):
+        return '', 'sensitive path'
+    try:
+        target = (root / name).resolve()
+        if not target.is_relative_to(root):
+            return '', 'link target outside the tree'
+        relative = target.relative_to(root)
+        if is_sensitive_path(relative) or '.git' in relative.parts:
+            return '', 'sensitive link target'
+        if not _overlaps(relative.as_posix(), scope):
+            return '', 'link target outside the scope'
+        info = target.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return '', 'not a regular file'
+        if info.st_size > DIFF_BUDGET:
+            return '', f'oversized file (over {DIFF_BUDGET} bytes)'
+        if budget <= 0:
+            return '', 'diff budget exhausted'
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0) | getattr(os, 'O_BINARY', 0)
+        with os.fdopen(os.open(target, flags), 'rb') as source:
+            opened = os.fstat(source.fileno())
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+                return '', 'file changed before reading'
+            data = source.read(DIFF_BUDGET + 1)
+    except (OSError, RuntimeError):
+        return '', 'unreadable file or link target'
+    if len(data) > DIFF_BUDGET:
+        return '', f'oversized file (over {DIFF_BUDGET} bytes)'
+    if _BINARY_CONTROL.search(data):
+        return '', 'binary file'
+    try:
+        return redact_incomplete_private_keys(redact_text(data.decode('utf-8'))), ''
+    except UnicodeDecodeError:
+        return '', 'binary or non-UTF-8 file'
 
 
 def candidate_diff(project: str, scope: list[str]) -> list[str]:
@@ -411,25 +485,42 @@ def candidate_diff(project: str, scope: list[str]) -> list[str]:
     except ValueError:
         return ['Candidate diff unavailable (Git filter configuration unreadable); inspect the files directly.']
     # Literal pathspecs: a scope such as ':(glob)**' names a path, never a Git pattern.
-    status = _git(project, '--literal-pathspecs', *overrides, 'status', '--porcelain', '-z', '--untracked-files=all',
-                  '--', *scope)
+    untracked = _git(project, '--literal-pathspecs', *overrides, 'ls-files', '--others', '--exclude-standard', '-z',
+                     '--', *scope)
     diff = _git(project, '--literal-pathspecs', *overrides, 'diff', '--no-color', '--no-ext-diff', '--no-textconv',
                 'HEAD', '--', *scope)
-    if status is None or diff is None:
-        return ['Candidate diff unavailable (git status/diff failed or exceeded its read limit); inspect the files.']
+    if untracked is None or diff is None:
+        return ['Candidate diff unavailable (git ls-files/diff failed or exceeded its read limit); inspect the files.']
     # Sensitive files (.env, keys) leave whole sections and secrets are redacted before truncation can split them.
     text = safe_diff(diff.decode('utf-8', errors='replace'))
-    # -z: unquoted names, so a sensitive name (.ssh/private note) is classified as the path it is.
-    untracked = [redact_text(sanitize_path(entry[3:])) for entry in status.decode('utf-8', errors='replace').split('\0')
-                 if entry.startswith('?? ')]
     shown = text[:DIFF_BUDGET]
     header = f"Candidate diff against HEAD within {', '.join(scope)}" + (
         f' (truncated: first {DIFF_BUDGET} of {len(text)} characters; read the files for the rest)'
         if len(text) > DIFF_BUDGET else '')
-    listing = ('Untracked files in scope:' + chr(10) + chr(10).join(untracked[:50])
-               + (chr(10) + '...' if len(untracked) > 50 else '')) if untracked else ''
-    # File names are repository content too: they stay inside the data block, never on their own prompt lines.
-    return [header, task_context._untrusted_block((shown or '(no tracked changes)') + (chr(10) + listing if listing else ''))]
+    sections = [shown or '(no tracked changes)']
+    if untracked:
+        root = Path(project).resolve()
+        sections.append('Untracked files in scope:')
+        remaining, notes_budget, omitted = DIFF_BUDGET - len(shown), DIFF_BUDGET, 0
+        for entry in untracked.rstrip(b'\0').split(b'\0'):
+            name = os.fsdecode(entry)
+            label = redact_text(sanitize_path(entry.decode('utf-8', errors='replace'))).replace('\n', r'\n')
+            body, reason = _untracked_text(root, name, scope, remaining)
+            section = f'{label}\n{body}\n'
+            if not reason and len(section) <= remaining:
+                sections.append(section)
+                remaining -= len(section)
+                continue
+            note = f'{label} (skipped: {reason or "diff budget exhausted"})'
+            if len(note) < notes_budget:
+                sections.append(note)
+                notes_budget -= len(note) + 1
+            else:
+                omitted += 1
+        if omitted:
+            sections.append(f'{omitted} additional skipped file(s) omitted from the listing (listing budget exhausted).')
+    # File names and all content stay inside the data block.
+    return [header, task_context._untrusted_block('\n'.join(sections))]
 
 
 def _overlaps(path: str, scope: list[str]) -> bool:
@@ -815,11 +906,11 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
             latest = [item for item in view['assignments'] if item['role'] == 'builder'][-1]['id']
             with closing(ledger.Ledger(db, create=False)) as store:
                 for finding in step.refs:
-                    store.update_finding(finding, status='fixed', actor=lead, resolved_by_assignment=latest,
+                    store.update_finding(finding, status='fixed', actor=lead, resolved_by_assignment=accepted,
                                          resolution_note=(f'repair {latest} passed lead verification '
                                                           f"{', '.join(view['verification']['accepted_ids'])} and "
-                                                          f're-review {accepted} reported no blocking/major finding'))
-            _record(db, task, lead, f"resolved {', '.join(step.refs)} after clean re-review {accepted}",
+                                                          f're-review {accepted} found no recurrence'))
+            _record(db, task, lead, f"resolved {', '.join(step.refs)} after re-review {accepted}",
                     [*step.refs, accepted])
         elif step.kind == 'close':
             closed = task_flow.close(db, task, to=spec['close_to'], actor=lead, timeout=spec['check_timeout'],

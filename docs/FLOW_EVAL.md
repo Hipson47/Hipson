@@ -17,6 +17,19 @@ how a live model follows a prompt (a careful agent may do better than A1/A2, a c
 quality, or tokens. It uses no model; `tokens` is `null` in every run. One run per cell: the procedures and
 workers are deterministic, so repetition adds no information here; it is not a statistical sample.
 
+## Reviewer briefs and repair findings
+
+The reviewer brief renders the tracked diff and new in-scope UTF-8 files from the verified snapshot in one
+untrusted data block. They share a 16,000-character content budget, with the tracked diff first. The brief
+redacts secrets and lists why files were skipped, including binary data, oversized files, and links outside
+the tree or write scope. Sensitive paths are masked. If the skip listing itself exceeds its budget, the brief
+reports how many entries were omitted.
+
+After a repair, the flow compares open structured findings with the accepted re-review. It records fixes
+against that review assignment, including fixes confirmed by a review that reports a different defect. The
+reviewer is asked to cite the earlier ID for recurring findings. Repeated or ambiguous reports stay open. New
+and unresolved blocking or major findings still prevent closure.
+
 ## Results (revision 46ccff7, clean tree, 2026-11-19, Python 3.13.12 from the worktree venv, WSL2; earlier runs on 5ccd9e2 and a83b9c2 gave the same outcomes)
 
 Raw report: [evals/flow-compare-2026-11-19.json](evals/flow-compare-2026-11-19.json).
