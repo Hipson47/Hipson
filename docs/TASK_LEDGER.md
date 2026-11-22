@@ -214,6 +214,45 @@ If the first task cannot fit, the page returns its ID, status, title, `too_large
 `task show --task T --detail compact` command in `hint`. The stub consumes one task position.
 `truncated` also reports a stub on the final page.
 
+### Follow next actions
+
+Compact `task now` and `lead resume` rank actions across the full ledger selection for the
+requested project and terminal-task filters, including tasks beyond the returned page. Standalone
+now and resume each carry `next_actions` and `next_actions_omitted` at the top level. Resume's nested
+`now` contains the task page and its continuation. The top level supplies the evidence policy.
+
+1. Unacknowledged results. Use `task.ack` when the view shows the complete result status and
+   summary and the assignment has no activity or journal. Otherwise read `task.activity` before
+   following its `then` call to `task.ack`.
+2. Checks. Read the verification section for recorded failures on live tasks that have started.
+   Each task gets at most one check action. Stale checks prompt `task.verify` once the task has
+   started. Missing, partial, or unknown checks prompt verification in `verify` or `review`, or
+   after a builder finishes with no newer verification.
+3. Tasks in review. The projection suggests `task.status` to `done` as the task lead when the
+   verification and review records qualify and the projection shows no recorded blockers.
+   The reason says “recorded ok, not re-checked” and the status call evaluates the live gate.
+   Other tasks in review link to compact `task.show`.
+4. Open blocking or major findings. Read `task.findings` once per task and severity.
+5. Stale tasks. Reserved for a later slice.
+6. Terminal tasks with active assignments or held claims. Preview cleanup with `task.reap`
+   and `dry_run: true`.
+
+Task ID breaks ties within a category, followed by assignment ID or the first finding ID for the
+severity where applicable. Check actions use the same HEAD observation as the task page.
+Each action supplies a `why` of at most 200 characters drawn from IDs, states and counts,
+an MCP `tool` and its `arguments`, an equivalent POSIX shell command in `cli`, and a
+`writes` flag. `writes: true` means the call changes the ledger or runs commands.
+Gated MCP calls include `approved: true`. The CLI omits this MCP argument and preserves an
+explicit `--db`. A `then` call has `tool`, `arguments`, `cli` and `writes` and follows the first
+call after the lead has read its result.
+
+The reads return at most ten actions and report the remainder in `next_actions_omitted`.
+Actions consume the 48,000-byte now and 64,000-byte resume budgets before full task rows.
+The budget can omit lower-priority actions when needed to fit the page envelope and a task stub.
+Compact now and resume text show the status and up to 160 characters of escaped summary for each
+unacknowledged result on the task page inside the untrusted evidence block. The text ends with
+`Next:` lines and any `Then:` commands.
+
 ### Read task records by section
 
 Compact `task show` returns the one-task projection and a `more` array with a call for each section.

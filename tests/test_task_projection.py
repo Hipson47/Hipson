@@ -120,7 +120,7 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert task_projection.project_task(store, terminal)["status"] == "cancelled"
         assert task_projection.project_list(store, kind="task.board", include_terminal=True)["tasks"][-1]["id"] == terminal
 
-        tiny = task_projection.project_list(store, kind="task.now", byte_budget=1_000)
+        tiny = task_projection.project_list(store, kind="task.now", byte_budget=1_700)
         assert tiny["truncated"] is True and tiny["omitted"] == 2
         assert tiny["more"] == {"tool": "task.now", "arguments": {"detail": "compact", "offset": 1},
                                 "cli": "hipson task now --detail compact --offset 1 --json"}
@@ -128,7 +128,8 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert stub["id"] == third and stub["too_large"] is True
         assert set(stub) == {"id", "status", "title", "too_large", "hint"} and "task show" in stub["hint"]
         encoded = task_projection.dumps(tiny).encode("utf-8")
-        assert json.loads(encoded) == tiny and len(encoded) <= 1_000
+        assert json.loads(encoded) == tiny and len(encoded) <= 1_700
+        assert tiny["next_actions"] == now["next_actions"]
 
         prefix = {**tiny, "tasks": now["tasks"][:1]}
         budget = len(task_projection.dumps(prefix).encode("utf-8"))
@@ -163,7 +164,7 @@ def test_projection_reads_v1_without_migration(tmp_path):
 
 
 _READ_HANDLERS = {
-    "cli.py": {"command_task_read"},
+    "cli.py": {"command_task_read", "_render_compact_tasks"},
     "mcp_server.py": {"_task_read_projection", "_compact_task_text"},
     "lead_context.py": {"build_compact"},
 }
@@ -174,7 +175,7 @@ _READ_DISPATCH = {
             (None, "resume.set_defaults(func=command_task_read)"),
         ),
         "command_task_read": (("action == 'resume'", "payload = lead_context.build_compact("
-                               "store, project=project, include_all=args.all, cli_db=cli_db)"),),
+                               "store, project=project, include_all=args.all, cli_db=cli_db, text=not args.json)"),),
     },
     "mcp_server.py": {
         "_call_tool": ((None, "text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)"),),
@@ -187,7 +188,7 @@ _READ_DISPATCH = {
 
 
 def _projection_references(source, *, module=""):
-    low_level = re.compile(r"\b(?:task_projection|projection_rows)\b")
+    low_level = re.compile(r"\b(?:task_projection|projection_rows)\b|^(?:hipson\.)?next_actions$")
     handlers = re.compile(r"\b(?:command_task_read|_task_read_projection|_compact_task_text|build_compact)\b")
     tree = ast.parse(source)
     declarations = {id(method) for node in tree.body if module == "ledger.py" and isinstance(node, ast.ClassDef)
@@ -213,7 +214,10 @@ def _projection_references(source, *, module=""):
                 dispatch.update(id(child) for child in ast.walk(match))
     return [node.lineno for node in ast.walk(tree)
             if id(node) not in declarations and any(
-                (module != "task_projection.py" and id(node) not in permitted and low_level.search(value))
+                (module not in {"task_projection.py", "next_actions.py"} and id(node) not in permitted
+                 # workflow.py uses this name for the unrelated work plan checklist.
+                 and (module != "workflow.py" or value != "next_actions" or isinstance(node, (ast.alias, ast.ImportFrom)))
+                 and low_level.search(value))
                 or (id(node) not in dispatch and handlers.search(value))
                 for value in vars(node).values() if isinstance(value, str))]
 
@@ -232,6 +236,8 @@ def test_gate_source_check_catches_dynamic_references():
     assert _projection_references("importlib.import_module('hipson.task_projection')") == [1]
     assert _projection_references("getattr(store, 'projection_rows')") == [1]
     assert _projection_references("from hipson import task_projection") == [1]
+    assert _projection_references("from hipson import next_actions") == [1]
+    assert _projection_references("importlib.import_module('hipson.next_actions')") == [1]
     assert _projection_references("class Ledger:\n    def projection_rows(self): ...", module="ledger.py") == []
     assert _projection_references("class Ledger:\n    def projection_rows(self): self.projection_rows()",
                                   module="ledger.py") == [2]
@@ -251,12 +257,13 @@ def test_gate_source_check_rejects_injected_calls_to_read_handlers():
             return source.replace(original, original + "    command_task_read(args)\n"
                                   "    mcp_server._task_read_projection(name, arguments, db)\n"
                                   "    mcp_server._compact_task_text(payload)\n"
+                                  "    from hipson import next_actions\n"
                                   "    lead_context.build_compact(store)\n", 1)
         return source
 
     with patch.object(Path, "read_text", read_with_injected_calls), pytest.raises(AssertionError) as exc:
         test_gate_sources_do_not_reference_projection()
-    assert sum(line.strip().startswith("task_flow.py:") for line in str(exc.value).splitlines()) == 4
+    assert sum(line.strip().startswith("task_flow.py:") for line in str(exc.value).splitlines()) == 5
     test_gate_sources_do_not_reference_projection()
 
 

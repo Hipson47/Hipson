@@ -63,7 +63,10 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
             assert fixture.heavy_task in _cli(command)
 
         resume = _call_mcp("lead.resume", {"detail": "compact"})
-        assert resume["now"] == _call_mcp("task.now", {"detail": "compact"})
+        now = _call_mcp("task.now", {"detail": "compact"})
+        for field in ("next_actions", "next_actions_omitted", "evidence_policy"):
+            assert resume[field] == now.pop(field)
+        assert resume["now"] == now
         assert sum(sum(project["counts"].values()) for project in resume["projects"]) == len(tasks)
         assert len(resume["projects"]) == 3
         for field in ("unacknowledged_results", "blocking_findings", "major_findings"):

@@ -1878,12 +1878,13 @@ def command_task_read(args: argparse.Namespace) -> int:
                 else:
                     payload = task_projection.show_task(store, args.task, cli_db=cli_db)
             elif action == "resume":
-                payload = lead_context.build_compact(store, project=project, include_all=args.all, cli_db=cli_db)
+                payload = lead_context.build_compact(store, project=project, include_all=args.all,
+                                                     cli_db=cli_db, text=not args.json)
             else:
                 kind: task_projection.ListKind = "task.board" if action == "board" else "task.now"
                 payload = dict(task_projection.project_list(store, kind=kind, project=project,
                                                             include_terminal=args.all, offset=offset or 0,
-                                                            limit=limit, cli_db=cli_db))
+                                                            limit=limit, cli_db=cli_db, text=not args.json))
         if args.json or section is not None:
             sys.stdout.write(task_projection.dumps(payload))
         else:
@@ -1895,6 +1896,8 @@ def command_task_read(args: argparse.Namespace) -> int:
 
 
 def _render_compact_tasks(payload: dict[str, Any]) -> str:
+    from hipson.next_actions import TEXT_SUMMARY_LIMIT, escape_summary
+
     page = payload.get("now", payload)
     tasks = page.get("tasks", [page])
     lines = []
@@ -1932,6 +1935,21 @@ def _render_compact_tasks(payload: dict[str, Any]) -> str:
             lines.append(f"  {project['project']}: {counts}")
         omitted = ", ".join(f"{field}={count}" for field, count in payload["omitted"].items())
         lines.extend((f"Omitted: {omitted}", f"Truncated: {str(payload['truncated']).lower()}"))
+    if "next_actions" in payload:
+        pending = [
+            f"  {task['id']}/{item['id']} {item['result_status'] or item['status']} unacknowledged result: "
+            + _bounded_cli(escape_summary(item['summary']) if item['summary'] is not None else "(summary unavailable)",
+                           limit=TEXT_SUMMARY_LIMIT)
+            for task in tasks for item in task.get("assignments", []) if item["ack_state"] == "unacknowledged"
+        ]
+        if pending:
+            lines.extend(['<untrusted_data name="lead_evidence">', *pending, '</untrusted_data>'])
+    if payload.get("next_actions_omitted"):
+        lines.append(f"Next actions omitted: {payload['next_actions_omitted']}")
+    for action in payload.get("next_actions", []):
+        lines.append(f"Next: {action['why']} {_escape_cli_controls(action['cli'])}")
+        if "then" in action:
+            lines.append(f"Then: {_escape_cli_controls(action['then']['cli'])}")
     return "\n".join(lines)
 
 

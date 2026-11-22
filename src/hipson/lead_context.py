@@ -208,10 +208,15 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
 
 
 def build_compact(store: ledger.Ledger | None, *, project: str | None = None, include_all: bool = False,
-                  cli_db: str | None = None) -> dict[str, Any]:
+                  cli_db: str | None = None, text: bool = False) -> dict[str, Any]:
     from hipson import task_projection
 
-    now, rows = task_projection.resume_inputs(store, project=project, include_terminal=include_all, cli_db=cli_db)
+    page, rows = task_projection.resume_inputs(store, project=project, include_terminal=include_all,
+                                               cli_db=cli_db, text=text)
+    now: dict[str, Any] = dict(page)
+    actions = now.pop("next_actions")
+    actions_omitted = now.pop("next_actions_omitted")
+    evidence_policy = now.pop("evidence_policy")
     projects: dict[str, dict[str, int]] = {}
     pending: list[dict[str, str]] = []
     findings: dict[str, list[dict[str, str]]] = {"blocking": [], "major": []}
@@ -243,7 +248,8 @@ def build_compact(store: ledger.Ledger | None, *, project: str | None = None, in
     included: dict[str, list[Any]] = {key: [] for key in entries}
     result = {"kind": "lead.resume", "view_schema": now["view_schema"], "hipson_version": now["hipson_version"],
               "now": now, **included, "omitted": omitted, "truncated": False,
-              "evidence_policy": EVIDENCE_POLICY, "untrusted_fields": [f"now.{field}" for field in now["untrusted_fields"]]}
+              "next_actions": actions, "next_actions_omitted": actions_omitted,
+              "evidence_policy": evidence_policy, "untrusted_fields": [f"now.{field}" for field in now["untrusted_fields"]]}
     remaining = task_projection.RESUME_BUDGET - len(task_projection.dumps(result).encode("utf-8"))
     # Interleave categories so a large backlog cannot consume the entire summary.
     for group in zip_longest(*entries.values()):

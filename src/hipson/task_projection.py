@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from typing import Any, Literal, TypedDict, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, TypeVar, cast
 
 from hipson import __version__
 from hipson.display import escape_display_controls
@@ -21,6 +21,9 @@ from hipson.redaction import redact_text, redact_value
 from hipson.task_activity import LINE_LIMIT
 from hipson.task_context import EVIDENCE_POLICY
 from hipson.task_verification import _worker_context, argv_identity
+
+if TYPE_CHECKING:
+    from hipson.next_actions import NextAction
 
 VIEW_SCHEMA = 1
 ListKind = Literal["task.board", "task.now"]
@@ -137,6 +140,8 @@ class ListProjection(TypedDict):
     truncated: bool
     omitted: int
     more: ReadCall | None
+    next_actions: NotRequired[list[NextAction]]
+    next_actions_omitted: NotRequired[int]
 
 
 def dumps(obj: object) -> str:
@@ -439,8 +444,9 @@ def project_task(store: Ledger, task: str) -> TaskProjection:
 
 
 def _read_call(tool: str, arguments: dict[str, str | int | bool], cli_db: str | None) -> ReadCall:
-    command = ["hipson", *tool.split(".")]
+    command = ["hipson", *("task finding list".split() if tool == "task.findings" else tool.split("."))]
     for key, value in arguments.items():
+        key = key.replace("_", "-")
         if isinstance(value, str) and value.startswith("-"):
             command.append(f"--{key}={value}")
             continue
@@ -588,16 +594,37 @@ def _now_priority(row: dict[str, Any]) -> int:
 
 
 def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, remaining: int,
-         *, filters: dict[str, str | int | bool], cli_db: str | None) -> ListProjection:
+         *, filters: dict[str, str | int | bool], cli_db: str | None,
+         next_actions: Sequence[NextAction] = (), next_actions_omitted: int = 0) -> ListProjection:
     untrusted_fields = [f"tasks[].{field}" for field in TASK_UNTRUSTED_FIELDS]
+    actions = list(next_actions)
 
     def envelope(count: int, *, stub: bool = False) -> ListProjection:
         omitted = remaining - count
-        return ListProjection(view_schema=VIEW_SCHEMA, hipson_version=__version__, gate="not_evaluated", gate_note=GATE_NOTE,
+        page = ListProjection(view_schema=VIEW_SCHEMA, hipson_version=__version__, gate="not_evaluated", gate_note=GATE_NOTE,
                               evidence_policy=EVIDENCE_POLICY, untrusted_fields=untrusted_fields,
                               kind=kind, tasks=[], truncated=omitted > 0 or stub, omitted=omitted,
                               more=_read_call(kind, {"detail": "compact", "offset": offset + count, **filters},
                                               cli_db) if omitted else None)
+        if kind == "task.now":
+            page["next_actions"] = actions
+            page["next_actions_omitted"] = next_actions_omitted
+        return page
+
+    if tasks:
+        first = tasks[0]
+        stub = TaskStub(id=first["id"], status=first["status"], title="", too_large=True,
+                        hint=_read_call("task.show", {"task": first["id"], "detail": "compact"}, cli_db)["cli"])
+        minimum = envelope(1, stub=True)
+        minimum["tasks"] = [stub]
+    else:
+        minimum = envelope(0)
+    # Fit the ranked prefix before task rows, leaving room for page framing
+    # and a task stub so paging can always advance.
+    while actions and _size(minimum) > budget:
+        actions.pop()
+        next_actions_omitted += 1
+        minimum["next_actions_omitted"] = next_actions_omitted
 
     view = envelope(0)
     count = 0
@@ -612,11 +639,8 @@ def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, 
     if count:
         view["tasks"] = tasks[:count]
     elif tasks:
-        first = tasks[0]
-        stub = TaskStub(id=first["id"], status=first["status"], title=first["title"], too_large=True,
-                        hint=_read_call("task.show", {"task": first["id"], "detail": "compact"}, cli_db)["cli"])
-        view = envelope(1, stub=True)
-        view["tasks"] = [stub]
+        view = minimum
+        stub["title"] = tasks[0]["title"]
         while stub["title"] and _size(view) > budget:
             stub["title"] = stub["title"][:len(stub["title"]) // 2]
     if _size(view) > budget:
@@ -631,12 +655,10 @@ def _validate_page(value: int, limit: int | None, *, position: str) -> None:
         raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
 
 
-def _list_page(rows: list[dict[str, Any]], *, kind: ListKind, project: str | None,
+def _list_page(store: Ledger | None, rows: list[dict[str, Any]], *, kind: ListKind, project: str | None,
                include_terminal: bool, byte_budget: int | None = None, offset: int = 0,
-               limit: int | None = None, cli_db: str | None = None) -> ListProjection:
+               limit: int | None = None, cli_db: str | None = None, text: bool = False) -> ListProjection:
     """Project tasks in board creation order or now attention order."""
-    if kind == "task.now":
-        rows.sort(key=lambda row: (_now_priority(row), row["id"]))
     filters: dict[str, str | int | bool] = {}
     if limit is not None:
         filters["limit"] = limit
@@ -644,21 +666,39 @@ def _list_page(rows: list[dict[str, Any]], *, kind: ListKind, project: str | Non
         filters["project"] = project
     if include_terminal:
         filters["all"] = True
-    tasks = _project_rows(rows[offset:None if limit is None else offset + limit])
-    return _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget,
-                offset, max(0, len(rows) - offset), filters=filters, cli_db=cli_db)
+    end = None if limit is None else offset + limit
+    actions: list[NextAction] = []
+    omitted = 0
+    if kind == "task.now":
+        from hipson import next_actions
+
+        rows.sort(key=lambda row: (_now_priority(row), row["id"]))
+        projected = _project_rows(rows)
+        actions, omitted = next_actions.build(rows, projected, cli_db=cli_db)
+        tasks = projected[offset:end]
+    else:
+        tasks = _project_rows(rows[offset:end])
+    page = _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget,
+                offset, max(0, len(rows) - offset), filters=filters, cli_db=cli_db,
+                next_actions=actions, next_actions_omitted=omitted)
+    if kind == "task.now" and store is not None:
+        # Reserve room for the activity read and its follow-up before using
+        # the shorter acknowledgment wherever the result fits on this page.
+        next_actions.acknowledge_visible_results(store, page, text=text)
+    return page
 
 
 def project_list(store: Ledger | None, *, kind: ListKind, project: str | None = None, include_terminal: bool = False,
                  byte_budget: int | None = None, offset: int = 0, limit: int | None = None,
-                 cli_db: str | None = None) -> ListProjection:
+                 cli_db: str | None = None, text: bool = False) -> ListProjection:
     _validate_page(offset, limit, position="offset")
     rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
-    return _list_page(rows, kind=kind, project=project, include_terminal=include_terminal,
-                      byte_budget=byte_budget, offset=offset, limit=limit, cli_db=cli_db)
+    return _list_page(store, rows, kind=kind, project=project, include_terminal=include_terminal,
+                      byte_budget=byte_budget, offset=offset, limit=limit, cli_db=cli_db, text=text)
 
 
 def resume_inputs(store: Ledger | None, *, project: str | None, include_terminal: bool,
-                  cli_db: str | None = None) -> tuple[ListProjection, list[dict[str, Any]]]:
+                  cli_db: str | None = None, text: bool = False) -> tuple[ListProjection, list[dict[str, Any]]]:
     rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
-    return _list_page(rows, kind="task.now", project=project, include_terminal=include_terminal, cli_db=cli_db), rows
+    return _list_page(store, rows, kind="task.now", project=project, include_terminal=include_terminal,
+                      cli_db=cli_db, text=text), rows

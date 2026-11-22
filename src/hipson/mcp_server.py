@@ -75,7 +75,8 @@ MCP_INSTRUCTIONS = (
     "recommends which actor should take work (capability tags, your registry, ledger history) and launches nothing. "
     "For task.board, task.now, lead.resume and task.show, pass detail=compact for a bounded view (view_schema 1). "
     "Full stays the default in 1.8 and changes to compact in 1.9. Follow more calls to page lists or read task sections. "
-    "Compact views use recorded evidence and do not evaluate gates."
+    "Compact task.now and lead.resume include ranked next_actions with tool arguments and CLI commands. "
+    "Read a result before following its then acknowledgment. Compact views use recorded evidence and do not evaluate gates."
 )
 _DETAIL = {"type": "string", "enum": ["compact", "full"], "default": "full"}
 _CURSOR = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
@@ -485,8 +486,10 @@ def _tool(name: str) -> dict[str, Any]:
 
 def _description(name: str) -> str:
     descriptions = {
-        'task.now': 'Read lead attention in priority order, pending results, activity, findings and cleanup.' + _DETAIL_HELP,
-        'lead.resume': 'Restore lead context. Full detail includes decisions, verification and project Git state.' + _DETAIL_HELP,
+        'task.now': ('Read lead attention in priority order, pending results, activity, findings and cleanup. '
+                     'Compact detail includes ranked next_actions.') + _DETAIL_HELP,
+        'lead.resume': ('Restore lead context. Full detail includes decisions, verification and project Git state. '
+                        'Compact detail includes ranked next_actions at the top level.') + _DETAIL_HELP,
         "contract.show": "Read the local Hipson agent contract.",
         "policy.show": "Read the merged project policy.",
         "work.create": "Create a provider-free work plan and optional packet path.",

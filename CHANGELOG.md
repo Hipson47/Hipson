@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Compact task now and lead resume suggest up to ten ranked next actions with executable MCP
+  arguments and CLI commands. The views suggest direct acknowledgment when they show the complete
+  result summary and the assignment has no extra activity or journal.
 - CLI and MCP now offer compact board, now, resume, and task reads with versioned, bounded JSON
   that marks worker evidence and offers executable list continuations with resolved project paths.
   Task show can page verification, assignment, finding, or event records in 64,000-byte JSON section
