@@ -8,9 +8,9 @@ import shlex
 import shutil
 import sqlite3
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from hipson import (
     __version__,
@@ -85,6 +85,7 @@ from hipson.runtime import HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
 from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
+from hipson.task_calls import DEFAULT_STALE_DAYS, MAX_STALE_DAYS, MIN_STALE_DAYS, cleanup_project, task_lookup_calls
 from hipson.tools import ToolContext, ToolRegistryError, ToolSpec, bounded_tool_output, build_default_registry
 
 PACKAGE_ROOT = package_root()
@@ -128,7 +129,7 @@ def _agent_install_targets(args: argparse.Namespace) -> list[str]:
         if getattr(args, name):
             targets.append(name)
     if not targets:
-        raise SystemExit("Select at least one agent target or pass --all.")
+        raise ledger.LedgerError("Select at least one agent target or pass --all.", code="agents.target_required")
     return targets
 
 
@@ -244,7 +245,8 @@ def command_scan_many(args: argparse.Namespace) -> int:
 
 
 def command_init(args: argparse.Namespace) -> int:
-    plan = init_setup.build_plan(project_path=args.project, client=args.client, scope=args.scope, dry_run=args.dry_run)
+    plan = init_setup.build_plan(project_path=args.project, client=args.client, scope=args.scope, dry_run=args.dry_run,
+                                 mcp_profile=args.mcp_profile)
     report = plan.report
     needs_consent = any(action["status"] == "planned" for action in report["actions"])
     if report["ok"] and not args.dry_run:
@@ -351,10 +353,12 @@ def command_route_actor(args: argparse.Namespace) -> int:
         try:
             db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         except RuntimeError as exc:  # e.g. ~unknown-user
-            raise actor_routing.RoutingError(f"--db path cannot be resolved: {exc}") from None
+            raise ledger.LedgerError(f"--db path cannot be resolved: {exc}",
+                code="ledger.path_unresolvable") from None
         registry = actor_routing.load_registry(actor_routing.registry_path(args.config))
         if args.task is not None and not db.exists():
-            raise actor_routing.RoutingError(f"Task not found: {args.task} (no ledger at {db})")
+            raise ledger.LedgerError(f"Task not found: {args.task} (no ledger at {db})", code="task.not_found",
+                fix=task_lookup_calls(db))
         # History is read without migrating or creating a ledger; only recording opens it for writing.
         store = ledger.Ledger(db, create=False, read_only=not record) if db.exists() else None
         try:
@@ -365,7 +369,8 @@ def command_route_actor(args: argparse.Namespace) -> int:
             if store is not None:
                 store.close()
     except (actor_routing.RoutingError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(f"hipson route actor: {_bounded_cli(str(exc), limit=1200, escape_controls=True)}", file=sys.stderr)
+        ledger.print_error(exc, f"hipson route actor: {_bounded_cli(str(exc), limit=1200, escape_controls=True)}",
+                           json_output=args.json)
         return 2
     print(json.dumps(route, indent=2) if args.json else actor_routing.render(route))
     return 0
@@ -405,7 +410,7 @@ def command_install_agents(args: argparse.Namespace) -> int:
             mcp_home=args.mcp_home,
         )
     except (SystemExit, ValueError, OSError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -428,7 +433,8 @@ def command_kit_review(args: argparse.Namespace) -> int:
     try:
         if getattr(args, "review_action", None) == "resume":
             if not args.resume_run:
-                raise SystemExit("hipson kit review resume requires --run runs/<work_id>")
+                raise ledger.LedgerError("hipson kit review resume requires --run runs/<work_id>",
+                    code="kit.resume_run_required")
             result = review_kit.resume_review_kit(
                 run_path=args.resume_run,
                 verify_profile=args.verify_profile,
@@ -463,7 +469,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 approved_operations=args.approve_operation,
             )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -477,7 +483,8 @@ def command_kit_review(args: argparse.Namespace) -> int:
 def command_autopilot_review(args: argparse.Namespace) -> int:
     try:
         if args.run_sidecar and not args.ai_profile:
-            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+            raise ledger.LedgerError("--run-sidecar requires --ai-profile so the agent/model choice is explicit",
+                code="sidecar.profile_required")
         policy_mod.enforce_autopilot_policy(
             project_path=args.project,
             operation="autopilot_review",
@@ -503,7 +510,7 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
             approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     result = {**result, "artifact_kind": "hipson.autopilot_review_run", "autopilot": True}
     if args.json:
@@ -518,7 +525,8 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
 def command_autopilot_implement(args: argparse.Namespace) -> int:
     try:
         if args.run_sidecar and not args.ai_profile:
-            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+            raise ledger.LedgerError("--run-sidecar requires --ai-profile so the agent/model choice is explicit",
+                code="sidecar.profile_required")
         policy_mod.enforce_autopilot_policy(
             project_path=args.project,
             operation="autopilot_implement",
@@ -550,7 +558,7 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
             approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     result = {**result, "artifact_kind": "hipson.autopilot_implement_run", "autopilot": True}
     if args.json:
@@ -626,9 +634,9 @@ def command_policy_validate(args: argparse.Namespace) -> int:
 def command_mcp_serve(args: argparse.Namespace) -> int:
     try:
         if args.stdio:
-            mcp_server.serve_stdio(project_path=args.project, stdin=sys.stdin, stdout=sys.stdout)
+            mcp_server.serve_stdio(project_path=args.project, profile=args.profile, stdin=sys.stdin, stdout=sys.stdout)
             return 0
-        payload = mcp_server.server_catalog(project_path=args.project)
+        payload = mcp_server.server_catalog(project_path=args.project, profile=args.profile)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
@@ -640,7 +648,7 @@ def command_run_status(args: argparse.Namespace) -> int:
     try:
         payload = run_control.build_status(args.run)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
     return 0
@@ -650,7 +658,7 @@ def command_run_validate(args: argparse.Namespace) -> int:
     try:
         payload = run_control.build_validation(args.run)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
     return 0 if payload.get("ok") else 1
@@ -662,7 +670,7 @@ def command_run_handoff(args: argparse.Namespace) -> int:
         payload = run_control.build_handoff(run_dir)
         paths = run_control.write_handoff(run_dir, payload)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     payload = {**payload, "outputs": paths}
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else run_control.render_handoff(payload))
@@ -734,7 +742,7 @@ def command_verify_run(args: argparse.Namespace) -> int:
             allow_unsafe_output=args.allow_unsafe_output,
         )
     except SystemExit as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="verify.artifact_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps({**result, "output": str(written)}, indent=2, ensure_ascii=False))
@@ -1130,7 +1138,7 @@ def command_chat(args: argparse.Namespace) -> int:
                 print(exc, file=sys.stderr)
                 return 2
             except (ValueError, ToolRegistryError) as exc:
-                print(exc, file=sys.stderr)
+                ledger.print_error(exc, str(exc), json_output=False)
                 return 1
             provider = FakeProvider(
                 responses=[
@@ -1151,8 +1159,8 @@ def command_chat(args: argparse.Namespace) -> int:
     elif args.provider:
         try:
             provider = _build_chat_provider(args)
-        except ProviderError as exc:
-            print(f"Chat provider is not configured: {exc}", file=sys.stderr)
+        except (ProviderError, ledger.LedgerError) as exc:
+            ledger.print_error(exc, f"Chat provider is not configured: {exc}", json_output=False)
             return 1
         runtime_mode = RuntimeMode.REAL
         model = args.model or DEFAULT_PROVIDER_MODEL
@@ -1196,7 +1204,8 @@ def command_chat(args: argparse.Namespace) -> int:
 
 def _build_chat_provider(args: argparse.Namespace) -> OpenAICompatibleProvider:
     if args.provider != "openai-compatible":
-        raise ProviderError("Unsupported chat provider", str(args.provider))
+        raise ledger.LedgerError(f"Unsupported chat provider: {redact_text(str(args.provider))}",
+                                 code="chat.provider_unsupported")
     return OpenAICompatibleProvider.from_env(
         base_url=args.provider_url or DEFAULT_BASE_URL,
         api_key_env=args.api_key_env,
@@ -1209,7 +1218,8 @@ def _validate_fake_demo_tool(tool_name: str) -> ToolSpec:
     registry = build_default_registry()
     spec = registry.get(tool_name)
     if spec.risk_level != "read" or spec.approval_required:
-        raise ToolRegistryError("Fake tool-call demo is limited to read-risk tools that do not require approval")
+        raise ledger.LedgerError("Fake tool-call demo is limited to read-risk tools that do not require approval",
+            code="chat.demo_tool_not_allowed")
     return spec
 
 
@@ -1465,7 +1475,7 @@ def command_tool_run(args: argparse.Namespace) -> int:
             store = open_session_store(_session_db_path(args))
             try:
                 session_id = _tool_run_session_id(store, args.session_id, cwd)
-            except ToolRegistryError as exc:
+            except ledger.LedgerError as exc:
                 payload = _tool_run_payload(
                     spec.name,
                     status="rejected",
@@ -1475,6 +1485,8 @@ def command_tool_run(args: argparse.Namespace) -> int:
                     error=str(exc),
                 )
                 _print_tool_run_payload(payload, json_output=args.json)
+                if args.json:
+                    ledger.print_error(exc, str(exc), json_output=True)
                 return 1
 
         context = ToolContext(cwd=cwd, repo_root=project_mod.git_root(cwd), session_id=session_id or "cli-tool-run")
@@ -1746,7 +1758,7 @@ def _print_tool_run_payload(payload: dict[str, object], *, json_output: bool) ->
 def _tool_run_session_id(store: SessionStore, session_id: str | None, cwd: Path) -> str:
     if session_id:
         if store.get_session(session_id) is None:
-            raise ToolRegistryError(f"Session does not exist: {session_id}")
+            raise ledger.LedgerError(f"Session does not exist: {session_id}", code="session.not_found")
         return session_id
     return store.create_session(cwd=str(cwd), repo_root=str(project_mod.git_root(cwd) or ""), title="Hipson tool run")
 
@@ -1840,6 +1852,134 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_task_read(args: argparse.Namespace) -> int:
+    action = args.lead_command if args.command == "lead" else args.task_command
+    section = getattr(args, "section", None)
+    offset = getattr(args, "offset", None)
+    limit = getattr(args, "limit", None)
+    cursor = getattr(args, "cursor", None)
+    stale_days = getattr(args, "stale_days", None)
+    try:
+        if stale_days is not None:
+            if args.detail != "compact":
+                raise ledger.LedgerError("--stale-days requires --detail compact", code="task_read.stale_days_requires_compact")
+            if not MIN_STALE_DAYS <= stale_days <= MAX_STALE_DAYS:
+                raise ledger.LedgerError(f"--stale-days must be between {MIN_STALE_DAYS} and {MAX_STALE_DAYS}",
+                                         code="task_read.stale_days_invalid")
+        if section is not None and args.detail == "compact":
+            raise ledger.LedgerError("--section and --detail compact are mutually exclusive",
+                code="task_read.section_with_compact")
+        if action == "show" and section is None and (limit is not None or cursor is not None):
+            raise ledger.LedgerError("--limit and --cursor require --section", code="task_read.section_required")
+        if args.detail == "full" and section is None:
+            if action in ("board", "now") and (offset is not None or limit is not None):
+                raise ledger.LedgerError("--offset and --limit require --detail compact",
+                    code="task_read.compact_paging_required")
+            if action == "board" and (args.project is not None or args.all):
+                raise ledger.LedgerError("--project and --all on task board require --detail compact",
+                    code="task_read.compact_filter_required")
+            return command_lead_view(args) if action in ("now", "resume") else command_task(args)
+
+        from hipson import task_projection
+
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        cli_db = str(db) if args.db else None
+        project = getattr(args, "project", None)
+        if project is not None:
+            project = str(Path(project).expanduser().resolve())
+        connection = (ledger.Ledger(db, read_only=True, sidecar_free=action in ("now", "resume"))
+                      if db.exists() else None)
+        with closing(connection) if connection is not None else nullcontext() as store:
+            payload: dict[str, Any]
+            if action == "show":
+                if store is None:
+                    raise ledger.LedgerError(
+                        f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)",
+                        code="task.not_found", fix=task_lookup_calls(db))
+                if section is not None:
+                    payload = task_projection.read_section(store, args.task, section, limit=limit, cursor=cursor)
+                else:
+                    payload = task_projection.show_task(store, args.task, cli_db=cli_db)
+            elif action == "resume":
+                payload = lead_context.build_compact(store, project=project, include_all=args.all,
+                                                     cli_db=cli_db, text=not args.json, stale_days=stale_days)
+            else:
+                kind: task_projection.ListKind = "task.board" if action == "board" else "task.now"
+                payload = dict(task_projection.project_list(store, kind=kind, project=project,
+                                                            include_terminal=args.all, offset=offset or 0,
+                                                            limit=limit, cli_db=cli_db, text=not args.json, stale_days=stale_days))
+        if args.json or section is not None:
+            sys.stdout.write(task_projection.dumps(payload))
+        else:
+            print(_render_compact_tasks(payload))
+        return 0
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
+        return 1
+
+
+def _render_compact_tasks(payload: dict[str, Any]) -> str:
+    from hipson.next_actions import TEXT_SUMMARY_LIMIT, escape_summary
+
+    page = payload.get("now", payload)
+    tasks = page.get("tasks", [page])
+    lines = []
+    for task in tasks:
+        title = _bounded_cli(task["title"], limit=160, escape_controls=True)
+        line = f"{task['id']} [{task['status']}] {title}"
+        if task.get("too_large"):
+            line += f" | Details: {_escape_cli_controls(task['hint'])}"
+        else:
+            checks = task["checks"]
+            recorded_ok = sum(item["recorded"] == "ok" for item in checks)
+            stale = sum(item["current"] == "stale" for item in checks)
+            line += (f" | checks recorded OK {recorded_ok}/{len(checks)}, stale {stale}"
+                     f" | open findings {sum(task['open_findings'].values())}")
+            if flag := task["stale"]:
+                line += f" | task stale {flag['days']} days since {flag['since']}"
+        lines.append(line)
+        if "usage" in payload:
+            lines.append(f"Usage: {_bounded_json(task['usage'], limit=2048, escape_controls=True)}")
+    if not lines:
+        lines.append("No tasks on this page.")
+    more = page["more"]
+    if isinstance(more, dict):
+        lines.append(f"{page['omitted']} more tasks: {_escape_cli_controls(more['cli'])}")
+    elif isinstance(more, list):
+        lines.extend(_escape_cli_controls(call["cli"]) for call in more)
+    if "now" in payload:
+        lines.append("")
+        for field, label, identifier in (
+            ("unacknowledged_results", "Unacknowledged results", "assignment"),
+            ("blocking_findings", "Blocking findings", "finding"),
+            ("major_findings", "Major findings", "finding"),
+        ):
+            items = ", ".join(f"{item['task']}/{item[identifier]}" for item in payload[field])
+            lines.append(f"{label}: {items or 'none'}")
+        lines.append("Projects:" if payload["projects"] else "Projects: none")
+        for project in payload["projects"]:
+            counts = ", ".join(f"{status}={count}" for status, count in project["counts"].items())
+            lines.append(f"  {project['project']}: {counts}")
+        omitted = ", ".join(f"{field}={count}" for field, count in payload["omitted"].items())
+        lines.extend((f"Omitted: {omitted}", f"Truncated: {str(payload['truncated']).lower()}"))
+    if "next_actions" in payload:
+        pending = [
+            f"  {task['id']}/{item['id']} {item['result_status'] or item['status']} unacknowledged result: "
+            + _bounded_cli(escape_summary(item['summary']) if item['summary'] is not None else "(summary unavailable)",
+                           limit=TEXT_SUMMARY_LIMIT)
+            for task in tasks for item in task.get("assignments", []) if item["ack_state"] == "unacknowledged"
+        ]
+        if pending:
+            lines.extend(['<untrusted_data name="lead_evidence">', *pending, '</untrusted_data>'])
+    if payload.get("next_actions_omitted"):
+        lines.append(f"Next actions omitted: {payload['next_actions_omitted']}")
+    for action in payload.get("next_actions", []):
+        lines.append(f"Next: {action['why']} {_escape_cli_controls(action['cli'])}")
+        if "then" in action:
+            lines.append(f"Then: {_escape_cli_controls(action['then']['cli'])}")
+    return "\n".join(lines)
+
+
 def command_lead_view(args: argparse.Namespace) -> int:
     try:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
@@ -1851,7 +1991,37 @@ def command_lead_view(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else lead_context.render(payload))
         return 0
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(redact_text(str(exc)), file=sys.stderr)
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
+        return 1
+
+
+def command_task_cleanup(args: argparse.Namespace) -> int:
+    try:
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        report, refusal = cleanup_project(db, args.project)
+        if args.json:
+            sys.stdout.write(json.dumps(report, separators=(",", ":")))
+        else:
+            print(f"Project: {_escape_cli_controls(report['project'])}")
+            if not report["tasks"]:
+                print("No tasks bound to this path.")
+            for task in report["tasks"]:
+                print(f"{task['id']} [{task['status']}] {_escape_cli_controls(task['project'])}")
+                for assignment in task["assignments"]:
+                    claims = ", ".join(_escape_cli_controls(path) for path in assignment["claims"]) or "none"
+                    print(f"  {assignment['id']} [{assignment['status']}] {assignment['role']}/{assignment['mode']} | claims: {claims}")
+                if omitted := task["omitted_assignments"]:
+                    print(f"  {omitted} more assignment(s) omitted.")
+                if omitted := task["omitted_claims"]:
+                    print(f"  {omitted} more claim(s) omitted.")
+            if report["omitted_tasks"]:
+                print(f"{report['omitted_tasks']} more task(s) omitted; narrow the path to see them.")
+        if refusal is not None:
+            ledger.print_error(refusal, str(refusal), json_output=args.json)
+            return 1
+        return 0
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
 
 
@@ -1878,9 +2048,11 @@ def command_task(args: argparse.Namespace) -> int:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if read_only and not db.exists():
             if args.task_command == 'activity':
-                raise ledger.LedgerError(f'Assignment not found: {args.assignment}')
+                raise ledger.LedgerError(f'Assignment not found: {args.assignment}', code="assignment.not_found")
             if args.task_command in ("show", "events", "brief", "context") or ((dry_run or finding_list) and args.task is not None):
-                raise ledger.LedgerError(f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)")
+                raise ledger.LedgerError(
+                    f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)",
+                    code="task.not_found", fix=task_lookup_calls(db))
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
             return 0
         with closing(ledger.Ledger(db, read_only=read_only)) as store:
@@ -1915,7 +2087,7 @@ def command_task(args: argparse.Namespace) -> int:
             elif args.task_command == 'activity':
                 payload = store.activity(args.assignment)
             elif args.task_command == 'ack':
-                payload = store.ack(args.assignment, note=args.note)
+                payload = store.ack(args.assignment, note=args.note, actor=args.actor)
             elif args.task_command == "finding":
                 if args.finding_command == "add":
                     payload = store.add_finding(
@@ -1949,7 +2121,9 @@ def command_task(args: argparse.Namespace) -> int:
                     return 0
                 payload = worker_view
             elif args.task_command == "show":
-                view = store.show(args.task)
+                from hipson.task_projection import show_full
+
+                view = show_full(store, args.task)
                 if not args.json:
                     print(f"{view['id']} [{view['status']}] {_bounded_cli(view['title'], limit=120, escape_controls=True)}")
                     print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
@@ -1991,6 +2165,7 @@ def command_task(args: argparse.Namespace) -> int:
                             print(f"    {_bounded_cli(finding['location'], limit=120, escape_controls=True)}")
                     if view["claims"]:
                         print(f"Claims: {_bounded_json(view['claims'], escape_controls=True)}")
+                    print(f"Usage: {_bounded_json(view['usage'], limit=2048, escape_controls=True)}")
                     return 0
                 payload = view
             elif args.task_command == "events":
@@ -2014,7 +2189,7 @@ def command_task(args: argparse.Namespace) -> int:
                     return 0
                 payload = tasks
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(redact_text(str(exc)), file=sys.stderr)
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload, escape_controls=True))
     return 0
@@ -2068,6 +2243,7 @@ def build_parser() -> argparse.ArgumentParser:
             ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
             ('ack', 'Acknowledge an ended assignment result or failure journal'),
             ("reap", "Cancel orphaned assignments and release their claims"),
+            ("cleanup", "Inspect tasks, assignments and claims before removing a project path (read-only)"),
             ("event", "Append a task event"),
             ("status", "Transition a task"),
             ("show", "Show a task with assignments and claims"),
@@ -2088,6 +2264,8 @@ def build_parser() -> argparse.ArgumentParser:
             task_parser.add_argument("--task", required=True)
         if name in ("assign", "event", "status"):
             task_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        elif name not in ("open", "run", "verify", "close", "checks", "do", "finding", "cleanup"):
+            task_parser.add_argument("--actor", help="Caller label for a shared lifecycle invocation")
         if name in ("finish", "event"):
             task_parser.add_argument("--summary", required=True)
             task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
@@ -2103,7 +2281,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)
     task_parsers["open"].add_argument("--acceptance", action="append", default=[], help="Acceptance criterion; repeatable")
-    task_parsers["open"].add_argument("--lead", default="claude")
+    task_parsers["open"].add_argument("--lead", "--actor", default="claude")
     task_flow.add_check_arguments(task_parsers["open"])
     task_runner.add_needs_arguments(task_parsers["open"], "the task")
     task_parsers["open"].add_argument("--start", action="store_true", help="Move the new task to in_progress")
@@ -2136,6 +2314,8 @@ def build_parser() -> argparse.ArgumentParser:
             finding_parser.add_argument("--severity", choices=ledger.FINDING_SEVERITIES, required=action == "add")
         if action in ("add", "update"):
             finding_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        else:
+            finding_parser.add_argument("--actor", help="Caller label for a shared lifecycle invocation")
         if action == "add":
             finding_parser.add_argument("--title", required=True)
             finding_parser.add_argument("--detail", default="")
@@ -2159,18 +2339,35 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
-    task_parsers['now'].add_argument('--project')
-    task_parsers['now'].add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
-    task_parsers['now'].set_defaults(func=command_lead_view)
+    task_parsers["cleanup"].add_argument("--project", required=True, help="Project path or parent directory")
+    task_parsers["cleanup"].set_defaults(func=command_task_cleanup)
+    for name in ("board", "now", "show"):
+        read = task_parsers[name]
+        read.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
+        read.add_argument("--limit", type=int, help="Maximum records on a page (1–100)")
+        read.set_defaults(func=command_task_read)
+    for name in ("board", "now"):
+        read = task_parsers[name]
+        read.add_argument("--project", help="Only include tasks in this project")
+        read.add_argument("--all", action="store_true", help="Include terminal tasks")
+        read.add_argument("--offset", type=int, help="Zero-based task offset for compact pages")
+    task_parsers["show"].add_argument("--section", choices=("verification", "assignments", "findings", "events"),
+                                      help="Read a byte-bounded section page (default record limit: 5)")
+    task_parsers["show"].add_argument("--cursor", type=int, help="Position returned as next_cursor by a section read")
 
     lead = subparsers.add_parser('lead', help='Restore lead context from the task ledger')
     lead_sub = lead.add_subparsers(dest='lead_command', required=True)
     resume = lead_sub.add_parser('resume', help='Read deterministic, bounded lead context without changing state')
     resume.add_argument('--project')
+    resume.add_argument('--actor', help='Caller label for a shared lifecycle invocation')
     resume.add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
     resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
-    resume.add_argument('--json', action='store_true', help='Print full machine-readable context')
-    resume.set_defaults(func=command_lead_view)
+    resume.add_argument('--json', action='store_true', help='Print machine-readable context')
+    resume.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
+    for stale_parser in (task_parsers["now"], resume):
+        stale_parser.add_argument("--stale-days", type=int, help=(
+            f"Compact task inactivity threshold in days ({MIN_STALE_DAYS}–{MAX_STALE_DAYS}, default: {DEFAULT_STALE_DAYS})"))
+    resume.set_defaults(func=command_task_read)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")
     doctor.add_argument("--agent-surfaces", action="store_true", help="Report agent integration readiness")
@@ -2398,6 +2595,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_serve.add_argument("--project", default=".", help="Target repository; defaults to current directory")
     mcp_serve.add_argument("--catalog", action="store_true", help="Print catalog-only MCP metadata")
     mcp_serve.add_argument("--stdio", action="store_true", help="Run the minimal MCP stdio JSON-RPC server")
+    mcp_serve.add_argument("--profile", choices=mcp_server.MCP_PROFILES, default="full", help="MCP tool profile (default: full)")
     mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
     mcp_serve.set_defaults(func=command_mcp_serve)
 
@@ -2618,6 +2816,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--project", default=".", help="Project directory; defaults to current directory")
     init.add_argument("--client", choices=init_setup.CLIENTS, default="auto", help="Auto detects both clients on PATH; none sets up only the ledger")
     init.add_argument("--scope", choices=("project", "user"), default="project", help="Claude registration scope; Codex uses CODEX_HOME/config.toml")
+    init.add_argument("--mcp-profile", choices=mcp_server.MCP_PROFILES, default="full", help="Register the given MCP tool profile (default: full)")
     init.add_argument("--dry-run", action="store_true", help="Print exact commands and config additions without applying setup")
     init.add_argument("--yes", action="store_true", help="Approve the displayed setup without an interactive prompt")
     init.add_argument("--json", action="store_true", help="Print checks, actions and MCP verification as JSON")

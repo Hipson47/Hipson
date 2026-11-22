@@ -1,0 +1,4 @@
+{"type":"turn_context","payload":{"model":"fixture-model","reasoning_effort":"high"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"<!-- ledger-run-fixture -->"}}
+{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":57653,"cached_input_tokens":38016,"cache_write_input_tokens":0,"output_tokens":940,"reasoning_output_tokens":281,"total_tokens":58593}}}}
+{"type":"event_msg","payload":{"type":"token_count","info":null}}

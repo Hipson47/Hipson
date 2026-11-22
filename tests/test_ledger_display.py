@@ -20,7 +20,9 @@ def test_plain_ledger_actor_redaction_and_bounds(tmp_path: Path):
         store.assign(task, actor=actor, role="reviewer", mode="ro")
         long_assignment = store.assign(task, actor=long_actor, role="reviewer", mode="ro")["id"]
         store.add_event(task, actor=actor, type="note", summary="Ready")
-        expected = [store.show(task), store.board(), store.list_tasks(), store.events(task)]
+        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens_by_source": None,
+                 "without_usage": 0, "elapsed_seconds": 0.0}
+        expected = [{**store.show(task), "usage": usage}, store.board(), store.list_tasks(), store.events(task)]
 
     commands = (("show", "--task", task), ("board",), ("list",), ("events", "--task", task))
     for command, payload in zip(commands, expected, strict=True):
@@ -48,12 +50,15 @@ def test_plain_ledger_views_escape_worker_controls_and_preserve_json(tmp_path: P
         task = store.open_task(project=tmp_path, title=f"task {unsafe}", objective=f"objective {unsafe}",
                                lead=f"lead {unsafe}")["id"]
         assignment = store.assign(task, actor=f"reviewer {unsafe}", role="reviewer", mode="ro")["id"]
-        store.finish(assignment, result="passed", summary="Reviewed", worker_result=report)
+        finished = store.finish(assignment, result="passed", summary="Reviewed", worker_result=report)
         store.assign(task, actor=f"active {unsafe}", role="reviewer", mode="ro")
         cursor = store.events(task)[-1]["seq"]
         store.add_event(task, actor=f"actor {unsafe}", type="note", summary=f"event {unsafe}")
+        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 1,
+                 "elapsed_seconds": finished["usage"]["elapsed_seconds"],
+                 "missing_reasons": {"not_an_agent_runtime": 1}}
         cases = (
-            (("show", "--task", task), store.show(task),
+            (("show", "--task", task), {**store.show(task), "usage": usage},
              (f"reviewer {safe}", f"summary {safe}", f"title {safe}", f"location {safe}")),
             (("board",), store.board(), (f"active {safe}", r"task text\u001b[2J\u001b[H")),
             (("list",), store.list_tasks(), (f"task {safe}", f"objective {safe}", f"lead {safe}")),

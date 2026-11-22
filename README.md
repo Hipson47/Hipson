@@ -87,8 +87,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 1,068 tests, 0 skipped on Linux CI (strict skip allowlist on macOS and Windows CI), run by both `pytest` and the dependency-free `scripts/run_tests.py`, plus a clean-wheel platform smoke on Linux, macOS and Windows (1.7.0, 2026-11-19; 404 tests when the ledger landed) |
-| Mutation gate | Four modules (approvals, evidence, redaction, sandbox): committed baseline 68.66% (1,593 / 2,320 killed; at most 727 survivors, 0 without tests, 0 timeouts), which fails CI on regression; a second gate covers the ledger's review/done gates, change, environment, capability, checkpoint and review-policy records (`ledger.py`, `task_verification.py`; committed baseline 80.28%, 2,744 / 3,418 killed, at most 667 survivors). Both gates run on Linux, Python 3.12, in every CI run |
+| Test suite | 1,195 tests in the 1.8.0 RC, up from 404 when the ledger landed. Both `pytest` and the dependency-free `scripts/run_tests.py` run them. CI requires zero skips on Linux and checks a skip allowlist on macOS and Windows. A clean-wheel smoke runs on all three |
+| Mutation gate | Four modules (approvals, evidence, redaction, sandbox) have a committed baseline of 68.66% (1,593 / 2,320 killed, at most 727 survivors, 0 without tests, 0 timeouts). The ledger-core gate (`ledger.py`, `task_verification.py`) has a committed baseline of 80.28% (2,744 / 3,418 killed, at most 667 survivors). The 1.8.0 RC ledger-core run passed at 84.03% on Python 3.13 (3,426 / 4,077 killed, 644 survivors, 7 without tests, 0 timeouts). Both gates run on Linux with Python 3.12 in CI |
 | Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
@@ -196,17 +196,21 @@ Claude defaults to project scope (`.mcp.json`); `--scope user` selects its user 
 `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Existing registrations are left alone;
 config edits get unique backups first. Restart the lead client after setup, then open your first task below.
 
-### Upgrade from 1.6
+### Upgrade from 1.7
 
 ```bash
 uv tool upgrade hipson        # or: pip install --upgrade hipson
-hipson init --client none     # migrates the ledger (schema 10 -> 11) after taking a backup
+hipson init --client none     # backs up the ledger and migrates schema 11 to 12
 ```
 
-1.7 reads a 1.6 ledger before migrating; `hipson init` migrates it and writes a `ledger.sqlite.backup-*` copy
-next to it first. After the migration 1.6 can no longer open the ledger, so upgrade every Hipson that shares it
-(for example the one your MCP client starts) and restart the lead client. Tasks, assignments, evidence and
-events carry over unchanged. To track unreleased work instead, install `git+https://github.com/Hipson47/Hipson`.
+Any 1.8 write open of an older ledger backs it up first, to `<ledger>.v<old>-backup-<timestamp>` next to it
+(from 1.6 the migration is schema 10 to 12). `hipson init` keeps its own backup too. Delete the backups once
+the upgrade has settled; they hold the same task evidence as the ledger.
+Hipson 1.7.0 refuses a schema 12 ledger, so upgrade every Hipson that shares it, including other environments
+and machines and the installation your MCP client starts; a machine still on 1.7 reports
+`ledger.schema_unsupported` until it upgrades. Sync only the closed ledger file, never its `-wal` or `-shm`
+files. Restart the lead client after upgrading.
+For rollback steps, see the [1.8 release notes](https://github.com/Hipson47/Hipson/blob/main/docs/release-1.8.md#upgrade-from-17).
 
 ### Run from a clone instead
 
@@ -245,6 +249,12 @@ then moves the task to `review` and `done`; if anything blocks (a failing check,
 major finding) it changes nothing and prints the command that clears each blocker. `hipson task checks`
 changes the checks later (replacing them needs `--reason`, and workers cannot), `hipson task verify --task T`
 without a command runs them all, and `--force --reason` on `task status` stays the audited override.
+
+Agents can request compact board, now, resume and task reads. Compact now and resume suggest ranked
+`next_actions`, and coded refusals suggest fix calls where available. Compact reads flag stale tasks,
+`task cleanup` checks a project before removal, and task show reports per-task usage by runtime source.
+The opt-in `lead` MCP profile gives a lead 14 tools and defaults these reads to compact detail.
+See the [1.8 release notes](https://github.com/Hipson47/Hipson/blob/main/docs/release-1.8.md).
 
 To let Hipson drive a coding agent through build, your checks, an independent review of exactly the verified
 tree and bounded repairs, see `hipson task flow` in

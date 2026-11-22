@@ -26,7 +26,8 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 
 Installed: Claude Code 2.1.319, Codex CLI 0.169.0, Antigravity 1.5.12. "Verified" means a run exercised it and
 the probe observed the effect itself (a file, a hook log line, a re-run check, a recalled code word), not the
-model's report. Evidence: `scripts/native_probe.py` reports in [evals/](evals/) (`native-probe-2026-11-19-*.json`),
+model's report. Evidence: `scripts/native_probe.py` reports in [evals/](evals/) (`native-probe-2026-11-19-*.json`; the
+2026-11-22 rerun in `native-probe-2026-11-22-*.json` adds the normalized usage record to every run),
 one sample per cell; "Hipson = manual" means the run through `hipson task run ... -- hipson agent exec` and the
 runtime's own non-interactive command on the same fixture showed the same capability.
 
@@ -37,11 +38,11 @@ runtime's own non-interactive command on the same fixture showed the same capabi
 | Project skills | verified: `.claude/skills`, Hipson = manual | verified: `.agents/skills`, Hipson = manual | unverified: no documented project skill directory |
 | Hooks | verified: project `PostToolUse` hook ran (8 events), Hipson = manual | not probed | not probed |
 | Native subagents | verified: the worker delegated to `Explore` (hook saw the Agent tool), Hipson = manual | not observed (none requested by the runtime) | not probed |
-| Write mode (builder) | verified: edit + task-scoped grant for the declared check | verified: `workspace-write` | verified: `accept-edits` + session-only grant for exactly the declared checks (`--settings` `permissions.allow: ["command(<check>)"]`; it admits that command and no other) |
+| Write mode (builder) | verified: edit + task-scoped grant for the declared check | verified: `workspace-write` | verified: `accept-edits` + session-only `command(<check>)` grants for the declared checks. Hipson merges these grants with the user's allow rules. |
 | Read-only mode (reviewer) | verified: plan mode, the write did not happen | verified: read-only sandbox refused the write ("Read-only file system") | **not enforced**: in `--mode plan` the reviewer created the file in 2 of 2 probe runs |
 | Session continuation | verified: `--resume`, code word recalled; also from another working directory (review snapshots) | verified after a fix: `exec resume` refuses `--sandbox`, so Hipson now passes `-c sandbox_mode=...` (same mode) | verified: `--conversation`, code word recalled |
 | A missing session | `No conversation found with session ID` (exit 1): Hipson reports it and the next `--continue-session` starts a new session | refused outside a trusted or Git directory; snapshots are Git checkouts | not probed |
-| Usage telemetry | `usage`, `modelUsage` (models used), turns | `turn.completed.usage` (input includes cached input); no model or turn count in `exec --json` | `usage`, turns; no model name |
+| Usage telemetry | Terminal `stream-json` result with `usage`, `modelUsage` and turns | Rollout `token_count` or `exec --json` `turn.completed.usage` | JSON result `usage` and turns |
 | MCP tools, plugins | configured and listed (`hipson agent runtimes`); not execution-verified | configured and listed; not execution-verified | configured and listed; not execution-verified |
 | Code intelligence, browser, computer use | not exercised by headless workers; unverified | unverified | unverified |
 | Controlled isolation | `--setting-sources project --strict-mcp-config --no-session-persistence`, refused when the project has `.claude/settings*.json` (they would load); `--bare` needs an API key | `--ephemeral --ignore-user-config --ignore-rules` | **unsupported**: no documented configuration-free run |
@@ -113,7 +114,8 @@ to the review; files in the project (`CLAUDE.md`, `AGENTS.md`, `.claude/settings
 
 Common failures: `auth_required` (log in with the runtime), `rate_limited` (wait, or use another runtime for that
 role), `permission_denied` (the runtime refused a tool: Antigravity's headless plan mode cannot run commands, so
-reviewers get the diff in their brief), `unsupported` (a combination the runtime does not document, e.g.
+reviewers get the diff in their brief), `model_unavailable` (choose a model from Antigravity's diagnostic),
+`unsupported` (a combination the runtime does not document, e.g.
 controlled Antigravity), `needs_lead` with "changed protected paths" (the builder edited a check's test or
 runtime configuration: restore it with `git checkout -- PATH`, then resume).
 
@@ -122,8 +124,15 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
 - **native** (default): the runtime runs with the user's own configuration, plugins, skills, MCP servers,
   instructions and model defaults. Hipson adds no clean-room flag and never a permission bypass
   (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for a
-  Claude writer a task-scoped permission for exactly the task's declared checks, read from the ledger
-  (`--allowedTools "Bash(<check>)"`; a check with a wildcard, bracket or leading `NAME=value` word gets none).
+  Claude or Antigravity writer a task-scoped permission for exactly the task's declared checks, read from the
+  ledger. Claude uses `--allowedTools "Bash(<check>)"`. Antigravity's temporary `--settings` file carries the
+  user's `permissions.allow` and `permissions.deny` lists from `~/.gemini/antigravity-cli/settings.json`,
+  with the exact `command(<check>)` grants added to `allow`. Antigravity applies the deny rules. A live
+  check on agy 1.5.14 confirmed that a user deny rule blocked `git status` with the layer present.
+  The file has mode `0600` on POSIX. Hipson passes the file path, removes the file after the run, and leaves
+  the user's settings untouched. If Hipson cannot read the user's settings or validate either permission
+  list, it omits the layer and records the reason in `check_grants_note` in the run meta and in the failure
+  detail if the run fails. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
   The permission mode follows the recorded assignment (`ro` -> plan / read-only / plan mode), whatever flags say.
 - **controlled**: for benchmarks and isolated tests; uses each runtime's documented isolation flags. Antigravity
   refuses it (exit 64, `unsupported`) rather than pretending. The e2e harness keeps its own stronger isolation
@@ -136,11 +145,14 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
 - The structured answer must validate against `schemas/task-result.schema.json`; Hipson writes it to
   `HIPSON_FLOW_RESULT`. Anything else is a failure, never a success.
 - Failure classes from the runtime's own words and exit codes: `rate_limited` (5), `auth_required` (4),
-  `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64). `task
-  run` records the exit code; the flow stops with `worker_failed` / `reviewer_failed`.
+  `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64),
+  and `model_unavailable` (64) for Antigravity model selection failures. The redacted CLI diagnostic is printed
+  and saved in the meta file's `detail`. `task run` records the exit code and the flow stops with
+  `worker_failed` / `reviewer_failed`.
 - Evidence beside the result (`<result>.meta.json`): runtime, profile, role, mode, ledger, project, session,
-  models, usage, the names of denied tools (never their inputs), duration, brief size and a bytes/4 token
-  estimate. A nonzero exit is never a success, even after a valid-looking result; Codex's last-message file is
+  models, raw usage, normalized `usage_report`, the names of denied tools (never their inputs), duration,
+  brief size and a bytes/4 `brief_tokens_estimate` heuristic. A nonzero exit is never a success, even after
+  a valid-looking result; Codex's last-message file is
   removed before and after each run so a stale one cannot be ingested. `verified` evidence records the CLI
   version and counts only while that version is installed.
 - Sessions: a new run gets a fresh session id, recorded with its task and assignment in the meta file;
@@ -155,6 +167,30 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   that fails (`OSError`) is a `provider_error` with meta; an Antigravity prompt over 100,000 bytes (it is an argv
   element) is refused before launch, and so is an agy that resolves to a `.cmd`/`.bat` script on Windows
   (cmd.exe would cut the multi-line prompt at its first line break).
+
+## Usage evidence
+
+- `codex_rollout` uses the cumulative `total_token_usage` from a matching `task run --rollout codex`
+  transcript. When the transcript contains an earlier cumulative snapshot, Hipson subtracts it. The
+  `agent exec` adapter uses the invocation's `turn.completed.usage` events from `codex exec --json`,
+  including when the session is resumed or ephemeral. Input includes cached input, and output
+  includes reasoning. With both counters present, input plus output gives the total.
+- `agy_json` uses the JSON result's `usage`. Cache reads and thinking are recorded separately.
+  The reported total takes precedence. If the total is absent, reported input plus output gives the
+  same measure, which excludes cache reads.
+- `claude_stream_json` uses the terminal result event's `usage`. Claude reports uncached input,
+  cache reads, cache writes and output separately. All four are needed to derive an absent total.
+  Reported thinking is part of output. The adapter also accepts a single JSON result object.
+
+An assignment can deliver token evidence even when its structured result fails. If it supplies no
+recognized counts, the ledger records a null `tokens` field and a reason. See the
+[reason table and task totals](TASK_LEDGER.md#usage-per-task-and-assignment). Assignment elapsed time
+comes from ledger timestamps. The adapter's process duration and brief estimate are separate fields.
+
+`scripts/native_probe.py` adds `evidence.usage_report` to live probe rows, reading the assignment's ledger
+record for Hipson runs and normalizing runtime stdout for manual runs. Manual rows leave
+`usage_report.elapsed_seconds` null and retain the probe's separately measured `duration_s`.
+The live flow comparison reports each arm's observed tokens and the counts of missing-usage reasons.
 
 ## Live runs through Hipson (2026-11-19, one sample each; not a benchmark)
 

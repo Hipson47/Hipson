@@ -49,9 +49,9 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-3] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs, v11 review_policy
         assert {row[-2] for row in after["tasks"]} == {"[]"} and {row[-1] for row in after["tasks"]} == {"none"}
-        assert [row[:-13] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-13:-4] == (None,) * 9 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
-        assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-14] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-14:-5] == (None,) * 9 and row[-4:] == (None,) * 4 for row in after['assignments'])
+        assert [row[-5] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         for task in store.list_tasks():
             assert_strict_schema("task.schema.json", store.show(task["id"]))
         assert store.reap() == []  # Migrated owner-less claims remain held.
@@ -62,7 +62,7 @@ def test_ledger_migrates_real_v1_file_preserving_all_rows_and_events(tmp_path: P
         assert new["id"] == "A-0004" and new["owner_pid"] == 42
         assert store.events("T-0001")[-1]["seq"] > 6
     with closing(Ledger(db)) as store:
-        assert _rows(store)["assignments"][-1][-13] == 42  # Reopening never repeats ALTER TABLE (v8 +changes, v9 +environment).
+        assert store.activity("A-0004")["owner_pid"] == 42  # Reopening never repeats ALTER TABLE.
 
 
 def test_ledger_v1_migration_rolls_back_ddl_and_version_on_failure(tmp_path: Path):
@@ -164,9 +164,9 @@ def test_ledger_v3_migration_preserves_evidence_and_read_only_does_not_migrate(t
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-3] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs, v11 review_policy
         assert {row[-2] for row in after["tasks"]} == {"[]"} and {row[-1] for row in after["tasks"]} == {"none"}
-        assert [row[:-8] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-8:-4] == (None,) * 4 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
-        assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-9] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-9:-5] == (None,) * 4 and row[-4:] == (None,) * 4 for row in after['assignments'])
+        assert [row[-5] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         assert store.findings() == findings
         assert store.show("T-0001")["assignments"][1]["result"]["summary"] == "Legacy result"
         _error(lambda: store.connection.execute("DELETE FROM events"), "append-only", sqlite3.IntegrityError)
@@ -950,3 +950,77 @@ sys.stdin.readline()
                         break
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+
+
+def test_any_writer_backs_up_an_older_ledger_before_migrating(tmp_path: Path):
+    """S8 review: migration ran on any write open, but only hipson init made a backup."""
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    with closing(sqlite3.connect(db)) as source:  # An open handle would lock the file on Windows.
+        original = source.execute("SELECT * FROM tasks").fetchall()
+    with closing(ledger.Ledger(db, read_only=True)):
+        pass
+    assert not list(tmp_path.glob("ledger.sqlite.v*-backup-*"))  # Reads never migrate or back up.
+    with closing(ledger.Ledger(db)) as store:
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
+    backup, = tmp_path.glob("ledger.sqlite.v1-backup-*")
+    with closing(sqlite3.connect(backup)) as copy:
+        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+        assert copy.execute("SELECT * FROM tasks").fetchall() == original
+    with closing(ledger.Ledger(db)):
+        pass
+    assert len(list(tmp_path.glob("ledger.sqlite.v*-backup-*"))) == 1  # A current ledger is not copied again.
+
+
+def test_migration_backup_is_private_and_a_failed_copy_is_removed(tmp_path: Path):
+    """S8 re-review: backups keep 0600 like init's, and a failed copy must not look like a good backup."""
+    import os
+    import stat
+
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    real_connect = sqlite3.connect
+
+    class Boom(sqlite3.Connection):
+        def backup(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk full")
+
+    def failing_connect(*args, **kwargs):
+        return real_connect(*args, factory=Boom, **kwargs)
+
+    with patch.object(ledger.sqlite3, "connect", side_effect=failing_connect):
+        try:
+            ledger.Ledger(db)
+        except sqlite3.OperationalError as exc:
+            assert "disk full" in str(exc)
+        else:
+            raise AssertionError("the failed backup did not stop the migration")
+    assert not list(tmp_path.glob("ledger.sqlite.v*-backup-*"))
+    with closing(real_connect(db)) as check:
+        assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 1  # Not migrated.
+    with closing(ledger.Ledger(db)):
+        pass
+    backup, = tmp_path.glob("ledger.sqlite.v1-backup-*")
+    if os.name == "posix":
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_migration_backup_takes_the_next_suffix_instead_of_overwriting(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    fixed = datetime(2026, 11, 22, 12, 0, 0, 123456, tzinfo=UTC)
+    taken = tmp_path / f"ledger.sqlite.v1-backup-{fixed.strftime('%Y%m%dT%H%M%S%fZ')}"
+    taken.write_bytes(b"earlier backup")
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    with patch.object(ledger, "datetime", Clock), closing(ledger.Ledger(db)):
+        pass
+    assert taken.read_bytes() == b"earlier backup"  # Never overwritten.
+    with closing(sqlite3.connect(tmp_path / f"{taken.name}-1")) as copy:
+        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 1

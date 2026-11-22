@@ -198,9 +198,9 @@ class Fixture:
             store.set_status(task, to="in_progress", actor="native-probe")
         return task
 
-    def assignment_status(self, task: str, actor: str) -> str | None:
+    def assignment(self, task: str, actor: str) -> ledger.Assignment | None:
         with closing(ledger.Ledger(self.db, read_only=True)) as store:
-            return next((row["status"] for row in store.show(task)["assignments"] if row["actor"] == actor), None)
+            return next((row for row in store.show(task)["assignments"] if row["actor"] == actor), None)
 
 
 def local_env(directory: Path) -> dict[str, str]:
@@ -347,6 +347,7 @@ class Trial:
             return row, None
 
         result, meta, failure = None, {}, None
+        stdout = ""
         started = time.monotonic()
         try:
             if self.task:
@@ -369,11 +370,13 @@ class Trial:
             else:
                 proc = run_contained(argv, fixture.project, env=fixture.env, input_text=stdin, timeout=args.timeout)
                 code = proc.returncode
-                result, meta = agent_runtimes.normalize(fixture.runtime, code, proc.stdout, proc.stderr, last)
+                stdout = proc.stdout
+                result, meta = agent_runtimes.normalize(fixture.runtime, code, stdout, proc.stderr, last)
         except agent_runtimes.RuntimeFailure as exc:
             failure = exc.kind
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             code, failure = 124, "timeout"
+            stdout = agent_runtimes._text(exc.stdout)
         except FileNotFoundError:
             code, failure = 127, "missing_executable"
         except InterruptedError:
@@ -389,7 +392,17 @@ class Trial:
         evidence = result_evidence(result, meta, clean, code_word)
         row["evidence"] = evidence
         if self.task:
-            evidence["assignment_status"] = fixture.assignment_status(self.task, self.name)
+            assignment = fixture.assignment(self.task, self.name)
+            evidence["assignment_status"] = assignment["status"] if assignment else None
+            evidence["usage_report"] = assignment["usage"] if assignment else None
+        else:
+            evidence["usage_report"] = {
+                **agent_runtimes.stdout_usage(fixture.runtime, stdout, failed=failure is not None),
+                "elapsed_seconds": None,
+            }
+        if evidence["usage_report"] is None:
+            evidence["usage_report"] = {"source": agent_runtimes.USAGE_SOURCES[fixture.runtime],
+                                        "tokens": None, "reason": "runtime_error", "elapsed_seconds": None}
         session = meta.get("session")
         session = session if isinstance(session, str) and agent_runtimes.SESSION_PATTERN.fullmatch(session) else None
         if self.name == "builder":

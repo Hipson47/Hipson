@@ -38,10 +38,15 @@ and output counts or perceived speed are poor productivity measures
 - Agent e2e adds false-completion cases: zero-exit incomplete work, altered tests, verification run
   on an older revision; the reference solution must pass and the broken one must fail.
 
+## 1.8: whole-task usage
+
+- Record reported tokens and elapsed assignment time. Show attempts, repair rounds, usage coverage
+  and elapsed time per task. Native probes and live flow comparisons report available token counts.
+
 ## Later
 
 - Delegation contracts for shared interfaces and the runtime under test (what path claims cannot see).
-- Whole-task budgets: attempts, review and repair rounds, elapsed time, usage per accepted task.
+- Whole-task budget limits and enforcement.
 - Finding adjudication: reproduction evidence and recorded reasons before a finding blocks work.
 - Pilot: lead-approved lessons from findings injected into briefs, with provenance, expiry and
   recurrence tracking; shipped only if recurrence drops without extra cost.

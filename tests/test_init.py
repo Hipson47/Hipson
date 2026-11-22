@@ -204,6 +204,26 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     assert len(second["next_steps"]) == 8  # Nothing new to approve once registered.
 
 
+def test_init_registers_the_opt_in_lead_profile_for_both_clients(tmp_path):
+    setup = _Setup(tmp_path)
+    args = setup.registration()["args"] + ["--profile", "lead"]
+    flags = ("--mcp-profile", "lead", "--json")
+    before = setup.snapshots()
+    plan = setup.run("--dry-run", *flags)
+    actions = {action["kind"]: action for action in plan["actions"]}
+    assert actions["claude"]["command"][-len(args):] == args
+    assert tomllib.loads(actions["codex"]["append"])["mcp_servers"]["hipson"]["args"] == args
+    assert plan["verification"]["command"][1:] == args
+    assert setup.snapshots() == before and setup.calls() == []
+
+    applied = setup.run("--yes", *flags)
+    assert applied["verification"]["status"] == "passed" and applied["verification"]["tools_count"] == 14
+    assert json.loads((setup.project / ".mcp.json").read_bytes())["mcpServers"]["hipson"]["args"] == args
+    assert tomllib.loads(setup.codex_config.read_text(encoding="utf-8"))["mcp_servers"]["hipson"]["args"] == args
+    again = setup.run(*flags)
+    assert all(action["status"] == "skipped" for action in again["actions"])
+
+
 def test_init_claude_user_scope_backs_up_before_cli_edit(tmp_path):
     setup = _Setup(tmp_path)
     setup.foreign_configs()
@@ -264,6 +284,31 @@ def test_init_migration_dry_run_is_read_only_then_apply_backs_up(tmp_path):
         assert backup.execute("SELECT version FROM schema_version").fetchone()[0] == 1
     with closing(ledger.Ledger(setup.db, read_only=True)) as store:
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
+
+
+def test_init_v11_migration_backs_up_old_assignments_once(tmp_path):
+    setup = _Setup(tmp_path)
+    with closing(ledger.Ledger(setup.db)) as store:
+        task = store.open_task(project=setup.project, title="Before usage", objective="Preserve this task")["id"]
+        assignment = store.assign(task, actor="old", role="builder", mode="ro")["id"]
+        store.finish(assignment, result="passed", summary="Finished before v12")
+        store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
+        store.connection.execute("UPDATE schema_version SET version = 11")
+    before = setup.snapshots()
+    report = setup.run("--client", "none", "--dry-run", "--json")
+    assert report["checks"]["ledger_schema"] == 11 and setup.snapshots() == before
+    report = setup.run("--client", "none", "--yes", "--json")
+    assert report["ok"] and report["actions"][0]["status"] == "applied"
+    with closing(ledger.Ledger(report["actions"][0]["backup"], read_only=True)) as backup:
+        assert backup.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+        assert backup.activity(assignment)["usage"] is None
+    with closing(ledger.Ledger(setup.db, read_only=True)) as store:
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+        assert store.activity(assignment)["status"] == "passed" and store.activity(assignment)["usage"] is None
+    repeated = setup.run("--client", "none", "--yes", "--json")
+    assert repeated["checks"]["ledger_schema"] == 12
+    assert repeated["actions"][0]["detail"] == "already configured"
+    assert "backup" not in repeated["actions"][0]
 
 
 def test_init_accepts_every_schema_version_the_ledger_migrates(tmp_path):

@@ -145,6 +145,254 @@ use the **ledger watermark** (latest task update or heartbeat) to keep repeated 
 for an unchanged ledger and Git state; the timestamp and age basis are displayed. Use `task now`
 for wall-clock activity ages. Git and ledger are separate observations, not an atomic cross-system snapshot.
 
+## Compact projection (view_schema 1)
+
+Use `--detail compact` on `hipson task board`, `hipson task now`, `hipson lead resume`, or
+`hipson task show --task T-0001`. The MCP tools `task.board`, `task.now`, `lead.resume`, and
+`task.show` take `"detail": "compact"`. In 1.8, the CLI and `full` MCP profile default to full
+detail. The opt-in [`lead` MCP profile](#lead-mcp-profile) defaults to compact. Compact detail is
+planned as the general default in 1.9. Callers can request `detail=full` explicitly.
+
+Compact views read one SQLite snapshot and carry `view_schema: 1` and `hipson_version`. Task and
+list views carry `gate: "not_evaluated"` and `gate_note: "task verify / task close evaluate the gates"`.
+CLI text shows a short line per task. Use CLI `--json` or MCP text for the complete compact payload.
+Compact show, list pages, and resume carry `evidence_policy` and `untrusted_fields`. The paths
+mark assignment actors and result summaries, for example `tasks[].assignments[].summary` on a list
+page. Treat the marked values as evidence rather than instructions.
+
+| Area | Fields and interpretation |
+| --- | --- |
+| Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes event timestamps, selected verification finish times, and assignment start, end, and heartbeat times. |
+| Task staleness | `stale` is null or `{"since": "<timestamp>", "days": <integer>}`. Only `open` and `in_progress` tasks can be stale. `since` is the latest qualifying ledger timestamp and `days` counts full days since then. |
+| Checks | Up to 16 declared argv lists in order, matched to the newest record by full argv identity. A task without declared checks shows its latest ad hoc record if one exists. Each check shows `command`, `recorded`, `current`, `record_id`, `exit_code`, `recorded_at`, `recorded_revision`, and `head_matches`. |
+| Recorded result | `ok` requires exit zero, complete content coverage, a fingerprint, confirmed cleanup, and the task lead's verification context. Other values are `failing`, `partial`, `unknown`, and `missing`. Malformed evidence and missing fingerprints report `unknown` with a reason. |
+| Current freshness | `stale` means HEAD moved, a builder finished after verification, or the record says the project changed during verification. Otherwise, `not_checked` means HEAD was observable and `unknown` means HEAD was unavailable. `head_matches` is null when HEAD or the recorded revision is unavailable. |
+| Review | `assignment_id` and the latest reviewer attempt's state. States are `not_required`, `missing`, `pending`, `ineligible`, `incomplete`, `live`, `changed`, `unverified` (a snapshot review exists but no lead verification is recorded for it), and `recorded_snapshot`. An eligible reviewer is independent of the lead and builders, ran in read-only mode, and started after the latest finished builder and recorded verification. |
+| Assignments | The newest eight in chronological order and an `omitted_assignments` count. Each has `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and the structured result's one-line `summary`. A successful assignment outcome displays as `completed`. |
+| Usage | `usage` summarizes all assignment attempts, repair rounds, reported tokens and elapsed time, including assignments omitted from the compact list. |
+| Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` each list at most 10 open IDs. Use `open_findings` for their total counts. |
+
+The projection reports `freshness_source: "recorded"` and a `freshness_note`. It only observes HEAD
+and recorded evidence. Same-HEAD working-tree edits leave `current: "not_checked"` when HEAD is
+available and the record has no staleness signal. Even `recorded: "ok"` describes only the recorded
+result. Gates use the full view to evaluate current working-tree content. HEAD reads run concurrently
+under a one-second batch deadline, separately from the SQLite snapshot.
+
+Stale tasks have at least seven full days since their latest assignment start or end, task event,
+or verification. For compact `task now` and `lead resume`, set `--stale-days N` or the MCP integer
+`stale_days` to a value from 1 to 3650. Continuations retain that threshold. Assignment heartbeats
+still appear in `last_activity_at` and do not reset task staleness, so a task whose only worker has
+run for longer than the threshold without a ledger write is flagged too; its action is a read. Staleness uses recorded
+timestamps and never evaluates checks or fingerprints the project.
+
+Character limits count Unicode code points, including the ellipsis. Each argv element has a 200-character
+limit, with 400 characters for the command including spaces between arguments. Titles allow 160
+characters, objectives 400, and projects, leads, actors and assignment summaries 200 each. Worker text has
+display controls escaped. Summaries join line breaks with spaces. Each task keeps the first five check
+reasons, at 240 characters each, and counts the remainder in `omitted_reasons`. `truncated_fields`
+names shortened fields by path with zero-based list indices.
+
+Board orders tasks by creation time and ID. Now prioritizes unacknowledged results, blocked tasks
+and tasks with blocking or major findings, active assignments, tasks in review, and other live tasks.
+Included terminal tasks without unread results come last. ID breaks ties. Both default lists include
+terminal tasks that still have active or unacknowledged assignments. The core can include all
+terminal tasks or project any single task by ID.
+
+The UTF-8 budgets are 32,000 bytes for board, 48,000 for now, and 64,000 for resume. The CLI and MCP
+use `task_projection.dumps` for compact JSON. The CLI writes that JSON without a trailing newline.
+
+### Usage per task and assignment
+
+`task show` in full and compact detail and `task show --section assignments` include the same task
+`usage` object. The section counts all assignments on every page. These are display fields. Full
+detail adds only the task and assignment `usage` fields to its existing JSON and a usage line to
+CLI text. Usage does not evaluate gates, change statuses or run checks. Reading usage requires no
+working-tree fingerprint, and compact size and paging limits still apply.
+
+- `attempts` counts every assignment by role, including active attempts. An absent role has zero
+  attempts. `repair_rounds` counts builder assignments started after the first reviewer assignment
+  that ended with a result (`passed` or `failed`); a cancelled or reaped reviewer did not review.
+- `tokens_by_source` keeps one total per runtime source (`codex_rollout`, `agy_json`,
+  `claude_stream_json`), because the runtimes count differently: Codex input includes cached
+  input, Claude input excludes it and Claude's total adds cache reads and writes. Hipson never adds
+  counts across sources. Each source has `assignments` and the six token fields; a field is a sum
+  only while every assignment of that source reported it, otherwise it is null. `tokens_by_source`
+  is null if no assignment reports usage. `without_usage` counts finished assignments without usage.
+  When it is nonzero, `missing_reasons` counts each reason.
+- `elapsed_seconds` sums assignment time from the ledger's start and end timestamps. Concurrent
+  assignments each contribute their duration. Active assignments contribute only to attempt counts.
+  A reaped assignment ends when it is reaped, so its time includes any gap after its supervisor
+  stopped.
+
+Each ended assignment in schema v12 has `usage.source`, `usage.tokens`, `usage.reason` and
+`usage.elapsed_seconds`. Token fields are `input_tokens`, `output_tokens`, `cached_tokens`
+(cache reads), `cache_write_tokens`, `reasoning_tokens`, and `total_tokens`. Unknown counters
+stay null. Sources are `codex_rollout`, `agy_json` and `claude_stream_json`. The runtime's
+explicit total wins. Hipson adds runtime-reported counters only when their definitions supply an
+exact total. Totals retain each runtime's counting convention. See the
+[runtime usage details](AGENT_RUNTIMES.md#usage-evidence).
+
+| Missing-usage reason | Meaning |
+| --- | --- |
+| `runtime_reported_no_usage` | The runtime completed but no recognized token count was reported. |
+| `rollout_not_found` | A `--rollout codex` worker had no readable transcript matching the run marker. |
+| `not_an_agent_runtime` | A regular command or manual finish supplied no runtime telemetry. |
+| `runtime_error` | A runtime failed without reporting usage, or its supervisor could not deliver telemetry before the assignment was reaped. |
+| `not_recorded` | A historical assignment predates usage recording. The summary still counts its ledger elapsed time. |
+
+Schema v12 adds one nullable `usage` column to `assignments`. Any write open of an older ledger
+(`hipson init`, a `task` command, an MCP write) first copies it with SQLite's backup API to
+`<ledger>.v<old>-backup-<UTC timestamp>` next to it, then migrates. `hipson init` also keeps its
+own backup. Older ledgers remain readable without migration.
+
+Upgrading from 1.7: a ledger is shared by every Hipson that uses it, including other virtual
+environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger with
+`ledger.schema_unsupported`, so upgrade every installation that uses the ledger to 1.8 together.
+To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<ledger>-shm` if
+they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
+pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
+created with mode 0600 and never overwritten. A failed copy is removed rather than left behind
+(SQLite may leave a stray `<backup>-journal` file next to it). If the backup cannot be written, for example
+on a full disk, writers cannot open the older ledger until it can; reads still work.
+
+Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
+adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
+the first transcript under `CODEX_HOME/sessions` that carries the run marker. Nothing gates on usage.
+
+Active and historical assignment rows without a usage record show `usage: null`. The adapter's `brief_tokens_estimate` is a bytes/4
+heuristic for the brief and never contributes to usage totals.
+
+### Page through board and now
+
+Board and now accept a zero-based `offset` and an optional `limit` from 1 through 100 in compact mode.
+The budget can shorten a page further. Use `--project PATH` to filter and `--all` to include all terminal
+tasks. The MCP argument names are `offset`, `limit`, `project`, and `all`.
+
+```sh
+hipson task now --detail compact --limit 3 --json
+```
+
+While rows remain, the page sets `truncated: true`, counts the remaining rows in `omitted`, and
+returns the next call as `more.tool` and `more.arguments` for MCP or `more.cli` for a POSIX shell.
+The call preserves the filters and the limit. Project filters use resolved absolute paths. A CLI
+continuation also preserves an explicit `--db`.
+Follow the call verbatim until `more` is null. Use the same ledger throughout. Now orders tasks by
+attention at read time. A task state change between calls can move it across the offset, causing a
+task to be skipped or repeated. Board pages use stable creation order. Use board with `--all` to
+enumerate every task.
+
+If the first task cannot fit, the page returns its ID, status, title, `too_large: true`, and a
+`task show --task T --detail compact` command in `hint`. The stub consumes one task position.
+`truncated` also reports a stub on the final page.
+
+### Follow next actions
+
+Compact `task now` and `lead resume` rank actions across the full ledger selection for the
+requested project and terminal-task filters, including tasks beyond the returned page. Standalone
+now and resume each carry `next_actions` and `next_actions_omitted` at the top level. Resume's nested
+`now` contains the task page and its continuation. The top level supplies the evidence policy.
+
+1. Unacknowledged results. Use `task.ack` when the view shows the result status and the untruncated
+   summary, the assignment has no activity or journal, and its structured result has no files,
+   commands, findings or risks, which the compact view does not show. Otherwise read
+   `task.activity` before following its `then` call to `task.ack`.
+2. Checks. Only tasks that have started, are not terminal and have no active assignment get a
+   check action, at most one each, so verification never runs against a tree a worker may still be
+   editing. A recorded failure gets a read of the verification section. Stale checks prompt
+   `task.verify`. Missing, partial, or unknown checks prompt verification in `verify` or `review`,
+   or after a builder finishes with no newer verification. Blocked tasks may get an inspection
+   action for recorded failures. Verification proposals wait until the lead resumes the task.
+3. Tasks in review. The projection suggests `task.status` to `done` as the task lead when the
+   verification and review records qualify and the projection shows no recorded blockers.
+   The reason says “recorded ok, not re-checked”: the status call evaluates the live gate and may
+   still refuse, for example after a working-tree edit at the same HEAD. Open minor findings do not
+   hold back the suggestion.
+   Other tasks in review link to compact `task.show`.
+4. Open blocking or major findings. Read `task.findings` once per task and severity.
+5. Stale tasks. Read each task with compact `task.show`. The reason names cancel, close and
+   reopen with a reason as lead decisions. The action itself only reads the task.
+6. Terminal tasks with active assignments or held claims. Preview cleanup with `task.reap`
+   and `dry_run: true`. For a specific directory, use `task.cleanup` to inspect the whole path
+   before removing it.
+
+Task ID breaks ties within a category, followed by assignment ID or the first finding ID for the
+severity where applicable. Check actions use the same HEAD observation as the task page.
+Each action supplies a `why` of at most 200 characters drawn from IDs, states and counts,
+an MCP `tool` and its `arguments`, an equivalent POSIX shell command in `cli`, and a
+`writes` flag. `writes: true` means the call changes the ledger or runs commands.
+Gated MCP calls include `approved: true`. The CLI omits this MCP argument and preserves an
+explicit `--db`. A `then` call has `tool`, `arguments`, `cli` and `writes` and follows the first
+call after the lead has read its result.
+
+The reads return at most ten actions and report the remainder in `next_actions_omitted`.
+Actions consume the 48,000-byte now and 64,000-byte resume budgets before full task rows.
+The budget can omit lower-priority actions when needed to fit the page envelope and a task stub.
+Compact now and resume text show the status and up to 160 characters of escaped summary for each
+unacknowledged result on the task page inside the untrusted evidence block. The text ends with
+`Next:` lines and any `Then:` commands.
+
+### Inspect a project path before removing it
+
+Run `hipson task cleanup --project PATH` or call MCP `task.cleanup` with `project` before removing a
+directory or Git worktree. Cleanup checks the resolved path and its descendants against the
+registered project paths, including paths that are already absent. It reports task IDs, projects
+and statuses, plus each task's assignments and their current claim paths. Use `--json` for compact
+JSON on stdout in place of the text report. With no ledger or no matches, the report has an empty
+`tasks` list. Only tasks registered at the path or below it match; a task registered at a parent
+directory is not reported. The report lists at most 50 tasks and counts the rest in
+`omitted_tasks`. Each listed task shows up to 20 assignments, active ones first, and up to
+20 claim paths across those assignments. `omitted_assignments` and `omitted_claims` count the
+remaining records for that task, including any claims on assignments outside the cap.
+
+Cleanup exits 1 with `cleanup.tasks_open` if any matching task is nonterminal or any assignment
+is active, including active assignments on cancelled tasks. Inspect the suggested reads, then
+decide how to resolve the blockers. The suggested close and cancel commands are templates: their
+MCP arguments omit `approved` and the cancellation summary on purpose, because closing or
+cancelling is the lead's decision. The refusal suggests at most 30 calls and reserves space for
+a close and cancel pair if there is a nonterminal task. Its message states how many calls it
+omitted. For cancellation, replace `REASON` with the lead's explanation in `--summary`. A blocked task must
+return to `in_progress` before it can close. Cleanup uses a sidecar-free read of the ledger.
+Run directory removal separately after reviewing the report. A later ledger write can change
+the result.
+
+### Read task records by section
+
+Compact `task show` returns the one-task projection and a `more` array with a call for each section.
+Read `verification`, `assignments`, `findings`, or `events` on its own. The response contains
+`task`, `section`, `records`, and `next_cursor`. The records use the ledger's full redaction rules.
+Each page carries `evidence_policy` and section-specific `untrusted_fields` paths such as
+`records[].result`, `records[].detail`, `records[].summary`, or `records[].output_tail`.
+Verification returns stored records in sequence order, assignments and findings in chronological
+order with ID as a tiebreaker, and events in sequence order. Findings include all statuses.
+
+```sh
+hipson task show --task T-0001 --section assignments --limit 5 --json
+hipson task show --task T-0001 --section assignments --limit 5 --cursor 5 --json
+```
+
+Use the returned `next_cursor` as `--cursor` or MCP `cursor` until it is null. The cursor is the
+zero-based position of the first remaining record in the selected section. The record limit defaults
+to five and can be set up to 100. Every section page uses the same JSON encoding and 64,000 UTF-8
+byte cap on CLI and MCP, with or without CLI `--json`. The cap includes page metadata and the cursor.
+A ledger schema that lacks the requested section returns an `unavailable` reason. Malformed or
+non-object verification evidence occupies its original position as a placeholder with `seq` and
+`invalid_evidence: true`, so later records remain reachable.
+
+Verification records show up to the first 20 entries in `files`, with the original count in
+`files_total` and `files_truncated` indicating whether entries were dropped. Read the full inventory
+with `task show --task T --detail full`. A record that still exceeds the byte cap gets its own page
+with shortened fields named in its `truncated_fields` list. `section` and compact detail are
+mutually exclusive.
+
+### Resume from compact context
+
+Compact resume includes the compact `now` page, per-project task counts by status, unacknowledged
+assignment IDs, and open blocking and major finding IDs. Its summaries use the same filter and
+terminal-task selection as `now` and include eligible tasks beyond the first page. Resume labels
+shortened summaries with `truncated` and per-category `omitted` counts. CLI text includes these
+summaries and flags after the task list. Follow `now.more` for more tasks and use task sections to
+page records.
+
 ## Change observation against scope (opt-in, 1.7)
 
 Claims stop two writers from starting on the same paths; change observation checks afterwards what
@@ -419,7 +667,15 @@ verification and review, open findings and the next command. The flow refuses to
 `review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
 bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
 result, and was assigned after the latest finished builder **and** after the accepted lead verification, and
-that read an **immutable snapshot** of the verified candidate. Before a reviewer starts, `task run` (or `task
+that read an **immutable snapshot** of the verified candidate. For a required review, `task run --role reviewer`
+refuses to launch without `--result-file` because the gate needs a completed structured result.
+
+```bash
+hipson task run --task T-0001 --actor reviewer --role reviewer --mode ro \
+  --result-file /tmp/review.json -- command-that-writes-review-result
+```
+
+Give the command the same absolute result path outside the snapshot. Before a reviewer starts, `task run` (or `task
 flow`, which prepares it so the brief's diff comes from the same copy) copies every covered file of the project,
 tracked, modified and untracked, from the very bytes it hashes, into a private directory beside the ledger
 (`.<ledger>.runs/review-*` or `.<ledger>.flows/<task>/review-N.snapshot`), makes the files read-only and, in a
@@ -429,7 +685,8 @@ the task project). The snapshot's fingerprint is the copy's own, and the flow re
 from the accepted verification (`verification_inconclusive`). `task run` re-hashes the snapshot from its
 manifest when the reviewer starts and ends (reserved `reviewed` events with `source=snapshot`); both must equal
 the accepted verification's revision and fingerprint, so a review of another tree, or a snapshot that was
-edited, replaced, emptied or gained files during the review (tool caches excepted), never qualifies. A review of
+edited, replaced, emptied or gained unrecognized files during the review, never qualifies. The failed check
+names up to ten extra paths in sorted order and counts any others. A review of
 the live tree (`--live-tree`, or a reviewer run outside `task run`) never qualifies: equal fingerprints at its
 start and end do not prove what it read in between. Snapshot creation fails closed (no assignment) for content
 beyond the hash budget, special files and symlinks that point outside the project. The live project may change
@@ -466,6 +723,16 @@ out of the project, Git submodules, a repository without a commit, and Git opera
 reviewer read the live tree (recorded `source=live`), so ordinary reviews of large repositories keep working.
 `--live-tree` asks for that directly. The snapshot copies the project's line-ending settings (`core.autocrlf`,
 `core.eol`, `core.safecrlf`, `info/attributes`), so a CRLF checkout shows only real changes.
+
+**Reviewer tooling files.** At the end of a review, the snapshot accepts new files inside `*.egg-info/`
+directories and inside `.venv/` at the task project's root. These directories must contain no manifest paths,
+including tracked deletions. The start check does not allow these additions. This lets `uv run pytest` create
+an environment and editable-install metadata in a fresh snapshot.
+Existing test and tool caches, including `node_modules/.cache/`, are also allowed. Generic `build/` trees and
+other dependency directories can contain project inputs and still fail the check when they gain ordinary files.
+Each candidate file is checked against the manifest before applying these rules. A `review_artifacts` event
+references the reviewer assignment and gives the count and up to ten redacted, escaped example paths for each
+check that tolerates files. The gate uses the companion `reviewed` events for the tree identity.
 
 Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and
 recorded identity); a reviewer that reads the live project by absolute path is outside it. Runtimes may not
@@ -1085,8 +1352,52 @@ detected Hipson home when unset). MCP arguments cannot select a database;
 `db` is rejected. The CLI's `--db` option remains available. Relative paths
 resolve against the server's working directory, as in the CLI.
 
+### Lead MCP profile
+
+Hipson 1.8 defaults to the `full` tool profile. Use `hipson mcp serve --stdio --profile lead`
+for a smaller tool list or `hipson mcp serve --catalog --profile lead` to inspect it.
+Changing the default profile is a breaking change reserved for a later release.
+
+Preview a new registration with `hipson init --client claude --mcp-profile lead --dry-run`.
+Use `--client codex` for Codex. Apply the same command without `--dry-run` after reviewing
+the plan. For an existing registration, append `--profile lead` to the server's arguments
+and reconnect the client. A manual stdio command is
+`hipson mcp serve --project /path/to/project --stdio --profile lead`.
+
+| Lead tool | Purpose |
+| --- | --- |
+| `lead.resume` | Restore lead context after an interruption. |
+| `task.now` | Read current priorities, pending results and suggested actions. |
+| `task.board` | Scan tasks in board order. |
+| `task.show` | Inspect a task or page through its evidence. |
+| `task.open` | Register a task and its acceptance checks. |
+| `task.status` | Start work or record transitions subject to existing gates. |
+| `task.verify` | Run and record lead verification. |
+| `task.close` | Run fresh checks and advance to review or done. |
+| `task.ack` | Acknowledge a worker result after inspection. |
+| `task.activity` | Inspect assignment activity, result and failure journal. |
+| `task.findings` | List review findings. |
+| `task.finding_update` | Resolve or reopen a finding. |
+| `task.cleanup` | Check whether outstanding work blocks removing a project directory. |
+| `task.reap` | Follow the compact view's orphan preview and recover orphaned assignments. |
+
+Run workers through the CLI. Declare acceptance checks with `task.open` and use the
+CLI's `task checks` for later revisions. `task.show` with `section=events` covers event history.
+Workflow, packet and run-bundle tools are available in `full`. Calls outside `lead` return
+`mcp.tool_not_in_profile`; its message tells the client to reconnect with `--profile full`. The fix
+list is empty, because restarting the server is not an MCP call. A name that exists in no profile
+gets the same unknown-tool error as in `full`.
+
+`task.board`, `task.now`, `lead.resume`, and `task.show` default to `detail=compact` in `lead`.
+Pass `detail=full` for full output. When reading a specific `task.show` section, omit
+`detail` or pass `detail=full` to get the bounded section page. Both profiles apply the same
+argument validation, approval and ledger gates.
+
+### Full profile ledger tools
+
 Read tools use the read-only access rules above. With no store,
 `task.list` and `task.board` return empty arrays; `task.now` and `lead.resume` return empty view objects;
+`task.cleanup` returns the resolved project, an empty `tasks` list and `omitted_tasks: 0`;
 `task.show`, `task.brief`, `task.context`, and `task.events`
 return `Task not found` errors. Approved write tools may initialize the store.
 
@@ -1098,8 +1409,9 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.events` | `task` | `after` (exclusive, default `0`) |
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
-| `task.now` | none | `project`, `all` |
-| `lead.resume` | none | `project`, `all` |
+| `task.now` | none | `project`, `all`, `detail`, `offset`, `limit`, `stale_days` (compact only) |
+| `lead.resume` | none | `project`, `all`, `detail`, `stale_days` (compact only) |
+| `task.cleanup` | `project` | none |
 | `task.findings` | none | `task`, `status`, `severity` |
 | `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
 | `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |
@@ -1107,7 +1419,7 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `owner_pid_namespace`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
 | `task.activity` | `assignment` | none |
-| `task.ack` | `assignment`, `approved=true` | `note` |
+| `task.ack` | `assignment`, `approved=true` | `note`, `actor` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
 | `task.verify` | `task`, `command` (argv array), `approved=true` | `label`, `timeout` (seconds, default 300) |
@@ -1157,3 +1469,205 @@ before retrying a write whose response was lost. `tools/list` and
 with the same bounded/redacted text as CLI `--json`. They require no approval;
 `approved` is an unknown argument. Context defaults come from the MCP server's
 environment, so pass `task` explicitly when the server has no `HIPSON_TASK`.
+
+## Refusal codes
+
+A coded MCP refusal keeps its human message as the first text item and adds a second
+text item with a JSON object. The CLI prints the message and a `fix: <cli>` line for
+each suggested call in text mode. With `--json` it writes the same JSON object to
+stderr. The object has `error_schema: 1`, a stable `code`, a `message` and a `fix`
+array. Each fix has `tool`, `arguments` and `cli` fields in the same shape as the
+calls in compact reads. An empty array means the refusal supplies no call. A gate
+with several reasons uses the first reason's code in the JSON body. In Python,
+`CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
+CLI `task close`, `task flow`, and `task cleanup` also keep their structured command results on
+stdout with `--json`. An MCP `task.cleanup` refusal sets `isError: true` and keeps the report as the third
+text item, after the human message and the refusal envelope. The report's `omitted_tasks` counts
+tasks outside the 50-task cap. If the fix list leaves calls out, the message gives their count.
+MCP close and verification refusals that recorded a result
+keep `isError: false` and the result as the first text content, as before 1.8, and
+add the refusal envelope as a second text content. Flow run states (such as `worker_failed`) and
+check exit statuses carry evidence. Rejected specs and resume requests emit the
+refusal envelope. The private verifier accepts a single stderr JSON document
+from its child, limited to documented codes the child can emit.
+
+Use the `cli` field for CLI-only `task.run` and `task.flow` calls. In templates,
+supply `REVIEWER` (an independent actor), `RESULT_PATH` (a path outside the
+candidate), and the reviewer `COMMAND [ARGS...]` that writes the structured
+result. Read and acknowledge its delivery before closing. Supply `PATH` for
+a missing write scope or result file, `STATUS` to resolve the listed finding
+after inspecting it, and `MATCHING_SPEC` for the original spec on resume.
+A verification template with `-- COMMAND` needs an explicit lead check when
+there are no declared checks. Fix calls use the recorded lead for lead writes.
+For an unavailable project, `task show` identifies the registered directory.
+Restore that directory and run the worker from it as described under
+[Native worker runner](#native-worker-runner).
+
+`task ack`, `verify`, `checks` and `close` accept `--actor` and default to the
+task lead. `task open --actor` aliases `--lead`. `assign`, `run` and `do`
+require a worker identity. `status` and `finding update` require an explicit
+actor for the audited transition or resolution. `event` and `finding add`
+require an explicit author. Shared task invocations can also pass `--actor`
+to reads, `finish`, `reap`, `restore`, `checkpoints` and `flow`. Those
+commands use the existing assignment, supervisor or spec for attribution.
+
+A timed-out check records the limit and retry hint. The retry doubles the
+per-check timeout, up to the supported maximum of 86400 seconds.
+
+| Code | Meaning | Typical fix |
+| --- | --- | --- |
+| `agents.target_required` | Agent installation has no selected target. | Select a target or pass `--all`. |
+| `assignment.active` | The operation requires an ended assignment. | Wait for it to finish or check whether its owner needs reaping. |
+| `assignment.already_finished` | The assignment already ended. | Read its recorded result with `task activity`. |
+| `assignment.environment_invalid` | The assignment environment record has an unsupported shape or mode. | Use an object with mode `inherit` or `minimal`. |
+| `assignment.lease_invalid` | The lease duration is invalid. | Supply a nonnegative integer number of seconds. |
+| `assignment.lease_overflow` | The lease expiration cannot be represented. | Supply a shorter lease. |
+| `assignment.not_found` | The assignment ID is absent from the ledger. | Read assignments on the task and retry with the correct ID. |
+| `assignment.owner_namespace_invalid` | The PID namespace is invalid. | Supply the namespace as a string. |
+| `assignment.owner_pid_invalid` | The owner PID is outside the supported integer range. | Supply its actual PID in range. |
+| `assignment.result_invalid` | The assignment outcome is unsupported. | Use `passed`, `failed` or `cancelled`. |
+| `assignment.role_or_mode_invalid` | The assignment role or mode is unsupported. | Choose a supported role and `ro` or `rw`. |
+| `assignment.task_mismatch` | The assignment belongs to another task. | Use an assignment from the selected task. |
+| `assignment.task_terminal` | A terminal task cannot receive an assignment. | Open a follow-up task. |
+| `capability.tag_invalid` | A capability tag uses invalid characters. | Use a lower-case name such as `code_write`. |
+| `capability.tags_invalid` | Capability tags exceed the limit or have the wrong shape. | Supply a bounded list of tag names. |
+| `chat.demo_tool_not_allowed` | The fake tool demo cannot use the selected tool. | Choose a read-risk tool that requires no approval. |
+| `chat.provider_unsupported` | The selected chat provider is unsupported. | Use the supported provider option. |
+| `checkpoint.capture_failed` | The runner could not save the checkpoint. | Inspect the diagnostic and correct the capture problem before retrying. |
+| `checkpoint.event_invalid` | The checkpoint event type is unsupported. | Use `checkpointed` or `restored`. |
+| `checkpoint.limit_invalid` | A checkpoint cap is zero or negative. | Supply a positive file or byte limit. |
+| `checkpoint.retention_invalid` | The checkpoint retention age is outside the supported range. | Use the age range shown in the error. |
+| `checkpoint.write_scope_required` | Checkpointing requires a write assignment. | Use `--mode rw` with a claimed scope. |
+| `checks.argument_invalid` | A check argument has an invalid type, length or control character. | Supply valid bounded text arguments. |
+| `checks.argument_sensitive` | A check argument contains secret-shaped text. | Pass credentials through the environment. |
+| `checks.argv_invalid` | A declared check is empty or has an invalid argument list. | Supply a nonempty argv list within the limit. |
+| `checks.command_required` | A check lacks a command name. | Supply an executable name. |
+| `checks.list_invalid` | The outer check list has the wrong shape or exceeds its limit. | Supply a bounded list of argv lists. |
+| `checks.operation_required` | No single check update operation was selected. | Pass repeatable `--check` or pass `--clear`. |
+| `checks.replace_reason_required` | Replacing declared checks requires a reason. | Pass `--reason` with the reason for replacing them. |
+| `checks.shell_backslash` | A backslash would be parsed as a shell escape in a check argument. | Use forward slashes in paths. |
+| `checks.shell_syntax` | The check string cannot be parsed into argv. | Correct its quoting and retry. |
+| `checks.task_terminal` | A terminal task's checks cannot change. | Declare new checks on a follow-up task. |
+| `claim.conflict` | The write scope overlaps a held claim. | Inspect the holding assignment, then wait or reap if the owner died. |
+| `cleanup.tasks_open` | The selected path contains nonterminal tasks or active assignments. | Inspect the task and assignment reads, then finish active assignments and close or cancel nonterminal tasks. The report counts omitted tasks in `omitted_tasks`, and the message counts any omitted fix calls. |
+| `close.assignment_active` | An active assignment blocks the gate. | Wait for the assignment or inspect it for orphan recovery. |
+| `close.checks_failed` | Recorded verification exited nonzero. | Address the check failure and verify again. |
+| `close.checks_mismatch` | The declared checks differ from the checks expected by the caller. | Read the current declarations and reconcile the expected checks. |
+| `close.checks_missing` | A declared check has no recorded verification. | Run the declared checks. |
+| `close.checks_stale` | Verification predates a completed builder or the project was unstable during the check. | Verify the final candidate again. |
+| `close.claims_held` | One or more remaining claims block the gate. | Inspect the holding assignments and reap orphaned claims if appropriate. |
+| `close.findings_open` | An open blocking or major finding prevents done. | Address and resolve the finding. |
+| `close.refused` | The gate reported an unclassified refusal reason. | Read the reason and address the reported blocker. |
+| `close.results_unacknowledged` | An ended assignment has an unread delivery. | Read its `task activity` and acknowledge it. |
+| `close.review_required` | A qualifying review of the verified snapshot is missing. | Run an independent read-only snapshot review of the verified candidate. |
+| `close.status_not_allowed` | Close cannot run from the current status to that target. | Read the current task status and use an allowed close target. |
+| `close.target_invalid` | Close only accepts review or done as a target. | Use `--to review` or `--to done`. |
+| `event.cursor_invalid` | The event cursor is outside SQLite's integer range. | Supply a nonnegative cursor within range. |
+| `event.type_reserved` | A free-form event uses a ledger-owned event type. | Use a descriptive type such as `progress` or `note`. |
+| `finding.not_found` | The finding ID is absent from the ledger. | List the task's findings and use the correct ID. |
+| `finding.reopen_resolution` | A reopen request supplies a resolved-by assignment. | Reopen without that assignment. |
+| `finding.severity_invalid` | The finding severity is unsupported. | Use a supported severity such as `major`. |
+| `finding.status_invalid` | The finding status is unsupported. | Use a supported status such as `open` or `fixed`. |
+| `finding.transition_not_allowed` | The requested finding status transition is forbidden. | Read the current finding status and choose a valid transition. |
+| `flow.conflict` | The selected task or existing flow state prevents starting or resuming. | Inspect the stop reasons before retrying. |
+| `flow.resume_mismatch` | The resume spec differs from the bound spec or project. | Resume with the matching spec. |
+| `flow.resume_required` | A retry omitted the flow task to resume. | Supply the task with `--resume`. |
+| `flow.spec_invalid` | The flow spec could not be read or validated. | Correct the spec and run the supplied validation call. |
+| `input.text_invalid_unicode` | A text field contains a lone surrogate. | Replace it with valid Unicode text. |
+| `input.text_required` | A required text field is empty or blank. | Supply a nonblank value for the named field. |
+| `kit.resume_run_required` | The review kit resume command has no run path. | Pass `--run runs/<work_id>`. |
+| `ledger.database_unavailable` | The ledger database could not be opened for a read. | Check the selected ledger path and its availability. |
+| `ledger.path_unresolvable` | The configured database path cannot be resolved. | Use a valid database path. |
+| `ledger.rollback_journal` | A rollback journal prevents a read-only snapshot. | Retry after the writable owner finishes recovery. |
+| `ledger.schema_unsupported` | The database has an unsupported ledger schema. | Use a compatible Hipson version or migrate with the supported upgrade path. |
+| `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
+| `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
+| `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |
+| `mcp.tool_not_in_profile` | A known tool outside the configured profile. | Reconnect with `hipson mcp serve --stdio --profile full` (named in the message; the fix list is empty). |
+| `observation.already_recorded` | The assignment already has a change observation. | Read the existing observation. |
+| `observation.baseline_failed` | The runner could not capture the requested baseline. | Address the reported baseline error and retry. |
+| `observation.limit_invalid` | An observation cap is zero or negative. | Supply a positive file or byte limit. |
+| `observation.status_invalid` | The change observation has an invalid shape or status. | Supply an observation object with a supported status. |
+| `project.path_sensitive` | The project path contains secret-shaped text. | Use a project path without credential material. |
+| `project.unavailable` | The bound project directory is unavailable. | Restore access to the task's project directory. |
+| `result.json_duplicate_property` | Worker result JSON contains a repeated key. | Keep a single value for each property. |
+| `result.json_encoding` | The result file is not encoded as UTF-8. | Save it as UTF-8 JSON. |
+| `result.json_invalid` | The result file contains malformed JSON. | Correct the JSON at the reported location. |
+| `result.json_nonfinite` | Worker result JSON contains a nonfinite number. | Use finite numbers. |
+| `result.json_resource_limit` | The worker result exceeded a parser resource limit. | Reduce the nesting or numeric size. |
+| `result.json_too_large` | The result file exceeds 1 MiB. | Condense the result. |
+| `result.properties_unknown` | The result includes undeclared properties. | Use the fields in the worker result schema. |
+| `result.property_required` | A required result property is absent. | Include the named property. |
+| `result.text_blank` | A result field requires nonblank text. | Supply text for the named field. |
+| `result.text_invalid_unicode` | A result field contains a lone surrogate. | Replace it with valid Unicode text. |
+| `result.type_invalid` | A result field has a mismatched type. | Use the type reported by the schema validator. |
+| `result.value_invalid` | A result field value is outside the schema's allowed values. | Use one of the reported values. |
+| `review.assignment_not_active` | The reviewed-tree event refers to an inactive assignment or a non-reviewer. | Record review evidence against an active reviewer. |
+| `review.policy_invalid` | The review policy is unsupported. | Use `none` or `required`. |
+| `review.tree_phase_invalid` | The review-tree event phase is unsupported. | Use `start` or `end`. |
+| `review.tree_source_invalid` | The review-tree event source is unsupported. | Use `live` or `snapshot` as recorded by the runner. |
+| `run.brief_unreadable` | The runner could not read the worker brief. | Check the brief path and its permissions. |
+| `run.bundle_unavailable` | Run control could not open or update its run bundle. | Check the bundle path and access. |
+| `run.command_required` | A worker command after `--` is missing. | Append `-- COMMAND [ARGS...]`. |
+| `run.grace_invalid` | The configured worker cleanup grace is invalid. | Use a finite nonnegative number of seconds. |
+| `run.launch_failed` | The supervisor could not launch or supervise the child. | Check the executable, permissions and launch diagnostic. |
+| `run.options_invalid` | A run option could not be converted to its supported value. | Correct the value described in the diagnostic. |
+| `run.output_pipes_unavailable` | The runner could not obtain worker output pipes. | Inspect the worker supervisor and retry after resolving the launch issue. |
+| `run.project_check_failed` | The runner could not inspect the task project. | Inspect the task and restore access to its project. |
+| `run.project_mismatch` | The invocation directory does not match the task project. | Run from the project reported by task show. |
+| `run.result_file_required` | A required reviewer has no structured result path. | Use the supplied run template with a result path. |
+| `run.setup_failed` | A worker setup operation failed before launch. | Correct the environment or checkpoint diagnostic. |
+| `run.snapshot_requires_reviewer` | Snapshot review options disagree with the worker role or live-tree option. | Use the snapshot with an independent reviewer. |
+| `run.snapshot_unavailable` | A required or explicitly requested review snapshot could not be prepared. | Correct the snapshot diagnostic and retry. |
+| `run.supervisor_failed` | The private runner supervisor could not start or continue. | Inspect the diagnostic and check for orphaned assignments. |
+| `run.task_unreadable` | The runner could not read the ledger task before launch. | Check the ledger path and access. |
+| `run.windows_command_invalid` | The Windows batch launch rejected the command. | Correct the command arguments or use a native executable. |
+| `run.worker_env_policy_unreadable` | An unreadable policy may configure the worker environment. | Correct `.hipson/policy.json` or set `--env` explicitly. |
+| `run.worker_env_yaml` | An effective YAML policy may configure the worker environment. | Move the setting to `.hipson/policy.json` or set `--env` explicitly. |
+| `run.worker_incomplete` | The one-shot worker did not deliver a usable completion. | Inspect the task and its worker result. |
+| `scope.path_invalid` | A scope path is absolute or uses a parent traversal or drive prefix. | Supply a repository-relative path. |
+| `scope.path_sensitive` | A write scope contains secret-shaped text. | Choose a scope without credential material. |
+| `scope.path_whitespace` | A scope path component starts or ends with whitespace. | Use the intended path without surrounding whitespace. |
+| `scope.required` | An `rw` assignment has no write scope. | Supply `--scope PATH`, using `.` for the whole project when intended. |
+| `session.not_found` | The CLI tool session ID does not exist. | List sessions and use an existing ID. |
+| `sidecar.profile_required` | Sidecar execution lacks an explicit agent or model profile. | Supply `--ai-profile`. |
+| `status.override_reason_without_force` | An override reason was supplied without force. | Use `--force` with the reason if overriding is intended. |
+| `status.override_target` | The selected status does not accept override flags. | Remove override flags or use the intended review/done target. |
+| `status.override_type` | Force or reason has the wrong type. | Supply a boolean force flag and a text reason. |
+| `status.transition_not_allowed` | The task cannot move from its current status to the requested status. | Use an allowed transition or the close workflow. |
+| `status.value_invalid` | The task status filter is unsupported. | Use one of the ledger's recorded status names. |
+| `task.not_found` | The task ID is absent from the selected ledger. | Use `task list` or `task now --detail compact` to locate it. |
+| `task_read.compact_filter_required` | Task board filtering fields require a compact view. | Pass `--detail compact` with the filter. |
+| `task_read.compact_paging_required` | List pagination flags require a compact view. | Pass `--detail compact` with the paging flags. |
+| `task_read.section_required` | A task-show page has no section. | Pass `--section` with the paging flags. |
+| `task_read.section_with_compact` | A section read was combined with compact detail. | Choose the section read or the compact summary. |
+| `task_read.stale_days_invalid` | The CLI staleness threshold is outside 1–3650 days. | Supply an integer in range. |
+| `task_read.stale_days_requires_compact` | The CLI staleness threshold was set on a full read. | Pass `--detail compact`. |
+| `verify.artifact_unavailable` | The verification command could not use its work or output artifact. | Inspect the artifact path and diagnostic. |
+| `verify.argv_invalid` | The verification command argv is missing or invalid. | Supply a command with valid text arguments and no NULs. |
+| `verify.check_timeout` | A lead check ran past its per-check timeout. | Retry verification using the supplied timeout. |
+| `verify.checks_undeclared` | No acceptance checks were declared for this task. | Declare checks or provide a verification command. |
+| `verify.cleanup_unconfirmed` | The supervisor could not confirm verification process cleanup. | Confirm the check's descendants have exited before retrying. |
+| `verify.command_required` | An explicit verification command is missing or lacks its delimiter. | Pass `-- COMMAND [ARGS...]` or omit it to run declared checks. |
+| `verify.coverage_partial` | Some content was verified by metadata only. | Restore readable content and verify again. |
+| `verify.directory_symlink` | A directory symlink prevents a contained fingerprint. | Verify a candidate with a contained directory layout. |
+| `verify.evidence_unavailable` | The supervisor returned no recorded verification evidence. | Inspect its diagnostic and retry verification. |
+| `verify.external_symlink` | A symlink points outside the project snapshot. | Replace it with a contained link or file. |
+| `verify.fingerprint_unavailable` | Verification lacks a usable working-tree fingerprint. | Address the reported fingerprint error and verify again. |
+| `verify.git_filters_unavailable` | Git filter settings cannot be read within the limit. | Check Git config readability and size. |
+| `verify.git_hash_unavailable` | Git could not normalize and hash candidate content. | Inspect Git attributes and the named project content. |
+| `verify.git_head_unavailable` | Git has no usable HEAD. | Create the initial revision or restore a valid checkout. |
+| `verify.git_inventory_unavailable` | Git's content inventory is unreadable or exceeds the limit. | Restore Git access or verify a smaller project. |
+| `verify.git_state_unavailable` | The Git repository is present but its state cannot be read. | Restore repository access and retry. |
+| `verify.git_submodules` | A submodule requires separate verification. | Verify the submodule separately. |
+| `verify.head_moved` | HEAD changed while fingerprinting or differs from verified HEAD. | Run verification against the current HEAD. |
+| `verify.inventory_path_invalid` | The fingerprint inventory contains an invalid path. | Inspect the Git inventory and correct the invalid path. |
+| `verify.lead_missing` | A task without declared checks has no lead verification record. | Run an explicit lead check or declare acceptance checks. |
+| `verify.lead_required` | The record lacks the task lead's verification in a lead context. | Verify as the recorded task lead. |
+| `verify.snapshot_budget` | Project content exceeds the per-file or aggregate snapshot budget. | Verify a smaller project or reduce the candidate content. |
+| `verify.special_file` | A special filesystem entry prevents fingerprinting. | Remove it from the verification candidate. |
+| `verify.supervisor_timeout` | The verification supervisor exceeded its execution budget. | Inspect the check and supervisor or retry with an appropriate timeout. |
+| `verify.timeout_invalid` | The verification timeout is outside the supported range. | Supply a positive, finite timeout up to 86400 seconds. |
+| `verify.tree_changed` | Working-tree content changed while fingerprinting or since verification. | Stabilize the working tree and verify the candidate again. |
+| `verify.walk_limit` | A non-Git project exceeded the fingerprint walk limits. | Use a Git repository or a smaller project folder. |
+| `verify.worker_context` | A worker context tried to perform a lead operation. | Run it from the lead session. |

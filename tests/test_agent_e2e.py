@@ -43,6 +43,32 @@ def _dead(pid):
 
 
 @_linux_harness
+def test_agent_e2e_compact_resume_follows_actions_and_then(tmp_path):
+    for format in ("text", "json"):
+        output = tmp_path / format
+        run = harness.run_scenario("resume", output, resume_compact=format)
+        assert run["variant"] == f"compact-{format}" and run["passed"] and run["measurement_valid"], run
+        audit = harness.read_jsonl(output / "cli.jsonl")
+        flags = ["--json"] if format == "json" else []
+        assert audit[0]["args"] == ["lead", "resume", "--detail", "compact", *flags]
+        if format == "json":
+            action = json.loads(audit[0]["output"])["next_actions"][0]
+            calls = [action["cli"], action["then"]["cli"]]
+        else:
+            lines = audit[0]["output"].splitlines()
+            assert "  T-0001/A-0001 completed unacknowledged result: Fixture worker: build" in lines
+            start = next(i for i, line in enumerate(lines) if line.startswith("Next: "))
+            assert lines[start + 1].startswith("Then: ")
+            calls = ["hipson " + line.split(" hipson ", 1)[1] if line.startswith("Next: ") else line[6:]
+                     for line in lines[start:start + 2]]
+        assert [entry["args"] for entry in audit[1:3]] == [shlex.split(call)[1:] for call in calls]
+        assert audit[1]["args"][:2] == ["task", "activity"]
+        assert audit[2]["args"][:2] == ["task", "ack"]
+        assert run["metrics"]["hipson_invocations"] == len(audit) == 6
+        assert harness.replay_scenario(output)["passed"]
+
+
+@_linux_harness
 def test_agent_e2e_reference_solutions(tmp_path):
     # The invoking Codex itself may be a worker; measured agents must still be leads.
     sentinel = tmp_path / "owner-ledger"
@@ -65,6 +91,9 @@ def test_agent_e2e_reference_solutions(tmp_path):
             assert run['metrics']['used_lead_resume'] is True
             assert run['metrics']['first_hipson_command'] == 'lead resume'
             assert run['metrics']['task_history_lookups'] == 0
+            audit = harness.read_jsonl(directory / 'cli.jsonl')
+            assert 0 < audit[0]['output_bytes'] == run['metrics']['hipson_read_output_bytes']
+            assert run['metrics']['hipson_output_bytes'] == sum(entry['output_bytes'] for entry in audit)
             resume = json.loads((directory / 'seed.json').read_text())['resume_output']
             assert len(resume.encode('utf-8')) <= 4096
             for required in ('A-0001', 'F-0001', 'src/held', 'src/parser', 'bin/fake-worker fix',
@@ -75,6 +104,8 @@ def test_agent_e2e_reference_solutions(tmp_path):
                 patch.object(harness, "cleanup_workers", side_effect=AssertionError("Replay must not signal processes")):
             replay = harness.replay_scenario(directory)
         assert replay["passed"], replay
+        assert replay['metrics']['hipson_output_bytes'] == run['metrics']['hipson_output_bytes']
+        assert replay['metrics']['hipson_read_output_bytes'] == run['metrics']['hipson_read_output_bytes']
     conflict = next(r for r in runs if r["scenario"] == "conflict")
     assert conflict["metrics"]["failing_invocations"][0]["exit_code"] == 1
     report = harness.write_report(tmp_path, runs)
@@ -462,6 +493,7 @@ def test_agent_e2e_workflow_metrics_count_successful_calls_without_help():
     assert observations['used_task_now'] is True
     assert observations['first_hipson_command'] == 'lead resume'
     assert observations['task_history_lookups'] == 1
+    assert observations['hipson_output_bytes'] is None and observations['hipson_read_output_bytes'] is None
     assert harness.metrics(harness.Transcript(), 0)['used_lead_resume'] is None
 
 

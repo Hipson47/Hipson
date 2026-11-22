@@ -24,7 +24,7 @@ from contextlib import closing
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hipson.ledger import Ledger
 from hipson.redaction import REDACTION, redact_text, redact_value
@@ -121,9 +121,10 @@ def hipson_proxy(workdir: str, expected_ledger: str) -> int:
         before = snapshot(db, root)
         started = time.monotonic()
         proc = subprocess.run([sys.executable, "-c", "from hipson.cli import main; raise SystemExit(main())",
-                               *sys.argv[1:]], capture_output=True, text=True, check=False)
+                               *sys.argv[1:]], capture_output=True, text=True, encoding="utf-8", check=False)
         entry = {"args": sys.argv[1:], "exit_code": proc.returncode, "output": proc.stdout + proc.stderr,
                  "duration_seconds": time.monotonic() - started,
+                 "output_bytes": len(proc.stdout.encode("utf-8")) + len(proc.stderr.encode("utf-8")),
                  "ledger": os.environ.get("HIPSON_LEDGER"), "before": before, "after": snapshot(db, root)}
         with (root / ".harness" / "cli.jsonl").open("a", encoding="utf-8") as log:
             log.write(json.dumps(scrub_value(entry)) + "\n")
@@ -219,6 +220,13 @@ def workflow_command(args: list[str]) -> str:
     return ' '.join(['task', *args[index:index + 1]])
 
 
+def _output_bytes(entries: list[dict[str, Any]] | None) -> int | None:
+    # Older saved runs lack pre-redaction output sizes.
+    if entries is None or any("output_bytes" not in entry for entry in entries):
+        return None
+    return sum(entry["output_bytes"] for entry in entries)
+
+
 def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
     """Command choices measure discoverability/friction, never scenario acceptance."""
     reads = ('lead resume', 'task now', 'task show', 'task events', 'task board',
@@ -226,6 +234,7 @@ def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
     calls = [(i, workflow_command(e['args']), e) for i, e in enumerate(audit or [])
              if e['exit_code'] == 0 and '--help' not in e['args'] and '-h' not in e['args']]
     counts = Counter(command for _, command, _ in calls if command in reads)
+    read_entries = [entry for _, command, entry in calls if command in reads] if audit is not None else None
     failure_reads = []
     for index, _, entry in calls:
         before = {a['id']: (t['id'], a) for t in entry.get('before', {}).get('tasks', []) for a in t['assignments']}
@@ -240,6 +249,7 @@ def workflow_metrics(audit: list[dict[str, Any]] | None) -> dict[str, Any]:
             'used_task_now': bool(counts['task now']) if audit is not None else None,
             'first_hipson_command': calls[0][1] if calls else None,
             'read_commands': {command: counts[command] for command in reads},
+            'hipson_read_output_bytes': _output_bytes(read_entries),
             'task_history_lookups': sum(counts[command] for command in reads if command not in ('lead resume', 'task now')),
             'failure_journal_read_before_recovery': all(failure_reads) if failure_reads else None}
 
@@ -254,6 +264,7 @@ def metrics(transcript: Transcript, duration: float, audit: list[dict[str, Any]]
                  "first_error_line": first_error(c.get("aggregated_output", ""))}
                 for c in invocations if c.get("exit_code") not in (0, None)]
     return {"total_commands": len(transcript.commands), "hipson_invocations": len(invocations),
+            "hipson_output_bytes": _output_bytes(audit),
             "failing_invocations": failures,
             "help_lookups": sum(bool(re.search(r"(?:--help|\s-h)(?![\w-])", c.get("command", "")))
                                 for c in transcript.commands),
@@ -642,9 +653,65 @@ def wait_groups_gone(workdir: Path, groups: set[int], deadline: float) -> bool:
     return True
 
 
+RESUME_COMPACT_SOLUTION = """\
+import json
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+command = ['hipson', 'lead', 'resume', '--detail', 'compact']
+json_mode = sys.argv[1] == 'json'
+output = subprocess.check_output(command + (['--json'] if json_mode else []), text=True)
+if json_mode:
+    resume = json.loads(output)
+    actions = [(shlex.split(action['cli']), shlex.split(action['then']['cli']) if 'then' in action else None)
+               for action in resume['next_actions']]
+    finding, = resume['major_findings']
+    task, finding_id = finding['task'], finding['finding']
+    delivery_task = next(row for row in resume['now']['tasks'] if row['id'] == task)
+    delivered, = (item for item in delivery_task['assignments'] if item['ack_state'] == 'unacknowledged')
+    assert delivered['result_status'] == 'completed' and delivered['summary']
+    delivered_id = delivered['id']
+else:
+    actions = [(shlex.split(call), shlex.split(followup) if followup else None) for call, followup in re.findall(
+        r'^Next: .*? (hipson [^\\n]+)\\n(?:Then: (hipson [^\\n]+)\\n)?', output, re.M)]
+    task, finding_id = re.search(r'^Major findings: (T-\\d+)/(F-\\d+)$', output, re.M).groups()
+    delivered_id = re.search(rf'^  {task}/(A-\\d+) completed unacknowledged result: .+$', output, re.M)[1]
+    assert '<untrusted_data name="lead_evidence">' in output
+
+delivery, followup = next((call, then) for call, then in actions
+                          if call[1:3] in (['task', 'activity'], ['task', 'ack']) and delivered_id in call)
+if followup is not None:
+    result = json.loads(subprocess.check_output(delivery))
+    assert result['result']['status'] == 'completed' and result['result']['summary']
+    delivery = followup
+assert delivery[1:3] == ['task', 'ack'] and delivered_id in delivery
+subprocess.run(delivery, check=True)
+
+finding_call = next(call for call, _ in actions if call[1:4] == ['task', 'finding', 'list'] and 'major' in call)
+assert finding_call[finding_call.index('--task') + 1] == task
+repair = subprocess.run(['hipson', 'task', 'run', '--task', task, '--actor', 'repair',
+                         '--role', 'builder', '--mode', 'rw', '--scope', 'src/parser',
+                         '--result-file', 'repair.json', '--', 'bin/fake-worker', 'fix', 'repair.json'],
+                        check=True, capture_output=True, text=True)
+assignment = re.search(r'^hipson task run: T-\\d+ (A-\\d+) repair/builder/rw$', repair.stderr, re.M)[1]
+report = json.loads(Path('repair.json').read_text())
+assert report['status'] == 'completed'
+from src.parser.pairs import parse_pair
+assert parse_pair(' a : b ') == ('a', 'b')
+subprocess.run(['hipson', 'task', 'finding', 'update', '--finding', finding_id, '--status', 'fixed',
+                '--actor', 'lead', '--resolved-by-assignment', assignment,
+                '--note', 'Independently checked whitespace parsing'], check=True)
+subprocess.run(['hipson', 'task', 'ack', '--assignment', assignment, '--note', 'Read repair and verified parser'],
+               check=True)
+"""
+
+
 def run_scenario(name: str, output: Path, *, driver: str = "fake", solution: Path | None = None,
                  model: str = "gpt-6.1-sol", effort: str = "high", timeout: float = 300,
-                 keep: bool = False) -> dict[str, Any]:
+                 keep: bool = False, resume_compact: Literal["text", "json"] | None = None) -> dict[str, Any]:
     scenario = SCENARIOS / name
     if name not in scenario_names():
         raise ValueError(f"Unknown scenario: {name}")
@@ -652,6 +719,12 @@ def run_scenario(name: str, output: Path, *, driver: str = "fake", solution: Pat
     result: dict[str, Any] = {"scenario": name, "driver": driver, "model": model if driver == "codex" else None,
                               "effort": effort if driver == "codex" else None, "failures": [],
                               "harness_errors": [], "isolation": []}
+    if resume_compact:
+        if name != "resume" or driver != "fake" or solution is not None:
+            raise ValueError("Compact resume variant requires the fake resume scenario without a custom solution")
+        result["variant"] = f"compact-{resume_compact}"
+        solution = output / "solution.sh"
+        solution.write_text(f"python3 - {resume_compact} <<'PY'\n{RESUME_COMPACT_SOLUTION}PY\n", encoding="utf-8")
     started = time.monotonic()
     fixture = None
     watch = None
@@ -845,6 +918,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--solution", type=Path, help="Fake driver only: run this script instead of the reference")
+    parser.add_argument("--resume-compact", nargs="?", const="text", choices=("text", "json"),
+                        help="Fake resume only: follow compact next actions (default format: text)")
     parser.add_argument("--replay", type=Path, help="Offline: recheck a saved run or report directory without launching a driver")
     args = parser.parse_args(argv)
     if args.runs < 1 or not 0 < args.timeout < float("inf"):
@@ -853,6 +928,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("Astra models are not allowed")
     if args.solution and args.driver != "fake":
         parser.error("--solution requires --driver fake")
+    if args.resume_compact and (args.scenario != "resume" or args.driver != "fake" or args.solution or args.replay):
+        parser.error("--resume-compact requires --scenario resume --driver fake")
     output = ROOT / ".agent-e2e" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     output.mkdir(parents=True)
     if args.replay:
@@ -867,7 +944,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in scenario_names() if args.scenario == "all" else [args.scenario]:
         for number in range(1, args.runs + 1):
             run = run_scenario(name, output / f"{name}-{number}", driver=args.driver, solution=args.solution,
-                               model=args.model, effort=args.effort, timeout=args.timeout, keep=args.keep)
+                               model=args.model, effort=args.effort, timeout=args.timeout, keep=args.keep,
+                               resume_compact=args.resume_compact)
             runs.append(run)
             outcome = "INVALID" if not run.get("measurement_valid", True) else "PASS" if run["passed"] else "FAIL"
             print(f"{name} #{number}: {outcome}", flush=True)

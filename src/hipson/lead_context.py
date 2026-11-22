@@ -207,6 +207,64 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
     return redact_value(result)
 
 
+def build_compact(store: ledger.Ledger | None, *, project: str | None = None, include_all: bool = False,
+                  cli_db: str | None = None, text: bool = False, stale_days: int | None = None) -> dict[str, Any]:
+    from hipson import task_projection
+
+    page, rows = task_projection.resume_inputs(store, project=project, include_terminal=include_all,
+                                               cli_db=cli_db, text=text, stale_days=stale_days)
+    now: dict[str, Any] = dict(page)
+    actions = now.pop("next_actions")
+    actions_omitted = now.pop("next_actions_omitted")
+    evidence_policy = now.pop("evidence_policy")
+    projects: dict[str, dict[str, int]] = {}
+    pending: list[dict[str, str]] = []
+    findings: dict[str, list[dict[str, str]]] = {"blocking": [], "major": []}
+    finding_totals = dict.fromkeys(findings, 0)
+    for row in rows:
+        project_counts = projects.setdefault(row["project"], {})
+        status = row["status"]
+        project_counts[status] = project_counts.get(status, 0) + 1
+        pending.extend({"task": row["id"], "assignment": item["id"]} for item in row["assignments"]
+                       if item["ack_state"] == "unacknowledged")
+        counts = {}
+        for item in row["findings"]:
+            severity = item["severity"]
+            if severity in findings:
+                findings[severity].append({"task": row["id"], "finding": item["id"]})
+                counts[severity] = item["total"]
+        for severity, total in counts.items():
+            finding_totals[severity] += total
+
+    project_entries = [
+        {"project": _text(redact_value(name), 200), "counts": counts} for name, counts in sorted(projects.items())
+    ]
+    entries: dict[str, list[dict[str, Any]]] = {
+        "unacknowledged_results": pending, "blocking_findings": findings["blocking"],
+        "major_findings": findings["major"], "projects": project_entries,
+    }
+    omitted = {"unacknowledged_results": len(pending), "blocking_findings": finding_totals["blocking"],
+               "major_findings": finding_totals["major"], "projects": len(projects)}
+    included: dict[str, list[Any]] = {key: [] for key in entries}
+    result = {"kind": "lead.resume", "view_schema": now["view_schema"], "hipson_version": now["hipson_version"],
+              "now": now, **included, "omitted": omitted, "truncated": False,
+              "next_actions": actions, "next_actions_omitted": actions_omitted,
+              "evidence_policy": evidence_policy, "untrusted_fields": [f"now.{field}" for field in now["untrusted_fields"]]}
+    remaining = task_projection.RESUME_BUDGET - len(task_projection.dumps(result).encode("utf-8"))
+    # Interleave categories so a large backlog cannot consume the entire summary.
+    for group in zip_longest(*entries.values()):
+        for key, entry in zip(entries, group, strict=True):
+            if entry is None:
+                continue
+            size = len(task_projection.dumps(entry).encode("utf-8")) + bool(included[key])
+            if size <= remaining:
+                included[key].append(entry)
+                omitted[key] -= 1
+                remaining -= size
+    result["truncated"] = now["truncated"] or any(omitted.values())
+    return result
+
+
 def _text(value: object, limit: int = 240) -> str:
     # One physical line, with forged evidence delimiters made inert.
     text = escape_display_controls(str(value)).replace('<', '&lt;').replace('>', '&gt;')

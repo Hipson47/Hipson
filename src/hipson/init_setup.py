@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hipson import __version__, ledger
+from hipson import __version__, ledger, mcp_server
 from hipson.codex_install import backup_file
 from hipson.home import detect_codex_home
 from hipson.init_config import Snapshot, atomic_write, config_locks, restore, snapshot, unchanged
@@ -277,7 +277,8 @@ def _claude_registrations(plan: InitPlan, project: Path, user_config: Path) -> l
     return registrations
 
 
-def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> InitPlan:
+def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool,
+               mcp_profile: mcp_server.MCPProfile = "full") -> InitPlan:
     report: dict[str, Any] = {
         "project": str(Path(project_path).expanduser().resolve()),
         "mode": "dry-run" if dry_run else "apply", "ok": False,
@@ -288,6 +289,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
     try:
         if client not in CLIENTS or scope not in ("project", "user"):
             raise ValueError("Invalid client or scope.")
+        if mcp_profile not in mcp_server.MCP_PROFILES:
+            raise ValueError("Invalid MCP profile.")
         project = resolve_project(project_path)
         if sys.platform not in ("linux", "darwin", "win32"):
             raise ValueError(f"Unsupported platform: {sys.platform}")
@@ -312,6 +315,8 @@ def build_plan(*, project_path: str, client: str, scope: str, dry_run: bool) -> 
             "detail": "already configured" if version == ledger.SCHEMA_VERSION else f"initialize schema {ledger.SCHEMA_VERSION}",
         })
         server_args = ["mcp", "serve", "--project", str(project), "--stdio"]
+        if mcp_profile == "lead":
+            server_args.extend(["--profile", "lead"])
         selected = [name for name, found in clients.items() if found] if client == "auto" else [client]
         if client == "auto" and not selected:
             raise ValueError("No Claude Code or Codex CLI found on PATH. Install a client, select --client codex, or use --client none for ledger-only setup.")
@@ -514,8 +519,7 @@ def _apply_config(plan: InitPlan, action: dict[str, Any], project: Path) -> None
             entry = parsed.get("mcpServers", {}).get("hipson")
             if not isinstance(entry, dict) or entry.get("env", {}) != action["env"]:
                 raise ValueError("Invalid claude registration environment after update")
-        command = plan.report["checks"]["hipson_executable"]
-        args = ["mcp", "serve", "--project", str(project), "--stdio"]
+        command, *args = plan.report["verification"]["command"]
         if not _registration_matches(entry, command, args, project, codex=action["kind"] == "codex"):
             raise ValueError(f"Invalid {action['kind']} registration after update")
         if written is not None:

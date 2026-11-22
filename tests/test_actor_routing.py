@@ -275,6 +275,7 @@ def test_v9_ledgers_open_read_only_and_migrate_to_empty_tags(tmp_path):
         task = store.open_task(project=tmp_path, title="Old", objective="Old ledger")["id"]
         store.assign(task, actor="codex", role="builder", mode="ro")
     with closing(sqlite3.connect(db)) as connection:
+        connection.execute("ALTER TABLE assignments DROP COLUMN usage")
         connection.execute("ALTER TABLE assignments DROP COLUMN needs")
         connection.execute("ALTER TABLE tasks DROP COLUMN needs")
         connection.execute("ALTER TABLE tasks DROP COLUMN review_policy")
@@ -285,7 +286,7 @@ def test_v9_ledgers_open_read_only_and_migrate_to_empty_tags(tmp_path):
         assert view["needs"] == [] and view["assignments"][0]["needs"] is None
         assert actor_routing.outcomes(store, role="builder") == []
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION == 11
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
         assert store.show(task)["needs"] == []
 
 

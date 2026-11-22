@@ -1,5 +1,6 @@
 """Task ledger MCP acceptance tests, also runnable by scripts/run_tests.py."""
 
+import hashlib
 import io
 import json
 import os
@@ -11,26 +12,26 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from hipson import mcp_server
+from hipson import __version__, mcp_server
 from hipson.ledger import Ledger
 from tests.support import hipson_cli
-from tests.test_hipson_helpers import assert_schema_valid, run_cli_inprocess
+from tests.test_hipson_helpers import assert_schema_valid, init_git_repo, run_cli_inprocess
 from tests.test_ledger import SCHEMAS, _strict_errors, assert_strict_schema
 
 TASK_TOOLS = {
     "task.verify": ({"task", "approved"}, {"command", "actor", "label", "timeout"}),
     "task.checks": ({"task", "checks", "approved"}, {"reason", "actor"}),
     "task.close": ({"task", "approved"}, {"to", "summary", "actor", "command", "timeout"}),
-    'lead.resume': (set(), {'project', 'all'}),
-    'task.now': (set(), {'project', 'all'}),
+    'lead.resume': (set(), {'project', 'all', 'detail', 'stale_days'}),
+    'task.now': (set(), {'project', 'all', 'detail', 'offset', 'limit', 'stale_days'}),
     "task.activity": ({"assignment"}, set()),
-    "task.ack": ({"assignment", "approved"}, {"note"}),
-    "task.show": ({"task"}, set()),
+    "task.ack": ({"assignment", "approved"}, {"note", "actor"}),
+    "task.show": ({"task"}, {"detail", "section", "cursor", "limit"}),
     "task.brief": ({"task", "role"}, {"scope"}),
     "task.context": (set(), {"task"}),
     "task.events": ({"task"}, {"after"}),
     "task.list": (set(), {"project", "status"}),
-    "task.board": (set(), set()),
+    "task.board": (set(), {"project", "all", "detail", "offset", "limit"}),
     "task.findings": (set(), {"task", "status", "severity"}),
     "task.finding_add": ({"task", "actor", "severity", "title", "approved"},
                          {"detail", "location", "source_assignment"}),
@@ -41,6 +42,7 @@ TASK_TOOLS = {
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
     "task.reap": ({"approved"}, {"task", "dry_run"}),
+    "task.cleanup": ({"project"}, set()),
     "task.event": ({"task", "actor", "type", "summary", "approved"}, {"ref"}),
     "task.status": ({"task", "to", "actor", "approved"}, {"summary", "force", "reason"}),
 }
@@ -65,13 +67,18 @@ def _request(request_id, name, arguments):
             "params": {"name": name, "arguments": arguments}}
 
 
-def _responses(project, requests, *, ledger_db=None):
+def _wire(project, requests, *, ledger_db=None, profile=None):
     stdout = io.StringIO()
     stdin = io.StringIO("".join(json.dumps(request) + "\n" for request in requests))
     env = {"HIPSON_LEDGER": str(ledger_db)} if ledger_db is not None else {}
+    options = {} if profile is None else {"profile": profile}
     with patch.dict(os.environ, env):
-        mcp_server.serve_stdio(project_path=project, stdin=stdin, stdout=stdout)
-    responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        mcp_server.serve_stdio(project_path=project, stdin=stdin, stdout=stdout, **options)
+    return stdout.getvalue()
+
+
+def _responses(project, requests, *, ledger_db=None, profile=None):
+    responses = [json.loads(line) for line in _wire(project, requests, ledger_db=ledger_db, profile=profile).splitlines()]
     assert [response["id"] for response in responses] == [request["id"] for request in requests]
     assert all("error" not in response for response in responses)
     return [response["result"] for response in responses]
@@ -141,7 +148,7 @@ def test_ledger_mcp_catalog_schemas_and_contract(tmp_path: Path):
     contract = _payload(_call(tmp_path, "contract.show"))
     assert_schema_valid("agent-contract.schema.json", contract)
     capabilities = contract["adapter_capabilities"]["mcp_stdio"]["capabilities"]
-    for name in TASK_TOOLS:
+    for name in TASK_TOOLS.keys() - {"task.cleanup"}:
         capability = name.replace(".", "_")
         assert ("gated_" + capability if name in WRITE_ARGUMENTS else capability) in capabilities
     assert list(tmp_path.iterdir()) == []
@@ -192,7 +199,12 @@ def test_ledger_mcp_full_lifecycle_and_strict_payloads(tmp_path: Path):
         assert_strict_schema("task-event.schema.json", item)
     assert command("task.events", task=task, after=event["seq"]) == events[3:]
     assert command("task.events", task=task, after=events[-1]["seq"]) == []
-    assert command("task.show", task=task) == view
+    shown = command("task.show", task=task)
+    assert shown.pop("usage") == {
+        "attempts": {"builder": 1}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 1,
+        "elapsed_seconds": finished["usage"]["elapsed_seconds"], "missing_reasons": {"not_an_agent_runtime": 1},
+    }
+    assert shown == view
     with closing(Ledger(db)) as store:
         assert view == store.show(task) and events == store.events(task)
 
@@ -291,6 +303,8 @@ def test_ledger_mcp_rejects_caller_db_for_every_task_tool(tmp_path: Path):
             arguments["role"] = "builder"
         if name == 'task.activity':
             arguments['assignment'] = 'A-0001'
+        if name == "task.cleanup":
+            arguments["project"] = str(tmp_path)
         if name in WRITE_ARGUMENTS:
             arguments["approved"] = True
         result = _call(tmp_path, name, ledger_db=configured, db=str(caller_db), **arguments)
@@ -351,11 +365,14 @@ def test_ledger_mcp_missing_store_reads_create_nothing(tmp_path: Path):
         assert list(tmp_path.iterdir()) == []
 
 
+EMPTY_TASK_USAGE = {"attempts": {}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 0, "elapsed_seconds": 0.0}
+
+
 def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):
     # '#' and '%' exercise URI escaping on every OS; '?' is not a legal Windows filename.
     db = tmp_path / ("ledger%#.sqlite" if sys.platform == "win32" else "ledger?%#.sqlite")
     opened = _open(tmp_path, db)
-    assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == opened
+    assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == {**opened, "usage": EMPTY_TASK_USAGE}
 
     def remove_before_connect(path, *, create, read_only):
         path.unlink()
@@ -381,7 +398,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
             **WRITE_ARGUMENTS["task.open"], "project": str(other_project), "approved": True,
         }))
         assert not home.exists()
-        assert _payload(_call(server_project, "task.show", task=env_task["id"])) == env_task
+        assert _payload(_call(server_project, "task.show", task=env_task["id"])) == {**env_task, "usage": EMPTY_TASK_USAGE}
         assert _payload(_call(server_project, "task.list")) == [
             {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings", "verification", "review")}
         ]
@@ -391,7 +408,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
         assert _payload(_call(server_project, "task.board")) == []
         assert not home.exists()
         home_task = _open(other_project)
-        assert _payload(_call(server_project, "task.show", task=home_task["id"])) == home_task
+        assert _payload(_call(server_project, "task.show", task=home_task["id"])) == {**home_task, "usage": EMPTY_TASK_USAGE}
         assert (home / "ledger.sqlite").exists()
     assert list(server_project.iterdir()) == []
 
@@ -460,7 +477,7 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
     assert [response["id"] for response in responses] == [1, 2, 3, 4, 5, 6]
     opened, shown, events = [_payload(response["result"]) for response in responses[:3]]
     assert_strict_schema("task.schema.json", opened)
-    assert shown == opened and shown["project"] == str(tmp_path)
+    assert shown == {**opened, "usage": EMPTY_TASK_USAGE} and shown["project"] == str(tmp_path)
     assert events[0]["type"] == "opened" and len(events) == 1
     assert_strict_schema("task-event.schema.json", events[0])
     for response in responses[3:5]:
@@ -469,19 +486,222 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
     assert list(project.iterdir()) == [] and not (tmp_path / "home").exists()
 
 
-def test_readme_mcp_inventory_lists_every_task_tool():
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+def test_docs_mcp_inventory_lists_every_task_tool():
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
     section = readme.split("## Use it from a lead agent (MCP)", 1)[1].split("\n## ", 1)[0]
     listed = set(re.findall(r"`((?:task|lead)\.[a-z_]+)`", section))
+    ledger_doc = (root / "docs" / "TASK_LEDGER.md").read_text(encoding="utf-8")
+    table = ledger_doc.split("| Tool | Required arguments | Optional arguments |\n", 1)[1].split("\n\n", 1)[0]
+    listed.update(re.findall(r"^\| `((?:task|lead)\.[a-z_]+)` \|", table, flags=re.M))
     expected = {name for name in mcp_server.MCP_TOOL_NAMES if name.startswith(("task.", "lead."))}
     assert listed == expected, (sorted(expected - listed), sorted(listed - expected))
 
 
 def test_mcp_initialize_reports_package_version_and_lifecycle_instructions():
-    from hipson import __version__
     reply = mcp_server._handle_request(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
                                       project=Path("."))
     result = reply["result"]
     assert result["serverInfo"] == {"name": "hipson", "version": __version__}
-    for phrase in ("task.ack", "task.close", "approved=true", "lead.resume", "launches nothing"):
+    for phrase in ("task.ack", "task.close", "approved=true", "lead.resume", "launches nothing", "stale_days", "task.cleanup"):
         assert phrase in result["instructions"]
+
+
+DISCOVERY_REQUESTS = [
+    {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+]
+LEAD_PROFILE_TOOLS = {
+    "lead.resume", "task.now", "task.board", "task.show", "task.open", "task.status",
+    "task.verify", "task.close", "task.ack", "task.activity", "task.findings",
+    "task.finding_update", "task.cleanup", "task.reap",
+}
+
+
+def test_full_profile_discovery_matches_pre_s7_wire_bytes(tmp_path):
+    cli = hipson_cli()
+    assert cli
+    request_text = "".join(json.dumps(request) + "\n" for request in DISCOVERY_REQUESTS)
+
+    def discovery(*options):
+        result = subprocess.run([cli, "mcp", "serve", "--stdio", *options], cwd=tmp_path,
+                                input=request_text.encode(), capture_output=True, check=True, timeout=30)
+        assert result.stderr == b""
+        # Windows text stdio translates the line delimiter.
+        return result.stdout.replace(b"\r\n", b"\n") if sys.platform == "win32" else result.stdout
+
+    wire = discovery()
+    assert discovery("--profile", "full") == wire
+    init, tools = wire.decode("utf-8").splitlines(keepends=True)
+    assert json.loads(init)["result"]["serverInfo"]["version"] == __version__
+    assert f'"instructions": "Hipson {__version__} ' in init
+    # Pin HEAD 0b12334. Normalize only the two package version fields for future releases.
+    init = init.replace(f'"version": "{__version__}"', '"version": "1.7.0"', 1)
+    init = init.replace(f'"instructions": "Hipson {__version__} ', '"instructions": "Hipson 1.7.0 ', 1)
+    assert hashlib.sha256(init.encode("utf-8")).hexdigest() == "254e837128bd8c6ac20a7a2f54fd1e8cb352f37918e700497dc66b04082fc4e6"
+    assert hashlib.sha256(tools.encode("utf-8")).hexdigest() == "878fcbf5bcfe0fee8fd6ecd159f2c1472d57707145ba522aef41319d77681b54"
+
+
+def test_lead_profile_discovery_catalog_and_schema_parity(tmp_path):
+    init, tools = _wire(tmp_path, DISCOVERY_REQUESTS, profile="lead").splitlines(keepends=True)
+    assert len(tools.encode("utf-8")) <= 6_000
+    instructions = json.loads(init)["result"]["instructions"]
+    assert len(instructions) < len(mcp_server.MCP_INSTRUCTIONS)
+    for term in ("detail=compact", "detail=full", "next_actions", "error_schema 1", "stale_days", "approved=true"):
+        assert term in instructions
+
+    descriptors = {tool["name"]: tool for tool in json.loads(tools)["result"]["tools"]}
+    assert descriptors.keys() == LEAD_PROFILE_TOOLS
+    code, stdout, stderr = run_cli_inprocess("mcp", "serve", "--project", str(tmp_path), "--catalog", "--profile", "lead")
+    assert (code, stderr) == (0, "")
+    catalog = json.loads(stdout)
+    assert [entry["name"] for entry in catalog["tools"]] == list(descriptors)
+    for entry in catalog["tools"]:
+        name = entry["name"]
+        descriptor = descriptors[name]
+        assert entry["description"] == descriptor["description"]
+        assert entry["input_schema"] == descriptor["inputSchema"]
+        full = mcp_server.MCP_INPUT_SCHEMAS[name]
+        lean = entry["input_schema"]
+        assert {key: value for key, value in lean.items() if key != "properties"} == {
+            key: value for key, value in full.items() if key != "properties"
+        }
+        assert lean["properties"].keys() == full["properties"].keys()
+        for field, schema in full["properties"].items():
+            expected = {key: value for key, value in schema.items() if key != "description"}
+            if field == "detail":
+                assert expected["default"] == "full"
+                expected["default"] = "compact"
+            assert lean["properties"][field] == expected, (name, field)
+
+
+def test_lead_profile_refuses_unlisted_tools_without_dispatch(tmp_path):
+    requests = [
+        _request(1, "task.assign", {**WRITE_ARGUMENTS["task.assign"], "task": "T-0001", "approved": True}),
+        _request(2, "work.create", {"project": str(tmp_path)}),
+        _request(3, "task.brief", {"task": "T-0001", "role": "builder"}),
+        {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
+    ]
+    db = tmp_path / "ledger.sqlite"
+    with patch.object(mcp_server, "_tool_payload", side_effect=AssertionError("unlisted tool dispatched")) as dispatch:
+        *refusals, discovery = _responses(tmp_path, requests, ledger_db=db, profile="lead")
+    dispatch.assert_not_called()
+    assert discovery["tools"]
+    assert not db.exists()
+    for request, refusal in zip(requests[:-1], refusals, strict=True):
+        _assert_error(refusal, request["params"]["name"])
+        body = json.loads(refusal["content"][1]["text"])
+        assert body == {
+            "error_schema": 1, "code": "mcp.tool_not_in_profile", "message": refusal["content"][0]["text"],
+            "fix": [],
+        }
+        assert "--profile full" in refusal["content"][0]["text"]
+
+
+def test_lead_profile_answers_unknown_tools_like_full(tmp_path):
+    """S7 review: a name that exists in no profile is an unknown tool, not a profile miss."""
+    db = tmp_path / "ledger.sqlite"
+    for name in ("release.claim", "nope.x"):
+        lead, = _responses(tmp_path, [_request(1, name, {})], ledger_db=db, profile="lead")
+        full, = _responses(tmp_path, [_request(1, name, {})], ledger_db=db, profile="full")
+        assert lead == full, (name, lead, full)
+        assert "mcp.tool_not_in_profile" not in json.dumps(lead)
+
+
+def test_lead_profile_rejects_the_same_invalid_arguments_as_full(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    cases = [
+        ("lead.resume", {"detail": "compact", "stale_days": 3651}),
+        ("task.now", {"detail": "compact", "offset": True}),
+        ("task.board", {"detail": "full", "limit": 1}),
+        ("task.board", {"limit": 101}),
+        ("task.show", {}),
+        ("task.show", {"task": "T-0001", "detail": "compact", "section": "events"}),
+        ("task.show", {"task": "T-0001", "cursor": 0}),
+        ("task.show", {"task": "T-0001", "unexpected": "value"}),
+        ("task.open", {**WRITE_ARGUMENTS["task.open"], "checks": [["git"]] * 17, "approved": True}),
+        ("task.status", {**WRITE_ARGUMENTS["task.status"], "to": "closed", "approved": True}),
+        ("task.verify", {**WRITE_ARGUMENTS["task.verify"], "timeout": 86401, "approved": True}),
+        ("task.close", {"task": "T-0001", "command": [], "approved": True}),
+        ("task.ack", {"assignment": "A-0001", "approved": "true"}),
+        ("task.activity", {"assignment": 1}),
+        ("task.findings", {"severity": "critical"}),
+        ("task.finding_update", {"finding": "F-0001", "status": "open", "actor": "lead", "approved": True}),
+        ("task.cleanup", {}),
+        ("task.reap", {"dry_run": 1, "approved": True}),
+    ]
+    requests = [_request(index, name, args) for index, (name, args) in enumerate(cases, 1)]
+    with patch.dict(os.environ, {"HIPSON_ROLE": "lead"}):
+        os.environ.pop("HIPSON_ASSIGNMENT", None)
+        full = _responses(tmp_path, requests, ledger_db=db, profile="full")
+        lead = _responses(tmp_path, requests, ledger_db=db, profile="lead")
+    assert all(reply["isError"] for reply in full)
+    assert lead == full
+    assert not db.exists()
+
+
+def test_lead_profile_lifecycle_over_stdio(tmp_path):
+    project = init_git_repo(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    cli = hipson_cli()
+    assert cli
+    environment = {**os.environ, "HIPSON_LEDGER": str(db), "HIPSON_ROLE": "lead"}
+    environment.pop("HIPSON_ASSIGNMENT", None)
+    environment.pop("HIPSON_TASK", None)
+
+    def request(name, **arguments):
+        assert name in LEAD_PROFILE_TOOLS
+        message = _request(1, name, arguments)
+        result = subprocess.run(
+            [cli, "mcp", "serve", "--stdio", "--profile", "lead", "--project", str(project)],
+            cwd=project, env=environment, input=json.dumps(message) + "\n", capture_output=True,
+            text=True, encoding="utf-8", check=True, timeout=30,
+        )
+        return json.loads(result.stdout)["result"]
+
+    task = _payload(request(
+        "task.open", project=str(project), lead="lead", title="Accept the delivery", objective="Exercise the lead profile",
+        checks=[["git", "diff", "--check"]], approved=True,
+    ))["id"]
+    assert _payload(request("task.status", task=task, to="in_progress", actor="lead", approved=True))["status"] == "in_progress"
+    cleanup = request("task.cleanup", project=str(project))
+    _assert_error(cleanup, "Cleanup refused")
+    assert json.loads(cleanup["content"][1]["text"])["code"] == "cleanup.tasks_open"
+    assert json.loads(cleanup["content"][2]["text"])["tasks"][0]["id"] == task
+
+    # The worker runner writes its result outside MCP. Seed that delivery without launching a worker.
+    with closing(Ledger(db)) as store:
+        assignment = store.assign(task, actor="fake-worker", role="builder", mode="rw", scope=["tracked.txt"])["id"]
+        (project / "tracked.txt").write_text("delivered\n", encoding="utf-8")
+        store.observe(assignment, {"last_stdout": "Fixture delivery complete."})
+        store.finish(assignment, result="passed", summary="Updated tracked.txt")
+
+    reads = {"task.board": {}, "task.now": {}, "lead.resume": {}, "task.show": {"task": task}}
+    for name, args in reads.items():
+        assert _payload(request(name, **args))["view_schema"] == 1
+        full = _payload(request(name, detail="full", **args))
+        if name == "task.board":
+            assert isinstance(full, list)
+        else:
+            assert "view_schema" not in full
+    assert _payload(request("task.board", offset=0, limit=1))["tasks"][0]["id"] == task
+
+    resume = _payload(request("lead.resume"))
+    delivery = next(action for action in resume["next_actions"] if action["tool"] == "task.activity")
+    activity = _payload(request(delivery["tool"], **delivery["arguments"]))
+    assert activity["id"] == assignment and activity["status"] == "passed"
+    assert activity["activity"]["last_stdout"] == "Fixture delivery complete."
+    ack = delivery["then"]
+    assert _payload(request(ack["tool"], **ack["arguments"]))["ack_state"] == "acknowledged"
+    verification = _payload(request("task.verify", task=task, approved=True))
+    assert verification["passing"] and verification["records"][0]["exit_code"] == 0
+    assert _payload(request("task.show", task=task, section="verification"))["section"] == "verification"
+    closed = _payload(request("task.close", task=task, approved=True))
+    assert closed["closed"] and closed["status"] == "done"
+    assert closed["accepted"] == [verification["records"][0]["id"]]
+    report = _payload(request("task.cleanup", project=str(project)))
+    assert report["tasks"] == [
+        {"id": task, "project": str(project), "status": "done", "assignments": [
+            {"id": assignment, "role": "builder", "mode": "rw", "status": "passed", "claims": []},
+            ], "omitted_assignments": 0, "omitted_claims": 0},
+    ]

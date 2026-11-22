@@ -1,0 +1,230 @@
+{
+  "schema_version": 1,
+  "hipson_version": "1.7.0",
+  "git_revision": "08a9d9504da6d3dbf82f019f85d515b401a23c38",
+  "git_dirty": true,
+  "ledger_source": "fixture",
+  "task_show_id": "T-0001",
+  "reads": {
+    "task.board": {
+      "full": {
+        "available": true,
+        "cli_json": {
+          "bytes": 5614904,
+          "project_state_calls": 3,
+          "wall_seconds": 0.50006
+        },
+        "mcp_json": {
+          "bytes": 4391961,
+          "project_state_calls": 3,
+          "wall_seconds": 0.482957
+        },
+        "cli_text": {
+          "bytes": 1350,
+          "project_state_calls": 3,
+          "wall_seconds": 0.48517
+        }
+      },
+      "compact": {
+        "available": true,
+        "cli_json": {
+          "bytes": 27657,
+          "project_state_calls": 0,
+          "wall_seconds": 0.025144
+        },
+        "mcp_json": {
+          "bytes": 27657,
+          "project_state_calls": 0,
+          "wall_seconds": 0.013883
+        },
+        "cli_text": {
+          "bytes": 2084,
+          "project_state_calls": 0,
+          "wall_seconds": 0.023247
+        }
+      }
+    },
+    "task.now": {
+      "full": {
+        "available": true,
+        "cli_json": {
+          "bytes": 5812325,
+          "project_state_calls": 3,
+          "wall_seconds": 0.87217
+        },
+        "mcp_json": {
+          "bytes": 4382200,
+          "project_state_calls": 3,
+          "wall_seconds": 0.849867
+        },
+        "cli_text": {
+          "bytes": 4024,
+          "project_state_calls": 3,
+          "wall_seconds": 0.841037
+        }
+      },
+      "compact": {
+        "available": true,
+        "cli_json": {
+          "bytes": 29101,
+          "project_state_calls": 0,
+          "wall_seconds": 0.023413
+        },
+        "mcp_json": {
+          "bytes": 29101,
+          "project_state_calls": 0,
+          "wall_seconds": 0.013256
+        },
+        "cli_text": {
+          "bytes": 2922,
+          "project_state_calls": 0,
+          "wall_seconds": 0.023706
+        }
+      }
+    },
+    "lead.resume": {
+      "full": {
+        "available": true,
+        "cli_json": {
+          "bytes": 11853633,
+          "project_state_calls": 3,
+          "wall_seconds": 1.277627
+        },
+        "mcp_json": {
+          "bytes": 8778936,
+          "project_state_calls": 3,
+          "wall_seconds": 1.253115
+        },
+        "cli_text": {
+          "bytes": 4043,
+          "project_state_calls": 3,
+          "wall_seconds": 1.2414
+        }
+      },
+      "compact": {
+        "available": true,
+        "cli_json": {
+          "bytes": 29852,
+          "project_state_calls": 0,
+          "wall_seconds": 0.024187
+        },
+        "mcp_json": {
+          "bytes": 29852,
+          "project_state_calls": 0,
+          "wall_seconds": 0.013439
+        },
+        "cli_text": {
+          "bytes": 3343,
+          "project_state_calls": 0,
+          "wall_seconds": 0.025997
+        }
+      }
+    },
+    "task.show": {
+      "full": {
+        "available": true,
+        "cli_json": {
+          "bytes": 766795,
+          "project_state_calls": 1,
+          "wall_seconds": 0.137844
+        },
+        "mcp_json": {
+          "bytes": 623094,
+          "project_state_calls": 1,
+          "wall_seconds": 0.121825
+        },
+        "cli_text": {
+          "bytes": 538,
+          "project_state_calls": 1,
+          "wall_seconds": 0.130704
+        }
+      },
+      "compact": {
+        "available": true,
+        "cli_json": {
+          "bytes": 2322,
+          "project_state_calls": 0,
+          "wall_seconds": 0.017505
+        },
+        "mcp_json": {
+          "bytes": 2322,
+          "project_state_calls": 0,
+          "wall_seconds": 0.006254
+        },
+        "cli_text": {
+          "bytes": 329,
+          "project_state_calls": 0,
+          "wall_seconds": 0.018499
+        }
+      }
+    }
+  },
+  "resume_e2e": {
+    "scenario": "resume",
+    "driver": "fake",
+    "passed": true,
+    "measurement_valid": true,
+    "metrics": {
+      "total_commands": 7,
+      "hipson_invocations": 6,
+      "hipson_output_bytes": 6654,
+      "failing_invocations": [],
+      "help_lookups": 0,
+      "docs_lookups": 0,
+      "turns": 1,
+      "duration_seconds": 4.387,
+      "token_usage": null,
+      "used_lead_resume": true,
+      "used_task_now": false,
+      "first_hipson_command": "lead resume",
+      "read_commands": {
+        "lead resume": 1,
+        "task now": 0,
+        "task show": 0,
+        "task events": 0,
+        "task board": 0,
+        "task list": 0,
+        "task context": 0,
+        "task brief": 0,
+        "task activity": 1
+      },
+      "hipson_read_output_bytes": 2625,
+      "task_history_lookups": 1,
+      "failure_journal_read_before_recovery": null
+    }
+  },
+  "resume_e2e_json": {
+    "scenario": "resume",
+    "driver": "fake",
+    "passed": true,
+    "measurement_valid": true,
+    "metrics": {
+      "total_commands": 7,
+      "hipson_invocations": 6,
+      "hipson_output_bytes": 10069,
+      "failing_invocations": [],
+      "help_lookups": 0,
+      "docs_lookups": 0,
+      "turns": 1,
+      "duration_seconds": 4.39,
+      "token_usage": null,
+      "used_lead_resume": true,
+      "used_task_now": false,
+      "first_hipson_command": "lead resume",
+      "read_commands": {
+        "lead resume": 1,
+        "task now": 0,
+        "task show": 0,
+        "task events": 0,
+        "task board": 0,
+        "task list": 0,
+        "task context": 0,
+        "task brief": 0,
+        "task activity": 1
+      },
+      "hipson_read_output_bytes": 6040,
+      "task_history_lookups": 1,
+      "failure_journal_read_before_recovery": null
+    }
+  }
+}

@@ -265,9 +265,9 @@ def render(view: WorkerContext) -> str:
 
 
 def _untrusted_block(content: str) -> str:
-    # Match prompt.py's boundary pattern, including protection against forged delimiters.
-    escaped = content.replace("</untrusted_data>", "&lt;/untrusted_data&gt;")
-    escaped = re.sub(r"<untrusted_data([^>]*)>", r"&lt;untrusted_data\1&gt;", escaped)
+    # Preserve the evidence text while escaping forged opening and closing delimiters.
+    escaped = re.sub(r"<\s*(?:/\s*)?untrusted_data[^>]*>",
+                     lambda match: match[0].replace("<", "&lt;").replace(">", "&gt;"), content, flags=re.IGNORECASE)
     return f'<untrusted_data name="worker_evidence">\n{escaped}\n</untrusted_data>'
 
 

@@ -489,9 +489,9 @@ def test_v2_migration_preserves_rows_events_and_is_transactional(tmp_path: Path)
         # v7 appends declared acceptance checks, empty for migrated tasks.
         assert [row[:-3] for row in after["tasks"]] == before["tasks"]  # v7 checks, v10 needs, v11 review_policy
         assert {row[-2] for row in after["tasks"]} == {"[]"} and {row[-1] for row in after["tasks"]} == {"none"}
-        assert [row[:-9] for row in after["assignments"]] == before["assignments"]
-        assert all(row[-9:-4] == (None,) * 5 and row[-3:] == (None,) * 3 for row in after['assignments'])  # v8 changes, v9 environment, v10 needs
-        assert [row[-4] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']  # ack_note before changes
+        assert [row[:-10] for row in after["assignments"]] == before["assignments"]
+        assert all(row[-10:-5] == (None,) * 5 and row[-4:] == (None,) * 4 for row in after['assignments'])
+        assert [row[-5] for row in after['assignments']] == ['', ledger.LEGACY_ACK_NOTE, '']
         assert store.findings() == []
         finding = store.add_finding("T-0001", actor="lead", severity="major", title="Legacy follow-up")
         assert finding["id"] == "F-0001" and store.events("T-0001")[-1]["seq"] == 7
@@ -518,6 +518,10 @@ def test_v2_reads_return_empty_findings_null_results_without_migration(tmp_path:
         assert view["findings"] == [] and all(item["result"] is None for item in view["assignments"])
         assert store.findings(task="T-0001") == [] and store.board()
         assert_strict_schema("task.schema.json", view)
+    view["usage"] = {
+        "attempts": {"builder": 1, "reviewer": 1}, "repair_rounds": 0, "tokens_by_source": None,
+        "without_usage": 1, "elapsed_seconds": 1.0, "missing_reasons": {"not_recorded": 1},
+    }
     for command in (("show", "--task", "T-0001"), ("finding", "list"),
                     ("finding", "list", "--task", "T-0001")):
         rc, stdout, stderr = run_cli_inprocess("task", "--db", str(db), *command, "--json")

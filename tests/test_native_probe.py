@@ -104,10 +104,15 @@ def test_fixture_and_report_with_fake_claude(tmp_path):
         assert evidence["check_passed"] and evidence["instruction_marker"] and evidence["skill_marker"]
         assert evidence["hook_log_lines"] == 2 and evidence["subagent_tool_observed"]
         assert evidence["models"] == ["fake-claude"] and evidence["usage"] == {"input_tokens": 7}
+        usage = evidence["usage_report"]
+        assert usage["source"] == "claude_stream_json" and usage["reason"] is None
+        assert usage["tokens"]["input_tokens"] == 7 and usage["tokens"]["total_tokens"] is None
         assert evidence["num_turns"] == 2 and evidence["permission_denials"] == ["Bash"]
         assert evidence["reported_check_exit_code"] == 0
         assert len(evidence["summary"]) == 300
     assert builder["evidence"]["assignment_status"] == "passed"
+    assert builder["evidence"]["usage_report"]["elapsed_seconds"] >= 0
+    assert manual["evidence"]["usage_report"]["elapsed_seconds"] is None
     assert "assignment_status" not in manual["evidence"]
     assert reviewer["evidence"]["result_returned"] and not reviewer["evidence"]["write_file_exists"]
     assert first["evidence"]["session_recorded"]
@@ -133,9 +138,11 @@ print(json.dumps({'status': 'SUCCESS', 'structured_output': """ + repr(RESULT) +
     codex, agy = rows[:5], rows[5:]
     assert {row["evidence"]["failure_class"] for row in codex} == {"rate_limited"}
     assert all(row["verdict"] == "error" for row in codex)
+    assert all(row["evidence"]["usage_report"]["reason"] == "runtime_error" for row in codex)
     reviewer = next(row for row in agy if row["probe"] == "reviewer")
     assert reviewer["evidence"]["result_returned"] and reviewer["evidence"]["write_file_exists"]
     assert reviewer["verdict"] == "not-observed"
+    assert reviewer["evidence"]["usage_report"]["reason"] == "runtime_reported_no_usage"
     for row in agy:
         if row is not reviewer:
             assert row["verdict"] == "refused" and row["evidence"]["failure_class"] == "permission_denied"
