@@ -39,7 +39,8 @@ See the measurements and upgrade instructions in the [release notes](docs/releas
 
 - Record runtime-reported tokens and ledger elapsed time per assignment in schema 12. Full and compact
   task show and the assignments section report attempts by role, repair rounds, token totals per
-  runtime source and missing-usage reasons. Native probes and flow comparisons include the usage evidence.
+  runtime source and missing-usage reasons. Native probes and flow comparisons include the usage evidence;
+  the live probes of 2026-11-22 recorded runtime-reported usage on Codex, Antigravity and Claude Code.
   New flow comparison reports group arm totals by runtime source.
 - Any write open of an older ledger backs it up next to the ledger
   (`<ledger>.v<old>-backup-<timestamp>`) before migrating. `hipson init` also keeps its own backup.

@@ -36,10 +36,14 @@ These UTF-8 byte counts compare 1.7.0 full reads with 1.8.0 RC compact reads on 
 
 | Read | CLI JSON, 1.7.0 → RC | MCP JSON, 1.7.0 → RC | CLI text, 1.7.0 → RC | Full fingerprints, 1.7.0 → RC |
 | --- | ---: | ---: | ---: | ---: |
-| `task board` | 5,614,904 → 30,497 | 4,391,961 → 30,497 | 1,350 → 2,264 | 3 → 0 |
-| `task now` | 5,812,325 → 32,704 | 4,382,200 → 32,704 | 4,024 → 3,580 | 3 → 0 |
-| `lead resume` | 11,853,633 → 33,455 | 8,778,936 → 33,455 | 4,043 → 4,001 | 3 → 0 |
-| `task show` | 766,795 → 2,441 | 623,094 → 2,441 | 538 → 455 | 1 → 0 |
+| `task board` | 5,614,904 → 30,145 | 4,391,961 → 30,145 | 1,350 → 2,264 | 3 → 0 |
+| `task now` | 5,812,325 → 32,352 | 4,382,200 → 32,352 | 4,024 → 3,580 | 3 → 0 |
+| `lead resume` | 11,853,633 → 33,103 | 8,778,936 → 33,103 | 4,043 → 4,001 | 3 → 0 |
+| `task show` | 766,795 → 2,425 | 623,094 → 2,425 | 538 → 455 | 1 → 0 |
+
+The RC figures were measured from a clean checkout of commit `8104ced`. Full detail, which stays the
+default in 1.8, grows slightly: `task show` CLI text goes from 538 to 648 bytes because it now carries
+the usage line.
 
 The complete MCP `tools/list` reply was 16,223 bytes for 34 tools on 1.7.0. The RC replies
 are 18,463 bytes for 35 tools in `full` and 5,954 bytes for 14 tools in `lead`.
@@ -47,12 +51,12 @@ are 18,463 bytes for 35 tools in `full` and 5,954 bytes for 14 tools in `lead`.
 | Fake-driver resume | Hipson calls | Output bytes | Read bytes | Oracle |
 | --- | ---: | ---: | ---: | --- |
 | 1.7.0 full text | 5 | 7,339 | 3,265 | Passed |
-| 1.8.0 RC compact text | 6 | 7,037 | 2,753 | Passed |
-| 1.8.0 RC compact JSON (informational) | 6 | 10,763 | 6,478 | Passed |
+| 1.8.0 RC compact text | 6 | 7,052 | 2,758 | Passed |
+| 1.8.0 RC compact JSON (informational) | 6 | 10,777 | 6,483 | Passed |
 
 The owner waived the fewer-calls target for this scenario. The 1.7.0 reference hard-codes
 the IDs and skips activity. The compact runs take a sixth call to read the worker's activity
-and failure journal before acknowledging the result. Compact text reads 512 fewer bytes.
+and failure journal before acknowledging the result. Compact text reads 507 fewer bytes.
 See the [measurement method and owner decision](evals/AGENT_UX.md).
 
 ## Upgrade from 1.7
@@ -62,13 +66,18 @@ uv tool upgrade hipson        # or: pip install --upgrade hipson
 hipson init --client none     # backs up the ledger and migrates schema 11 to 12
 ```
 
-With 1.8 installed, any write open of a schema 11 ledger first takes a SQLite backup next to
-the ledger, named `<ledger>.v11-backup-<timestamp>`, then migrates it. `hipson init` keeps its
+With 1.8 installed, any write open of an older ledger first takes a SQLite backup next to
+the ledger, named `<ledger>.v<old>-backup-<timestamp>` (`.v11-` from 1.7, `.v10-` from 1.6), then
+migrates it. Find backups with `ls <ledger>.v*-backup-*`; `hipson init` also leaves
+`<ledger>.backup-<timestamp>`. Backups hold the same briefs, journals and worker output as the
+ledger and are kept until you delete them, so remove them once the upgrade has settled. `hipson init` keeps its
 own backup as well. Reads can open the older ledger before migration.
 
 Hipson 1.7.0 refuses a schema 12 ledger. Upgrade every Hipson that shares it together, including
 other virtual environments, installations that your MCP clients start, and other machines that
-sync the ledger. Restart the lead client after upgrading.
+sync the ledger. A machine still on 1.7 reports `ledger.schema_unsupported` until it upgrades. If
+you sync a ledger between machines, sync only the closed `.sqlite` file, never its `-wal` or
+`-shm` files. Restart the lead client after upgrading.
 
 To go back, stop every Hipson that uses the ledger. Delete the ledger's `-wal` and `-shm`
 files if present, then copy the pre-migration backup over the ledger file before starting
@@ -80,9 +89,15 @@ files if present, then copy the pre-migration backup over the ledger file before
   lead verification for a fresh result and read the relevant task section for the full evidence.
   Cleanup is a point-in-time read. A later ledger write can change its result.
 - Runtime token reporting depends on the adapter and runtime. Missing counters remain unknown.
-  Usage is recorded as evidence and has no effect on gates. The RC measurements use a fake
-  driver. Updated live Codex, Claude Code and Antigravity usage probes are pending with the lead.
-- The Windows Python 3.12 CI test `test_a_redacted_review_finding_is_still_repairable` has
-  intermittently failed while copying `core.autocrlf` into the review snapshot. The Git helper
-  uses a five-second timeout, discards stderr and makes one attempt. The observed failure is
-  insufficient to distinguish a timeout from a Git error, and the test passed locally on Linux.
+  Usage is recorded as evidence and has no effect on gates. The RC byte measurements use a fake
+  driver. The live native probes of 2026-11-22 (`docs/evals/native-probe-2026-11-22-*.json`) ran
+  five probes on each of Codex, Antigravity and Claude Code, and all 15 recorded the runtime's own
+  usage report (`codex_rollout`, `agy_json`, `claude_stream_json`), none null. Antigravity's
+  verdicts vary between runs, and its plan mode still does not prevent a reviewer write (a provider
+  limitation, see the runtime docs).
+- The Windows Python 3.12 CI test `test_a_redacted_review_finding_is_still_repairable` used to fail
+  intermittently while copying `core.autocrlf` into the review snapshot, through one `git config`
+  process per key. The RC writes these plain line-ending values straight into the snapshot's own
+  config and keeps Git, with one retry, only for unusual values. Watch the first Windows runs.
+- `task cleanup` on a path with many open tasks suggests reads for the first ones and close or
+  cancel templates for the first open task only; narrow the path to act on the others.

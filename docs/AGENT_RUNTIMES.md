@@ -26,7 +26,8 @@ Workspace-provided executables (a project `.mcp.json`, project hooks in `.claude
 
 Installed: Claude Code 2.1.319, Codex CLI 0.169.0, Antigravity 1.5.12. "Verified" means a run exercised it and
 the probe observed the effect itself (a file, a hook log line, a re-run check, a recalled code word), not the
-model's report. Evidence: `scripts/native_probe.py` reports in [evals/](evals/) (`native-probe-2026-11-19-*.json`),
+model's report. Evidence: `scripts/native_probe.py` reports in [evals/](evals/) (`native-probe-2026-11-19-*.json`; the
+2026-11-22 rerun in `native-probe-2026-11-22-*.json` adds the normalized usage record to every run),
 one sample per cell; "Hipson = manual" means the run through `hipson task run ... -- hipson agent exec` and the
 runtime's own non-interactive command on the same fixture showed the same capability.
 

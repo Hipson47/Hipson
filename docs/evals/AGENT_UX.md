@@ -116,18 +116,19 @@ inspects, acknowledges, verifies, closes and runs cleanup for one task.
 
 The RC and the 1.7.0 baseline use the same 22-task S0 fixture. Run the S3 commands with
 `docs/evals/agent-ux-1.8-rc.json` as the output path to reproduce the RC measurements.
-The report records HEAD `55160e0` and marks the working tree as dirty for the uncommitted release candidate.
+The report was measured from a clean checkout of commit `8104ced` (`git_dirty: false`).
 [1.7.0 baseline](agent-ux-baseline-1.7.0.json) · [RC report](agent-ux-1.8-rc.json)
 
 | Read | 1.7.0 full CLI JSON (bytes) | 1.8.0 RC compact CLI JSON (bytes) | 1.7.0 full MCP JSON (bytes) | 1.8.0 RC compact MCP JSON (bytes) | 1.7.0 full CLI text (bytes) | 1.8.0 RC compact CLI text (bytes) | Full fingerprints, 1.7.0 → RC compact |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `task board` | 5,614,904 | 30,497 | 4,391,961 | 30,497 | 1,350 | 2,264 | 3 → 0 |
-| `task now` | 5,812,325 | 32,704 | 4,382,200 | 32,704 | 4,024 | 3,580 | 3 → 0 |
-| `lead resume` | 11,853,633 | 33,455 | 8,778,936 | 33,455 | 4,043 | 4,001 | 3 → 0 |
-| `task show` | 766,795 | 2,441 | 623,094 | 2,441 | 538 | 455 | 1 → 0 |
+| `task board` | 5,614,904 | 30,145 | 4,391,961 | 30,145 | 1,350 | 2,264 | 3 → 0 |
+| `task now` | 5,812,325 | 32,352 | 4,382,200 | 32,352 | 4,024 | 3,580 | 3 → 0 |
+| `lead resume` | 11,853,633 | 33,103 | 8,778,936 | 33,103 | 4,043 | 4,001 | 3 → 0 |
+| `task show` | 766,795 | 2,425 | 623,094 | 2,425 | 538 | 455 | 1 → 0 |
 
 The RC artifact also records the full-detail reads, which remain the default in the CLI and the
-full MCP profile for 1.8. The compact CLI board text gives more evidence per task than the old board text.
+full MCP profile for 1.8. Full `task show` CLI text grows from 538 to 648 bytes because it now carries the
+usage line. The compact CLI board text gives more evidence per task than the old board text.
 
 | MCP profile | 1.7.0 tools | 1.7.0 `tools/list` bytes | 1.8.0 RC tools | 1.8.0 RC `tools/list` bytes |
 | --- | ---: | ---: | ---: | ---: |
@@ -140,10 +141,10 @@ same stdio JSON-RPC request and UTF-8 byte counting, including the response line
 | Lead resumes mid-task | Hipson calls | Output bytes | Read bytes | Oracle |
 | --- | ---: | ---: | ---: | --- |
 | 1.7.0 full text | 5 | 7,339 | 3,265 | Passed |
-| 1.8.0 RC compact text | 6 | 7,037 | 2,753 | Passed |
-| 1.8.0 RC compact JSON (informational) | 6 | 10,763 | 6,478 | Passed |
+| 1.8.0 RC compact text | 6 | 7,052 | 2,758 | Passed |
+| 1.8.0 RC compact JSON (informational) | 6 | 10,777 | 6,483 | Passed |
 
-RC compact text saves 512 read bytes. Both compact formats inspect activity before acknowledgment,
+RC compact text saves 507 read bytes. Both compact formats inspect activity before acknowledgment,
 as specified in the [owner decision](#owner-decision-on-resume-call-count).
 
 ## Reading the report

@@ -203,9 +203,13 @@ uv tool upgrade hipson        # or: pip install --upgrade hipson
 hipson init --client none     # backs up the ledger and migrates schema 11 to 12
 ```
 
-Any 1.8 write open of an older ledger backs it up before migration. `hipson init` keeps its own backup too.
+Any 1.8 write open of an older ledger backs it up first, to `<ledger>.v<old>-backup-<timestamp>` next to it
+(from 1.6 the migration is schema 10 to 12). `hipson init` keeps its own backup too. Delete the backups once
+the upgrade has settled; they hold the same task evidence as the ledger.
 Hipson 1.7.0 refuses a schema 12 ledger, so upgrade every Hipson that shares it, including other environments
-and machines and the installation your MCP client starts. Restart the lead client after upgrading.
+and machines and the installation your MCP client starts; a machine still on 1.7 reports
+`ledger.schema_unsupported` until it upgrades. Sync only the closed ledger file, never its `-wal` or `-shm`
+files. Restart the lead client after upgrading.
 For rollback steps, see the [1.8 release notes](https://github.com/Hipson47/Hipson/blob/main/docs/release-1.8.md#upgrade-from-17).
 
 ### Run from a clone instead
