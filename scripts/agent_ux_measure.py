@@ -9,7 +9,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import closing, redirect_stderr, redirect_stdout
 from functools import partial
 from io import StringIO
@@ -96,22 +96,45 @@ def _select_task(db: Path) -> str:
         if not tasks:
             raise ValueError("The ledger has no task to measure with task show")
 
-        def inventory_size(task: ledger.Task) -> int:
-            records = store.verifications(task["id"])
-            return len(records[-1].get("files", [])) if records else 0
-
-        return max(live or tasks, key=inventory_size)["id"]
+        sizes = {}
+        if store.connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'verifications'").fetchone():
+            sizes = dict(store.connection.execute(
+                """SELECT task, CASE WHEN json_valid(evidence)
+                         THEN COALESCE(json_array_length(evidence, '$.files'), 0) ELSE 0 END
+                   FROM verifications WHERE seq IN (SELECT MAX(seq) FROM verifications GROUP BY task)"""
+            ))
+        return max(live or tasks, key=lambda task: sizes.get(task["id"], 0))["id"]
 
 
 def _measure_projection(db: Path, task: str) -> dict[str, Any]:
     from hipson import task_projection
 
+    board_tasks: Sequence[task_projection.TaskProjection | task_projection.TaskStub] = ()
+
+    def render_board() -> str:
+        nonlocal board_tasks
+        board = task_projection.project_list(store, kind="task.board")
+        board_tasks = board["tasks"]
+        return task_projection.dumps(board)
+
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
-        return {
-            "task.board": _measure(lambda: task_projection.dumps(task_projection.project_list(store, kind="task.board"))),
+        metrics = {
+            "task.board": _measure(render_board),
             "task.now": _measure(lambda: task_projection.dumps(task_projection.project_list(store, kind="task.now"))),
             "task.show": _measure(lambda: task_projection.dumps(task_projection.project_task(store, task))),
         }
+    distribution: dict[str, dict[str, int]] = {}
+    largest = 0
+    for item in board_tasks:
+        if "too_large" in item:
+            continue
+        largest = max(largest, len(task_projection.dumps(item).encode("utf-8")))
+        for check in item["checks"]:
+            counts = distribution.setdefault(check["recorded"], {})
+            current = check["current"]
+            counts[current] = counts.get(current, 0) + 1
+    metrics["task.board"].update(check_states=distribution, largest_task_bytes=largest)
+    return metrics
 
 
 def measure(db: Path, *, task: str | None = None, ledger_source: str = "provided",

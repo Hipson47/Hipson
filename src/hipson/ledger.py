@@ -1656,7 +1656,7 @@ class Ledger:
         ]))
 
     def projection_rows(self, *, task: str | None = None, project: str | Path | None = None,
-                        include_terminal: bool = False, inventory_limit: int = 32) -> list[dict[str, Any]]:
+                        include_terminal: bool = False) -> list[dict[str, Any]]:
         """Load compact read inputs in batches from one SQLite snapshot."""
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         with self._transaction(write=False):
@@ -1780,24 +1780,27 @@ class Ledger:
                             FROM latest JOIN verifications v USING (seq)
                         )
                         SELECT task, id, seq, identity,
-                               CAST(json_remove(body, '$.output_tail', '$.generated_files', '$.changes', '$.untrusted_fields',
-                                   '$.metadata_fallback_paths', '$.subject',
-                                   CASE WHEN json_array_length(body, '$.files') <= ?
-                                             AND length(json_extract(body, '$.files')) <= 32768
-                                        THEN '$.__unused_inventory_limit' ELSE '$.files' END) AS BLOB) AS evidence,
+                               CAST(json_extract(body, '$.id', '$.command', '$.finished_at', '$.revision',
+                                   '$.exit_code', '$.builder_finished_seq', '$.state_changed', '$.actor', '$.context',
+                                   '$.cleanup_confirmed', '$.fingerprint', '$.coverage', '$.error') AS BLOB) AS fields,
                                json_type(body, '$.files') AS files_type,
                                json_type(body, '$.metadata_fallback_paths') AS fallback_type,
                                EXISTS (SELECT 1 FROM json_each(body, '$.metadata_fallback_paths')
                                        WHERE type <> 'text') AS malformed_fallback,
+                               EXISTS (SELECT 1 FROM json_each(body, '$.files') AS file WHERE
+                                   CASE WHEN file.type <> 'object' THEN 1 ELSE
+                                       json_type(file.value, '$.path') IS NOT 'text'
+                                       OR json_type(file.value, '$.state') IS NOT 'text'
+                                       OR json_type(file.value, '$.key') NOT IN ('null', 'text') END
+                               ) AS malformed_files,
                                EXISTS (SELECT 1 FROM json_each(body)
                                        GROUP BY key HAVING COUNT(*) > 1) AS duplicate_fields,
-                               COALESCE(json_array_length(body, '$.metadata_fallback_paths'), 0) > 0 OR EXISTS (
+                               EXISTS (SELECT 1 FROM json_each(body, '$.metadata_fallback_paths')) OR EXISTS (
                                    SELECT 1 FROM json_each(body, '$.files') AS file WHERE
                                        CASE WHEN file.type = 'object' THEN
                                            instr(json_extract(file.value, '$.state'), ':metadata:') > 0 END
                                ) AS metadata_fallback
                         FROM selected ORDER BY seq""",  # nosec B608
-                    inventory_limit,
                 ):
                     tasks[verification["task"]]["verifications"].append(dict(verification))
         return list(tasks.values())

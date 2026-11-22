@@ -21,11 +21,17 @@ The fixture checks require all 22 tasks in each list, at most 32,000 bytes for b
 and 4,000 for the heaviest compact task across the fixture. All three reads must make zero
 `task_verification.project_state` calls.
 
+The S0 fixture has three verification records across its 22 checks. All three report
+`recorded: "ok"`. Two report `current: "not_checked"` and the older inventory revision reports
+`current: "stale"`. The other 19 checks report `recorded: "missing"` and `current: "not_checked"`.
+Parity tests compare each fixture task to the full view and exercise the same-HEAD edit limit
+with a targeted record. The compact view reports `gate: "not_evaluated"`.
+
 ## Reading the report
 
 - `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `git_dirty` records whether the checkout has changes when measurement begins. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.
 - `reads` contains `full` and `compact` measurements for `task.board`, `task.now`, `lead.resume`, and `task.show`. The script checks CLI help and MCP tool schemas for `detail` and passes it explicitly where supported. A missing surface is `null`. If neither surface supports a mode, `available` is `false`. The `full` entry uses the default on 1.7.0.
-- In `--projection` mode, `projection` supplies `bytes`, `project_state_calls`, and `wall_seconds` for `task.board`, `task.now`, and `task.show`. The byte count uses the UTF-8 output of `task_projection.dumps` without a trailing newline.
+- In `--projection` mode, `projection` supplies `bytes`, `project_state_calls`, and `wall_seconds` for `task.board`, `task.now`, and `task.show`. The byte count uses the UTF-8 output of `task_projection.dumps` without a trailing newline. Board also reports `largest_task_bytes` and `check_states` counts grouped by `recorded` then `current` for the full tasks on the measured page.
 - `cli_json` and `cli_text` count UTF-8 stdout bytes, including the final newline and any JSON indentation. `mcp_json` counts UTF-8 bytes of the JSON text returned by `tools/call` before JSON-RPC envelope encoding.
 - Each surface has its own `project_state_calls` and `wall_seconds`. The count covers calls to the full `task_verification.project_state` fingerprint. Resume's separate stat-only Git checks contribute to elapsed time. Wall time includes command parsing or request dispatch, reads and rendering. Both entry points run in-process with one sample per surface and mode. Fixture setup and process startup are outside the timed calls. Compare timings on the same machine.
 - `resume_e2e` holds `scenario`, `driver`, the oracle result `passed`, and `measurement_valid` for the harness recording. `hipson_invocations` counts audited CLI calls. `read_commands` counts successful workflow reads by command, and `task_history_lookups` counts reads beyond `lead resume` and `task now`. `used_lead_resume`, `used_task_now`, and `first_hipson_command` describe how the driver found its context. `help_lookups` and `docs_lookups` count matching transcript commands.

@@ -53,6 +53,7 @@ def test_projection_fields_recorded_evidence_and_unicode_bounds(tmp_path):
                 "id": record_id, "task": task, "actor": "claude", "command": ["display-only"],
                 "argv_sha256": task_verification.argv_identity(checks[0]),
                 "revision": "a" * 40, "fingerprint": None, "exit_code": exit_code, "state_changed": False,
+                "coverage": "complete", "cleanup_confirmed": True,
                 "context": {"role": None, "assignment": None, "task": None}, "builder_finished_seq": 0,
                 "finished_at": "2099-01-01T01:00:00+02:00", "error": text,
                 "files": [{"path": "PRIVATE_INVENTORY", "state": "missing"}], "output_tail": "PRIVATE_OUTPUT_TAIL",
@@ -77,10 +78,11 @@ def test_projection_fields_recorded_evidence_and_unicode_bounds(tmp_path):
     assert view["open_findings"] == {"blocking": 1, "major": 1, "minor": 0, "info": 1}
     assert view["blocking_findings"] == [blocking] and view["major_findings"] == [major]
     assert view["checks"][0] == {
-        "command": checks[0], "state": "unknown", "record_id": "V-last", "exit_code": 0,
+        "command": checks[0], "recorded": "unknown", "current": "unknown", "record_id": "V-last", "exit_code": 0,
         "recorded_at": "2099-01-01T01:00:00+02:00", "recorded_revision": "a" * 40, "head_matches": None,
     }
-    assert all(item["state"] == "missing" and item["record_id"] is None for item in view["checks"][1:])
+    assert all(item["recorded"] == "missing" and item["current"] == "unknown" and item["record_id"] is None
+               for item in view["checks"][1:])
     assert len(view["reasons"]) == 5 and view["omitted_reasons"] == 2
     assert view["reasons"][0].startswith("Check 1: Verification recorded no working-tree fingerprint")
     assert len(view["reasons"][0]) == 240 and view["reasons"][0].endswith("…")
@@ -259,14 +261,42 @@ def _finish_review(store, task, record, *, actor="reviewer", mode="ro"):
 
 def _assert_gate_parity(view, compact):
     full = view["verification"]
-    if full["checks"]:
-        assert len(compact["checks"]) == len(full["checks"])
-        for check, projected in zip(full["checks"], compact["checks"], strict=True):
-            assert check["passing"] or projected["state"] != "recorded_ok", (view["id"], check, projected)
-    elif compact["checks"]:
-        assert full["passing"] or compact["checks"][0]["state"] != "recorded_ok"
-    else:
-        assert not full["passing"]
+    assert compact["gate"] == "not_evaluated"
+    full_checks = full["checks"] or ([full] if full["latest"] else [])
+    assert len(compact["checks"]) == len(full_checks)
+    for check, projected in zip(full_checks, compact["checks"], strict=True):
+        assert set(projected) == {"command", "recorded", "current", "record_id", "exit_code", "recorded_at",
+                                  "recorded_revision", "head_matches"}
+        assert projected["recorded"] in {"ok", "unknown", "partial", "missing", "failing"}
+        assert projected["current"] in {"not_checked", "stale", "unknown"}
+        assert projected["current"] != "unknown" or projected["head_matches"] is None
+        if check["passing"]:
+            assert projected["current"] != "stale"
+            continue
+        assert check["reasons"]
+        detected_stale = ("stale: HEAD moved", "stale: project changed during verification",
+                          "stale: verification predates latest finished builder assignment")
+        if any(reason.startswith(detected_stale) for reason in check["reasons"]):
+            assert projected["current"] == "stale", (view["id"], check, projected)
+        else:
+            assert projected["current"] == "not_checked", (view["id"], check, projected)
+        reasons = check["reasons"]
+        current = full["current"]
+        if check["freshness"] == "missing":
+            assert projected["recorded"] == "missing"
+        elif current["fingerprint"] and any(reason.startswith("unavailable working-tree fingerprint")
+                                            for reason in reasons):
+            assert projected["recorded"] == "unknown"
+        elif any(reason.startswith("failing verification") for reason in reasons):
+            assert projected["recorded"] == "failing"
+        elif any(reason.startswith("partial content coverage") for reason in reasons):
+            if not any(":metadata:" in item["state"] for item in current["files"]):
+                assert projected["recorded"] == "partial"
+        elif any(reason.startswith(("verification was not recorded", "verification process cleanup"))
+                 for reason in reasons):
+            assert projected["recorded"] == "unknown"
+        elif all(reason.startswith("stale: working tree changed") for reason in reasons):
+            assert projected["recorded"] == "ok"
     assert view["review"]["passing"] or compact["review"]["state"] not in {"recorded_snapshot", "not_required"}, (
         view["id"], view["review"], compact["review"])
 
@@ -283,96 +313,116 @@ def test_projection_parity_for_recorded_checks_and_review_eligibility(tmp_path):
             return task, saved
 
         clean, _ = seed("clean")
-        states[clean] = ("recorded_ok", "not_required")
+        states[clean] = ("ok", "not_checked", "not_required")
         clean_review, record = seed("independent snapshot", review=True)
         _finish_review(store, clean_review, record)
-        states[clean_review] = ("recorded_ok", "recorded_snapshot")
+        states[clean_review] = ("ok", "not_checked", "recorded_snapshot")
 
-        for name, expected, evidence in (
-            ("failing", "failing", {"exit_code": 4}),
-            ("coverage", "partial", {"coverage": "partial"}),
-            ("paths", "partial", {"metadata_fallback_paths": ["large"]}),
-            ("fingerprint", "unknown", {"fingerprint": ""}),
-            ("cleanup", "unknown", {"cleanup_confirmed": False}),
-            ("worker", "unknown", {"context": {"role": "Worker", "assignment": None, "task": None}}),
-            ("worker assignment", "unknown", {"context": {"role": None, "assignment": "A-1", "task": None}}),
-            ("changed", "stale", {"state_changed": True}),
-            ("HEAD", "stale", {"revision": "a" * 40}),
-            ("inventory metadata", "partial", {"files": [{"path": "large", "state": "100644:metadata:file_limit"}]}),
-            ("omitted inventory metadata", "partial", {"files": [
-                {"path": str(i), "state": "missing"} for i in range(task_projection.PROOF_FILES)
-            ] + [{"path": "large", "state": "100644:metadata:file_limit"}]}),
+        for name, recorded, current, evidence in (
+            ("failing", "failing", "not_checked", {"exit_code": 4}),
+            ("coverage", "partial", "not_checked", {"coverage": "partial"}),
+            ("paths", "partial", "not_checked", {"metadata_fallback_paths": ["large"]}),
+            ("fingerprint", "unknown", "not_checked", {"fingerprint": ""}),
+            ("cleanup", "unknown", "not_checked", {"cleanup_confirmed": False}),
+            ("worker", "unknown", "not_checked", {"context": {"role": "Worker", "assignment": None, "task": None}}),
+            ("worker assignment", "unknown", "not_checked",
+             {"context": {"role": None, "assignment": "A-1", "task": None}}),
+            ("non-lead actor", "unknown", "not_checked", {"actor": "different lead"}),
+            ("changed", "ok", "stale", {"state_changed": True}),
+            ("HEAD", "ok", "stale", {"revision": "a" * 40}),
+            ("changed and failed", "failing", "stale", {"state_changed": True, "exit_code": 1}),
+            ("inventory metadata", "partial", "not_checked",
+             {"files": [{"path": "large", "state": "100644:metadata:file_limit"}]}),
+            ("unrecorded cleanup", "unknown", "not_checked", {"cleanup_confirmed": None}),
+            ("unrecorded coverage", "unknown", "not_checked", {"coverage": None}),
         ):
             task, _ = seed(name, **evidence)
-            states[task] = (expected, "not_required")
+            states[task] = (recorded, current, "not_required")
+
+        missing = _open(store, project)
+        states[missing] = ("missing", "not_checked", "not_required")
 
         builder_stale, _ = seed("builder completed")
         builder = store.assign(builder_stale, actor="builder", role="builder", mode="rw", scope=["source.py"])["id"]
         store.finish(builder, result="passed", summary="Ready")
-        states[builder_stale] = ("stale", "not_required")
+        states[builder_stale] = ("ok", "stale", "not_required")
 
         for actor, mode in (("CLAUDE", "ro"), ("reviewer", "rw")):
             task, record = seed(actor, review=True)
             _finish_review(store, task, record, actor=actor, mode=mode)
-            states[task] = ("recorded_ok", "ineligible")
+            states[task] = ("ok", "not_checked", "ineligible")
 
         same_builder, _ = seed("review by builder", review=True)
         builder = store.assign(same_builder, actor="Builder", role="builder", mode="rw", scope=["source.py"])["id"]
         store.finish(builder, result="passed", summary="Ready")
         _finish_review(store, same_builder, _evidence(store, same_builder, project), actor="builder")
-        states[same_builder] = ("recorded_ok", "ineligible")
+        states[same_builder] = ("ok", "not_checked", "ineligible")
 
         stale_review, record = seed("review predates verification", review=True)
         _finish_review(store, stale_review, record)
         _evidence(store, stale_review, project)
-        states[stale_review] = ("recorded_ok", "ineligible")
+        states[stale_review] = ("ok", "not_checked", "ineligible")
 
         early_review, record = seed("review predates builder", review=True)
         _finish_review(store, early_review, record)
         builder = store.assign(early_review, actor="builder", role="builder", mode="rw", scope=["source.py"])["id"]
         store.finish(builder, result="passed", summary="Ready")
-        states[early_review] = ("stale", "ineligible")
+        states[early_review] = ("ok", "stale", "ineligible")
 
         other_snapshot, record = seed("wrong candidate", review=True)
         _finish_review(store, other_snapshot, {**record, "fingerprint": "different-tree"})
-        states[other_snapshot] = ("recorded_ok", "changed")
+        states[other_snapshot] = ("ok", "not_checked", "changed")
 
         multiple, record = seed("multiple checks", checks=(PASS, SECOND), review=True)
         _evidence(store, multiple, project, command=SECOND)
         _finish_review(store, multiple, record)
-        states[multiple] = ("recorded_ok", "recorded_snapshot")
+        states[multiple] = ("ok", "not_checked", "recorded_snapshot")
 
         adhoc, _ = seed("ad hoc", checks=())
         latest = _evidence(store, adhoc, project, command=SECOND, exit_code=3)
-        states[adhoc] = ("failing", "not_required")
+        states[adhoc] = ("failing", "not_checked", "not_required")
         empty = store.open_task(project=project, title="No checks or records", objective="No checks or records")["id"]
 
-        compact = task_projection.project_list(store, kind="task.board")
+        compact = task_projection.project_list(store, kind="task.board", byte_budget=64_000)
         by_id = {task["id"]: task for task in compact["tasks"]}
+        assert set(by_id) == {*states, empty}
         assert by_id[empty]["checks"] == []
         _assert_gate_parity(store.show(empty), by_id[empty])
-        for task, (check_state, review_state) in states.items():
+        for task, (recorded, current, review) in states.items():
             projected = by_id[task]
             full = store.show(task)
             _assert_gate_parity(full, projected)
-            assert projected["checks"][0]["state"] == check_state, projected
-            assert projected["review"]["state"] == review_state, projected
-            assert projected["checks"][0]["head_matches"] is (full["title"] != "HEAD")
+            check = projected["checks"][0]
+            assert (check["recorded"], check["current"], projected["review"]["state"]) == (recorded, current, review)
+            assert check["head_matches"] is (None if task == missing else full["title"] != "HEAD")
         head_moved = next(view for view in by_id.values() if view["title"] == "HEAD")
         assert "Check 1: HEAD moved since verification" in head_moved["reasons"]
-        assert by_id[multiple]["checks"][1]["state"] == "recorded_ok"
+        assert by_id[multiple]["checks"][1]["recorded"] == "ok"
         assert by_id[adhoc]["checks"][0]["record_id"] == latest["id"]
         assert by_id[adhoc]["checks"][0]["command"] == SECOND
 
-        # Preserve HEAD and mtime, so a cheap stat or Git dirty check cannot establish parity.
+        with patch.object(task_projection, "_head", return_value=None):
+            unavailable = task_projection.project_task(store, clean)["checks"][0]
+            assert unavailable["recorded"] == "ok" and unavailable["current"] == "unknown"
+            assert unavailable["head_matches"] is None
+            latest_builder = task_projection.project_task(store, builder_stale)["checks"][0]
+            assert latest_builder["current"] == "stale" and latest_builder["head_matches"] is None
+
+        # The full view detects a content change even with the same HEAD and mtime.
         source = project / "source.py"
         before = source.stat()
         source.write_text("value = 2\n")
         os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
-        changed = task_projection.project_task(store, clean)
-        assert changed["checks"][0]["head_matches"] is True
-        _assert_gate_parity(store.show(clean), changed)
-        assert changed["checks"][0]["state"] == "unknown"
+        with patch.object(task_verification, "project_state", side_effect=AssertionError("content read")), \
+                patch.object(task_projection, "_git", wraps=task_projection._git) as git:
+            changed = task_projection.project_task(store, clean)
+        git.assert_called_once_with(str(project), "rev-parse", "--verify", "HEAD")
+        full = store.show(clean)
+        assert full["verification"]["checks"][0]["freshness"] == "stale"
+        assert full["verification"]["checks"][0]["reasons"][0].startswith("stale: working tree changed")
+        _assert_gate_parity(full, changed)
+        check = changed["checks"][0]
+        assert check["head_matches"] is True and check["recorded"] == "ok" and check["current"] == "not_checked"
 
 
 def test_projection_terminal_assignment_inclusion_matches_board(tmp_path):
@@ -478,7 +528,9 @@ def test_malformed_evidence_becomes_unknown_without_leaking_invalid_fields(tmp_p
         for key, bad in (
             ("revision", []), ("revision", "r" * 400), ("finished_at", []), ("finished_at", "z" * 400),
             ("id", {}), ("id", "v" * 400), ("exit_code", "0"), ("exit_code", True), ("exit_code", 10**90),
-            ("context", "lead"), ("command", [123]), ("files", [{"path": "x", "state": 10}]),
+            ("context", "lead"), ("command", [123]), ("command", ["x" * 4097]),
+            ("cleanup_confirmed", 1), ("state_changed", 0), ("fingerprint", "x" * 65),
+            ("files", [{"path": "x", "state": 10}]),
             ("metadata_fallback_paths", [{}]),
         ):
             task = _open(store, project)
@@ -500,9 +552,38 @@ def test_malformed_evidence_becomes_unknown_without_leaking_invalid_fields(tmp_p
         for task in malformed_tasks:
             view = by_id[task]
             check, = view["checks"]
-            assert check["state"] == "unknown" and "malformed" in view["reasons"][0]
+            assert check["recorded"] == "unknown" and check["current"] == "not_checked"
+            assert "malformed" in view["reasons"][0]
             assert all(check[key] is None for key in ("record_id", "exit_code", "recorded_at", "recorded_revision"))
         task_projection.dumps(listed).encode("utf-8")
+
+
+def test_large_evidence_does_not_load_the_inventory(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+        task = _open(store, project)
+        files = [{"path": f"PRIVATE_INVENTORY/{index:04d}-" + "x" * 122, "state": "100644:" + "f" * 64}
+                 for index in range(1_650)]
+        record = _evidence(store, task, project, files=files, output_tail="PRIVATE_OUTPUT_TAIL",
+                           unexpected_field="PRIVATE_UNKNOWN_FIELD")
+        assert 400_000 <= len(json.dumps(record).encode("utf-8")) < 420_000
+        saved, = store.projection_rows(task=task)[0]["verifications"]
+        assert set(saved) == {"task", "id", "seq", "identity", "fields", "files_type", "fallback_type",
+                              "malformed_fallback", "malformed_files", "duplicate_fields", "metadata_fallback"}
+        assert len(saved["fields"]) < 1_024 and b"PRIVATE_" not in saved["fields"]
+        with patch.object(store, "verifications", side_effect=AssertionError("loaded full evidence")):
+            compact = task_projection.project_task(store, task)
+        check, = compact["checks"]
+        assert check["record_id"] == record["id"]
+        assert (check["recorded"], check["current"]) == ("ok", "not_checked")
+        _assert_gate_parity(store.show(task), compact)
+
+        # A metadata fallback at the end of the large inventory is still visible.
+        files[-1]["state"] = "100644:metadata:file_limit"
+        _evidence(store, task, project, files=files)
+        partial = task_projection.project_task(store, task)
+        assert (partial["checks"][0]["recorded"], partial["checks"][0]["current"]) == ("partial", "not_checked")
+        _assert_gate_parity(store.show(task), partial)
 
 
 def test_projection_batches_tables_and_selects_latest_verifications(tmp_path):

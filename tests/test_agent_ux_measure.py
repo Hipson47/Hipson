@@ -79,7 +79,8 @@ def test_agent_ux_fixture_and_report(tmp_path):
         assert board["full"]["cli_json"]["project_state_calls"] == 3
         assert 0 < board["full"]["cli_text"]["bytes"] < 10_000
 
-    assert agent_ux_measure.main(["--db", str(fixture.db), "--projection", "--output", str(output)]) == 0
+    with patch.object(Ledger, "verifications", side_effect=AssertionError("loaded full evidence")):
+        assert agent_ux_measure.main(["--db", str(fixture.db), "--projection", "--output", str(output)]) == 0
     compact = json.loads(output.read_text(encoding="utf-8"))
     assert compact["git_revision"] == report["git_revision"] and compact["git_dirty"] == report["git_dirty"]
     assert compact["task_show_id"] == fixture.heavy_task
@@ -89,6 +90,8 @@ def test_agent_ux_fixture_and_report(tmp_path):
         stats = compact["projection"][name]
         assert 0 < stats["bytes"] <= budget
         assert stats["project_state_calls"] == 0 and stats["wall_seconds"] >= 0
+    board_stats = compact["projection"]["task.board"]
+    assert board_stats["check_states"] == {"ok": {"not_checked": 2, "stale": 1}, "missing": {"not_checked": 19}}
     with closing(Ledger(fixture.db, read_only=True)) as store:
         full = {task["id"]: store.show(task["id"]) for task in tasks}
         for kind in ("task.board", "task.now"):
@@ -97,12 +100,16 @@ def test_agent_ux_fixture_and_report(tmp_path):
             assert set(by_id) == {task["id"] for task in tasks}
             assert projection["truncated"] is False and projection["omitted"] == 0
             assert len(dumps(projection).encode("utf-8")) <= budgets[kind]
-            assert max(len(dumps(task).encode("utf-8")) for task in by_id.values()) <= budgets["task.show"]
+            assert max(len(dumps(task).encode("utf-8")) for task in by_id.values()) == board_stats["largest_task_bytes"]
+            assert board_stats["largest_task_bytes"] <= budgets["task.show"]
             for task_id, projected in by_id.items():
                 _assert_gate_parity(full[task_id], projected)
             assert by_id[fixture.heavy_task]["checks"][0]["head_matches"] is True
+            assert by_id[fixture.heavy_task]["checks"][0]["recorded"] == "ok"
+            assert by_id[fixture.heavy_task]["checks"][0]["current"] == "not_checked"
             assert by_id[stale["id"]]["checks"][0]["head_matches"] is False
-            assert by_id[stale["id"]]["checks"][0]["state"] == "stale"
+            assert by_id[stale["id"]]["checks"][0]["recorded"] == "ok"
+            assert by_id[stale["id"]]["checks"][0]["current"] == "stale"
 
 
 def test_agent_ux_detail_is_explicit_on_supported_surfaces():

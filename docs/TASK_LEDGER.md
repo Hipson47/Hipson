@@ -154,16 +154,18 @@ S2 defines the CLI and MCP calls. Task and list views carry `gate: "not_evaluate
 | Area | Fields and interpretation |
 | --- | --- |
 | Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes event timestamps, selected verification finish times, and assignment start, end, and heartbeat times. |
-| Checks | Up to 16 declared argv lists in order, matched to the newest record by full argv identity. A task without declared checks shows its latest ad hoc record if one exists. Each check shows `command`, `state`, `record_id`, `exit_code`, `recorded_at`, `recorded_revision`, and `head_matches`. |
-| Freshness | `freshness_source: "recorded"` and `freshness_note`. Check states are `recorded_ok`, `stale`, `failing`, `partial`, `missing`, and `unknown`. A different HEAD makes the evidence stale. An unavailable HEAD is represented by a null `head_matches`. |
+| Checks | Up to 16 declared argv lists in order, matched to the newest record by full argv identity. A task without declared checks shows its latest ad hoc record if one exists. Each check shows `command`, `recorded`, `current`, `record_id`, `exit_code`, `recorded_at`, `recorded_revision`, and `head_matches`. |
+| Recorded result | `ok` requires exit zero, complete content coverage, a fingerprint, confirmed cleanup, and the task lead's verification context. Other values are `failing`, `partial`, `unknown`, and `missing`. Malformed evidence and missing fingerprints report `unknown` with a reason. |
+| Current freshness | `stale` means HEAD moved, a builder finished after verification, or the record says the project changed during verification. Otherwise, `not_checked` means HEAD was observable and `unknown` means HEAD was unavailable. `head_matches` is null when HEAD or the recorded revision is unavailable. |
 | Review | `assignment_id` and the latest reviewer attempt's state. States are `not_required`, `missing`, `pending`, `ineligible`, `incomplete`, `live`, `changed`, and `recorded_snapshot`. An eligible reviewer is independent of the lead and builders, ran in read-only mode, and started after the latest finished builder and recorded verification. |
 | Assignments | The newest eight in chronological order and an `omitted_assignments` count. Each has `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and the structured result's one-line `summary`. A successful assignment outcome displays as `completed`. |
 | Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` each list at most 10 open IDs. Use `open_findings` for their total counts. |
 
-Gates use the full view. To report `recorded_ok`, the projection must corroborate the recorded evidence
-against raw content in a clean Git tree of at most 32 regular files and 256 KiB. It reports `unknown`
-when a matching HEAD cannot establish current content within these bounds. HEAD reads run concurrently
-under a one-second batch deadline. The Git observations happen separately from the SQLite snapshot.
+The projection reports `freshness_source: "recorded"` and a `freshness_note`. It only observes HEAD
+and recorded evidence. Same-HEAD working-tree edits leave `current: "not_checked"` when HEAD is
+available and the record has no staleness signal. Even `recorded: "ok"` describes only the recorded
+result. Gates use the full view to evaluate current working-tree content. HEAD reads run concurrently
+under a one-second batch deadline, separately from the SQLite snapshot.
 
 Character limits count Unicode code points, including the ellipsis. Each argv element has a 200-character
 limit, with 400 characters for the command including spaces between arguments. Titles allow 160

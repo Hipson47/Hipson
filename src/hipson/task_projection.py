@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
-import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
-from pathlib import Path
-from time import monotonic
 from typing import Any, Literal, TypedDict, TypeVar, cast
 
 from hipson.display import escape_display_controls
 from hipson.lead_context import GIT_READ_LIMIT
-from hipson.ledger import FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
+from hipson.ledger import CHECK_ARG_LIMIT, FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
 from hipson.redaction import redact_text
-from hipson.task_verification import _changes, _fingerprint, _stored_files, _worker_context, argv_identity
+from hipson.task_activity import LINE_LIMIT
+from hipson.task_verification import _worker_context, argv_identity
 
 VIEW_SCHEMA = 1
 ListKind = Literal["task.board", "task.now"]
@@ -30,16 +26,17 @@ GATE_NOTE = "task verify / task close evaluate the gates"
 REASON_LIMIT = 5
 ASSIGNMENT_LIMIT = 8
 GIT_TIMEOUT = 1
-PROOF_FILES = 32
-PROOF_BYTES = 256 * 1024
 REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 T = TypeVar("T")
+Recorded = Literal["ok", "failing", "partial", "unknown", "missing"]
+Current = Literal["stale", "not_checked", "unknown"]
 SelectedRecord = tuple[int, str | None, dict[str, Any] | None]
 
 
 class CheckProjection(TypedDict):
     command: list[str]
-    state: str
+    recorded: Recorded
+    current: Current
     record_id: str | None
     exit_code: int | None
     recorded_at: str | None
@@ -120,17 +117,15 @@ def _size(obj: object) -> int:
     return len(dumps(obj).encode("utf-8"))
 
 
-def _git(project: str, *args: str, timeout: float = GIT_TIMEOUT) -> bytes | None:
+def _git(project: str, *args: str) -> bytes | None:
     # Match lead_context._git hardening, with the compact read's shorter timeout.
-    if timeout <= 0:
-        return None
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
     env.update(GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0")
     try:
         result = subprocess.run(
             ["git", "--no-pager", "--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false",
              "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never", "-C", project, *args],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=timeout, check=False,
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=GIT_TIMEOUT, check=False,
         )
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
@@ -141,80 +136,6 @@ def _head(project: str) -> str | None:
     raw = _git(project, "rev-parse", "--verify", "HEAD")
     sha = raw.strip().decode("ascii", errors="replace") if raw else ""
     return sha if REVISION.fullmatch(sha) else None
-
-
-def _raw_regular_file(path: Path, before: os.stat_result) -> bytes:
-    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
-    with os.fdopen(os.open(path, os.O_RDONLY | flags), "rb") as stream:
-        opened = os.fstat(stream.fileno())
-        if not os.path.samestat(opened, before) or not stat.S_ISREG(opened.st_mode):
-            raise ValueError("File was replaced during the compact read")
-        data = stream.read(before.st_size + 1)
-    after = path.lstat()
-    if (len(data) != before.st_size or before.st_size != after.st_size or
-            (before.st_dev, before.st_ino, before.st_mode, before.st_mtime_ns, before.st_ctime_ns) !=
-            (after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns, after.st_ctime_ns)):
-        raise ValueError("File changed during the compact read")
-    return data
-
-
-def _clean_tree(project: str, head: str, db: Path) -> dict[str, Any] | None:
-    """Corroborate a small, clean Git tree by reading raw files, without a full gate scan."""
-    deadline = monotonic() + GIT_TIMEOUT
-
-    def git(cwd: str, *args: str) -> bytes | None:
-        return _git(cwd, *args, timeout=deadline - monotonic())
-
-    try:
-        top = git(project, "rev-parse", "--show-toplevel")
-        if not top:
-            return None
-        top_path = os.fsdecode(top).removesuffix("\n")
-        if sys.platform == "win32":
-            top_path = top_path.removesuffix("\r")
-        root = Path(top_path).resolve(strict=True)
-        tree = git(str(root), "ls-tree", "-r", "-z", "--full-tree", head)
-        if tree is None or tree.count(b"\0") > PROOF_FILES:
-            return None
-        if git(str(root), "ls-files", "--others", "--exclude-standard", "-z") != b"":
-            return None
-        index = []
-        files = []
-        remaining = PROOF_BYTES
-        excluded = {db, *(Path(str(db) + suffix) for suffix in ("-wal", "-shm", "-journal"))}
-        algorithm = "sha256" if len(head) == 64 else "sha1"
-        for entry in sorted(tree.split(b"\0")[:-1], key=lambda item: item.split(b"\t", 1)[1]):
-            metadata, name = entry.split(b"\t", 1)
-            mode, kind, blob = metadata.split()
-            filename = os.fsdecode(name)
-            relative = Path(filename)
-            if (kind != b"blob" or mode not in (b"100644", b"100755") or relative.is_absolute()
-                    or ".." in relative.parts or monotonic() >= deadline):
-                return None
-            path = root / relative
-            if path in excluded or any(
-                parent.is_symlink() for parent in path.parents if parent != root and parent.is_relative_to(root)
-            ):
-                return None
-            info = path.lstat()
-            actual_mode = b"100755" if os.name == "posix" and info.st_mode & stat.S_IXUSR else b"100644"
-            if not stat.S_ISREG(info.st_mode) or info.st_size > remaining or mode != actual_mode:
-                return None
-            data = _raw_regular_file(path, info)
-            remaining -= len(data)
-            digest = hashlib.new(algorithm, b"blob " + str(len(data)).encode() + b"\0" + data, usedforsecurity=False)
-            if digest.hexdigest().encode() != blob:
-                return None
-            index.append(mode + b" " + blob + b" 0\t" + name + b"\0")
-            files.append({"path": filename, "state": mode.decode() + ":" + hashlib.sha256(data).hexdigest()})
-        if git(str(root), "ls-files", "--stage", "-z") != b"".join(index):
-            return None
-        current_head = git(project, "rev-parse", "--verify", "HEAD")
-        if not current_head or current_head.strip() != head.encode():
-            return None
-        return {"files": _stored_files(files), "fingerprint": _fingerprint(files)}
-    except (OSError, ValueError, RuntimeError, IndexError):
-        return None
 
 
 def _observe(projects: Sequence[str], read: Callable[[str], T]) -> dict[str, T]:
@@ -272,79 +193,75 @@ def _timestamp(value: object) -> datetime | None:
 
 
 def _argv(value: object) -> bool:
-    return isinstance(value, list) and bool(value) and all(isinstance(part, str) for part in value)
+    return isinstance(value, list) and bool(value) and all(
+        isinstance(part, str) and len(part) <= CHECK_ARG_LIMIT for part in value
+    )
 
 
 def _record(row: dict[str, Any]) -> dict[str, Any] | None:
-    body = row["evidence"]
-    if not isinstance(body, bytes) or len(body) > 65_536 or row["duplicate_fields"]:
+    fields = row["fields"]
+    if (fields is None or row["duplicate_fields"] or row["malformed_fallback"] or row["malformed_files"]
+            or row["fallback_type"] not in (None, "array") or row["files_type"] not in (None, "array")):
         return None
+    # The SQLite query projects these fields in the same order and keeps JSON types intact.
+    keys = ("id", "command", "finished_at", "revision", "exit_code", "builder_finished_seq",
+            "state_changed", "actor", "context", "cleanup_confirmed", "fingerprint", "coverage", "error")
     try:
-        record = json.loads(body.decode("utf-8"))
+        record = dict(zip(keys, json.loads(fields.decode("utf-8")), strict=True))
     except (ValueError, RecursionError):
         return None
-    record_id, exit_code, revision = record.get("id"), record.get("exit_code"), record.get("revision")
-    builder_seq, context, files = record.get("builder_finished_seq"), record.get("context"), record.get("files")
-    cleanup, fingerprint = record.get("cleanup_confirmed"), record.get("fingerprint")
+    record_id, exit_code, revision = record["id"], record["exit_code"], record["revision"]
+    builder_seq, context, error = record["builder_finished_seq"], record["context"], record["error"]
+    cleanup, fingerprint = record["cleanup_confirmed"], record["fingerprint"]
     if (not isinstance(record_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", record_id) or record_id != row["id"]
             or type(exit_code) is not int or not -(2**31) <= exit_code < 2**32
             or not isinstance(revision, str) or (revision != "none" and not REVISION.fullmatch(revision))
-            or _timestamp(record.get("finished_at")) is None or not _argv(record.get("command"))
-            or type(builder_seq) is not int or builder_seq < 0
-            or type(record.get("state_changed")) is not bool
+            or _timestamp(record["finished_at"]) is None or not _argv(record["command"])
+            or type(builder_seq) is not int or not 0 <= builder_seq <= 2**63 - 1
+            or type(record["state_changed"]) is not bool
             or (cleanup is not None and type(cleanup) is not bool)
-            or not isinstance(record.get("actor"), str)
+            or not isinstance(record["actor"], str)
             or not isinstance(context, dict) or set(context) != {"role", "assignment", "task"}
-            or any(value is not None and not isinstance(value, str) for value in context.values())
-            or (fingerprint is not None and not isinstance(fingerprint, str))
-            or record.get("coverage") not in (None, "complete", "partial")
-            or row["fallback_type"] not in (None, "array") or row["malformed_fallback"]
-            or row["files_type"] not in (None, "array")):
+            or any(value is not None and (not isinstance(value, str) or len(value) > LINE_LIMIT)
+                   for value in context.values())
+            or (fingerprint is not None and (not isinstance(fingerprint, str) or len(fingerprint) > 64))
+            or (error is not None and (not isinstance(error, str) or len(error) > LINE_LIMIT))
+            or record["coverage"] not in (None, "complete", "partial")):
         return None
-    if files is not None and any(
-        not isinstance(item, dict) or not isinstance(item.get("state"), str)
-        or not isinstance(item.get("path"), str) or (item.get("key") and not isinstance(item["key"], str))
-        for item in files
-    ):
-        return None
-    record["metadata_fallback"] = row["metadata_fallback"] or any(
-        ":metadata:" in item["state"] for item in files or []
-    )
-    record["inventory_omitted"] = row["files_type"] == "array" and files is None
+    record["metadata_fallback"] = bool(row["metadata_fallback"])
     return record
 
 
-def _check_reasons(record: dict[str, Any], lead: str, builder_seq: int, head_matches: bool | None,
-                   current: dict[str, Any] | None) -> list[tuple[str, str]]:
+def _recorded_issues(record: dict[str, Any], lead: str) -> list[tuple[Recorded, str]]:
+    issues: list[tuple[Recorded, str]] = []
+    if not record["fingerprint"]:
+        detail = record["error"] or "cause unavailable"
+        issues.append(("unknown", f"Verification recorded no working-tree fingerprint: {detail}"))
+    if record["exit_code"] != 0:
+        issues.append(("failing", f"Verification exit code: {record['exit_code']}"))
+    if record["coverage"] == "partial" or record["metadata_fallback"]:
+        issues.append(("partial", "Verification recorded partial content coverage"))
+    elif record["coverage"] is None:
+        issues.append(("unknown", "Verification did not record content coverage"))
+    if record["cleanup_confirmed"] is not True:
+        issues.append(("unknown", "Verification process cleanup was unconfirmed"))
+    if record["actor"] != lead or _worker_context(record["context"]):
+        issues.append(("unknown", "Verification was recorded without the task lead's verification context"))
+    return issues
+
+
+def _stale_reasons(record: dict[str, Any], builder_seq: int, head_matches: bool | None) -> list[str]:
     reasons = []
     if head_matches is False:
-        reasons.append(("stale", "HEAD moved since verification"))
+        reasons.append("HEAD moved since verification")
     if record["state_changed"]:
-        reasons.append(("stale", "Project changed during verification or cleanup was unconfirmed"))
+        reasons.append("Project changed during verification")
     if record["builder_finished_seq"] < builder_seq:
-        reasons.append(("stale", "Verification predates the latest finished builder assignment"))
-    if record["exit_code"] != 0:
-        reasons.append(("failing", f"Verification exit code: {record['exit_code']}"))
-    if record.get("coverage") == "partial" or record["metadata_fallback"]:
-        reasons.append(("partial", "Verification recorded partial content coverage"))
-    if not record.get("fingerprint"):
-        error = record.get("error")
-        detail = error if isinstance(error, str) and error else "cause unavailable"
-        reasons.append(("unknown", f"Verification recorded no working-tree fingerprint: {detail}"))
-    if record.get("cleanup_confirmed") is False:
-        reasons.append(("unknown", "Verification process cleanup was unconfirmed"))
-    if record["actor"] != lead or _worker_context(record["context"]):
-        reasons.append(("unknown", "Verification was recorded without the task lead's verification context"))
-    if reasons:
-        return reasons
-    if head_matches is not True or current is None or record["inventory_omitted"]:
-        return [("unknown", "Current working-tree content could not be corroborated in the compact view")]
-    files = record.get("files")
-    changed = _changes({"files": files}, current) if files is not None else record["fingerprint"] != current["fingerprint"]
-    return [("stale", "Working tree differs from the recorded verification")] if changed else []
+        reasons.append("Verification predates the latest finished builder assignment")
+    return reasons
 
 
-def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None, current: dict[str, Any] | None,
+def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None,
             reasons: list[str], truncated: list[str]) -> list[CheckProjection]:
     latest = {identity: (seq, item) for seq, identity, item in records if identity is not None}
     ambiguous = max((seq for seq, identity, _ in records if identity is None), default=0)
@@ -357,23 +274,25 @@ def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None
         pairs = [(record["command"] if record is not None else [], seq, record)]
     checks = []
     for index, (command, seq, record) in enumerate(pairs):
+        issues: list[tuple[Recorded, str]]
+        stale: list[str] = []
+        if (declared and ambiguous > seq) or (record is None and seq > 0):
+            record = None
+            issues = [("unknown", "Recorded verification is malformed or has no usable identity")]
+        elif record is None:
+            issues = [("missing", "No recorded verification")]
+        else:
+            issues = _recorded_issues(record, row["lead"])
         revision = record["revision"] if record is not None else None
         matches = head == revision if head is not None and revision is not None else None
-        if (declared and ambiguous > seq) or (record is None and seq > 0):
-            record, revision, matches = None, None, None
-            problems = [("unknown", "Recorded verification is malformed or has no usable identity")]
-        elif record is None:
-            problems = [("missing", "No recorded verification")]
-        else:
-            try:
-                problems = _check_reasons(record, row["lead"], row["builder_finished_seq"], matches, current)
-            except (ValueError, TypeError):
-                record, revision, matches = None, None, None
-                problems = [("unknown", "Recorded verification inventory is malformed")]
-        reasons.extend(f"Check {index + 1}: {reason}" for _, reason in problems)
+        if record is not None:
+            stale = _stale_reasons(record, row["builder_finished_seq"], matches)
+        reasons.extend(f"Check {index + 1}: {reason}" for reason in stale)
+        reasons.extend(f"Check {index + 1}: {reason}" for _, reason in issues)
         checks.append(CheckProjection(
             command=_command(command, index, truncated),
-            state=problems[0][0] if problems else "recorded_ok",
+            recorded=issues[0][0] if issues else "ok",
+            current="stale" if stale else "unknown" if head is None else "not_checked",
             record_id=_text(record["id"]) if record else None,
             exit_code=record["exit_code"] if record else None,
             recorded_at=record["finished_at"] if record else None,
@@ -422,11 +341,11 @@ def _review(row: dict[str, Any], records: list[SelectedRecord]) -> ReviewProject
     return {"state": state, "assignment_id": assignment}
 
 
-def _project(row: dict[str, Any], head: str | None, current: dict[str, Any] | None) -> TaskProjection:
+def _project(row: dict[str, Any], head: str | None) -> TaskProjection:
     truncated: list[str] = []
     reasons: list[str] = []
     records = [(item["seq"], item["identity"], _record(item)) for item in row["verifications"]]
-    checks = _checks(row, records, head, current, reasons, truncated)
+    checks = _checks(row, records, head, reasons, truncated)
     assignments = []
     activity = [row["updated_at"], row["created_at"], row["last_event_at"]]
     activity.extend(check["recorded_at"] for check in checks)
@@ -449,7 +368,7 @@ def _project(row: dict[str, Any], head: str | None, current: dict[str, Any] | No
         project=_bound(row["project"], 200, "project", truncated), lead=_bound(row["lead"], 200, "lead", truncated),
         title=_bound(row["title"], 160, "title", truncated), objective=_bound(row["objective"], 400, "objective", truncated),
         review_policy=row["review_policy"], checks=checks, freshness_source="recorded",
-        freshness_note="Check freshness uses recorded evidence and bounded Git observations.",
+        freshness_note="Check freshness uses recorded evidence and HEAD. Working-tree content was not re-checked.",
         review=_review(row, records), assignments=assignments, omitted_assignments=len(row["assignments"]) - len(assignments),
         open_findings=counts,
         blocking_findings=[item["id"] for item in row["findings"] if item["severity"] == "blocking"],
@@ -464,21 +383,13 @@ def _project(row: dict[str, Any], head: str | None, current: dict[str, Any] | No
     )
 
 
-def _project_rows(rows: Sequence[dict[str, Any]], db: Path) -> list[TaskProjection]:
+def _project_rows(rows: Sequence[dict[str, Any]]) -> list[TaskProjection]:
     heads = _observe(list(dict.fromkeys(row["project"] for row in rows)), _head)
-    candidates = list(dict.fromkeys(row["project"] for row in rows
-                                    if row["verifications"] and heads.get(row["project"]) is not None))
-
-    def clean_tree(project: str) -> dict[str, Any] | None:
-        head = heads[project]
-        return _clean_tree(project, head, db) if head is not None else None
-
-    current = _observe(candidates, clean_tree)
-    return [_project(row, heads.get(row["project"]), current.get(row["project"])) for row in rows]
+    return [_project(row, heads.get(row["project"])) for row in rows]
 
 
 def project_task(store: Ledger, task: str) -> TaskProjection:
-    result, = _project_rows(store.projection_rows(task=task, inventory_limit=PROOF_FILES), store.path)
+    result, = _project_rows(store.projection_rows(task=task))
     return result
 
 
@@ -531,9 +442,9 @@ def project_list(store: Ledger, *, kind: ListKind, project: str | None = None, i
     """Project tasks in board creation order or now attention order."""
     if offset < 0 or (limit is not None and limit < 1):
         raise ValueError("Projection offset must be nonnegative and limit must be positive")
-    rows = store.projection_rows(project=project, include_terminal=include_terminal, inventory_limit=PROOF_FILES)
+    rows = store.projection_rows(project=project, include_terminal=include_terminal)
     if kind == "task.now":
         rows.sort(key=lambda row: (_now_priority(row), row["id"]))
-    tasks = _project_rows(rows[offset:None if limit is None else offset + limit], store.path)
+    tasks = _project_rows(rows[offset:None if limit is None else offset + limit])
     return _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget,
                 offset, max(0, len(rows) - offset))
