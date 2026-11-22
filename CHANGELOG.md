@@ -7,6 +7,8 @@
   when granting declared checks to builders. Flow review briefs include bounded, redacted contents of new
   in-scope text files and report any unexamined paths after the 200-file limit. Resolution notes identify the
   accepted re-review and record which finding fields the flow compared.
+- Review snapshots accept new editable-install metadata and a top-level virtual environment from reviewer tooling,
+  record the tolerated files, and name unexpected additions. Required reviewers need `--result-file` before launch.
 
 ## 1.7.0 - 2026-11-19
 
