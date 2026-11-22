@@ -462,7 +462,15 @@ verification and review, open findings and the next command. The flow refuses to
 `review_policy: required` at open; nothing can drop it later, and only an audited `done --force --reason`
 bypasses it. `done` then needs a reviewer assignment that is read-only, passed with a completed structured
 result, and was assigned after the latest finished builder **and** after the accepted lead verification, and
-that read an **immutable snapshot** of the verified candidate. Before a reviewer starts, `task run` (or `task
+that read an **immutable snapshot** of the verified candidate. For a required review, `task run --role reviewer`
+refuses to launch without `--result-file` because the gate needs a completed structured result.
+
+```bash
+hipson task run --task T-0001 --actor reviewer --role reviewer --mode ro \
+  --result-file /tmp/review.json -- command-that-writes-review-result
+```
+
+Give the command the same absolute result path outside the snapshot. Before a reviewer starts, `task run` (or `task
 flow`, which prepares it so the brief's diff comes from the same copy) copies every covered file of the project,
 tracked, modified and untracked, from the very bytes it hashes, into a private directory beside the ledger
 (`.<ledger>.runs/review-*` or `.<ledger>.flows/<task>/review-N.snapshot`), makes the files read-only and, in a
@@ -472,7 +480,8 @@ the task project). The snapshot's fingerprint is the copy's own, and the flow re
 from the accepted verification (`verification_inconclusive`). `task run` re-hashes the snapshot from its
 manifest when the reviewer starts and ends (reserved `reviewed` events with `source=snapshot`); both must equal
 the accepted verification's revision and fingerprint, so a review of another tree, or a snapshot that was
-edited, replaced, emptied or gained files during the review (tool caches excepted), never qualifies. A review of
+edited, replaced, emptied or gained unrecognized files during the review, never qualifies. The failed check
+names up to ten extra paths in sorted order and counts any others. A review of
 the live tree (`--live-tree`, or a reviewer run outside `task run`) never qualifies: equal fingerprints at its
 start and end do not prove what it read in between. Snapshot creation fails closed (no assignment) for content
 beyond the hash budget, special files and symlinks that point outside the project. The live project may change
@@ -509,6 +518,16 @@ out of the project, Git submodules, a repository without a commit, and Git opera
 reviewer read the live tree (recorded `source=live`), so ordinary reviews of large repositories keep working.
 `--live-tree` asks for that directly. The snapshot copies the project's line-ending settings (`core.autocrlf`,
 `core.eol`, `core.safecrlf`, `info/attributes`), so a CRLF checkout shows only real changes.
+
+**Reviewer tooling files.** At the end of a review, the snapshot accepts new files inside `*.egg-info/`
+directories and inside `.venv/` at the task project's root. These directories must contain no manifest paths,
+including tracked deletions. The start check does not allow these additions. This lets `uv run pytest` create
+an environment and editable-install metadata in a fresh snapshot.
+Existing test and tool caches, including `node_modules/.cache/`, are also allowed. Generic `build/` trees and
+other dependency directories can contain project inputs and still fail the check when they gain ordinary files.
+Each candidate file is checked against the manifest before applying these rules. A `review_artifacts` event
+references the reviewer assignment and gives the count and up to ten redacted, escaped example paths for each
+check that tolerates files. The gate uses the companion `reviewed` events for the tree identity.
 
 Known limits (open): the guarantee covers what Hipson supplies to a reviewer (its working directory, brief and
 recorded identity); a reviewer that reads the live project by absolute path is outside it. Runtimes may not

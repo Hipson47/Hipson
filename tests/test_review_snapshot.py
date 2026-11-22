@@ -91,12 +91,56 @@ def test_snapshot_verification_detects_edited_missing_added_and_forged_content(t
     assert cases == [
         ('edit', 'snapshot content differs from its manifest (missing, replaced or edited file)'),
         ('delete', 'snapshot content differs from its manifest (missing, replaced or edited file)'),
-        ('add', 'snapshot gained 1 file(s) that are not part of the candidate'),
+        ('add', 'snapshot gained 1 file(s) that are not part of the candidate: src/parser/extra.py'),
         ('cache', None),
         ('forge', 'snapshot manifest fingerprint does not match its entries'),
         ('escape', 'snapshot manifest names a path outside the snapshot')]
     with pytest.raises(review_snapshot.SnapshotError, match='manifest unreadable'):
         review_snapshot.load(tmp_path / 'nothing')
+
+
+def test_snapshot_names_at_most_ten_extra_paths_safely(tmp_path):
+    project = _repo(tmp_path)
+    directory = tmp_path / 'snap'
+    manifest = review_snapshot.create(str(project), tmp_path / 'ledger.sqlite', directory)
+    copy = review_snapshot.workdir(directory, manifest)
+    secret = 'example-credential-value'
+    extras = ['tests/extra_test.py', 'src/new.py', 'build/metadata.txt', 'src/.env',
+              f'src/{secret}.py', 'src/unsafe\u202e.py', *(f'tests/z{i}.py' for i in range(6))]
+    for path in extras:
+        target = copy / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('extra')
+    with patch.dict(os.environ, {'EXAMPLE_API_TOKEN': secret}):
+        with pytest.raises(review_snapshot.SnapshotError) as error:
+            review_snapshot.verify(directory, manifest)
+    assert str(error.value) == (
+        r'snapshot gained 12 file(s) that are not part of the candidate: build/metadata.txt, '
+        r'[sensitive file skipped], src/[REDACTED].py, src/new.py, src/unsafe\u202e.py, tests/extra_test.py, '
+        r'tests/z0.py, tests/z1.py, tests/z2.py, tests/z3.py (+2 more)'
+    )
+
+
+def test_snapshot_refuses_artifacts_in_candidate_directories_and_lookalike_files(tmp_path):
+    project = _repo(tmp_path)
+    for path in ('.venv/tracked.txt', 'src/parser.egg-info/PKG-INFO'):
+        target = project / path
+        target.parent.mkdir()
+        target.write_text('candidate')
+    _git(project, 'add', '.')
+    directory = tmp_path / 'snap'
+    manifest = review_snapshot.create(str(project), tmp_path / 'ledger.sqlite', directory)
+    copy = review_snapshot.workdir(directory, manifest)
+    for path in ('.venv/extra.txt', 'src/parser.egg-info/SOURCES.txt', 'tests/.venv/config', 'tests/plain.egg-info'):
+        target = copy / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('extra')
+    with pytest.raises(review_snapshot.SnapshotError) as error:
+        review_snapshot.verify(directory, manifest)
+    assert str(error.value) == (
+        'snapshot gained 4 file(s) that are not part of the candidate: .venv/extra.txt, '
+        'src/parser.egg-info/SOURCES.txt, tests/.venv/config, tests/plain.egg-info'
+    )
 
 
 def test_a_candidate_that_cannot_be_bound_is_never_snapshotted(tmp_path):
@@ -194,8 +238,10 @@ def test_manual_reviewers_read_a_snapshot_and_a_tampered_or_live_review_never_qu
              "'project': os.environ.get('HIPSON_PROJECT'), 'text': open('src/parser/pairs.py').read()}, "
              f"open({str(seen)!r}, 'w'))")
     # A reviewer that edits its snapshot invalidates its own review.
-    tamper = "import os; os.chmod('src/parser/pairs.py', 0o644); open('src/parser/pairs.py', 'w').write('B = 2')"
-    assert review(code=tamper).returncode == 0
+    tamper = ("import os; os.mkdir('.venv'); open('.venv/pyvenv.cfg', 'w').close(); "
+              "os.chmod('src/parser/pairs.py', 0o644); open('src/parser/pairs.py', 'w').write('B = 2')")
+    edited = review(code=tamper)
+    assert edited.returncode == 0 and 'snapshot content differs from its manifest' in edited.stderr
     assert not list(runs.glob('review-*'))  # Its own snapshot and the stale one are both gone.
     run_cli(project, 'task', 'ack', '--db', str(db), '--assignment', 'A-0002')
     reasons = _view(db)[0]['review']['reasons']
@@ -221,6 +267,47 @@ def test_manual_reviewers_read_a_snapshot_and_a_tampered_or_live_review_never_qu
     misused = run_cli(project, 'task', 'run', '--db', str(db), '--task', 'T-0001', '--actor', 'x', '--role',
                       'explorer', '--snapshot', str(tmp_path), '--', PY, '-c', 'pass')
     assert misused.returncode == 64 and '--snapshot needs --role reviewer' in misused.stderr
+
+
+def test_reviewer_tool_artifacts_are_recorded_and_the_review_qualifies(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    task_args = ('--db', str(db), '--task', 'T-0001')
+    opened = run_cli(project, 'task', 'open', '--db', str(db), '--project', str(project), '--title', 'Artifacts',
+                     '--objective', 'x', '--lead', 'lead', '--require-review', '--check', PY + ' -c pass', '--start')
+    assert opened.returncode == 0, opened.stderr
+    verified = run_cli(project, 'task', 'verify', *task_args)
+    assert verified.returncode == 0, verified.stderr
+    result = tmp_path / 'review.json'
+    files = ('.venv/pyvenv.cfg', '.venv/bin/pytest', 'src/parser.egg-info/PKG-INFO',
+             'src/parser.egg-info/SOURCES.txt', 'node_modules/.cache/runner/cache.json')
+    code = f"""
+from pathlib import Path
+for name in {files!r}:
+    path = Path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('generated')
+Path({str(result)!r}).write_text({json.dumps(RESULT)!r})
+"""
+    review = run_cli(project, 'task', 'run', *task_args, '--actor', 'reviewer', '--role', 'reviewer',
+                     '--mode', 'ro', '--result-file', str(result), '--', PY, '-c', code)
+    assert review.returncode == 0, review.stderr
+    view, events = _view(db)
+    assert view['review']['accepted'] == 'A-0001', (view['review'], review.stderr)
+    artifacts = [event for event in events if event['type'] == 'review_artifacts']
+    assert len(artifacts) == 1 and artifacts[0]['refs'] == ['A-0001']
+    assert artifacts[0]['summary'] == 'A-0001: end check tolerated 5 file(s): ' + ', '.join(sorted(files))
+    assert all(not (project / path).exists() for path in files)
+
+    # A caller-supplied snapshot with installation artifacts already present fails the start check.
+    prepared = tmp_path / 'prepared'
+    manifest = review_snapshot.create(str(project), db, prepared)
+    venv = review_snapshot.workdir(prepared, manifest) / '.venv'
+    venv.mkdir()
+    (venv / 'pyvenv.cfg').write_text('pre-existing')
+    review = run_cli(project, 'task', 'run', *task_args, '--actor', 'reviewer', '--role', 'reviewer', '--mode', 'ro',
+                     '--snapshot', str(prepared), '--result-file', str(result), '--', PY, '-c', code)
+    assert review.returncode == 0 and 'failed its start check' in review.stderr, review.stderr
+    assert _view(db)[0]['review']['accepted'] == 'A-0001'
 
 
 def test_an_interrupted_reviews_snapshot_is_removed_on_resume(tmp_path):

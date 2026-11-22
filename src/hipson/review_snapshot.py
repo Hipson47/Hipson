@@ -27,8 +27,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hipson import task_verification
+from hipson import task_activity, task_verification
+from hipson.display import escape_display_controls
 from hipson.lead_context import _git
+from hipson.redaction import sanitize_path
 
 KIND = 'hipson.review_snapshot'
 MANIFEST = 'manifest.json'
@@ -141,8 +143,9 @@ def load(directory: Path) -> dict[str, Any]:
     return manifest
 
 
-def verify(directory: Path, manifest: dict[str, Any]) -> str:
-    """Re-hash the snapshot against its manifest; return the fingerprint, or raise on any difference."""
+def verify(directory: Path, manifest: dict[str, Any], *, allow_install_artifacts: bool = True,
+           tolerated: list[str] | None = None) -> str:
+    """Re-hash the snapshot, collecting any allowed tool files for the runner's review event."""
     copy = tree(directory)
     files = []
     for entry in manifest['entries']:
@@ -154,15 +157,47 @@ def verify(directory: Path, manifest: dict[str, Any]) -> str:
         files.append({'path': entry['path'], 'state': _state(copy / relative)})
         if files[-1]['state'] != entry['state']:
             raise SnapshotError('snapshot content differs from its manifest (missing, replaced or edited file)')
-    expected = {entry['path'] for entry in manifest['entries'] if entry['state'] != 'missing'}
-    extra = [path for path in _present(copy) if path not in expected
-             and not task_verification._is_tool_cache(Path(path))]
-    if extra:  # Tool caches (pytest, bytecode) are tolerated; any other new file changes what was reviewed.
-        raise SnapshotError(f'snapshot gained {len(extra)} file(s) that are not part of the candidate')
+    extra = _unexpected_files(copy, workdir(directory, manifest).relative_to(copy), files,
+                              allow_install_artifacts=allow_install_artifacts, tolerated=tolerated)
+    if extra:
+        raise SnapshotError(f'snapshot gained {len(extra)} file(s) that are not part of the candidate: '
+                            f'{path_examples(extra)}')
     fingerprint = task_verification._fingerprint(files)
     if fingerprint != manifest['fingerprint']:
         raise SnapshotError('snapshot manifest fingerprint does not match its entries')
     return fingerprint
+
+
+def _unexpected_files(copy: Path, project: Path, files: list[dict[str, Any]], *, allow_install_artifacts: bool,
+                      tolerated: list[str] | None) -> list[str]:
+    expected = {entry['path'] for entry in files if entry['state'] != 'missing'}
+    # Include deleted paths and their parents. A new artifact directory must have no candidate content of its own.
+    occupied = {parent for entry in files for parent in (Path(entry['path']), *Path(entry['path']).parents)}
+    venv = project / '.venv'
+    unexpected = []
+    for name in _present(copy):
+        if name in expected:
+            continue
+        path = Path(name)
+        # Test parents so a regular file or symlink with an artifact name does not qualify as a directory.
+        artifact = next((parent for parent in reversed(path.parents)
+                         if parent == venv or parent.suffix == '.egg-info'), None)
+        new_artifact = allow_install_artifacts and artifact is not None and artifact not in occupied
+        if path not in occupied and (task_verification._is_tool_cache(path) or new_artifact):
+            if tolerated is not None:
+                tolerated.append(name)
+        else:
+            unexpected.append(name)
+    return unexpected
+
+
+def path_examples(paths: list[str]) -> str:
+    """Display a bounded sample of snapshot paths without exposing secrets or display controls."""
+    sample = ', '.join(
+        escape_display_controls(task_activity.safe_text(sanitize_path(path))).replace('<', '&lt;').replace('>', '&gt;')
+        for path in sorted(paths)[:10]
+    )
+    return f'{sample} (+{len(paths) - 10} more)' if len(paths) > 10 else sample
 
 
 def _present(copy: Path) -> list[str]:

@@ -23,15 +23,17 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 import uuid
-from contextlib import closing
+import weakref
+from contextlib import ExitStack, closing
 from pathlib import Path
 from typing import Any
 
 from hipson import ledger
-from hipson.redaction import redact_text
+from hipson.redaction import redact_incomplete_private_keys, redact_text
 
 PROFILES = ("native", "controlled")
 # Observed live (agy 1.5.12, 2026-11-19): a reviewer in --mode plan created a file when its brief asked it to.
@@ -78,7 +80,9 @@ RUNTIMES: dict[str, dict[str, Any]] = {
     },
 }
 EXIT = {"ok": 0, "malformed_output": 2, "provider_error": 3, "auth_required": 4, "rate_limited": 5,
-        "permission_denied": 6, "unsupported": 64, "timeout": 124}
+        "permission_denied": 6, "unsupported": 64, "model_unavailable": 64, "timeout": 124}
+AGY_MODEL_REJECTION = re.compile(r"invalid model selection|not recognized as a known model", re.I)
+MAX_AGY_DIAGNOSTIC_CHARS = 600
 _PATTERNS = [  # Order matters: the most specific evidence wins.
     ("rate_limited", re.compile(r"usage limit|rate.?limit|\b429\b|quota", re.I)),
     ("auth_required", re.compile(r"not logged in|please (run )?/?login|unauthori[sz]ed|\b401\b|authentication", re.I)),
@@ -279,11 +283,46 @@ def _project(cwd: str) -> str:
     return os.environ.get("HIPSON_PROJECT") or cwd
 
 
+def _agy_user_permissions() -> dict[str, list[str]] | str:
+    """Read the user's allow and deny lists, or return a reason to omit the layer."""
+    try:
+        settings = json.loads(_home(".gemini", "antigravity-cli", "settings.json").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, RuntimeError):
+        return "agy user settings could not be read"
+    except ValueError:
+        return "agy user settings are malformed JSON"
+    if not isinstance(settings, dict):
+        return "agy user settings must be a JSON object"
+    permissions = settings.get("permissions", {})
+    if not isinstance(permissions, dict):
+        return "agy user settings permissions must be an object"
+    rules: dict[str, list[str]] = {}
+    for field in ("allow", "deny"):
+        if field not in permissions:
+            continue
+        entries = permissions[field]
+        if not isinstance(entries, list) or not all(isinstance(rule, str) for rule in entries):
+            return f"agy user settings permissions.{field} must be a list of strings"
+        rules[field] = entries
+    return rules
+
+
+class _SettingsArgv(list[str]):
+    """Own the temporary settings file when a direct caller has no launch cleanup stack."""
+
+
 def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_path: Path, last_path: Path,
                   cwd: str, model: str | None = None, effort: str | None = None, session: str | None = None,
                   resume: str | None = None, timeout: float = 1800,
-                  checks: list[list[str]] | None = None) -> tuple[list[str], str | None]:
-    """argv and stdin for one non-interactive run; raises RuntimeFailure('unsupported') rather than pretending."""
+                  checks: list[list[str]] | None = None,
+                  settings_files: ExitStack | None = None,
+                  run_meta: dict[str, Any] | None = None) -> tuple[list[str], str | None]:
+    """Build argv and stdin.
+
+    Direct callers that omit ``settings_files`` must keep the returned argv object alive through launch.
+    """
     if profile not in PROFILES or mode not in ledger.MODES:
         raise RuntimeFailure("unsupported", f"profile {profile!r} / mode {mode!r}")
     spec = RUNTIMES[name]
@@ -339,11 +378,28 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     argv += ["--conversation", resume] if resume else []
     argv += ["--model", model] if model else []
     argv += ["--effort", effort] if effort else []
-    # Headless agy auto-denies every command; a session-only settings layer (never saved, the user's settings
-    # stay) grants exactly the declared checks, as --allowedTools does for Claude (verified live on 1.5.12: the
-    # rule admits that command and no other).
-    allowed = [f"command({shlex.join(check)})" for check in checks if _exact_pattern(check)]
-    argv += ["--settings", json.dumps({"permissions": {"allow": allowed}})] if allowed else []
+    # Keep the user's deny rules in the same layer as every allow rule and let agy enforce them.
+    allowed = [f"command({shlex.join(check)})" for check in checks if mode == "rw" and _exact_pattern(check)]
+    if allowed:
+        permissions = _agy_user_permissions()
+        if isinstance(permissions, str):
+            if run_meta is not None:
+                run_meta["check_grants_note"] = f"Check grants were not passed because {permissions}."
+            return argv, None
+        permissions["allow"] = list(dict.fromkeys(permissions.get("allow", []) + allowed))
+        try:
+            fd, filename = tempfile.mkstemp(prefix="hipson-agy-", suffix=".json")
+            unlink = Path(filename).unlink
+            if settings_files is None:
+                argv = _SettingsArgv(argv)
+                weakref.finalize(argv, unlink, missing_ok=True)
+            else:
+                settings_files.callback(unlink, missing_ok=True)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"permissions": permissions}, stream)
+        except OSError as exc:
+            raise RuntimeFailure("unsupported", f"cannot write agy session settings: {exc}") from exc
+        argv += ["--settings", filename]
     return argv, None
 
 
@@ -447,6 +503,19 @@ def _evidence(output: str) -> str | None:
     return next((kind for kind, pattern in _PATTERNS if pattern.search(output)), None)
 
 
+def _agy_model_diagnostic(payload: Any, stderr: str) -> str | None:
+    messages: list[object] = [stderr]
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        messages.extend((error.get("message") if isinstance(error, dict) else error, payload.get("message")))
+    for text in messages:
+        if isinstance(text, str) and (match := AGY_MODEL_REJECTION.search(text)):
+            # Keep the diagnostic and its model list, skipping any unrelated lines before it.
+            detail = text[text.rfind("\n", 0, match.start()) + 1:].strip()
+            return redact_incomplete_private_keys(redact_text(detail))[:MAX_AGY_DIAGNOSTIC_CHARS]
+    return None
+
+
 def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -> tuple[ledger.TaskResult, dict[str, Any]]:
     """Validate the structured result against the task-result contract and collect session/usage evidence."""
     meta: dict[str, Any] = {"session": None, "usage": None, "models": None, "cost_usd_list": None,
@@ -491,9 +560,13 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
     else:
         payload = _parse_json(stdout)
         if code or not isinstance(payload, dict) or payload.get("status") != "SUCCESS":
+            output = stdout + "\n" + stderr
+            kind = (classify(code or 1, output) if code or isinstance(payload, dict)
+                    else _evidence(output) or "malformed_output")
+            if kind not in ("timeout", "rate_limited", "auth_required"):
+                if diagnostic := _agy_model_diagnostic(payload, stderr):
+                    raise RuntimeFailure("model_unavailable", diagnostic)
             detail = payload.get("status") if isinstance(payload, dict) else f"exit {code}"
-            kind = (classify(code or 1, stdout + stderr) if code or isinstance(payload, dict)
-                    else _evidence(stdout + stderr) or "malformed_output")
             raise RuntimeFailure(kind, f"agy {detail}")
         meta.update(session=payload.get("conversation_id"), usage=payload.get("usage"),
                     num_turns=payload.get("num_turns"))
@@ -542,6 +615,8 @@ def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[
 def exec_worker(args: argparse.Namespace) -> int:
     """`hipson agent exec`: one native run inside a `task run` assignment; never outside one."""
     def fail(kind: str, detail: str) -> int:
+        if note := meta.get("check_grants_note"):
+            detail = f"{note} {detail}"
         detail = redact_text(detail)[:600]
         try:
             _write_meta(meta_path, {**meta, "outcome": kind, "detail": detail})
@@ -585,60 +660,65 @@ def exec_worker(args: argparse.Namespace) -> int:
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.{session}.last.json"  # Codex only; unique per run, never pre-existing.
     prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
-    try:
-        _check_state_path(result_path)
-        if meta_path is not None:
-            _check_state_path(meta_path)
-        _write_state(schema_path, json.dumps(result_schema()))
-        argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
-                                    schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
-                                    effort=args.effort, session=session, resume=resume, timeout=args.timeout,
-                                    checks=checks if mode == "rw" else [])
-    except RuntimeFailure as exc:
-        return fail(exc.kind, exc.detail)
-    if shutil.which(argv[0]) is None:
-        return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
-    context = execution_context(shutil.which(argv[0]))
-    meta["execution_context"] = context["context"]
-    if context["context"] == "wsl-forwarded":
-        return fail("unsupported", _context_limitation(args.runtime, context) or "")
-    launch: str | list[str] = argv
-    env = dict(os.environ)
-    if context.get("direct"):  # The launcher's own interpreter and script: no cmd.exe, so every argument passes.
-        launch = [*context["direct"], *argv[1:]]
-        meta["execution_context"] = "batch-shim (direct)"
-    elif context["context"] == "batch-shim":
-        from hipson.task_windows import batch_command
-        try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
-            launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
-        except ValueError:
+    with ExitStack() as settings_files:
+        try:
+            _check_state_path(result_path)
+            if meta_path is not None:
+                _check_state_path(meta_path)
+            _write_state(schema_path, json.dumps(result_schema()))
+            argv, stdin = build_command(args.runtime, profile=args.profile, mode=mode, prompt=prompt,
+                                        schema_path=schema_path, last_path=last_path, cwd=cwd, model=args.model,
+                                        effort=args.effort, session=session, resume=resume, timeout=args.timeout,
+                                        checks=checks if mode == "rw" else [], settings_files=settings_files,
+                                        run_meta=meta)
+        except RuntimeFailure as exc:
+            return fail(exc.kind, exc.detail)
+        if shutil.which(argv[0]) is None:
+            return fail("unsupported", f"{argv[0]} is not installed or not on PATH")
+        context = execution_context(shutil.which(argv[0]))
+        meta["execution_context"] = context["context"]
+        if context["context"] == "wsl-forwarded":
             return fail("unsupported", _context_limitation(args.runtime, context) or "")
-    # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
-    auth = auth_state(args.runtime, argv[0])
-    meta["preflight"] = {"auth": auth["state"]}
-    if auth["state"] == "logged_out":
-        return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
-                    "the runtime itself, then retry")
-    meta.update(session_requested=resume or session, resumed=bool(resume))
-    started = time.monotonic()
-    try:
-        # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
-        proc = subprocess.run(launch, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=args.timeout, check=False, env=env)
-        code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
-    except subprocess.TimeoutExpired as exc:
-        code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)
-    except OSError as exc:
-        meta["duration_seconds"] = round(time.monotonic() - started, 3)
-        return fail("provider_error", f"could not launch {args.runtime}: {exc}")
+        launch: str | list[str] = argv
+        env = dict(os.environ)
+        if context.get("direct"):  # The launcher's own interpreter and script: no cmd.exe, so every argument passes.
+            launch = [*context["direct"], *argv[1:]]
+            meta["execution_context"] = "batch-shim (direct)"
+        elif context["context"] == "batch-shim":
+            from hipson.task_windows import batch_command
+            try:  # cmd.exe would otherwise reparse &, |, ^, % and quotes in the arguments.
+                launch, env = batch_command(argv, env, "HIPSON_AGENT_ARG_")
+            except ValueError:
+                return fail("unsupported", _context_limitation(args.runtime, context) or "")
+        # Preflight: a runtime that says it is logged out would only fail after launch (or prompt); stop before.
+        auth = auth_state(args.runtime, argv[0])
+        meta["preflight"] = {"auth": auth["state"]}
+        if auth["state"] == "logged_out":
+            return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
+                        "the runtime itself, then retry")
+        meta.update(session_requested=resume or session, resumed=bool(resume))
+        started = time.monotonic()
+        try:
+            # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
+            proc = subprocess.run(launch, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  timeout=args.timeout, check=False, env=env)
+            code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
+        except subprocess.TimeoutExpired as exc:
+            code, stdout, stderr = 124, _text(exc.stdout), _text(exc.stderr)
+        except OSError as exc:
+            meta["duration_seconds"] = round(time.monotonic() - started, 3)
+            return fail("provider_error", f"could not launch {args.runtime}: {exc}")
     meta["duration_seconds"] = round(time.monotonic() - started, 3)
     meta["exit_code"] = code
     try:
         report, facts = normalize(args.runtime, code, stdout, stderr, last_path)
     except RuntimeFailure as exc:
-        meta["stderr_tail"] = redact_text(stderr[-1500:])
-        detail = exc.detail + (f"; resuming session {resume} failed, so the next --continue-session run starts a new "
-                               "session" if resume else "")
+        meta["stderr_tail"] = redact_incomplete_private_keys(redact_text(stderr))[-1500:]
+        detail = exc.detail
+        if exc.kind == "model_unavailable" and args.model and args.model not in detail:
+            detail = f"agy model {args.model!r}: {detail}"
+        if resume:
+            detail += f"; resuming session {resume} failed, so the next --continue-session run starts a new session"
         return fail(exc.kind, detail)
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.

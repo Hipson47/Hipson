@@ -37,7 +37,7 @@ runtime's own non-interactive command on the same fixture showed the same capabi
 | Project skills | verified: `.claude/skills`, Hipson = manual | verified: `.agents/skills`, Hipson = manual | unverified: no documented project skill directory |
 | Hooks | verified: project `PostToolUse` hook ran (8 events), Hipson = manual | not probed | not probed |
 | Native subagents | verified: the worker delegated to `Explore` (hook saw the Agent tool), Hipson = manual | not observed (none requested by the runtime) | not probed |
-| Write mode (builder) | verified: edit + task-scoped grant for the declared check | verified: `workspace-write` | verified: `accept-edits` + session-only grant for exactly the declared checks (`--settings` `permissions.allow: ["command(<check>)"]`; it admits that command and no other) |
+| Write mode (builder) | verified: edit + task-scoped grant for the declared check | verified: `workspace-write` | verified: `accept-edits` + session-only `command(<check>)` grants for the declared checks. Hipson merges these grants with the user's allow rules. |
 | Read-only mode (reviewer) | verified: plan mode, the write did not happen | verified: read-only sandbox refused the write ("Read-only file system") | **not enforced**: in `--mode plan` the reviewer created the file in 2 of 2 probe runs |
 | Session continuation | verified: `--resume`, code word recalled; also from another working directory (review snapshots) | verified after a fix: `exec resume` refuses `--sandbox`, so Hipson now passes `-c sandbox_mode=...` (same mode) | verified: `--conversation`, code word recalled |
 | A missing session | `No conversation found with session ID` (exit 1): Hipson reports it and the next `--continue-session` starts a new session | refused outside a trusted or Git directory; snapshots are Git checkouts | not probed |
@@ -113,7 +113,8 @@ to the review; files in the project (`CLAUDE.md`, `AGENTS.md`, `.claude/settings
 
 Common failures: `auth_required` (log in with the runtime), `rate_limited` (wait, or use another runtime for that
 role), `permission_denied` (the runtime refused a tool: Antigravity's headless plan mode cannot run commands, so
-reviewers get the diff in their brief), `unsupported` (a combination the runtime does not document, e.g.
+reviewers get the diff in their brief), `model_unavailable` (choose a model from Antigravity's diagnostic),
+`unsupported` (a combination the runtime does not document, e.g.
 controlled Antigravity), `needs_lead` with "changed protected paths" (the builder edited a check's test or
 runtime configuration: restore it with `git checkout -- PATH`, then resume).
 
@@ -122,8 +123,15 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
 - **native** (default): the runtime runs with the user's own configuration, plugins, skills, MCP servers,
   instructions and model defaults. Hipson adds no clean-room flag and never a permission bypass
   (`--dangerously-*`). It adds two things: the worker rules and result contract in the prompt, and for a
-  Claude writer a task-scoped permission for exactly the task's declared checks, read from the ledger
-  (`--allowedTools "Bash(<check>)"`; a check with a wildcard, bracket or leading `NAME=value` word gets none).
+  Claude or Antigravity writer a task-scoped permission for exactly the task's declared checks, read from the
+  ledger. Claude uses `--allowedTools "Bash(<check>)"`. Antigravity's temporary `--settings` file carries the
+  user's `permissions.allow` and `permissions.deny` lists from `~/.gemini/antigravity-cli/settings.json`,
+  with the exact `command(<check>)` grants added to `allow`. Antigravity applies the deny rules. A live
+  check on agy 1.5.14 confirmed that a user deny rule blocked `git status` with the layer present.
+  The file has mode `0600` on POSIX. Hipson passes the file path, removes the file after the run, and leaves
+  the user's settings untouched. If Hipson cannot read the user's settings or validate either permission
+  list, it omits the layer and records the reason in `check_grants_note` in the run meta and in the failure
+  detail if the run fails. A check with a wildcard, bracket or leading `NAME=value` word gets no automatic grant.
   The permission mode follows the recorded assignment (`ro` -> plan / read-only / plan mode), whatever flags say.
 - **controlled**: for benchmarks and isolated tests; uses each runtime's documented isolation flags. Antigravity
   refuses it (exit 64, `unsupported`) rather than pretending. The e2e harness keeps its own stronger isolation
@@ -136,8 +144,10 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
 - The structured answer must validate against `schemas/task-result.schema.json`; Hipson writes it to
   `HIPSON_FLOW_RESULT`. Anything else is a failure, never a success.
 - Failure classes from the runtime's own words and exit codes: `rate_limited` (5), `auth_required` (4),
-  `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64). `task
-  run` records the exit code; the flow stops with `worker_failed` / `reviewer_failed`.
+  `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64),
+  and `model_unavailable` (64) for Antigravity model selection failures. The redacted CLI diagnostic is printed
+  and saved in the meta file's `detail`. `task run` records the exit code and the flow stops with
+  `worker_failed` / `reviewer_failed`.
 - Evidence beside the result (`<result>.meta.json`): runtime, profile, role, mode, ledger, project, session,
   models, usage, the names of denied tools (never their inputs), duration, brief size and a bytes/4 token
   estimate. A nonzero exit is never a success, even after a valid-looking result; Codex's last-message file is

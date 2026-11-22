@@ -14,6 +14,7 @@ from unittest.mock import patch
 from hipson import ledger, task_runner
 from tests import test_agent_run as bash
 from tests.support import ROOT, hipson_cli
+from tests.test_hipson_helpers import run_cli
 
 
 class _NativeRun(bash._Run):
@@ -202,6 +203,24 @@ def test_task_run_usage_errors_and_default_read_only(tmp_path):
             view = store.show(task["id"])
             assert view["assignments"][-1]["status"] == "failed" and view["claims"] == []
             assert f"worker process exit={expected}" in store.events(task["id"])[-1]["summary"]
+
+
+def test_required_reviewer_without_result_file_is_refused_before_launch(tmp_path):
+    project, db = tmp_path / "project", tmp_path / "ledger.sqlite"
+    project.mkdir()
+    marker = tmp_path / "started"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=project, title="Required review", objective="Review", review_policy="required")
+    result = run_cli(
+        project, "task", "run", "--db", str(db), "--task", task["id"], "--actor", "reviewer",
+        "--role", "reviewer", "--", sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()",
+    )
+    assert result.returncode == 64, result.stderr
+    assert "requires a completed structured result" in result.stderr
+    assert "--role reviewer --mode ro --result-file PATH -- COMMAND [ARGS...]" in result.stderr
+    assert not marker.exists() and not (tmp_path / ".ledger.sqlite.runs").exists()
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert not store.show(task["id"])["assignments"]
 
 
 def test_task_run_rollout_nonce_and_missing_rollout(tmp_path):

@@ -202,7 +202,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--scope", action="append", default=[])
     parser.add_argument("--lease-seconds", type=int)
     parser.add_argument("--ref", action="append", default=[])
-    parser.add_argument("--result-file")
+    parser.add_argument("--result-file", help="Structured worker result path (required for reviewers on review-gated tasks)")
     parser.add_argument("--rollout", choices=["codex"])
     parser.add_argument("--allow-project-mismatch", action="store_true")
     parser.add_argument("--snapshot", metavar="DIR",
@@ -406,7 +406,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         'log_tail': snapshot.get('observations', []), 'reason': summary,
     }
     if getattr(args, "role", None) == "reviewer":
-        _record_review_tree(db, assignment, "end", project, getattr(args, "review_snapshot", None))
+        _record_review_tree(db, args.task, assignment, "end", project, getattr(args, "review_snapshot", None))
     try:
         with closing(ledger.Ledger(db)) as store:
             try:
@@ -453,14 +453,17 @@ def _review_snapshot(db: Path, args: argparse.Namespace, project: str) -> Review
     return directory, review_snapshot.create(project, db, directory), True
 
 
-def _record_review_tree(db: Path, assignment: str, phase: str, project: str, review: ReviewTree | None) -> None:
+def _record_review_tree(db: Path, task: str, assignment: str, phase: str, project: str,
+                        review: ReviewTree | None) -> None:
     """Bind a review to the tree it saw: its snapshot re-hashed now, or (--live-tree) the project (best effort)."""
     from hipson import task_verification
+    tolerated: list[str] = []
     try:
         if review is not None:
             directory, manifest, _ = review
             try:
-                fingerprint: str | None = review_snapshot.verify(directory, manifest)
+                fingerprint: str | None = review_snapshot.verify(
+                    directory, manifest, allow_install_artifacts=phase == "end", tolerated=tolerated)
             except (review_snapshot.SnapshotError, OSError) as exc:
                 _message(f"review snapshot of {assignment} failed its {phase} check: {exc}")
                 fingerprint = None
@@ -469,6 +472,10 @@ def _record_review_tree(db: Path, assignment: str, phase: str, project: str, rev
             state = task_verification.project_state(project, db)
             revision, fingerprint, source = state["revision"], state["fingerprint"], 'live'
         with closing(ledger.Ledger(db)) as store:
+            if tolerated:
+                store.add_event(task, actor="hipson", type="review_artifacts", refs=[assignment],
+                                summary=f"{assignment}: {phase} check tolerated {len(tolerated)} file(s): "
+                                        f"{review_snapshot.path_examples(tolerated)}")
             store.record_review_tree(assignment, phase=phase, revision=revision, fingerprint=fingerprint,
                                      source=source)
     except (ledger.LedgerError, OSError, sqlite3.Error, ValueError) as exc:
@@ -513,6 +520,11 @@ def run(args: argparse.Namespace) -> int:
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _message(f"could not read task {args.task}: {exc}; worker not started")
         return 75
+    if review_required and args.role == "reviewer" and not args.result_file:
+        _message("required review needs --result-file because the gate requires a completed structured result. "
+                 "Use hipson task run --task TASK --actor ACTOR --role reviewer --mode ro --result-file PATH "
+                 "-- COMMAND [ARGS...] and have the command write its result to PATH")
+        return 64
     try:
         check = _project_check(project)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
@@ -671,7 +683,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
             if getattr(args, "role", None) == "reviewer":
-                _record_review_tree(db, assignment, "start", str(check["expected"]),
+                _record_review_tree(db, args.task, assignment, "start", str(check["expected"]),
                                     getattr(args, "review_snapshot", None))
             checkpoint = checkpoint_caps(args)
             if checkpoint is not None:
