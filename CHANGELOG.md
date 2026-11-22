@@ -28,6 +28,13 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
   ...) in a worker result, a finding or a resolution note was written to the ledger as is. That
   includes the event summaries that quote them. Values shorter than 8 characters are not treated as
   secrets. Records written before 1.8.1 are not rewritten.
+- **A busy ledger no longer kills or loses a worker.** When another process held the ledger write lock past
+  SQLite's 10-second busy timeout (for example a lead opening or closing a task on a large project on a slow
+  filesystem: 10-13 s to fingerprint 421 files on `/mnt/c` under WSL), the supervisor treated the failed
+  activity heartbeat as a launch failure, stopped the worker with SIGTERM and recorded `failed`
+  (`run.launch_failed: database is locked`), and a busy final record left the assignment active. Heartbeats
+  now skip a busy ledger, and the final record retries up to six times. Holding the lock while
+  fingerprinting remains a known limitation.
 - **Permission denials say what was denied.** A `permission_denied` runtime failure quotes the
   redacted denial line. For Antigravity it also explains that headless mode auto-denies commands
   outside its allow list.
