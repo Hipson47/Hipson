@@ -7,6 +7,9 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
 
 ### Fixes
 
+- **Flow protected-path check fails closed.** The flow records the SHA-256 of each builder's protected-path
+  baseline in the ledger; a baseline file that is missing or changed, or a forged `.clean` marker, no
+  longer reads as "nothing changed" and stops the flow with `needs_lead`.
 - **Pre-migration backups are atomic.** The copy is written to a hidden
   `.<ledger>.v<old>-backup-<ts>-<pid>.partial` file and gets its backup name only when complete.
   Before, a writer killed mid-copy left an empty or hot-journal file under a real backup name
