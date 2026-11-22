@@ -98,16 +98,31 @@ def test_agent_ux_fixture_and_report(tmp_path):
         assert 0 < stats["bytes"] <= budget
         assert stats["project_state_calls"] == 0 and stats["wall_seconds"] >= 0
     board_stats = compact["projection"]["task.board"]
-    assert board_stats["check_states"] == {"ok": {"not_checked": 2, "stale": 1}, "missing": {"not_checked": 19}}
+    # The first board page holds the tasks that fit in 32 kB; longer temporary paths (macOS, Windows) fit fewer.
+    assert board_stats["check_states"]["ok"] == {"not_checked": 2, "stale": 1}
+    with closing(Ledger(fixture.db, read_only=True)) as store:
+        first_page = project_list(store, kind="task.board")
+    full_on_page = sum("too_large" not in task for task in first_page["tasks"])
+    assert 0 < full_on_page - 3 <= 19
+    assert board_stats["check_states"]["missing"] == {"not_checked": full_on_page - 3}
     with closing(Ledger(fixture.db, read_only=True)) as store:
         full = {task["id"]: store.show(task["id"]) for task in tasks}
         for kind in ("task.board", "task.now"):
-            projection = project_list(store, kind=kind)
-            by_id = {task["id"]: task for task in projection["tasks"]}
+            # Follow the continuations: how many tasks the first page holds depends on path lengths.
+            first = page = project_list(store, kind=kind)
+            assert len(dumps(first).encode("utf-8")) <= budgets[kind]
+            by_id = {}
+            while True:
+                assert len(dumps(page).encode("utf-8")) <= budgets[kind]
+                by_id.update({task["id"]: task for task in page["tasks"]})
+                if page["more"] is None:
+                    break
+                page = project_list(store, kind=kind, offset=page["more"]["arguments"]["offset"])
             assert set(by_id) == {task["id"] for task in tasks}
-            assert projection["truncated"] is False and projection["omitted"] == 0
-            assert len(dumps(projection).encode("utf-8")) <= budgets[kind]
-            assert max(len(dumps(task).encode("utf-8")) for task in by_id.values()) == board_stats["largest_task_bytes"]
+            assert not any(task.get("too_large") for task in by_id.values())
+            if kind == "task.board":
+                largest = max(len(dumps(task).encode("utf-8")) for task in first["tasks"])
+                assert largest == board_stats["largest_task_bytes"]
             assert board_stats["largest_task_bytes"] <= budgets["task.show"]
             for task_id, projected in by_id.items():
                 _assert_gate_parity(full[task_id], projected)
