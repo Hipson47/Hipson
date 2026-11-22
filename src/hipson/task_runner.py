@@ -23,6 +23,7 @@ from typing import Any, NoReturn
 
 from hipson import ledger, review_snapshot, task_activity, task_checkpoint, task_observation, worker_env
 from hipson.redaction import redact_text
+from hipson.task_calls import CallValue, ReadCall, project_fix_calls, read_call
 from hipson.task_posix import ProcessTree
 from hipson.task_windows import Job, batch_command
 
@@ -140,7 +141,8 @@ def supervise_command(command: list[str]) -> int:
             time.sleep(0.05)
         return 128 + signum if signum else int(child.returncode or 0)
     except FileNotFoundError as exc:
-        print(exc, file=sys.stderr)
+        error = ledger.LedgerError(str(exc), code="run.launch_failed")
+        ledger.print_error(error, str(exc), json_output=False)
         return 127
     finally:
         try:
@@ -343,6 +345,16 @@ def _run_error(args: argparse.Namespace, error: BaseException, message: str) -> 
     ledger.print_error(error, f"hipson task run: {redact_text(message)}", json_output=getattr(args, "json", False))
 
 
+def _run_call(args: argparse.Namespace, db: Path, *, template: tuple[str, ...]) -> ReadCall:
+    flags = ("task", "actor", "role", "mode", "scope", "lease_seconds", "ref", "result_file", "rollout",
+             "allow_project_mismatch", "snapshot", "live_tree", "checkpoint", "checkpoint_max_files",
+             "checkpoint_max_bytes", "env", "env_allow", "needs", "observe", "observe_max_files", "observe_max_bytes")
+    arguments: dict[str, CallValue] = {flag: value for flag in flags
+                                       if (value := getattr(args, flag, None)) is not None and value != []}
+    arguments["command"] = args.worker_command[1:]
+    return read_call("task.run", arguments, str(db), template=template)
+
+
 def _project_check(project: str) -> dict[str, object]:
     expected, cwd = Path(project).resolve(), Path.cwd().resolve()
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
@@ -426,7 +438,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
                 store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs,
                              failure_journal=journal)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        _message(f"could not finish {assignment}: {exc}; run 'hipson task reap'")
+        _run_error(args, exc, f"could not finish {assignment}: {exc}; run 'hipson task reap'")
         return
     try:
         observed = task_observation.complete(db, assignment, after=after)
@@ -434,7 +446,7 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
             with closing(ledger.Ledger(db)) as store:
                 observed = store.record_changes(assignment, task_observation.unobserved(args.mode, args.observation_error))
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        _message(f"could not record observed changes for {assignment}: {exc}; run 'hipson task reap'")
+        _run_error(args, exc, f"could not record observed changes for {assignment}: {exc}; run 'hipson task reap'")
         return
     if observed is not None:
         _message(f"{assignment} observed changes: {task_observation.summary(observed['changes'])}")
@@ -485,8 +497,9 @@ def _record_review_tree(db: Path, task: str, assignment: str, phase: str, projec
             store.record_review_tree(assignment, phase=phase, revision=revision, fingerprint=fingerprint,
                                      source=source)
     except (ledger.LedgerError, OSError, sqlite3.Error, ValueError) as exc:
-        _message(f"could not record the reviewed tree ({phase}) of {assignment}: {type(exc).__name__}; "
-                 "this review cannot satisfy a required-review gate")
+        _run_error(argparse.Namespace(json=False), exc,
+                   f"could not record the reviewed tree ({phase}) of {assignment}: {type(exc).__name__}; "
+                   "this review cannot satisfy a required-review gate")
 
 
 def run(args: argparse.Namespace) -> int:
@@ -518,8 +531,14 @@ def run(args: argparse.Namespace) -> int:
         if getattr(args, "checkpoint", False) and args.mode != "rw":
             raise ledger.LedgerError("--checkpoint needs --mode rw: it saves the claimed write scope",
                 code="checkpoint.write_scope_required")
-    except (ValueError, OverflowError, ledger.LedgerError) as exc:
+    except ledger.LedgerError as exc:
+        if exc.code == "scope.required":
+            db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+            exc.fix = [_run_call(args, db, template=("--scope", "PATH"))]
         _run_error(args, exc, str(exc))
+        return 64
+    except (ValueError, OverflowError) as exc:
+        _run_error(args, ledger.LedgerError(str(exc), code="run.options_invalid"), str(exc))
         return 64
     db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
     try:
@@ -527,21 +546,31 @@ def run(args: argparse.Namespace) -> int:
             shown = store.show(args.task)
             project, review_required = shown["project"], shown.get("review_policy") == "required"
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        _run_error(args, exc, f"could not read task {args.task}: {exc}; worker not started")
+        error = exc if isinstance(exc, ledger.LedgerError) else ledger.LedgerError(str(exc), code="run.task_unreadable")
+        _run_error(args, error, f"could not read task {args.task}: {exc}; worker not started")
         return 75
     if review_required and args.role == "reviewer" and not args.result_file:
-        _message("required review needs --result-file because the gate requires a completed structured result. "
-                 "Use hipson task run --task TASK --actor ACTOR --role reviewer --mode ro --result-file PATH "
-                 "-- COMMAND [ARGS...] and have the command write its result to PATH")
+        error = ledger.LedgerError(
+            "required review needs --result-file because the gate requires a completed structured result. "
+            "Use hipson task run --task TASK --actor ACTOR --role reviewer --mode ro --result-file PATH "
+            "-- COMMAND [ARGS...] and have the command write its result to PATH", code="run.result_file_required",
+            fix=[_run_call(args, db, template=("--result-file", "PATH"))])
+        _run_error(args, error, str(error))
         return 64
     try:
         check = _project_check(project)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        _message(f"could not verify task project: {exc}; worker not started")
+        error = ledger.LedgerError(f"could not verify task project: {exc}; worker not started",
+                                  code="run.project_check_failed", fix=project_fix_calls(args.task, db))
+        _run_error(args, error, str(error))
         return 76
     mismatch = not check["matches"]
     if mismatch and not args.allow_project_mismatch:
-        _message(f"project mismatch {json.dumps(check)}; worker not started (explicit override: --allow-project-mismatch)")
+        message = f"project mismatch {json.dumps(check)}; worker not started (explicit override: --allow-project-mismatch)"
+        error = (ledger.LedgerError(message, code="run.project_mismatch", fix=project_fix_calls(args.task, db))
+                 if Path(project).is_dir() else ledger.LedgerError(
+                     message, code="project.unavailable", fix=project_fix_calls(args.task, db)))
+        _run_error(args, error, message)
         return 76
     try:
         args.worker_env = worker_environment(args, str(check["expected"]))
@@ -551,7 +580,8 @@ def run(args: argparse.Namespace) -> int:
             task_checkpoint.scan(str(check["expected"]), args.scope, caps=checkpoint,
                                  private=task_checkpoint.private_paths(db))
     except (ValueError, OSError) as exc:
-        _run_error(args, exc, f"{exc}; worker not started")
+        error = exc if isinstance(exc, ledger.LedgerError) else ledger.LedgerError(str(exc), code="run.setup_failed")
+        _run_error(args, error, f"{exc}; worker not started")
         return 64
     review: ReviewTree | None = None
     if args.role == "reviewer" and not getattr(args, "live_tree", False):
@@ -560,13 +590,17 @@ def run(args: argparse.Namespace) -> int:
         except (review_snapshot.SnapshotError, OSError) as exc:
             if review_required or args.snapshot:
                 # Only a snapshot review can satisfy a required review: never start one that could not count.
-                _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; worker not started")
+                error = ledger.LedgerError(f"could not prepare the review snapshot: {exc}; worker not started",
+                                          code="run.snapshot_unavailable")
+                _run_error(args, error, str(error))
                 return 75
             # No review gate depends on it: review the live tree (recorded as source=live) rather than refuse.
             _message(f"could not prepare the review snapshot: {task_activity.safe_text(exc)}; this task does not "
                      "require review, so the reviewer reads the live working tree")
     elif getattr(args, "snapshot", None):
-        _message("--snapshot needs --role reviewer without --live-tree; worker not started")
+        error = ledger.LedgerError("--snapshot needs --role reviewer without --live-tree; worker not started",
+                                 code="run.snapshot_requires_reviewer")
+        _run_error(args, error, str(error))
         return 64
     args.review_snapshot = review
     try:
@@ -592,7 +626,9 @@ def _execute(db: Path, args: argparse.Namespace, command: list[str], mismatch: b
                         os.setsid()
                         code = _execute_owned(db, args, command, mismatch, check, grace, mask)
                     except BaseException as exc:
-                        _message(f"private supervisor failed: {exc}; run 'hipson task reap'")
+                        error = ledger.LedgerError(f"private supervisor failed: {exc}; run 'hipson task reap'",
+                                                   code="run.supervisor_failed")
+                        _run_error(args, error, str(error))
                         code = 75
                     sys.stdout.flush()
                     sys.stderr.flush()
@@ -797,6 +833,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         next_heartbeat = time.monotonic() + task_activity.HEARTBEAT_SECONDS
                     time.sleep(0.05)
                 outcome = child.poll()
+                if verifying and outcome is None and not signum:
+                    args.check_timed_out = True
                 code = outcome if outcome is not None else 124 if verifying else 0
                 if code < 0:
                     child_signal = -code
@@ -804,14 +842,22 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 if signum or outcome is None or _active(job, tree):
                     if not signum:
                         note = "; leftover processes stopped"
-                        _message("worker left processes running; stopping them before finishing")
+                        if not verifying or not getattr(args, "json", False):
+                            _message("worker left processes running; stopping them before finishing")
                     safe = _stop(child, job, signum or signal.SIGTERM, grace, tree)
                 else:
                     safe = True
             if signum:
                 code = 128 + signum
     except (ledger.LedgerError, OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        _run_error(args, exc, f"{exc}; worker not started" if child is None else str(exc))
+        message = f"{exc}; worker not started" if child is None else str(exc)
+        if isinstance(exc, ledger.LedgerError):
+            error = exc
+        elif child is None and launching and not Path(str(check["expected"])).is_dir():
+            error = ledger.LedgerError(message, code="project.unavailable", fix=project_fix_calls(args.task, db))
+        else:
+            error = ledger.LedgerError(message, code="run.launch_failed")
+        _run_error(args, error, message)
         if child is not None:
             try:
                 safe = _stop(child, job, signal.SIGTERM, grace, tree)
@@ -837,7 +883,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     with closing(ledger.Ledger(db)) as store:
                         store.observe(assignment, snapshot)
             except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-                _message(f'could not record final activity: {exc}')
+                _run_error(args, exc, f'could not record final activity: {exc}')
         if verifying and verify_before:
             from hipson.task_verification import finish
             finish(db, args, code, verify_stamp, verify_started, verify_before, builder_seq,

@@ -647,7 +647,7 @@ def command_run_status(args: argparse.Namespace) -> int:
     try:
         payload = run_control.build_status(args.run)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
     return 0
@@ -657,7 +657,7 @@ def command_run_validate(args: argparse.Namespace) -> int:
     try:
         payload = run_control.build_validation(args.run)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload))
     return 0 if payload.get("ok") else 1
@@ -669,7 +669,7 @@ def command_run_handoff(args: argparse.Namespace) -> int:
         payload = run_control.build_handoff(run_dir)
         paths = run_control.write_handoff(run_dir, payload)
     except (SystemExit, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="run.bundle_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     payload = {**payload, "outputs": paths}
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else run_control.render_handoff(payload))
@@ -741,7 +741,7 @@ def command_verify_run(args: argparse.Namespace) -> int:
             allow_unsafe_output=args.allow_unsafe_output,
         )
     except SystemExit as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(ledger.LedgerError(str(exc), code="verify.artifact_unavailable"), str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps({**result, "output": str(written)}, indent=2, ensure_ascii=False))
@@ -2045,7 +2045,7 @@ def command_task(args: argparse.Namespace) -> int:
             elif args.task_command == 'activity':
                 payload = store.activity(args.assignment)
             elif args.task_command == 'ack':
-                payload = store.ack(args.assignment, note=args.note)
+                payload = store.ack(args.assignment, note=args.note, actor=args.actor)
             elif args.task_command == "finding":
                 if args.finding_command == "add":
                     payload = store.add_finding(
@@ -2218,6 +2218,8 @@ def build_parser() -> argparse.ArgumentParser:
             task_parser.add_argument("--task", required=True)
         if name in ("assign", "event", "status"):
             task_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        elif name not in ("open", "run", "verify", "close", "checks", "do", "finding"):
+            task_parser.add_argument("--actor", help="Caller label for a shared lifecycle invocation")
         if name in ("finish", "event"):
             task_parser.add_argument("--summary", required=True)
             task_parser.add_argument("--ref", action="append", default=[], help="Path or ID; repeat for multiple refs")
@@ -2233,7 +2235,7 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["open"].add_argument("--title", required=True)
     task_parsers["open"].add_argument("--objective", required=True)
     task_parsers["open"].add_argument("--acceptance", action="append", default=[], help="Acceptance criterion; repeatable")
-    task_parsers["open"].add_argument("--lead", default="claude")
+    task_parsers["open"].add_argument("--lead", "--actor", default="claude")
     task_flow.add_check_arguments(task_parsers["open"])
     task_runner.add_needs_arguments(task_parsers["open"], "the task")
     task_parsers["open"].add_argument("--start", action="store_true", help="Move the new task to in_progress")
@@ -2266,6 +2268,8 @@ def build_parser() -> argparse.ArgumentParser:
             finding_parser.add_argument("--severity", choices=ledger.FINDING_SEVERITIES, required=action == "add")
         if action in ("add", "update"):
             finding_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
+        else:
+            finding_parser.add_argument("--actor", help="Caller label for a shared lifecycle invocation")
         if action == "add":
             finding_parser.add_argument("--title", required=True)
             finding_parser.add_argument("--detail", default="")
@@ -2307,6 +2311,7 @@ def build_parser() -> argparse.ArgumentParser:
     lead_sub = lead.add_subparsers(dest='lead_command', required=True)
     resume = lead_sub.add_parser('resume', help='Read deterministic, bounded lead context without changing state')
     resume.add_argument('--project')
+    resume.add_argument('--actor', help='Caller label for a shared lifecycle invocation')
     resume.add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
     resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
     resume.add_argument('--json', action='store_true', help='Print machine-readable context')

@@ -1276,7 +1276,7 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.assign` | `task`, `actor`, `role`, `mode`, `approved=true` | `scope`, `owner_pid`, `owner_boot_id`, `owner_host`, `owner_pid_namespace`, `lease_seconds` |
 | `task.finish` | `assignment`, `result`, `summary`, `approved=true` | `ref` |
 | `task.activity` | `assignment` | none |
-| `task.ack` | `assignment`, `approved=true` | `note` |
+| `task.ack` | `assignment`, `approved=true` | `note`, `actor` |
 | `task.reap` | `approved=true` | `task`, `dry_run` (default `false`) |
 | `task.event` | `task`, `actor`, `type`, `summary`, `approved=true` | `ref` |
 | `task.verify` | `task`, `command` (argv array), `approved=true` | `label`, `timeout` (seconds, default 300) |
@@ -1337,8 +1337,35 @@ array. Each fix has `tool`, `arguments` and `cli` fields in the same shape as th
 calls in compact reads. An empty array means the refusal supplies no call. A gate
 with several reasons uses the first reason's code in the JSON body. In Python,
 `CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
-The table describes typical resolutions, including those that require judgment or
-manual work.
+CLI `task close` and `task flow` also keep their structured command results on
+stdout with `--json`. MCP close and verification refusals that have a result
+include it in `structuredContent`. Flow run states (such as `worker_failed`) and
+check exit statuses carry evidence. Rejected specs and resume requests emit the
+refusal envelope. The private verifier accepts a single stderr JSON document
+from its child, limited to documented codes the child can emit.
+
+Use the `cli` field for CLI-only `task.run` and `task.flow` calls. In templates,
+supply `REVIEWER` (an independent actor), `RESULT_PATH` (a path outside the
+candidate), and the reviewer `COMMAND [ARGS...]` that writes the structured
+result. Read and acknowledge its delivery before closing. Supply `PATH` for
+a missing write scope or result file, `STATUS` to resolve the listed finding
+after inspecting it, and `MATCHING_SPEC` for the original spec on resume.
+A verification template with `-- COMMAND` needs an explicit lead check when
+there are no declared checks. Fix calls use the recorded lead for lead writes.
+For an unavailable project, `task show` identifies the registered directory.
+Restore that directory and run the worker from it as described under
+[Native worker runner](#native-worker-runner).
+
+`task ack`, `verify`, `checks` and `close` accept `--actor` and default to the
+task lead. `task open --actor` aliases `--lead`. `assign`, `run` and `do`
+require a worker identity. `status` and `finding update` require an explicit
+actor for the audited transition or resolution. `event` and `finding add`
+require an explicit author. Shared task invocations can also pass `--actor`
+to reads, `finish`, `reap`, `restore`, `checkpoints` and `flow`. Those
+commands use the existing assignment, supervisor or spec for attribution.
+
+A timed-out check records the limit and retry hint. The retry doubles the
+per-check timeout, up to the supported maximum of 86400 seconds.
 
 | Code | Meaning | Typical fix |
 | --- | --- | --- |
@@ -1362,6 +1389,7 @@ manual work.
 | `checkpoint.capture_failed` | The runner could not save the checkpoint. | Inspect the diagnostic and correct the capture problem before retrying. |
 | `checkpoint.event_invalid` | The checkpoint event type is unsupported. | Use `checkpointed` or `restored`. |
 | `checkpoint.limit_invalid` | A checkpoint cap is zero or negative. | Supply a positive file or byte limit. |
+| `checkpoint.retention_invalid` | The checkpoint retention age is outside the supported range. | Use the age range shown in the error. |
 | `checkpoint.write_scope_required` | Checkpointing requires a write assignment. | Use `--mode rw` with a claimed scope. |
 | `checks.argument_invalid` | A check argument has an invalid type, length or control character. | Supply valid bounded text arguments. |
 | `checks.argument_sensitive` | A check argument contains secret-shaped text. | Pass credentials through the environment. |
@@ -1377,7 +1405,7 @@ manual work.
 | `close.assignment_active` | An active assignment blocks the gate. | Wait for the assignment or inspect it for orphan recovery. |
 | `close.checks_failed` | Recorded verification exited nonzero. | Address the check failure and verify again. |
 | `close.checks_mismatch` | The declared checks differ from the checks expected by the caller. | Read the current declarations and reconcile the expected checks. |
-| `close.checks_missing` | The task or a declared check has no recorded verification. | Run the declared checks or record a lead verification. |
+| `close.checks_missing` | A declared check has no recorded verification. | Run the declared checks. |
 | `close.checks_stale` | Verification predates a completed builder or the project was unstable during the check. | Verify the final candidate again. |
 | `close.claims_held` | One or more remaining claims block the gate. | Inspect the holding assignments and reap orphaned claims if appropriate. |
 | `close.findings_open` | An open blocking or major finding prevents done. | Address and resolve the finding. |
@@ -1393,6 +1421,10 @@ manual work.
 | `finding.severity_invalid` | The finding severity is unsupported. | Use a supported severity such as `major`. |
 | `finding.status_invalid` | The finding status is unsupported. | Use a supported status such as `open` or `fixed`. |
 | `finding.transition_not_allowed` | The requested finding status transition is forbidden. | Read the current finding status and choose a valid transition. |
+| `flow.conflict` | The selected task or existing flow state prevents starting or resuming. | Inspect the stop reasons before retrying. |
+| `flow.resume_mismatch` | The resume spec differs from the bound spec or project. | Resume with the matching spec. |
+| `flow.resume_required` | A retry omitted the flow task to resume. | Supply the task with `--resume`. |
+| `flow.spec_invalid` | The flow spec could not be read or validated. | Correct the spec and run the supplied validation call. |
 | `input.text_invalid_unicode` | A text field contains a lone surrogate. | Replace it with valid Unicode text. |
 | `input.text_required` | A required text field is empty or blank. | Supply a nonblank value for the named field. |
 | `kit.resume_run_required` | The review kit resume command has no run path. | Pass `--run runs/<work_id>`. |
@@ -1426,12 +1458,24 @@ manual work.
 | `review.tree_phase_invalid` | The review-tree event phase is unsupported. | Use `start` or `end`. |
 | `review.tree_source_invalid` | The review-tree event source is unsupported. | Use `live` or `snapshot` as recorded by the runner. |
 | `run.brief_unreadable` | The runner could not read the worker brief. | Check the brief path and its permissions. |
+| `run.bundle_unavailable` | Run control could not open or update its run bundle. | Check the bundle path and access. |
 | `run.command_required` | A worker command after `--` is missing. | Append `-- COMMAND [ARGS...]`. |
 | `run.grace_invalid` | The configured worker cleanup grace is invalid. | Use a finite nonnegative number of seconds. |
+| `run.launch_failed` | The supervisor could not launch or supervise the child. | Check the executable, permissions and launch diagnostic. |
+| `run.options_invalid` | A run option could not be converted to its supported value. | Correct the value described in the diagnostic. |
 | `run.output_pipes_unavailable` | The runner could not obtain worker output pipes. | Inspect the worker supervisor and retry after resolving the launch issue. |
+| `run.project_check_failed` | The runner could not inspect the task project. | Inspect the task and restore access to its project. |
+| `run.project_mismatch` | The invocation directory does not match the task project. | Run from the project reported by task show. |
+| `run.result_file_required` | A required reviewer has no structured result path. | Use the supplied run template with a result path. |
+| `run.setup_failed` | A worker setup operation failed before launch. | Correct the environment or checkpoint diagnostic. |
+| `run.snapshot_requires_reviewer` | Snapshot review options disagree with the worker role or live-tree option. | Use the snapshot with an independent reviewer. |
+| `run.snapshot_unavailable` | A required or explicitly requested review snapshot could not be prepared. | Correct the snapshot diagnostic and retry. |
+| `run.supervisor_failed` | The private runner supervisor could not start or continue. | Inspect the diagnostic and check for orphaned assignments. |
+| `run.task_unreadable` | The runner could not read the ledger task before launch. | Check the ledger path and access. |
 | `run.windows_command_invalid` | The Windows batch launch rejected the command. | Correct the command arguments or use a native executable. |
 | `run.worker_env_policy_unreadable` | An unreadable policy may configure the worker environment. | Correct `.hipson/policy.json` or set `--env` explicitly. |
 | `run.worker_env_yaml` | An effective YAML policy may configure the worker environment. | Move the setting to `.hipson/policy.json` or set `--env` explicitly. |
+| `run.worker_incomplete` | The one-shot worker did not deliver a usable completion. | Inspect the task and its worker result. |
 | `scope.path_invalid` | A scope path is absolute or uses a parent traversal or drive prefix. | Supply a repository-relative path. |
 | `scope.path_sensitive` | A write scope contains secret-shaped text. | Choose a scope without credential material. |
 | `scope.path_whitespace` | A scope path component starts or ends with whitespace. | Use the intended path without surrounding whitespace. |
@@ -1448,7 +1492,9 @@ manual work.
 | `task_read.compact_paging_required` | List pagination flags require a compact view. | Pass `--detail compact` with the paging flags. |
 | `task_read.section_required` | A task-show page has no section. | Pass `--section` with the paging flags. |
 | `task_read.section_with_compact` | A section read was combined with compact detail. | Choose the section read or the compact summary. |
+| `verify.artifact_unavailable` | The verification command could not use its work or output artifact. | Inspect the artifact path and diagnostic. |
 | `verify.argv_invalid` | The verification command argv is missing or invalid. | Supply a command with valid text arguments and no NULs. |
+| `verify.check_timeout` | A lead check ran past its per-check timeout. | Retry verification using the supplied timeout. |
 | `verify.checks_undeclared` | No acceptance checks were declared for this task. | Declare checks or provide a verification command. |
 | `verify.cleanup_unconfirmed` | The supervisor could not confirm verification process cleanup. | Confirm the check's descendants have exited before retrying. |
 | `verify.command_required` | An explicit verification command is missing or lacks its delimiter. | Pass `-- COMMAND [ARGS...]` or omit it to run declared checks. |
@@ -1465,6 +1511,7 @@ manual work.
 | `verify.git_submodules` | A submodule requires separate verification. | Verify the submodule separately. |
 | `verify.head_moved` | HEAD changed while fingerprinting or differs from verified HEAD. | Run verification against the current HEAD. |
 | `verify.inventory_path_invalid` | The fingerprint inventory contains an invalid path. | Inspect the Git inventory and correct the invalid path. |
+| `verify.lead_missing` | A task without declared checks has no lead verification record. | Run an explicit lead check or declare acceptance checks. |
 | `verify.lead_required` | The record lacks the task lead's verification in a lead context. | Verify as the recorded task lead. |
 | `verify.snapshot_budget` | Project content exceeds the per-file or aggregate snapshot budget. | Verify a smaller project or reduce the candidate content. |
 | `verify.special_file` | A special filesystem entry prevents fingerprinting. | Remove it from the verification candidate. |

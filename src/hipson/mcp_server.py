@@ -105,7 +105,7 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     'task.ack': {
         'type': 'object', 'required': ['assignment', 'approved'],
-        'properties': {'assignment': {'type': 'string'}, 'note': {'type': 'string'},
+        'properties': {'assignment': {'type': 'string'}, 'note': {'type': 'string'}, 'actor': {'type': 'string'},
                        'approved': {'type': 'boolean'}}, 'additionalProperties': False,
     },
     "contract.show": {
@@ -672,6 +672,8 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise SystemExit("tools/call arguments must be an object")
     payload = _tool_payload(name, arguments, project=project)
+    if name in ("task.close", "task.verify") and isinstance(payload, dict) and isinstance(body := payload.get("refusal"), dict):
+        return {**_error_content(body["message"], body), "structuredContent": payload}
     compact = name in _TASK_READS and (arguments.get("detail") == "compact" or "section" in arguments)
     text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)
     return {"content": [{"type": "text", "text": text}], "isError": False}
@@ -882,17 +884,21 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     if name in _TASK_READS and (arguments.get("detail") == "compact" or "section" in arguments):
         return _task_read_projection(name, arguments, db)
     if name == 'task.verify':
-        from hipson.task_verification import declared_checks, run, run_checks
+        from hipson.task_verification import check_refusal, declared_checks, run, run_checks
         if 'command' in arguments:
-            return run(db, arguments['task'], arguments['command'], label=arguments.get('label', ''),
-                       timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
+            record = run(db, arguments['task'], arguments['command'], label=arguments.get('label', ''),
+                         timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
+            refusal = check_refusal(record, db, command=arguments['command'])
+            return {**record, 'refusal': refusal.error_payload()} if refusal else record
         checks = declared_checks(db, arguments['task'])
         if not checks:
             raise ledger.LedgerError(f"{arguments['task']} declares no acceptance checks; pass command or use task.checks",
                                      code="verify.checks_undeclared")
         records = run_checks(db, arguments['task'], checks, label=arguments.get('label', ''),
                              timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
-        return {'records': records, 'passing': len(records) == len(checks) and all(
+        refusal = next((issue for record in records if (issue := check_refusal(record, db))), None)
+        return {**({'refusal': refusal.error_payload()} if refusal else {}),
+                'records': records, 'passing': len(records) == len(checks) and all(
             record['exit_code'] == 0 for record in records)}
     if name == 'task.close':
         from hipson.task_flow import close
@@ -926,7 +932,7 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         if name == 'task.activity':
             return store.activity(arguments['assignment'])
         if name == 'task.ack':
-            return store.ack(arguments['assignment'], note=arguments.get('note', ''))
+            return store.ack(arguments['assignment'], note=arguments.get('note', ''), actor=arguments.get('actor'))
         if name == "task.open":
             return store.open_task(
                 project=arguments["project"], title=arguments["title"], objective=arguments["objective"],
@@ -1085,10 +1091,14 @@ def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:
 
 
 def _tool_error(request_id: object, message: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _result(request_id, _error_content(message, body))
+
+
+def _error_content(message: str, body: dict[str, Any] | None) -> dict[str, Any]:
     content = [{"type": "text", "text": redact_text(message) if body is None else body["message"]}]
     if body is not None:
         content.append({"type": "text", "text": json.dumps(body, ensure_ascii=True)})
-    return _result(request_id, {"content": content, "isError": True})
+    return {"content": content, "isError": True}
 
 
 def _result(request_id: object, result: dict[str, Any]) -> dict[str, Any]:

@@ -24,7 +24,7 @@ TASK_TOOLS = {
     'lead.resume': (set(), {'project', 'all', 'detail'}),
     'task.now': (set(), {'project', 'all', 'detail', 'offset', 'limit'}),
     "task.activity": ({"assignment"}, set()),
-    "task.ack": ({"assignment", "approved"}, {"note"}),
+    "task.ack": ({"assignment", "approved"}, {"note", "actor"}),
     "task.show": ({"task"}, {"detail", "section", "cursor", "limit"}),
     "task.brief": ({"task", "role"}, {"scope"}),
     "task.context": (set(), {"task"}),

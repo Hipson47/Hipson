@@ -962,9 +962,12 @@ def configure(parser: argparse.ArgumentParser) -> None:
 
 
 def command(args: argparse.Namespace) -> int:
+    from hipson.task_calls import read_call
+
     def echo(text: str) -> None:
         print(text, file=sys.stderr, flush=True)
 
+    db = None
     try:
         if args.retry and not args.resume:
             raise FlowError('invalid_config', ['--retry needs --resume TASK'])
@@ -976,11 +979,21 @@ def command(args: argparse.Namespace) -> int:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         result = run(db, spec, digest, resume=args.resume, retry=args.retry, echo=echo)
     except FlowError as exc:
-        print(json.dumps({'state': exc.state, 'exit_code': EXIT[exc.state], 'reasons': exc.reasons}) if args.json
-              else f'hipson task flow: {task_activity.safe_text(exc, 1200)}', file=None if args.json else sys.stderr)
+        cli_db = str(db) if db is not None else args.db
+        if exc.state == 'invalid_config':
+            exc.code = 'flow.spec_invalid' if not args.retry or args.resume else 'flow.resume_required'
+            exc.fix = [read_call('task.flow', {'spec': args.spec, 'check': True}, cli_db)]
+        elif args.resume and any(reason.startswith(('spec differs from', 'spec project ')) for reason in exc.reasons):
+            exc.code = 'flow.resume_mismatch'
+            exc.fix = [read_call('task.flow', {'resume': args.resume}, cli_db, template=('--spec', 'MATCHING_SPEC'))]
+        else:
+            exc.code = 'flow.conflict'
+        if args.json:
+            print(json.dumps({'state': exc.state, 'exit_code': EXIT[exc.state], 'reasons': exc.reasons}))
+        ledger.print_error(exc, f'hipson task flow: {exc}', json_output=args.json)
         return EXIT[exc.state]
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(f'hipson task flow: {task_activity.safe_text(exc, 1200)}', file=sys.stderr)
+        ledger.print_error(exc, f'hipson task flow: {exc}', json_output=args.json)
         return 1
     if args.json:
         print(json.dumps(result, ensure_ascii=True))

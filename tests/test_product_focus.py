@@ -144,8 +144,11 @@ def test_close_refusal_names_the_timeout_when_a_check_runs_out_of_time(tmp_path:
         task = _open(store, project, checks=(slow,))
     refused = task_flow.close(db, task, timeout=1)
     assert not refused["closed"] and refused["exit_code"] == 124
-    assert refused["reasons"] == [f"check `{shlex.join(slow)}` failed with exit 124; it hit the 1s per-check timeout, "
-                                  "rerun with --timeout SECONDS"]
+    assert refused["reasons"] == [f"check `{shlex.join(slow)}` failed with exit 124; Check hit the 1s per-check timeout; "
+                                  "retry with hipson task verify --timeout 2"]
+    assert refused["refusal"]["code"] == "verify.check_timeout"
+    (retry,) = refused["refusal"]["fix"]
+    assert retry["tool"] == "task.verify" and retry["arguments"]["timeout"] == 2
 
 
 def test_brief_shows_a_readable_gate_summary_instead_of_raw_json(tmp_path: Path):

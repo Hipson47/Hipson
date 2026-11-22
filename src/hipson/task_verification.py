@@ -21,7 +21,7 @@ from typing import Any, cast
 from hipson import ledger, task_activity
 from hipson.display import escape_display_controls
 from hipson.redaction import redact_text
-from hipson.task_calls import ReadCall
+from hipson.task_calls import VERIFIER_REFUSAL_CODES, ReadCall, read_call, valid_call, verify_call
 
 OUTPUT_LIMIT = 8192
 FILE_HASH_LIMIT = 16 * 1024 * 1024
@@ -463,15 +463,19 @@ def command(args: argparse.Namespace) -> int:
             records = store.verifications(args.task)
         record = next((item for item in records if item['id'] == args.verification_id), None)
         if record is None:
+            if code == 75 and args.json:
+                return 1  # The runner already emitted the refusal envelope.
             raise ledger.LedgerError(f'Verification evidence unavailable (command exit {code}); closure remains gated',
                 code="verify.evidence_unavailable")
         print(json.dumps(record, ensure_ascii=True) if args.json else render(record))
+        if (exc := check_refusal(record, db, command=argv, lead=task['lead'])) is not None:
+            ledger.print_error(exc, str(exc), json_output=args.json)
         if record['fingerprint'] is None:
             print(f"Warning: this run cannot be closure evidence: {task_activity.safe_text(record.get('error') or 'fingerprint unavailable')}."
                   " Fix that (for example commit the initial revision) and verify again.", file=sys.stderr)
         return code
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 1
 
 
@@ -481,7 +485,8 @@ def render(record: dict[str, Any]) -> str:
             f"command: {escape_display_controls(shlex.join(record['command']))}\n"
             + '<untrusted_data name="verification_output">\n'
             + escape_display_controls(record['output_tail']).replace('<', '&lt;').replace('>', '&gt;')
-            + '\n</untrusted_data>')
+            + '\n</untrusted_data>'
+            + (f"\n{record['timeout_hint']}" if 'timeout_hint' in record else ''))
 
 
 def declared_checks(db: Path, task: str) -> list[list[str]]:
@@ -516,25 +521,65 @@ def _command_checks(db: Path, args: argparse.Namespace) -> int:
         print(json.dumps(records, ensure_ascii=True))
     failed = next((record for record in records if record['exit_code'] != 0), None)
     if failed is None:
+        refusal = next((issue for record in records if (issue := check_refusal(record, db))), None)
+        if refusal is not None:
+            ledger.print_error(refusal, str(refusal), json_output=args.json)
         if not args.json:
             print(f'All {len(records)} acceptance checks passed.')
         return 0
     skipped = len(checks) - len(records)
-    print(f"Check failed: {shlex.join(failed['command'])} (exit {failed['exit_code']})"
-          + (f'; {skipped} later checks not run' if skipped else ''), file=sys.stderr)
+    message = (f"Check failed: {shlex.join(failed['command'])} (exit {failed['exit_code']})"
+               + (f'; {skipped} later checks not run' if skipped else ''))
+    if 'timeout_seconds' in failed:
+        exc = timeout_refusal(failed, db)
+        ledger.print_error(exc, f"{message}; {exc}", json_output=args.json)
+    else:
+        exc = ledger.LedgerError(message, code="close.checks_failed", fix=[
+            read_call("task.show", {"task": args.task, "section": "verification"}, str(db)),
+            verify_call(args.task, task_lead(db, args.task), db),
+        ])
+        ledger.print_error(exc, message, json_output=args.json)
     return int(failed['exit_code']) or 1
 
 
+def task_lead(db: Path, task: str) -> str:
+    with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
+        return store._task(task)['lead']
+
+
+def timeout_refusal(record: dict[str, Any], db: Path, *, command: list[str] | None = None,
+                    lead: str | None = None) -> ledger.LedgerError:
+    timeout = record['timeout_seconds']
+    retry = verify_call(record['task'], lead or task_lead(db, record['task']), db,
+                        command=command, timeout=min(86400, 2 * timeout))
+    return ledger.LedgerError(f'Check hit the {timeout:g}s per-check timeout', code="verify.check_timeout", fix=[retry])
+
+
+def check_refusal(record: dict[str, Any], db: Path, *, command: list[str] | None = None,
+                  lead: str | None = None) -> ledger.LedgerError | None:
+    if 'timeout_seconds' in record:
+        return timeout_refusal(record, db, command=command, lead=lead)
+    if record['error'] == 'HEAD moved while fingerprinting' or any(
+            change.startswith('HEAD before=') for change in record['changes']):
+        retry = verify_call(record['task'], lead or task_lead(db, record['task']), db, command=command)
+        return ledger.LedgerError('HEAD moved during verification; verify the current HEAD',
+                                  code="verify.head_moved", fix=[retry])
+    return None
+
+
 def _supervisor_refusal(stderr: str) -> ledger.LedgerError | None:
-    # The private verifier does not relay the check's output to stderr. Its final error line
-    # can carry the CLI error envelope even when runner diagnostics preceded it.
-    line = stderr.rstrip().rsplit('\n', 1)[-1]
+    from hipson.mcp_server import MCP_TOOL_NAMES
+
+    # A coded refusal is a whole stderr document. Diagnostic text cannot supply a trailing envelope.
     try:
-        body = json.loads(line)
+        body = json.loads(stderr)
     except (ValueError, RecursionError):
         return None
-    if (isinstance(body, dict) and body.get('error_schema') == 1 and isinstance(body.get('code'), str)
-            and isinstance(body.get('message'), str) and isinstance(body.get('fix'), list)):
+    tools = set(MCP_TOOL_NAMES) | {"task.run", "task.flow"}
+    if (isinstance(body, dict) and type(body.get('error_schema')) is int and body['error_schema'] == 1
+            and isinstance(body.get('code'), str) and body['code'] in VERIFIER_REFUSAL_CODES
+            and isinstance(body.get('message'), str) and isinstance(body.get('fix'), list)
+            and all(valid_call(item, tools) for item in body['fix'])):
         return ledger.LedgerError(body['message'], code=body['code'], fix=cast(list[ReadCall], body['fix']))
     return None
 
@@ -564,7 +609,9 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
         refusal = _supervisor_refusal(diagnostic)
         if refusal is not None:
             raise refusal from exc
-        raise ledger.LedgerError(task_activity.safe_text(diagnostic) or 'Verification did not return recorded evidence',
+        if diagnostic.strip():
+            raise ledger.LedgerError(ledger.refusal_text(diagnostic)) from exc
+        raise ledger.LedgerError('Verification did not return recorded evidence',
                                  code="verify.evidence_unavailable") from exc
 
 
@@ -590,5 +637,10 @@ def finish(db: Path, args: argparse.Namespace, code: int, started_at: str, start
               'generated_files': [], 'changes': changes, 'cleanup_confirmed': safe,
               'untrusted_fields': ['actor', 'context', 'metadata_fallback_paths', 'label', 'command', 'subject',
                                    'output_tail', 'error', 'files', 'generated_files', 'changes']}
+    if getattr(args, 'check_timed_out', False):
+        record['timeout_seconds'] = args.timeout
+        retry = min(86400, 2 * args.timeout)
+        record['timeout_hint'] = (f"Check hit the {args.timeout:g}s per-check timeout; "
+                                  f"retry with hipson task verify --timeout {retry:g}")
     with closing(ledger.Ledger(db, create=False)) as store:
         store._record_verification(record)

@@ -145,6 +145,38 @@ def _activity_fix(assignment, db):
     }
 
 
+def _fix(tool, args, flags, db, suffix=""):
+    command = {"task.findings": "task finding list", "task.finding_update": "task finding update"}
+    cli = f"hipson {command.get(tool, tool.replace('.', ' '))}{flags} --db {shlex.quote(str(db))} --json{suffix}"
+    return {"tool": tool, "arguments": args, "cli": cli}
+
+
+def _verify_fix(task, db, *, command=None, explicit=False):
+    args = {"task": task, "actor": LEAD, "approved": True}
+    if command:
+        args["command"] = command
+    suffix = " -- " + shlex.join(command) if command else " -- COMMAND" if explicit else ""
+    return _fix("task.verify", args, f" --task {task} --actor {LEAD}", db, suffix)
+
+
+def _ack_fixes(assignment, db):
+    return [_activity_fix(assignment, db),
+            _fix("task.ack", {"assignment": assignment, "actor": LEAD, "approved": True},
+                 f" --assignment {assignment} --actor {LEAD}", db)]
+
+
+def _finding_fixes(task, finding, db):
+    return [_fix("task.findings", {"task": task, "status": "open"}, f" --task {task} --status open", db),
+            _fix("task.finding_update", {"finding": finding, "actor": LEAD, "approved": True},
+                 f" --finding {finding} --actor {LEAD}", db, " --status STATUS")]
+
+
+def _transition_fixes(task, db, targets):
+    return [_fix("task.show", {"task": task, "detail": "compact"}, f" --task {task} --detail compact", db),
+            *(_fix("task.status", {"task": task, "to": to, "actor": LEAD, "approved": True},
+                   f" --task {task} --to {to} --actor {LEAD}", db) for to in targets)]
+
+
 def test_close_task_from_open_records_every_step_without_overrides(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         store, task = _store(tmp_path)
@@ -167,14 +199,14 @@ def test_close_to_review_ignores_done_only_blockers_but_not_active_work(tmp_path
             store.set_status(task, to="in_progress", actor=LEAD)
             done = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
             store.finish(done, result="passed", summary="unread")
-            store.add_finding(task, actor="r", severity="major", title="Open major")
+            major = store.add_finding(task, actor="r", severity="major", title="Open major")["id"]
             _verified(store, task)
             assert store.close_task(task, to="review", actor=LEAD)["status"] == "review"
             refusal = _error(lambda: store.close_task(task, actor=LEAD), "unacknowledged result",
                              "close.results_unacknowledged", ledger.CloseRefusedError)
             assert str(refusal).startswith(f"Cannot close {task}: ") and len(refusal.reasons) == 2
             _assert_gate_refusal(refusal, ["close.results_unacknowledged", "close.findings_open"],
-                                 fix=[_activity_fix(done, store.path)])
+                                 fix=_ack_fixes(done, store.path) + _finding_fixes(task, major, store.path))
             refusal = _error(lambda: store.close_task(task, to="review", actor=LEAD),
                              "close works from open, in_progress or review",
                              "close.status_not_allowed", ledger.CloseRefusedError)
@@ -196,7 +228,7 @@ def test_done_lists_remaining_minor_findings_and_blocks_on_severe_ones(tmp_path)
             blocking = store.add_finding(task, actor="r", severity="blocking", title="Stop")["id"]
             refusal = _error(lambda: store.set_status(task, to="done", actor=LEAD),
                              f"open blocking finding {blocking}: Stop", "close.findings_open", ledger.GateRefusedError)
-            _assert_gate_refusal(refusal, ["close.findings_open"])
+            _assert_gate_refusal(refusal, ["close.findings_open"], fix=_finding_fixes(task, blocking, store.path))
             store.update_finding(blocking, actor=LEAD, status="fixed", resolution_note="done")
             view = store.set_status(task, to="done", actor=LEAD, summary="ship")
             event = store.events(task)[-1]
@@ -209,16 +241,19 @@ def test_invalid_transitions_name_allowed_targets_and_the_close_hint(tmp_path):
     with patch.object(task_verification, "project_state", return_value=dict(STATE)):
         store, task = _store(tmp_path)
         with closing(store):
-            _error(lambda: store.set_status(task, to="done", actor=LEAD),
+            refusal = _error(lambda: store.set_status(task, to="done", actor="invoker"),
                    f"Invalid task transition for {task}: open -> done (allowed: cancelled, in_progress); "
                    f"hipson task close --task {task} verifies and closes in one step", "status.transition_not_allowed")
-            _error(lambda: store.set_status(task, to="review", actor=LEAD),
+            assert refusal.fix == _transition_fixes(task, store.path, ["cancelled", "in_progress"])
+            refusal = _error(lambda: store.set_status(task, to="review", actor=LEAD),
                    f"Invalid task transition for {task}: open -> review (allowed: cancelled, in_progress)",
                    "status.transition_not_allowed")
+            assert refusal.fix == _transition_fixes(task, store.path, ["cancelled", "in_progress"])
             store.set_status(task, to="cancelled", actor=LEAD, summary="dropped")
             assert store.events(task)[-1]["summary"] == "open -> cancelled: dropped"
-            _error(lambda: store.set_status(task, to="open", actor=LEAD), "(allowed: none (terminal))",
-                   "status.transition_not_allowed")
+            refusal = _error(lambda: store.set_status(task, to="open", actor=LEAD), "(allowed: none (terminal))",
+                             "status.transition_not_allowed")
+            assert refusal.fix == _transition_fixes(task, store.path, [])
 
 
 def test_close_task_refuses_unverified_work_with_every_reason_and_closes_from_review(tmp_path):
@@ -231,11 +266,13 @@ def test_close_task_refuses_unverified_work_with_every_reason_and_closes_from_re
                 store.close_task(task, actor=LEAD)
             assert refusal.value.reasons == ["missing lead verification; run hipson task verify",
                                              f"active assignment {active}: wait for it, or hipson task reap --task {task}"]
-            _assert_gate_refusal(refusal.value, ["close.checks_missing", "close.assignment_active"])
+            _assert_gate_refusal(refusal.value, ["verify.lead_missing", "close.assignment_active"],
+                                 fix=[_verify_fix(task, store.path, explicit=True)])
             with pytest.raises(ledger.CloseRefusedError) as refusal:
                 store.close_task(task, to="review", actor=LEAD)
             assert refusal.value.reasons[-1].startswith(f"active assignment {active}")
-            _assert_gate_refusal(refusal.value, ["close.checks_missing", "close.assignment_active"])
+            _assert_gate_refusal(refusal.value, ["verify.lead_missing", "close.assignment_active"],
+                                 fix=[_verify_fix(task, store.path, explicit=True)])
             store.finish(active, result="passed", summary="ok")
             store.ack(active, note="read")
             _verified(store, task)
@@ -342,7 +379,7 @@ def test_done_refusal_lists_every_blocker_and_force_records_an_exact_override(tm
                              f"open major finding {major}: M; unacknowledged result {unread}",
                              "close.assignment_active", ledger.GateRefusedError)
             _assert_gate_refusal(refusal, ["close.assignment_active", "close.claims_held", "close.findings_open",
-                                           "close.results_unacknowledged"], fix=[_activity_fix(unread, store.path)])
+                                           "close.results_unacknowledged"], fix=_finding_fixes(task, major, store.path) + _ack_fixes(unread, store.path))
             _error(lambda: store.set_status(task, to="done", actor=LEAD, force=True), "Override reason must not be empty",
                    "input.text_required")
             view = store.set_status(task, to="done", actor=LEAD, force=True, reason="ship anyway")
@@ -366,8 +403,8 @@ def test_forced_review_without_verification_is_recorded_as_overridden(tmp_path):
                              f"Cannot mark {task} review: missing lead verification; run hipson task verify; next: "
                              f"hipson task close --task {task} (runs declared checks), or hipson task verify --task "
                              f"{task} -- COMMAND (MCP: task.close / task.verify)",
-                             "close.checks_missing", ledger.GateRefusedError)
-            _assert_gate_refusal(refusal, ["close.checks_missing"])
+                             "verify.lead_missing", ledger.GateRefusedError)
+            _assert_gate_refusal(refusal, ["verify.lead_missing"], fix=[_verify_fix(task, store.path, explicit=True)])
             view = store.set_status(task, to="review", actor=LEAD, force=True, reason="manual check")
             assert view["status"] == "review"
             override, status = store.events(task)[-2:]
@@ -388,7 +425,7 @@ def test_a_final_snapshot_change_inside_the_transaction_is_refused_or_audited(tm
             state.side_effect = itertools.chain([dict(STATE)], itertools.repeat(moved))  # Stale only in the final view.
             refusal = _error(lambda: store.set_status(task, to="review", actor=LEAD),
                              f"Cannot mark {task} review: stale: HEAD moved", "verify.head_moved", ledger.GateRefusedError)
-            _assert_gate_refusal(refusal, ["verify.head_moved"])
+            _assert_gate_refusal(refusal, ["verify.head_moved"], fix=[_verify_fix(task, store.path, command=CHECK)])
             assert store.show(task)["status"] == "in_progress"
             state.side_effect = itertools.chain([dict(STATE)], itertools.repeat(moved))
             view = store.set_status(task, to="review", actor=LEAD, force=True, reason="moved during close")
@@ -456,7 +493,7 @@ def test_final_snapshot_is_rechecked_for_done_too_and_messages_are_exact(tmp_pat
             refusal = _exact(lambda: store.set_status(task, to="done", actor=LEAD),
                              f"Cannot mark {task} done: stale: HEAD moved; before={'a' * 40} after={'c' * 40}",
                              "verify.head_moved", ledger.GateRefusedError)
-            _assert_gate_refusal(refusal, ["verify.head_moved"])
+            _assert_gate_refusal(refusal, ["verify.head_moved"], fix=[_verify_fix(task, store.path, command=CHECK)])
             assert store.show(task)["status"] == "review"
             state.side_effect = None
             state.return_value = dict(STATE)
@@ -754,9 +791,13 @@ def _checkpoint_events_contract(tmp_path):
         store.assign(other_task, actor="w", role="builder", mode="rw", scope=["src"])
         with patch.object(ledger.sys, "platform", "darwin"):
             same = store.open_task(project=str(tmp_path).upper(), title="S", objective="o", lead=LEAD)["id"]
-            _error(lambda: store.assign(same, actor="w", role="builder", mode="rw", scope=["SRC/x"]),
+            refusal = _error(lambda: store.assign(same, actor="w", role="builder", mode="rw", scope=["SRC/x"]),
                    f"Claim 'SRC/x' conflicts with 'src' held by assignment {held}", "claim.conflict",
                    ledger.ClaimConflictError)
+        assert refusal.fix == [
+            _fix("task.show", {"task": task, "section": "assignments"}, f" --task {task} --section assignments", store.path),
+            _fix("task.reap", {"task": task, "dry_run": True, "approved": True}, f" --task {task} --dry-run", store.path),
+        ]
         event = store.record_checkpoint(held, type="checkpointed", summary=" A: checkpoint of src ")
         assert (event["type"], event["actor"], event["summary"], event["refs"], event["task"]) == (
             "checkpointed", "hipson", "A: checkpoint of src", [held], task)
@@ -1000,7 +1041,9 @@ def test_review_policy_ledger_exact_contract(tmp_path):
                   "builder and lead verification (hipson task flow, or hipson task run --role reviewer --mode ro)")
         refusal = _error(lambda: store.set_status(task, to="done", actor=LEAD), f"Cannot mark {task} done: {reason}",
                          "close.review_required", ledger.GateRefusedError)
-        _assert_gate_refusal(refusal, ["close.review_required"])
+        _assert_gate_refusal(refusal, ["close.review_required"], fix=[_fix(
+            "task.run", {"task": task, "role": "reviewer", "mode": "ro"}, f" --task {task} --role reviewer --mode ro",
+            store.path, " --actor REVIEWER --result-file RESULT_PATH -- COMMAND")])
         # Reviews by the lead's label do not count; done_blockers keeps every other blocker too.
         _review(store, task, actor=LEAD.upper())
         active = store.assign(task, actor="other", role="explorer", mode="ro", scope=[])["id"]
@@ -1122,7 +1165,8 @@ def test_close_refused_error_constructor(tmp_path):
 
 def test_gate_reason_codes_classify_raw_reasons_in_order():
     cases = [
-        ("missing lead verification; run hipson task verify", "close.checks_missing"),
+        ("missing lead verification; run hipson task verify", "verify.lead_missing"),
+        ("missing: never verified", "close.checks_missing"),
         ("failing verification: exit 2", "close.checks_failed"),
         ("stale: HEAD moved; before=a after=b", "verify.head_moved"),
         ("stale: working tree changed since verification: x.py", "verify.tree_changed"),
@@ -1130,6 +1174,18 @@ def test_gate_reason_codes_classify_raw_reasons_in_order():
         ("unavailable working-tree fingerprint: Project directory is unavailable", "project.unavailable"),
         ("unavailable working-tree fingerprint: HEAD moved while fingerprinting", "verify.head_moved"),
         ("unavailable working-tree fingerprint: Project changed while fingerprinting", "verify.tree_changed"),
+        ("unavailable working-tree fingerprint: Git filter configuration is unavailable", "verify.git_filters_unavailable"),
+        ("unavailable working-tree fingerprint: Git repository is present", "verify.git_state_unavailable"),
+        ("unavailable working-tree fingerprint: Git HEAD is unavailable", "verify.git_head_unavailable"),
+        ("unavailable working-tree fingerprint: Git content inventory is unavailable", "verify.git_inventory_unavailable"),
+        ("unavailable working-tree fingerprint: Git submodules require separate verification", "verify.git_submodules"),
+        ("unavailable working-tree fingerprint: Invalid repository path in content inventory", "verify.inventory_path_invalid"),
+        ("unavailable working-tree fingerprint: Directory symlink prevents contained project fingerprinting", "verify.directory_symlink"),
+        ("unavailable working-tree fingerprint: Special file prevents project fingerprinting", "verify.special_file"),
+        ("unavailable working-tree fingerprint: Project content exceeds the snapshot budget", "verify.snapshot_budget"),
+        ("unavailable working-tree fingerprint: A symlink points outside the project", "verify.external_symlink"),
+        ("unavailable working-tree fingerprint: Git normalized content hash is unavailable", "verify.git_hash_unavailable"),
+        ("unavailable working-tree fingerprint: Project /x is not a Git repository and is too large to fingerprint (over 20000 paths or 20 s)", "verify.walk_limit"),
         ("unavailable working-tree fingerprint: unknown", "verify.fingerprint_unavailable"),
         ("verification was not recorded by the task lead in a lead context", "verify.lead_required"),
         ("partial content coverage (metadata fallback): big.bin", "verify.coverage_partial"),
@@ -1158,18 +1214,6 @@ def test_gate_reason_codes_classify_raw_reasons_in_order():
     assert ledger._gate_reason_codes({"checks": []}, []) == []
 
 
-def test_gate_fix_calls_preserve_assignment_order_and_database(tmp_path):
-    db = tmp_path / "ledger with spaces.sqlite"
-    reasons = [
-        "open major finding F-0001: mentions an unacknowledged result A-0999",
-        "unacknowledged result A-0002: read it, then acknowledge it",
-        "unacknowledged results need attention",
-        "unacknowledged result A-0001",
-    ]
-    assert ledger._gate_fix_calls(reasons, db) == [_activity_fix("A-0002", db), _activity_fix("A-0001", db)]
-    assert ledger._gate_fix_calls(reasons[:1], db) == []
-
-
 def test_gate_refusals_keep_distinct_verification_codes(tmp_path):
     with (patch.object(task_verification, "project_state", return_value=dict(STATE)) as project_state,
           closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
@@ -1177,18 +1221,18 @@ def test_gate_refusals_keep_distinct_verification_codes(tmp_path):
         store.set_status(task, to="in_progress", actor=LEAD)
         with pytest.raises(ledger.CloseRefusedError) as missing:
             store.close_task(task, to="review", actor=LEAD)
-        _assert_gate_refusal(missing.value, ["close.checks_missing"])
+        _assert_gate_refusal(missing.value, ["close.checks_missing"], fix=[_verify_fix(task, store.path)])
 
         _verified(store, task)
         project_state.return_value = {**STATE, "revision": "c" * 40}
         with pytest.raises(ledger.GateRefusedError) as moved:
             store.set_status(task, to="review", actor=LEAD)
-        _assert_gate_refusal(moved.value, ["verify.head_moved"])
+        _assert_gate_refusal(moved.value, ["verify.head_moved"], fix=[_verify_fix(task, store.path)])
 
         project_state.return_value = {**STATE, "files": [{"path": "new.py", "state": "file:hash"}]}
         with pytest.raises(ledger.CloseRefusedError) as changed:
             store.close_task(task, to="review", actor=LEAD)
-        _assert_gate_refusal(changed.value, ["verify.tree_changed"])
+        _assert_gate_refusal(changed.value, ["verify.tree_changed"], fix=[_verify_fix(task, store.path)])
         assert store.show(task)["status"] == "in_progress"
 
 
@@ -1198,10 +1242,107 @@ def test_close_refusal_pairs_codes_with_reasons_and_suggests_the_unread_activity
         with closing(store):
             assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
             store.finish(assignment, result="passed", summary="unread")
-            store.add_finding(task, actor="r", severity="major", title="Open major")
+            major = store.add_finding(task, actor="r", severity="major", title="Open major")["id"]
             with pytest.raises(ledger.CloseRefusedError) as error:
                 store.close_task(task, actor=LEAD)
             refusal = error.value
             assert [reason.split()[0] for reason in refusal.reasons] == ["missing", "unacknowledged", "open"]
-            _assert_gate_refusal(refusal, ["close.checks_missing", "close.results_unacknowledged", "close.findings_open"],
-                                 fix=[_activity_fix(assignment, store.path)])
+            _assert_gate_refusal(refusal, ["verify.lead_missing", "close.results_unacknowledged", "close.findings_open"],
+                                 fix=[_verify_fix(task, store.path, explicit=True), *_ack_fixes(assignment, store.path),
+                                      *_finding_fixes(task, major, store.path)])
+
+
+def test_ack_records_exact_actor_note_and_lookup_fixes(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        store, task = _store(tmp_path)
+        with closing(store):
+            task_and_lead = {"actor": LEAD, "task": task}
+            active = store.assign(task, actor="w", role="explorer", mode="ro")["id"]
+            missing = _exact(lambda: store.ack("A-9999"), "Assignment not found: A-9999", "assignment.not_found")
+            assert missing.fix == [_fix("task.now", {"detail": "compact", "all": True},
+                                        " --detail compact --all", store.path)]
+            busy = _exact(lambda: store.ack(active), f"Cannot acknowledge active assignment {active}", "assignment.active")
+            assert busy.fix == []
+            store.finish(active, result="passed", summary="reviewed")
+            _exact(lambda: store.ack(active, actor=" "), "actor must not be empty", "input.text_required")
+            default = store.ack(active)
+            assert default["acknowledged_at"] is not None and default["ack_note"] == ""
+            assert default["ack_state"] == "acknowledged"
+            event = store.events(task)[-1]
+            assert {key: event[key] for key in task_and_lead} == task_and_lead
+            assert (event["type"], event["summary"], event["refs"]) == (
+                "acknowledged", f"{active}: result acknowledged", [active])
+            assert store.ack(active, actor="other", note="again") == default
+            assert store.events(task)[-1] == event
+
+            other = store.assign(task, actor="w", role="explorer", mode="ro")["id"]
+            store.finish(other, result="failed", summary="reviewed")
+            timestamp = "2026-11-22T12:01:10Z"
+            with patch.object(ledger, "_timestamp", return_value=timestamp):
+                noted = store.ack(other, actor=" delegate ", note="Read fully")
+            assert noted == store.activity(other)
+            assert (noted["acknowledged_at"], noted["ack_note"], noted["ack_state"]) == (
+                timestamp, "Read fully", "acknowledged")
+            event = store.events(task)[-1]
+            assert (event["task"], event["actor"], event["type"], event["summary"], event["refs"]) == (
+                task, "delegate", "acknowledged", f"{other}: Read fully", [other])
+
+
+def test_close_refusal_can_classify_only_its_preflight_blockers(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)),
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Candidate", objective="Verify", lead=LEAD, checks=[CHECK])["id"]
+        assignment = store.assign(task, actor="w", role="explorer", mode="ro")["id"]
+        store.finish(assignment, result="passed", summary="unread")
+        reasons = [f"unacknowledged result {assignment}"]
+        error = ledger.close_refusal(store.show(task), reasons, store.path, include_verification=False)
+        assert error.reasons == reasons and str(error) == f"Cannot close {task}: {reasons[0]}"
+        _assert_gate_refusal(error, ["close.results_unacknowledged"], fix=_ack_fixes(assignment, store.path))
+
+
+def test_assignment_delivery_retains_exact_details_and_historical_ack_state(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        store, task = _store(tmp_path)
+        started = "2026-11-22T12:00:00Z"
+        ended = "2026-11-22T12:00:20Z"
+        environment = {"mode": "minimal", "names": ["PATH"], "allowed": ["PATH"], "missing": [], "dropped": 7}
+        report = {"status": "completed", "summary": "Complete", "files_changed": [], "commands": [],
+                  "findings": [], "risks": []}
+        with closing(store), patch.object(ledger, "_timestamp", return_value=started) as clock:
+            assigned = store.assign(task, actor=" worker ", role="reviewer", mode="ro", owner_pid=4321,
+                                    owner_boot_id="boot", owner_host="host", owner_pid_namespace="pid:[101]",
+                                    environment=environment, lease_seconds=600, needs=["review"])
+            item = assigned["id"]
+            expected = {"id": "A-0001", "task": task, "actor": "worker", "role": "reviewer", "mode": "ro", "scope": [],
+                        "status": "active", "started_at": started, "ended_at": None, "owner_pid": 4321,
+                        "owner_boot_id": "boot", "owner_host": "host", "owner_pid_namespace": "pid:[101]",
+                        "lease_until": "2026-11-22T12:10:00Z", "result": None, "activity": None,
+                        "failure_journal": None, "acknowledged_at": None, "ack_note": "", "changes": None,
+                        "environment": environment, "needs": ["review"], "ack_state": "not_required"}
+            assert assigned == expected
+            later = store.assign(task, actor="worker", role="builder", mode="rw", scope=["src"])["id"]
+            clock.return_value = ended
+            result = store.finish(item, result="passed", summary="Reviewed", refs=["result.json"])
+            expected.update(status="passed", ended_at=ended, ack_state="unacknowledged")
+            assert result == expected
+            store.connection.execute("UPDATE assignments SET result = ? WHERE id = ?", (json.dumps(report), item))
+            expected["result"] = report
+            assert store.activity(item) == expected
+            event = store.events(task)[-1]
+            assert (event["actor"], event["type"], event["summary"], event["refs"]) == (
+                "worker", "finished", "passed: Reviewed", [item, "result.json"])
+            store.set_status(task, to="cancelled", actor=LEAD)
+            store.finish(later, result="failed", summary="Finished after closing")
+            assert store.show(task)["claims"] == []
+            assert store.activity(later)["ack_state"] == "unacknowledged"
+            expected["ack_state"] = "not_required"
+            assert store.activity(item) == expected
+
+            legacy_row = store.connection.execute(
+                "SELECT id, task, actor, role, mode, scope, status, started_at, ended_at FROM assignments WHERE id = ?",
+                (item,),
+            ).fetchone()
+            assert store._assignment_dict(legacy_row) == {
+                **expected, "owner_pid": None, "owner_boot_id": None, "owner_host": None,
+                "owner_pid_namespace": None, "lease_until": None, "result": None, "environment": None, "needs": None,
+            }

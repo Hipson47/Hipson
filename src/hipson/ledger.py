@@ -25,7 +25,7 @@ from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
-from hipson.task_calls import ReadCall, read_call, task_lookup_calls
+from hipson.task_calls import ReadCall, gate_fix_calls, read_call, task_lookup_calls
 
 SCHEMA_VERSION = 11
 BUSY_TIMEOUT_MS = 10_000
@@ -386,8 +386,7 @@ class LedgerError(ValueError):
     def error_payload(self) -> dict[str, Any] | None:
         if self.code is None:
             return None
-        from hipson.task_activity import safe_text
-        return {"error_schema": 1, "code": self.code, "message": safe_text(self, 65536),
+        return {"error_schema": 1, "code": self.code, "message": refusal_text(self),
                 "fix": redact_value(self.fix)}
 
 
@@ -415,12 +414,25 @@ class CloseRefusedError(GateRefusedError):
         self.reasons = reasons
 
 
+def refusal_text(value: object) -> str:
+    from hipson.task_activity import READ_LIMIT, safe_text
+
+    text = str(value)
+    for char in ("\x00", "\ufeff", "\ufffe"):
+        text = text.replace(char, "")
+    return safe_text(text[:READ_LIMIT], READ_LIMIT)
+
+
 def print_error(error: BaseException, message: str, *, json_output: bool) -> None:
     payload = error.error_payload() if isinstance(error, LedgerError) else None
+    print_refusal(payload, message, json_output=json_output)
+
+
+def print_refusal(payload: dict[str, Any] | None, message: str, *, json_output: bool) -> None:
     if json_output and payload is not None:
         print(json.dumps(payload, ensure_ascii=True), file=sys.stderr, flush=True)
         return
-    print(message, file=sys.stderr, flush=True)
+    print(refusal_text(message), file=sys.stderr, flush=True)
     if payload is not None:
         for call in payload["fix"]:
             print(f"fix: {call['cli']}", file=sys.stderr, flush=True)
@@ -534,7 +546,8 @@ def done_blockers(view: TaskView) -> list[str]:
 # Classify existing gate reasons at the error boundary. Declared checks keep their raw reasons
 # in verification["checks"], so command text never participates in matching these prefixes.
 _GATE_REASON_CODES = {
-    "missing": "close.checks_missing",
+    "missing lead verification": "verify.lead_missing",
+    "missing:": "close.checks_missing",
     "failing verification": "close.checks_failed",
     "stale: HEAD moved": "verify.head_moved",
     "stale: working tree changed": "verify.tree_changed",
@@ -542,6 +555,17 @@ _GATE_REASON_CODES = {
     "unavailable working-tree fingerprint: Project directory is unavailable": "project.unavailable",
     "unavailable working-tree fingerprint: HEAD moved while fingerprinting": "verify.head_moved",
     "unavailable working-tree fingerprint: Project changed while fingerprinting": "verify.tree_changed",
+    "unavailable working-tree fingerprint: Git filter configuration": "verify.git_filters_unavailable",
+    "unavailable working-tree fingerprint: Git repository is present": "verify.git_state_unavailable",
+    "unavailable working-tree fingerprint: Git HEAD is unavailable": "verify.git_head_unavailable",
+    "unavailable working-tree fingerprint: Git content inventory": "verify.git_inventory_unavailable",
+    "unavailable working-tree fingerprint: Git submodules": "verify.git_submodules",
+    "unavailable working-tree fingerprint: Invalid repository path": "verify.inventory_path_invalid",
+    "unavailable working-tree fingerprint: Directory symlink": "verify.directory_symlink",
+    "unavailable working-tree fingerprint: Special file": "verify.special_file",
+    "unavailable working-tree fingerprint: Project content exceeds": "verify.snapshot_budget",
+    "unavailable working-tree fingerprint: A symlink points outside": "verify.external_symlink",
+    "unavailable working-tree fingerprint: Git normalized content hash": "verify.git_hash_unavailable",
     "unavailable working-tree fingerprint": "verify.fingerprint_unavailable",
     "verification was not recorded": "verify.lead_required",
     "partial content coverage": "verify.coverage_partial",
@@ -557,18 +581,28 @@ _GATE_REASON_CODES = {
 }
 
 
-def _gate_reason_codes(verification: dict[str, Any], reasons: list[str]) -> list[str]:
+def _gate_raw_reasons(verification: dict[str, Any], reasons: list[str]) -> list[str]:
     raw = [reason for check in verification["checks"] for reason in check["reasons"]]
     # Raw check reasons replace their formatted copies; the gate's own reasons follow them.
-    all_reasons = raw + reasons[len(raw):]
-    return [next((code for prefix, code in _GATE_REASON_CODES.items() if reason.startswith(prefix)), "close.refused")
-            for reason in all_reasons]
+    return raw + reasons[len(raw):]
 
 
-def _gate_fix_calls(reasons: list[str], db: Path) -> list[ReadCall]:
-    prefix = "unacknowledged result "
-    return [read_call("task.activity", {"assignment": reason.removeprefix(prefix).split()[0].rstrip(":")}, str(db))
-            for reason in reasons if reason.startswith(prefix)]
+def _gate_reason_codes(verification: dict[str, Any], reasons: list[str]) -> list[str]:
+    return [_gate_reason_code(reason) for reason in _gate_raw_reasons(verification, reasons)]
+
+
+def _gate_reason_code(reason: str) -> str:
+    if (reason.startswith("unavailable working-tree fingerprint: Project ")
+            and "is not a Git repository and is too large to fingerprint (" in reason):
+        return "verify.walk_limit"
+    return next((code for prefix, code in _GATE_REASON_CODES.items() if reason.startswith(prefix)), "close.refused")
+
+
+def close_refusal(view: TaskView, reasons: list[str], db: Path, *, include_verification: bool = True) -> CloseRefusedError:
+    verification = view["verification"] if include_verification else {"checks": []}
+    codes = _gate_reason_codes(verification, reasons)
+    return CloseRefusedError(view["id"], reasons, reason_codes=codes,
+                             fix=gate_fix_calls(list(zip(_gate_raw_reasons(verification, reasons), codes, strict=True)), view, db))
 
 
 class ClaimConflictError(LedgerError):
@@ -1244,7 +1278,10 @@ class Ledger:
         if result is None:
             raise ClaimConflictError(conflict + f"; inspect it with hipson task activity --assignment "
                                      f"{holder['assignment']} and wait, or run hipson task reap if its owner died",
-                code="claim.conflict")
+                code="claim.conflict", fix=[
+                    read_call("task.show", {"task": holder["task"], "section": "assignments"}, str(self.path)),
+                    read_call("task.reap", {"task": holder["task"], "dry_run": True, "approved": True}, str(self.path)),
+                ])
         return cast(Assignment, redact_value(result))
 
     def reap(self, *, task: str | None = None, dry_run: bool = False) -> list[ReapedAssignment]:
@@ -1378,17 +1415,21 @@ class Ledger:
         with self._transaction(write=False):
             return cast(Assignment, redact_value(self._assignment(assignment)))
 
-    def ack(self, assignment: str, *, note: str = '') -> Assignment:
+    def ack(self, assignment: str, *, note: str = '', actor: str | None = None) -> Assignment:
         """Explicit, idempotent lead acknowledgement; never inferred from reads."""
+        if actor is not None:
+            actor = require_text(actor, "actor")
         with self._transaction():
-            current = self._assignment(assignment)
+            current = self._assignment(assignment, fix=[
+                read_call("task.now", {"detail": "compact", "all": True}, str(self.path)),
+            ])
             if current['status'] == 'active':
                 raise LedgerError(f'Cannot acknowledge active assignment {assignment}', code="assignment.active")
             if current['acknowledged_at'] is None:
                 from hipson.task_activity import safe_text
                 self.connection.execute('UPDATE assignments SET acknowledged_at = ?, ack_note = ? WHERE id = ?',
                                         (_timestamp(), safe_text(note), assignment))
-                self._append_event(current['task'], self._task(current['task'])['lead'], 'acknowledged',
+                self._append_event(current['task'], actor if actor is not None else self._task(current['task'])['lead'], 'acknowledged',
                                    f'{assignment}: {safe_text(note) or "result acknowledged"}', [assignment])
             return cast(Assignment, redact_value(self._assignment(assignment)))
 
@@ -1634,9 +1675,7 @@ class Ledger:
             # Review must not race a writer assigned after the caller's own checks either.
             reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]
             if reasons:
-                raise CloseRefusedError(task, reasons,
-                                        reason_codes=_gate_reason_codes(view["verification"], reasons),
-                                        fix=_gate_fix_calls(reasons, self.path))
+                raise close_refusal(view, reasons, self.path)
             if status == "open":
                 self._set_status_locked(task, to="in_progress", actor=actor, summary="started by close",
                                         force=False, reason="")
@@ -1655,7 +1694,11 @@ class Ledger:
             allowed = ', '.join(sorted(TRANSITIONS[previous])) or 'none (terminal)'
             hint = f"; hipson task close --task {task} verifies and closes in one step" if to == 'done' else ''
             raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}",
-                code="status.transition_not_allowed")
+                code="status.transition_not_allowed", fix=[
+                    read_call("task.show", {"task": task, "detail": "compact"}, str(self.path)),
+                    *(read_call("task.status", {"task": task, "to": target, "actor": current["lead"], "approved": True},
+                                str(self.path)) for target in sorted(TRANSITIONS[previous])),
+                ])
         refs: list[str] = []
         view = self._view(task)
         verification = view['verification']
@@ -1691,9 +1734,9 @@ class Ledger:
                 hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
                         f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
                         if not verification['passing'] else '')
+                refusal = close_refusal(view, blockers, self.path)
                 raise GateRefusedError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint,
-                                       reason_codes=_gate_reason_codes(verification, blockers),
-                                       fix=_gate_fix_calls(blockers, self.path))
+                                       reason_codes=refusal.reason_codes, fix=refusal.fix)
             if force and to == 'review':
                 self._append_event(task, actor, 'review_override',
                                    f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
@@ -1710,8 +1753,9 @@ class Ledger:
         if to in ('review', 'done') and not final['verification']['passing']:
             if not force:
                 reasons = final['verification']['reasons']
+                refusal = close_refusal(final, reasons, self.path)
                 raise GateRefusedError(f"Cannot mark {task} {to}: " + '; '.join(reasons),
-                                       reason_codes=_gate_reason_codes(final['verification'], reasons))
+                                       reason_codes=refusal.reason_codes, fix=refusal.fix)
             if final['verification']['reasons'] != verification['reasons']:
                 self._append_event(task, actor, to + '_override',
                                    f"Reason: {reason.strip()}; final verification blockers: "
@@ -1971,10 +2015,10 @@ class Ledger:
                 code="task.not_found", fix=task_lookup_calls(self.path))
         return self._task_dict(row)
 
-    def _assignment(self, assignment: str) -> Assignment:
+    def _assignment(self, assignment: str, *, fix: list[ReadCall] | None = None) -> Assignment:
         row = self.connection.execute("SELECT * FROM assignments WHERE id = ?", (assignment,)).fetchone()
         if row is None:
-            raise LedgerError(f"Assignment not found: {assignment}", code="assignment.not_found")
+            raise LedgerError(f"Assignment not found: {assignment}", code="assignment.not_found", fix=fix)
         return self._assignment_dict(row)
 
     def _view(self, task: str, *, active_only: bool = False, states: dict[str, dict[str, Any]] | None = None) -> TaskView:

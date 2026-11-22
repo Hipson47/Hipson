@@ -92,9 +92,9 @@ def _execute(action, db, *, expect_refusal=False):
     with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
         try:
             result = mcp_server._call_tool({"name": tool, "arguments": arguments}, project=db.parent)
-        except ValueError as exc:
+        except ledger.LedgerError as exc:
             assert expect_refusal and str(exc)
-            return str(exc)
+            return exc.error_payload()
     assert not expect_refusal and not result["isError"]
     return None
 
@@ -111,8 +111,7 @@ def _execute_cli(call, db, *, refusal=None):
         code = cli.main(args)
     if refusal is not None:
         assert code == 1
-        error = json.loads(err.getvalue())
-        assert error == {"error_schema": 1, "code": "verify.tree_changed", "message": refusal, "fix": []}
+        assert json.loads(err.getvalue()) == refusal
     else:
         assert code == 0, err.getvalue()
         json.loads(out.getvalue())
@@ -162,10 +161,14 @@ def test_next_actions_order_filters_schemas_and_execution(tmp_path):
     assert cli_refusal == actions[5] and "recorded ok, not re-checked" in cli_refusal["why"]
     copy = tmp_path / "refusal copy.sqlite"
     copyfile(db, copy)
-    message = _execute(cli_refusal, copy, expect_refusal=True)
-    assert message and "working tree changed" in message
+    error = _execute(cli_refusal, copy, expect_refusal=True)
+    assert error["error_schema"] == 1 and error["code"] == "verify.tree_changed"
+    assert "working tree changed" in error["message"]
     refusal = {**cli_refusal, "cli": cli_refusal["cli"].replace(shlex.quote(str(db)), shlex.quote(str(copy)))}
-    _execute_cli(refusal, copy, refusal=message)
+    _execute_cli(refusal, copy, refusal=error)
+    verify, = error["fix"]
+    assert verify["tool"] == "task.verify" and verify["arguments"]["actor"] == ACTOR
+    _execute_cli(verify, copy)
 
 
 def test_next_actions_fixture_bounds_and_text(tmp_path):

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from hipson import ledger, task_activity, task_checkpoint, task_runner, task_verification
+from hipson.task_calls import read_call
 
 
 def parse_check(text: str) -> list[str]:
@@ -40,10 +41,12 @@ def _db(args: argparse.Namespace) -> Path:
     return Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
 
 
-def _refused(task: str, db: Path, reasons: list[str], records: list[dict[str, Any]], code: int = 1) -> dict[str, Any]:
+def _refused(task: str, db: Path, reasons: list[str], records: list[dict[str, Any]], *,
+             refusal: ledger.LedgerError, code: int = 1) -> dict[str, Any]:
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
         status = store.show(task)['status']
-    return {'task': task, 'closed': False, 'status': status, 'records': records, 'reasons': reasons, 'exit_code': code}
+    return {'task': task, 'closed': False, 'status': status, 'records': records, 'reasons': reasons,
+            'exit_code': code, 'refusal': refusal.error_payload()}
 
 
 def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: str | None = None,
@@ -61,8 +64,8 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
     with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
         view = store.show(task)
     if expected_checks is not None and view['checks'] != expected_checks:  # Run nothing under changed acceptance.
-        return _refused(task, db, ['declared checks differ from the ones this close expects: '
-                                   + ledger.checks_text(view['checks'])], [])
+        reasons = ['declared checks differ from the ones this close expects: ' + ledger.checks_text(view['checks'])]
+        return _refused(task, db, reasons, [], refusal=ledger.close_refusal(view, reasons, db, include_verification=False))
     actor = actor or view['lead']
     if view['status'] not in ('open', 'in_progress', 'review'):
         raise ledger.LedgerError(f"Cannot close {task} from status {view['status']}", code="close.status_not_allowed")
@@ -71,7 +74,8 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
     active = [item['id'] for item in view['assignments'] if item['status'] == 'active']
     blockers = ledger.done_blockers(view) if to == 'done' or active else []
     if blockers:  # Verifying now would only append evidence to a close that must be refused anyway.
-        return _refused(task, db, blockers, [])
+        return _refused(task, db, blockers, [],
+                        refusal=ledger.close_refusal(view, blockers, db, include_verification=False))
     if command is not None:
         task_verification.validate(command, timeout)
         pending = [command]
@@ -82,9 +86,17 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
     failed = next((record for record in records if record['exit_code'] != 0), None)
     if failed is not None:
         reason = f"check `{shlex.join(failed['command'])}` failed with exit {failed['exit_code']}"
-        if failed['exit_code'] == 124 and failed['duration_seconds'] >= timeout - 1:
-            reason += f"; it hit the {timeout:g}s per-check timeout, rerun with --timeout SECONDS"
-        return _refused(task, db, [reason], records, int(failed['exit_code']) or 1)
+        if 'timeout_seconds' in failed:
+            refusal: ledger.LedgerError = task_verification.timeout_refusal(failed, db, command=command, lead=view['lead'])
+            reason += f"; {failed['timeout_hint']}"
+        else:
+            failure_view = view.copy()
+            failure_view['verification'] = {**view['verification'], 'latest': failed}
+            if command is not None:
+                failure_view['checks'] = []
+            refusal = ledger.close_refusal(failure_view, [f"failing verification: exit {failed['exit_code']}"], db,
+                                           include_verification=False)
+        return _refused(task, db, [reason], records, refusal=refusal, code=int(failed['exit_code']) or 1)
     try:
         with closing(ledger.Ledger(db, create=False)) as store:
             view = store.close_task(task, to=to, actor=actor, summary=summary, expected_checks=expected_checks)
@@ -92,18 +104,21 @@ def close(db: Path, task: str, *, to: str = 'done', summary: str = '', actor: st
         hint = ([] if view['checks'] or records else
                 [f"no acceptance checks declared: run hipson task close --task {task} -- COMMAND, or declare "
                  f"them with hipson task checks --task {task} --check 'COMMAND'"])
-        return _refused(task, db, hint + exc.reasons, records)
+        return _refused(task, db, hint + exc.reasons, records, refusal=exc)
     return {'task': task, 'closed': True, 'status': view['status'], 'records': records, 'reasons': [],
             'accepted': view['verification']['accepted_ids'], 'exit_code': 0}
 
 
-def _print_close(result: dict[str, Any]) -> None:
+def _print_close(result: dict[str, Any], *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(result, ensure_ascii=True))
     if result['closed']:
-        print(f"{result['task']} [{result['status']}]: lead verification {', '.join(result['accepted'])}")
+        if not json_output:
+            print(f"{result['task']} [{result['status']}]: lead verification {', '.join(result['accepted'])}")
     else:
-        print(f"{result['task']} not closed (still {result['status']}):", file=sys.stderr)
-        for reason in result['reasons']:
-            print(f'  - {task_activity.safe_text(reason)}', file=sys.stderr)
+        message = f"{result['task']} not closed (still {result['status']}):" + ''.join(
+            f'\n  - {reason}' for reason in result['reasons'])
+        ledger.print_refusal(result['refusal'], message, json_output=json_output)
 
 
 def command_close(args: argparse.Namespace) -> int:
@@ -117,12 +132,9 @@ def command_close(args: argparse.Namespace) -> int:
                        timeout=args.timeout, command=command,
                        on_record=None if args.json else lambda record: print(task_verification.render(record), flush=True))
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 1
-    if args.json:
-        print(json.dumps(result, ensure_ascii=True))
-    else:
-        _print_close(result)
+    _print_close(result, json_output=args.json)
     return int(result['exit_code'])
 
 
@@ -137,7 +149,7 @@ def command_checks(args: argparse.Namespace) -> int:
             actor = args.actor or store.show(args.task)['lead']
             view = store.set_checks(args.task, checks=checks, actor=actor, reason=args.reason)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 1
     print(json.dumps(view['checks'], ensure_ascii=True) if args.json else
           f"{view['id']} acceptance checks: {ledger.checks_text(view['checks'])}")
@@ -176,7 +188,7 @@ def command_do(args: argparse.Namespace) -> int:
             task = view['id']
             store.set_status(task, to='in_progress', actor=args.lead, summary='started by task do')
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 1
     print(f'hipson task do: opened {task} in {project}; checks: {ledger.checks_text(checks)}', file=sys.stderr, flush=True)
     # -P: the worker runs in the project directory, whose modules must not shadow the stdlib.
@@ -211,21 +223,20 @@ def command_do(args: argparse.Namespace) -> int:
                        and state != 'rejected' and (state == 'valid' or not args.result_file)
                        and (report is None or report['status'] == 'completed'))
             if not healthy or assignment is None:
-                print(f'hipson task do: worker did not complete (exit {code}); {task} stays {view["status"]}. '
-                      f'Inspect: hipson task show --task {task}; retry: hipson task run --task {task} ...',
-                      file=sys.stderr)
+                refusal = ledger.LedgerError(
+                    f'hipson task do: worker did not complete (exit {code}); {task} stays {view["status"]}. '
+                    f'Inspect: hipson task show --task {task}; retry: hipson task run --task {task} ...',
+                    code="run.worker_incomplete", fix=[read_call("task.show", {"task": task}, str(db))])
+                ledger.print_error(refusal, str(refusal), json_output=args.json)
                 return code or 1
             if assignment['ack_state'] == 'unacknowledged':
                 store.ack(assignment['id'], note='acknowledged by hipson task do after printing the result to the lead')
         result = close(db, task, to=args.to, actor=args.lead, timeout=args.timeout,
                        on_record=None if args.json else lambda record: print(task_verification.render(record), flush=True))
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 1
-    if args.json:
-        print(json.dumps(result, ensure_ascii=True))
-    else:
-        _print_close(result)
+    _print_close(result, json_output=args.json)
     return int(result['exit_code'])
 
 
@@ -302,7 +313,7 @@ def command_restore(args: argparse.Namespace) -> int:
                           'blockers': task_checkpoint.live_blockers(
                               store, args.assignment, task_checkpoint.load(db, args.assignment)['roots'])}
     except (task_checkpoint.CheckpointError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, f'hipson task restore: {task_activity.safe_text(exc, 1200)}', json_output=args.json)
+        ledger.print_error(exc, f'hipson task restore: {exc}', json_output=args.json)
         return 1
     result['task'] = assignment['task']
     if getattr(args, 'json', False):
@@ -341,8 +352,10 @@ def configure_checkpoints(parser: argparse.ArgumentParser) -> None:
 def command_checkpoints(args: argparse.Namespace) -> int:
     db = _db(args)
     if not 0 <= args.older_than_days <= task_checkpoint.MAX_RETENTION_DAYS:
-        print(f'hipson task checkpoints: --older-than-days must be between 0 and {task_checkpoint.MAX_RETENTION_DAYS}',
-              file=sys.stderr)
+        exc = ledger.LedgerError(
+            f'hipson task checkpoints: --older-than-days must be between 0 and {task_checkpoint.MAX_RETENTION_DAYS}',
+            code="checkpoint.retention_invalid")
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return 64
     try:
         store = ledger.Ledger(db, create=False, read_only=True) if db.exists() else None
@@ -353,7 +366,7 @@ def command_checkpoints(args: argparse.Namespace) -> int:
             if store is not None:
                 store.close()
     except (task_checkpoint.CheckpointError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        ledger.print_error(exc, f'hipson task checkpoints: {task_activity.safe_text(exc, 600)}', json_output=args.json)
+        ledger.print_error(exc, f'hipson task checkpoints: {exc}', json_output=args.json)
         return 1
     if getattr(args, 'json', False):
         print(json.dumps(payload, ensure_ascii=True))
