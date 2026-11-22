@@ -111,7 +111,9 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
             ]
             assert _replay_cli(first["hint"]) == expected
 
-        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 1_200}), \
+        # The page repeats the --db path in more.cli and in the stub hint; long temp paths (macOS) need room.
+        db_room = 2 * len(shlex.quote(str(fixture.db)).encode("utf-8"))
+        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 1_200 + db_room}), \
                 patch.dict(os.environ, HIPSON_LEDGER=str(tmp_path / "wrong.sqlite")):
             page = _json_cli("task", "board", "--detail", "compact", "--db", str(fixture.db))
             first, = page["tasks"]
