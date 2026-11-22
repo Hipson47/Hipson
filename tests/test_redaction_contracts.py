@@ -6,7 +6,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from hipson import sandbox
-from hipson.redaction import SKIPPED, _diff_paths, drop_sensitive_diff_sections, redact_incomplete_private_keys
+from hipson.redaction import (
+    MIN_ENV_SECRET_CHARS,
+    REDACTION,
+    SKIPPED,
+    _diff_paths,
+    drop_sensitive_diff_sections,
+    redact_incomplete_private_keys,
+    redact_worker_text,
+)
 from hipson.sandbox import git_filter_overrides, prepare_read_only_command
 
 OMITTED = SKIPPED + " (sensitive file diff omitted)"
@@ -80,6 +88,31 @@ def test_incomplete_private_key_blocks_are_redacted_to_the_end():
     text = "keep\n-----BEGIN RSA PRIVATE KEY-----\nAAAA\nBBBB"
     assert redact_incomplete_private_keys(text) == "keep\n[REDACTED]"
     assert redact_incomplete_private_keys("no keys here") == "no keys here"
+
+
+def test_worker_text_masks_secret_env_values_patterns_and_cut_key_blocks_exactly():
+    assert MIN_ENV_SECRET_CHARS == 8
+    environ = {
+        "SVC_TOKEN": "zq9plainvalue77", "MY_API_KEY": "abcdefgh", "DB_PASSWORD": "pw-long-enough",
+        "PASSWD": "hunter2hunter2", "X_CREDENTIAL": "credvalue1", "AWS_CREDENTIALS": "credsvalue22",
+        "AWS_ACCESS_KEY_ID": "keyidvalue9", "APP_SECRET_FILE": "secretpath1",
+        "TOKENIZER": "notasecret1", "MYTOKEN": "notasecret2", "SHORT_TOKEN": "1234567", "EMPTY_SECRET": "",
+        "PATH": "/usr/bin:/bin", "lower_token": "lowercase77",
+    }
+    text = ("t=zq9plainvalue77 k=abcdefgh p=pw-long-enough q=hunter2hunter2 c=credvalue1 cs=credsvalue22 "
+            "id=keyidvalue9 f=secretpath1 n=notasecret1 m=notasecret2 s=1234567 path=/usr/bin:/bin l=lowercase77")
+    assert redact_worker_text(text, environ) == (
+        f"t={REDACTION} k={REDACTION} p={REDACTION} q={REDACTION} c={REDACTION} cs={REDACTION} "
+        f"id={REDACTION} f={REDACTION} n=notasecret1 m=notasecret2 s=1234567 path=/usr/bin:/bin l={REDACTION}")
+    # Longest first: a secret that contains another is masked whole, not left as a fragment.
+    nested = {"A_TOKEN": "abcdefgh", "B_TOKEN": "abcdefgh-ijkl"}
+    assert redact_worker_text("x abcdefgh-ijkl y abcdefgh", nested) == f"x {REDACTION} y {REDACTION}"
+    cut = "key: -----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n(read cut here)"
+    assert redact_worker_text(cut, {}) == f"key: {REDACTION}"
+    assert redact_worker_text("plain text, nothing secret", {}) == "plain text, nothing secret"
+    assert redact_worker_text("Authorization: Bearer abcdefghijklmnop", {}) != "Authorization: Bearer abcdefghijklmnop"
+    with patch.dict(os.environ, {"ENV_TOKEN": "fromprocessenv1"}):
+        assert redact_worker_text("v=fromprocessenv1") == f"v={REDACTION}"  # Defaults to this process.
 
 
 def test_git_filter_overrides_exact_list_from_the_repository(tmp_path):

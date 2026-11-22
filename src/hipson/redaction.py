@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import codecs
+import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +116,23 @@ def redact_sensitive_paths(text: str) -> str:
 def redact_incomplete_private_keys(text: str) -> str:
     """A bounded read can cut off a key's END marker; redact from any surviving BEGIN to the end."""
     return re.sub(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*", REDACTION, text, flags=re.DOTALL)
+
+
+# Environment variable names whose values are secrets, as worker activity already masks them.
+SECRET_ENV_NAME = re.compile(r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|ACCESS_KEY_ID)(?:_|$)",
+                             re.IGNORECASE)
+# Shorter values ('1', 'true', a short flag) are not credentials and would garble unrelated text.
+MIN_ENV_SECRET_CHARS = 8
+
+
+def redact_worker_text(text: str, environ: Mapping[str, str] | None = None) -> str:
+    """Redaction for worker text the ledger keeps: the values of secret-named environment variables in this
+    process (longest first), credential patterns, then any private key block whose END marker is missing."""
+    values = (os.environ if environ is None else environ).items()
+    secrets = {value for name, value in values if len(value) >= MIN_ENV_SECRET_CHARS and SECRET_ENV_NAME.search(name)}
+    for secret in sorted(secrets, key=lambda value: (-len(value), value)):
+        text = text.replace(secret, REDACTION)
+    return redact_incomplete_private_keys(redact_text(text))
 
 
 def drop_sensitive_diff_sections(diff: str) -> str:

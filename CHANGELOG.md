@@ -19,6 +19,12 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
   snapshots, or runs that changed a `.gitignore`.
 - **Native Codex runs record the model.** `hipson agent exec --runtime codex` now reads the model
   from the run's own rollout file into the meta file's `models`.
+- **Worker results, findings and event summaries no longer store secrets that activity already
+  masked.** Before, only pattern redaction applied, so an incomplete private-key block (a cut-off
+  read) or the value of a secret-named environment variable (`*_TOKEN`, `*_API_KEY`, `*_PASSWORD`,
+  ...) in a worker result, a finding or a resolution note was written to the ledger as is. That
+  includes the event summaries that quote them. Values shorter than 8 characters are not treated as
+  secrets. Records written before 1.8.1 are not rewritten.
 - **Permission denials say what was denied.** A `permission_denied` runtime failure quotes the
   redacted denial line. For Antigravity it also explains that headless mode auto-denies commands
   outside its allow list.

@@ -24,7 +24,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
-from hipson.redaction import redact_text, redact_value
+from hipson.redaction import redact_text, redact_value, redact_worker_text
 from hipson.task_calls import ReadCall, gate_fix_calls, read_call, task_lookup_calls
 
 SCHEMA_VERSION = 12
@@ -790,7 +790,7 @@ def validate_task_result(value: object) -> TaskResult:
 
     def redact(item: Any) -> Any:
         if isinstance(item, str):
-            return redact_text(item)
+            return redact_worker_text(item)
         if isinstance(item, list):
             return [redact(child) for child in item]
         if isinstance(item, dict):
@@ -1584,8 +1584,8 @@ class Ledger:
         now = _timestamp()
         self.connection.execute(
             """INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, '', ?, ?, NULL)""",
-            (finding, task, source_assignment, severity, redact_text(title), redact_text(detail),
-             redact_text(location), now, now),
+            (finding, task, source_assignment, severity, redact_worker_text(title), redact_worker_text(detail),
+             redact_worker_text(location), now, now),
         )
         self._append_event(task, actor, "finding_opened", f"{finding} [{severity}]: {title}", [finding])
         self._reopen_for_finding(task, finding=finding, severity=severity, actor=actor)
@@ -1626,7 +1626,7 @@ class Ledger:
             self.connection.execute(
                 """UPDATE findings SET status = ?, resolved_by_assignment = ?, resolution_note = ?,
                    updated_at = ?, resolved_at = ? WHERE id = ?""",
-                (status, resolved_by_assignment, redact_text(resolution_note), now,
+                (status, resolved_by_assignment, redact_worker_text(resolution_note), now,
                  None if status == "open" else now, finding),
             )
             self._append_event(
@@ -2165,7 +2165,9 @@ class Ledger:
         now = _timestamp()
         cursor = self.connection.execute(
             "INSERT INTO events (task, actor, type, summary, refs, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (task, redact_text(actor), redact_text(type), redact_text(summary), json.dumps(redact_value(list(refs))), now),
+            # Summaries quote worker text (finding titles, notes, flow reasons): the same redaction as results.
+            (task, redact_text(actor), redact_text(type), redact_worker_text(summary), json.dumps(redact_value(list(refs))),
+             now),
         )
         self.connection.execute("UPDATE tasks SET revision = revision + 1, updated_at = ? WHERE id = ?", (now, task))
         row = self.connection.execute("SELECT * FROM events WHERE seq = ?", (cursor.lastrowid,)).fetchone()
