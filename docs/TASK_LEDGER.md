@@ -1319,7 +1319,9 @@ and reconnect the client. A manual stdio command is
 Run workers through the CLI. Declare acceptance checks with `task.open` and use the
 CLI's `task checks` for later revisions. `task.show` with `section=events` covers event history.
 Workflow, packet and run-bundle tools are available in `full`. Calls outside `lead` return
-`mcp.tool_not_in_profile` with a fix that tells the client how to start the `full` profile.
+`mcp.tool_not_in_profile`; its message tells the client to reconnect with `--profile full`. The fix
+list is empty, because restarting the server is not an MCP call. A name that exists in no profile
+gets the same unknown-tool error as in `full`.
 
 `task.board`, `task.now`, `lead.resume`, and `task.show` default to `detail=compact` in `lead`.
 Pass `detail=full` for full output. When reading a specific `task.show` section, omit
@@ -1514,7 +1516,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
 | `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
 | `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |
-| `mcp.tool_not_in_profile` | The configured MCP tool profile does not expose the requested tool. | Reconnect with `hipson mcp serve --stdio --profile full`. |
+| `mcp.tool_not_in_profile` | The configured MCP tool profile does not expose the requested tool. | Reconnect with `hipson mcp serve --stdio --profile full` (named in the message; the fix list is empty). |
 | `observation.already_recorded` | The assignment already has a change observation. | Read the existing observation. |
 | `observation.baseline_failed` | The runner could not capture the requested baseline. | Address the reported baseline error and retry. |
 | `observation.limit_invalid` | An observation cap is zero or negative. | Supply a positive file or byte limit. |

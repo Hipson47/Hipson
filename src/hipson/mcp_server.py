@@ -731,12 +731,12 @@ def _call_tool(params: object, *, project: Path, profile: MCPProfile = "full") -
     if not isinstance(params, dict):
         raise SystemExit("tools/call params must be an object")
     name = str(params.get("name", ""))
-    if profile == "lead" and name not in LEAD_TOOL_DESCRIPTIONS:
+    # Only a real tool outside the profile gets the profile refusal; an unknown name takes the normal
+    # unknown-tool path in every profile. Restarting the server is not an MCP call, so there is no fix call.
+    if profile == "lead" and name in MCP_TOOL_NAMES and name not in LEAD_TOOL_DESCRIPTIONS:
         raise ledger.LedgerError(
             f"Tool {name!r} is unavailable in the lead MCP profile. Restart with --profile full for the full tool set.",
-            code="mcp.tool_not_in_profile",
-            fix=[{"tool": "mcp.serve", "arguments": {"stdio": True, "profile": "full"},
-                  "cli": "hipson mcp serve --stdio --profile full"}],
+            code="mcp.tool_not_in_profile", fix=[],
         )
     arguments = params.get("arguments", {})
     if not isinstance(arguments, dict):

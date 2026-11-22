@@ -572,7 +572,6 @@ def test_lead_profile_refuses_unlisted_tools_without_dispatch(tmp_path):
     requests = [
         _request(1, "task.assign", {**WRITE_ARGUMENTS["task.assign"], "task": "T-0001", "approved": True}),
         _request(2, "work.create", {"project": str(tmp_path)}),
-        _request(3, "release.claim", {}),
         {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
     ]
     db = tmp_path / "ledger.sqlite"
@@ -586,9 +585,19 @@ def test_lead_profile_refuses_unlisted_tools_without_dispatch(tmp_path):
         body = json.loads(refusal["content"][1]["text"])
         assert body == {
             "error_schema": 1, "code": "mcp.tool_not_in_profile", "message": refusal["content"][0]["text"],
-            "fix": [{"tool": "mcp.serve", "arguments": {"stdio": True, "profile": "full"},
-                     "cli": "hipson mcp serve --stdio --profile full"}],
+            "fix": [],
         }
+        assert "--profile full" in refusal["content"][0]["text"]
+
+
+def test_lead_profile_answers_unknown_tools_like_full(tmp_path):
+    """S7 review: a name that exists in no profile is an unknown tool, not a profile miss."""
+    db = tmp_path / "ledger.sqlite"
+    for name in ("release.claim", "nope.x"):
+        lead, = _responses(tmp_path, [_request(1, name, {})], ledger_db=db, profile="lead")
+        full, = _responses(tmp_path, [_request(1, name, {})], ledger_db=db, profile="full")
+        assert lead == full, (name, lead, full)
+        assert "mcp.tool_not_in_profile" not in json.dumps(lead)
 
 
 def test_lead_profile_rejects_the_same_invalid_arguments_as_full(tmp_path):
