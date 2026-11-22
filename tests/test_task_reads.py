@@ -3,7 +3,7 @@
 import json
 import os
 import shlex
-from contextlib import closing, redirect_stderr, redirect_stdout
+from contextlib import chdir, closing, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
@@ -13,6 +13,14 @@ from hipson import __version__, cli, lead_context, ledger, mcp_server, task_proj
 from hipson.redaction import redact_value
 from scripts.agent_ux_measure import READS, _cli, _mcp, _tool_text
 from tests.fixtures.agent_ux_ledger import build
+from tests.test_ledger_recovery import _v1_file
+
+SECTION_EVIDENCE_FIELDS = {
+    "verification": {"subject", "output_tail", "error", "metadata_fallback_paths", "files", "generated_files", "changes"},
+    "assignments": {"actor", "result", "activity", "failure_journal", "changes"},
+    "findings": {"title", "detail", "location"},
+    "events": {"actor", "type", "summary", "refs"},
+}
 
 
 def _json_cli(*args):
@@ -45,6 +53,9 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
             payload = json.loads(text)
             assert text == _tool_text(name, {**arguments, "detail": "compact"}) == task_projection.dumps(payload)
             assert payload["view_schema"] == 1 and payload["hipson_version"] == __version__
+            prefix = {"task.show": "", "lead.resume": "now.tasks[]."}.get(name, "tasks[].")
+            assert payload["evidence_policy"] == lead_context.EVIDENCE_POLICY
+            assert payload["untrusted_fields"] == [prefix + "assignments[].actor", prefix + "assignments[].summary"]
             assert fixture.heavy_task in _cli(command)
 
         resume = _call_mcp("lead.resume", {"detail": "compact"})
@@ -54,8 +65,6 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
         for field in ("unacknowledged_results", "blocking_findings", "major_findings"):
             item, = resume[field]
             assert item["task"] in tasks and resume["omitted"][field] == 0
-        assert resume["evidence_policy"] == lead_context.EVIDENCE_POLICY
-        assert resume["untrusted_fields"] == ["now.tasks", "projects"]
 
         # Exercise both the byte cap and the caller's limit. Replay each continuation verbatim.
         with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 1_600, "task.now": 1_600}):
@@ -88,7 +97,7 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
             second = _replay_cli(page["more"]["cli"])
             assert second["omitted"] == len(tasks) - 2 and second["tasks"][0]["id"] != page["tasks"][0]["id"]
 
-        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 520}):
+        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 1_000}):
             first, = _call_mcp("task.board", {"detail": "compact"})["tasks"]
             assert first["too_large"]
             show_args = {"task": first["id"], "detail": "compact"}
@@ -98,13 +107,60 @@ def test_compact_reads_and_continuations_on_fixture(tmp_path):
             ]
             assert _replay_cli(first["hint"]) == expected
 
-        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 800}), \
+        with patch.dict(task_projection.LIST_BUDGETS, {"task.board": 1_200}), \
                 patch.dict(os.environ, HIPSON_LEDGER=str(tmp_path / "wrong.sqlite")):
             page = _json_cli("task", "board", "--detail", "compact", "--db", str(fixture.db))
             first, = page["tasks"]
             assert first["too_large"]
             assert shlex.split(first["hint"])[-3:] == ["--db", str(fixture.db), "--json"]
             assert _replay_cli(first["hint"])["id"] == first["id"]
+
+
+def test_compact_resume_text_includes_context_summaries(tmp_path):
+    fixture = build(tmp_path / "fixture")
+    args = ["lead", "resume", "--detail", "compact"]
+    env = {"HIPSON_LEDGER": str(fixture.db)}
+    with patch.dict(os.environ, env):
+        complete = _cli([*args, "--json"])
+        assert "Truncated: false" in _cli(args).splitlines()
+    with patch.dict(os.environ, env), patch.object(task_projection, "RESUME_BUDGET", len(complete.encode("utf-8")) - 20):
+        payload = _json_cli(*args)
+        lines = _cli(args).splitlines()
+        for field, label, identifier in (
+            ("unacknowledged_results", "Unacknowledged results", "assignment"),
+            ("blocking_findings", "Blocking findings", "finding"),
+            ("major_findings", "Major findings", "finding"),
+        ):
+            item, = payload[field]
+            assert f"{label}: {item['task']}/{item[identifier]}" in lines
+        assert payload["projects"] and "Projects:" in lines
+        for project in payload["projects"]:
+            counts = ", ".join(f"{status}={count}" for status, count in project["counts"].items())
+            assert f"  {project['project']}: {counts}" in lines
+        assert payload["truncated"] and payload["omitted"]["projects"] > 0
+        assert "Omitted: " + ", ".join(f"{field}={count}" for field, count in payload["omitted"].items()) in lines
+        assert "Truncated: true" in lines
+
+
+def test_compact_cli_continuations_resolve_relative_project(tmp_path):
+    fixture = build(tmp_path / "fixture")
+    with patch.dict(os.environ, HIPSON_LEDGER=str(fixture.db)), \
+            patch.dict(task_projection.LIST_BUDGETS, {"task.now": 2_000}):
+        for name in ("task.board", "task.now", "lead.resume"):
+            command = [*name.split("."), "--detail", "compact", "--project", "inventory"]
+            if name != "lead.resume":
+                command.extend(["--limit", "1"])
+            with chdir(fixture.db.parent):
+                payload = _json_cli(*command)
+                args = {"detail": "compact", "project": "inventory"}
+                if name != "lead.resume":
+                    args["limit"] = 1
+                assert payload == _call_mcp(name, args)
+            more = payload.get("now", payload)["more"]
+            assert more["arguments"]["project"] == str(fixture.db.parent / "inventory")
+            with chdir(tmp_path):
+                page = _replay_cli(more["cli"])
+            assert page == _call_mcp(more["tool"], more["arguments"]) and page["tasks"]
 
 
 def test_full_detail_uses_s1_read_handlers_on_fixture(tmp_path):
@@ -180,10 +236,12 @@ def test_show_sections_return_paged_records(tmp_path):
                 page = _json_cli("task", "show", "--task", task, "--section", section, "--limit", "3",
                                  "--cursor", str(cursor))
                 assert page == _call_mcp("task.show", {"task": task, "section": section, "limit": 3, "cursor": cursor})
-                keys = {"task", "section", "records", "next_cursor"}
+                keys = {"task", "section", "records", "next_cursor", "evidence_policy", "untrusted_fields"}
                 if section == "verification":
                     keys.add("files_note")
                 assert page.keys() == keys
+                assert page["evidence_policy"] == lead_context.EVIDENCE_POLICY
+                assert set(page["untrusted_fields"]) == {f"records[].{field}" for field in SECTION_EVIDENCE_FIELDS[section]}
                 assert page["task"] == task and page["section"] == section and len(page["records"]) <= 3
                 records.extend(page["records"])
                 cursor = page["next_cursor"]
@@ -193,6 +251,8 @@ def test_show_sections_return_paged_records(tmp_path):
             assert cursor is None and records == expected[section]
         assert _call_mcp("task.show", {"task": task, "section": "events", "cursor": 9_007_199_254_740_991}) == {
             "task": task, "section": "events", "records": [], "next_cursor": None,
+            "evidence_policy": lead_context.EVIDENCE_POLICY,
+            "untrusted_fields": ["records[].actor", "records[].type", "records[].summary", "records[].refs"],
         }
         assert expected["verification"][0]["output_tail"] == "token=[REDACTED]"
 
@@ -210,6 +270,46 @@ def _section_page(task, section, *, cursor=None, limit=None):
     return json.loads(cli_text)
 
 
+def test_verification_section_pages_past_invalid_evidence(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Malformed data", objective="Read later records")["id"]
+        store.connection.executemany("INSERT INTO verifications (id, task, evidence) VALUES (?, ?, ?)", [
+            ("V-1", task, "{broken"),
+            ("V-2", task, '[ ["summary", "Not an object"] ]'),
+            ("V-3", task, "42"),
+            ("V-4", task, '{"id":"V-4","files":[]}'),
+        ])
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        page = _section_page(task, "verification", limit=2)
+        assert page["records"] == [{"seq": 1, "invalid_evidence": True}, {"seq": 2, "invalid_evidence": True}]
+        assert page["next_cursor"] == 2
+        page = _section_page(task, "verification", cursor=page["next_cursor"])
+        assert page["records"] == [{"seq": 3, "invalid_evidence": True},
+                                   {"id": "V-4", "files": [], "files_total": 0, "files_truncated": False}]
+        assert page["next_cursor"] is None
+
+
+def test_old_schema_reports_unavailable_sections_without_migrating(tmp_path):
+    db = tmp_path / "legacy.sqlite"
+    _v1_file(db)
+    before = db.read_bytes()
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        for section in ("verification", "findings"):
+            page = _section_page("T-0001", section)
+            assert page["unavailable"] == f"schema v1 does not store {section}"
+            assert page["records"] == [] and page["next_cursor"] is None
+        assert "unavailable" not in _section_page("T-0001", "events")
+    assert db.read_bytes() == before
+
+
+def _assert_section_text_bounded(task, section):
+    flags = ["task", "show", "--task", task, "--section", section]
+    text = _cli(flags)
+    assert len(text.encode("utf-8")) <= 64_000
+    assert text == _cli([*flags, "--json"])
+
+
 def test_show_section_byte_budget_and_fixture_paging(tmp_path):
     # The tracked fixture marker contributes one more entry to the inventory.
     fixture = build(tmp_path / "fixture", inventory_files=1049)
@@ -220,6 +320,8 @@ def test_show_section_byte_budget_and_fixture_paging(tmp_path):
         assert len(record["files"]) == 20
         assert record["files_total"] == 1050 and record["files_truncated"] is True
         assert "task show --detail full" in page["files_note"]
+        for section in SECTION_EVIDENCE_FIELDS:
+            _assert_section_text_bounded(fixture.heavy_task, section)
 
         for task in store.list_tasks():
             task_id = task["id"]
@@ -261,6 +363,7 @@ def test_show_section_paging_advances_past_oversized_record(tmp_path):
         opened, first, second, _, _ = store.events(task)
 
     with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        _assert_section_text_bounded(task, "events")
         page = _section_page(task, "events")
         assert page["records"] == [opened, first]
         assert page["next_cursor"] == 2
@@ -278,6 +381,22 @@ def test_show_section_paging_advances_past_oversized_record(tmp_path):
         page = _section_page(task, "events", cursor=page["next_cursor"])
         assert page["records"] == [last]
         assert page["next_cursor"] is None
+
+
+def test_section_fit_lists_only_fields_that_changed():
+    record = {"summary": "a" * 500, "actor": "b" * 450, "refs": ["keep"]}
+    original = record.copy()
+    page = {"records": [record]}
+    section_prefix = task_projection._section_prefix
+
+    def keep_summary(value, budget):
+        return value if value == original["summary"] else section_prefix(value, budget)
+
+    with patch.object(task_projection, "SECTION_BUDGET", 900), \
+            patch.object(task_projection, "_section_prefix", side_effect=keep_summary):
+        task_projection._fit_section_record(page, record)
+    assert record["truncated_fields"] == [key for key, value in original.items() if record[key] != value] == ["actor"]
+    assert len(task_projection.dumps(page).encode("utf-8")) <= 900
 
 
 def test_read_discovery_and_invalid_arguments(tmp_path):

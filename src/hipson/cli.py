@@ -1862,6 +1862,9 @@ def command_task_read(args: argparse.Namespace) -> int:
 
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         cli_db = str(db) if args.db else None
+        project = getattr(args, "project", None)
+        if project is not None:
+            project = str(Path(project).expanduser().resolve())
         connection = (ledger.Ledger(db, read_only=True, sidecar_free=action in ("now", "resume"))
                       if db.exists() else None)
         with closing(connection) if connection is not None else nullcontext() as store:
@@ -1875,16 +1878,14 @@ def command_task_read(args: argparse.Namespace) -> int:
                 else:
                     payload = task_projection.show_task(store, args.task, cli_db=cli_db)
             elif action == "resume":
-                payload = lead_context.build_compact(store, project=args.project, include_all=args.all, cli_db=cli_db)
+                payload = lead_context.build_compact(store, project=project, include_all=args.all, cli_db=cli_db)
             else:
                 kind: task_projection.ListKind = "task.board" if action == "board" else "task.now"
-                payload = dict(task_projection.project_list(store, kind=kind, project=args.project,
+                payload = dict(task_projection.project_list(store, kind=kind, project=project,
                                                             include_terminal=args.all, offset=offset or 0,
                                                             limit=limit, cli_db=cli_db))
-        if args.json:
+        if args.json or section is not None:
             sys.stdout.write(task_projection.dumps(payload))
-        elif section is not None:
-            print(json.dumps(payload, indent=2))
         else:
             print(_render_compact_tasks(payload))
         return 0
@@ -1916,6 +1917,21 @@ def _render_compact_tasks(payload: dict[str, Any]) -> str:
         lines.append(f"{page['omitted']} more tasks: {_escape_cli_controls(more['cli'])}")
     elif isinstance(more, list):
         lines.extend(_escape_cli_controls(call["cli"]) for call in more)
+    if "now" in payload:
+        lines.append("")
+        for field, label, identifier in (
+            ("unacknowledged_results", "Unacknowledged results", "assignment"),
+            ("blocking_findings", "Blocking findings", "finding"),
+            ("major_findings", "Major findings", "finding"),
+        ):
+            items = ", ".join(f"{item['task']}/{item[identifier]}" for item in payload[field])
+            lines.append(f"{label}: {items or 'none'}")
+        lines.append("Projects:" if payload["projects"] else "Projects: none")
+        for project in payload["projects"]:
+            counts = ", ".join(f"{status}={count}" for status, count in project["counts"].items())
+            lines.append(f"  {project['project']}: {counts}")
+        omitted = ", ".join(f"{field}={count}" for field, count in payload["omitted"].items())
+        lines.extend((f"Omitted: {omitted}", f"Truncated: {str(payload['truncated']).lower()}"))
     return "\n".join(lines)
 
 

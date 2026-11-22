@@ -120,7 +120,7 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert task_projection.project_task(store, terminal)["status"] == "cancelled"
         assert task_projection.project_list(store, kind="task.board", include_terminal=True)["tasks"][-1]["id"] == terminal
 
-        tiny = task_projection.project_list(store, kind="task.now", byte_budget=512)
+        tiny = task_projection.project_list(store, kind="task.now", byte_budget=1_000)
         assert tiny["truncated"] is True and tiny["omitted"] == 2
         assert tiny["more"] == {"tool": "task.now", "arguments": {"detail": "compact", "offset": 1},
                                 "cli": "hipson task now --detail compact --offset 1 --json"}
@@ -128,7 +128,7 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert stub["id"] == third and stub["too_large"] is True
         assert set(stub) == {"id", "status", "title", "too_large", "hint"} and "task show" in stub["hint"]
         encoded = task_projection.dumps(tiny).encode("utf-8")
-        assert json.loads(encoded) == tiny and len(encoded) <= 512
+        assert json.loads(encoded) == tiny and len(encoded) <= 1_000
 
         prefix = {**tiny, "tasks": now["tasks"][:1]}
         budget = len(task_projection.dumps(prefix).encode("utf-8"))
@@ -162,33 +162,69 @@ def test_projection_reads_v1_without_migration(tmp_path):
     assert db.read_bytes() == before
 
 
-def _projection_references(source, *, ledger_module=False, read_handlers=()):
-    pattern = re.compile(r"\b(?:task_projection|projection_rows)\b")
+_READ_HANDLERS = {
+    "cli.py": {"command_task_read"},
+    "mcp_server.py": {"_task_read_projection", "_compact_task_text"},
+    "lead_context.py": {"build_compact"},
+}
+_READ_DISPATCH = {
+    "cli.py": {
+        "build_parser": (
+            (None, "read.set_defaults(func=command_task_read)"),
+            (None, "resume.set_defaults(func=command_task_read)"),
+        ),
+        "command_task_read": (("action == 'resume'", "payload = lead_context.build_compact("
+                               "store, project=project, include_all=args.all, cli_db=cli_db)"),),
+    },
+    "mcp_server.py": {
+        "_call_tool": ((None, "text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)"),),
+        "_task_tool_payload": (("name in _TASK_READS and (arguments.get('detail') == 'compact' or 'section' in arguments)",
+                                "return _task_read_projection(name, arguments, db)"),),
+        "_task_read_projection": (("name == 'lead.resume'", "return lead_context.build_compact("
+                                   "store, project=project, include_all=include_all)"),),
+    },
+}
+
+
+def _projection_references(source, *, module=""):
+    low_level = re.compile(r"\b(?:task_projection|projection_rows)\b")
+    handlers = re.compile(r"\b(?:command_task_read|_task_read_projection|_compact_task_text|build_compact)\b")
     tree = ast.parse(source)
-    declarations = {id(method) for node in tree.body if ledger_module and isinstance(node, ast.ClassDef)
+    declarations = {id(method) for node in tree.body if module == "ledger.py" and isinstance(node, ast.ClassDef)
                     and node.name == "Ledger" for method in node.body
                     if isinstance(method, ast.FunctionDef) and method.name == "projection_rows"}
-    permitted = {id(child) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in read_handlers
-                 for statement in node.body for child in ast.walk(statement)}
+    permitted = set()
+    dispatch = set()
+    for function in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+        if function.name in _READ_HANDLERS.get(module, ()):
+            declarations.add(id(function))
+            permitted.update(id(child) for statement in function.body for child in ast.walk(statement))
+        for guard, statement in _READ_DISPATCH.get(module, {}).get(function.name, ()):
+            shape = ast.parse(statement).body[0]
+            expected = ast.dump(shape)
+            if guard is None:
+                candidates = ast.walk(function)
+            else:
+                candidates = (child for branch in ast.walk(function) if isinstance(branch, ast.If)
+                              and ast.unparse(branch.test) == guard for child in branch.body)
+            match = next((candidate for candidate in candidates
+                          if isinstance(candidate, type(shape)) and ast.dump(candidate) == expected), None)
+            if match is not None:
+                dispatch.update(id(child) for child in ast.walk(match))
     return [node.lineno for node in ast.walk(tree)
-            if id(node) not in declarations | permitted and any(pattern.search(value)
-                                                    for value in vars(node).values() if isinstance(value, str))]
+            if id(node) not in declarations and any(
+                (module != "task_projection.py" and id(node) not in permitted and low_level.search(value))
+                or (id(node) not in dispatch and handlers.search(value))
+                for value in vars(node).values() if isinstance(value, str))]
 
 
 def test_gate_sources_do_not_reference_projection():
     root = Path(ledger.__file__).parent
-    read_handlers = {
-        "cli.py": {"command_task_read"},
-        "mcp_server.py": {"_task_read_projection", "_compact_task_text"},
-        "lead_context.py": {"build_compact"},
-    }
     violations = []
     for module in sorted(root.rglob("*.py")):
         relative = module.relative_to(root).as_posix()
-        if relative != "task_projection.py":
-            violations.extend(f"{relative}:{line}" for line in _projection_references(
-                module.read_text(encoding="utf-8"), ledger_module=relative == "ledger.py",
-                read_handlers=read_handlers.get(relative, ())))
+        violations.extend(f"{relative}:{line}" for line in _projection_references(
+            module.read_text(encoding="utf-8"), module=relative))
     assert not violations, "\n".join(violations)
 
 
@@ -196,11 +232,32 @@ def test_gate_source_check_catches_dynamic_references():
     assert _projection_references("importlib.import_module('hipson.task_projection')") == [1]
     assert _projection_references("getattr(store, 'projection_rows')") == [1]
     assert _projection_references("from hipson import task_projection") == [1]
-    assert _projection_references("class Ledger:\n    def projection_rows(self): ...", ledger_module=True) == []
+    assert _projection_references("class Ledger:\n    def projection_rows(self): ...", module="ledger.py") == []
     assert _projection_references("class Ledger:\n    def projection_rows(self): self.projection_rows()",
-                                  ledger_module=True) == [2]
+                                  module="ledger.py") == [2]
     source = "def command_task_read():\n    import task_projection\ndef command_task():\n    import task_projection"
-    assert _projection_references(source, read_handlers={"command_task_read"}) == [4]
+    assert _projection_references(source, module="cli.py") == [4]
+
+
+def test_gate_source_check_rejects_injected_calls_to_read_handlers():
+    read_text = Path.read_text
+    gate_file = Path(task_flow.__file__)
+
+    def read_with_injected_calls(path, *args, **kwargs):
+        source = read_text(path, *args, **kwargs)
+        if path == gate_file:
+            original = "def command_close(args: argparse.Namespace) -> int:\n"
+            assert original in source
+            return source.replace(original, original + "    command_task_read(args)\n"
+                                  "    mcp_server._task_read_projection(name, arguments, db)\n"
+                                  "    mcp_server._compact_task_text(payload)\n"
+                                  "    lead_context.build_compact(store)\n", 1)
+        return source
+
+    with patch.object(Path, "read_text", read_with_injected_calls), pytest.raises(AssertionError) as exc:
+        test_gate_sources_do_not_reference_projection()
+    assert sum(line.strip().startswith("task_flow.py:") for line in str(exc.value).splitlines()) == 4
+    test_gate_sources_do_not_reference_projection()
 
 
 def test_close_and_live_content_gate_work_with_projection_disabled(tmp_path):

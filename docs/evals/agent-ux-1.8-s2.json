@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "hipson_version": "1.7.0",
-  "git_revision": "7a56dc471626e06c9ec97e163125b5975bfd2b36",
+  "git_revision": "3610b6365fa3616b59801fca4a4e61952ce2f0df",
   "git_dirty": true,
   "ledger_source": "fixture",
   "task_show_id": "T-0001",
@@ -12,35 +12,35 @@
         "cli_json": {
           "bytes": 5614904,
           "project_state_calls": 3,
-          "wall_seconds": 0.512647
+          "wall_seconds": 0.502631
         },
         "mcp_json": {
           "bytes": 4391961,
           "project_state_calls": 3,
-          "wall_seconds": 0.494759
+          "wall_seconds": 0.486256
         },
         "cli_text": {
           "bytes": 1350,
           "project_state_calls": 3,
-          "wall_seconds": 0.491918
+          "wall_seconds": 0.484972
         }
       },
       "compact": {
         "available": true,
         "cli_json": {
-          "bytes": 27132,
+          "bytes": 27657,
           "project_state_calls": 0,
-          "wall_seconds": 0.025
+          "wall_seconds": 0.024252
         },
         "mcp_json": {
-          "bytes": 27132,
+          "bytes": 27657,
           "project_state_calls": 0,
-          "wall_seconds": 0.013413
+          "wall_seconds": 0.013671
         },
         "cli_text": {
           "bytes": 2084,
           "project_state_calls": 0,
-          "wall_seconds": 0.023987
+          "wall_seconds": 0.025013
         }
       }
     },
@@ -50,35 +50,35 @@
         "cli_json": {
           "bytes": 5812325,
           "project_state_calls": 3,
-          "wall_seconds": 0.894884
+          "wall_seconds": 0.872146
         },
         "mcp_json": {
           "bytes": 4382200,
           "project_state_calls": 3,
-          "wall_seconds": 0.896746
+          "wall_seconds": 0.854042
         },
         "cli_text": {
           "bytes": 4024,
           "project_state_calls": 3,
-          "wall_seconds": 0.879916
+          "wall_seconds": 0.851546
         }
       },
       "compact": {
         "available": true,
         "cli_json": {
-          "bytes": 27130,
+          "bytes": 27655,
           "project_state_calls": 0,
-          "wall_seconds": 0.023936
+          "wall_seconds": 0.023668
         },
         "mcp_json": {
-          "bytes": 27130,
+          "bytes": 27655,
           "project_state_calls": 0,
-          "wall_seconds": 0.014336
+          "wall_seconds": 0.012916
         },
         "cli_text": {
           "bytes": 2084,
           "project_state_calls": 0,
-          "wall_seconds": 0.025762
+          "wall_seconds": 0.024331
         }
       }
     },
@@ -88,35 +88,35 @@
         "cli_json": {
           "bytes": 11853633,
           "project_state_calls": 3,
-          "wall_seconds": 1.349691
+          "wall_seconds": 1.288899
         },
         "mcp_json": {
           "bytes": 8778936,
           "project_state_calls": 3,
-          "wall_seconds": 1.289644
+          "wall_seconds": 1.278789
         },
         "cli_text": {
           "bytes": 4043,
           "project_state_calls": 3,
-          "wall_seconds": 1.306569
+          "wall_seconds": 1.284591
         }
       },
       "compact": {
         "available": true,
         "cli_json": {
-          "bytes": 28276,
+          "bytes": 28848,
           "project_state_calls": 0,
-          "wall_seconds": 0.024327
+          "wall_seconds": 0.023568
         },
         "mcp_json": {
-          "bytes": 28276,
+          "bytes": 28848,
           "project_state_calls": 0,
-          "wall_seconds": 0.013499
+          "wall_seconds": 0.014858
         },
         "cli_text": {
-          "bytes": 2084,
+          "bytes": 2505,
           "project_state_calls": 0,
-          "wall_seconds": 0.023622
+          "wall_seconds": 0.024796
         }
       }
     },
@@ -126,35 +126,35 @@
         "cli_json": {
           "bytes": 766795,
           "project_state_calls": 1,
-          "wall_seconds": 0.14118
+          "wall_seconds": 0.137324
         },
         "mcp_json": {
           "bytes": 623094,
           "project_state_calls": 1,
-          "wall_seconds": 0.129543
+          "wall_seconds": 0.125256
         },
         "cli_text": {
           "bytes": 538,
           "project_state_calls": 1,
-          "wall_seconds": 0.139772
+          "wall_seconds": 0.135135
         }
       },
       "compact": {
         "available": true,
         "cli_json": {
-          "bytes": 1813,
+          "bytes": 2322,
           "project_state_calls": 0,
-          "wall_seconds": 0.017594
+          "wall_seconds": 0.017757
         },
         "mcp_json": {
-          "bytes": 1813,
+          "bytes": 2322,
           "project_state_calls": 0,
-          "wall_seconds": 0.006151
+          "wall_seconds": 0.00612
         },
         "cli_text": {
           "bytes": 329,
           "project_state_calls": 0,
-          "wall_seconds": 0.017866
+          "wall_seconds": 0.016563
         }
       }
     }
@@ -164,14 +164,19 @@
     "task": "T-0001",
     "section": "verification",
     "cli_json": {
-      "bytes": 6905,
+      "bytes": 7533,
       "project_state_calls": 0,
-      "wall_seconds": 0.01221
+      "wall_seconds": 0.012118
     },
     "mcp_json": {
-      "bytes": 6905,
+      "bytes": 7533,
       "project_state_calls": 0,
-      "wall_seconds": 0.001762
+      "wall_seconds": 0.001818
+    },
+    "cli_text": {
+      "bytes": 7533,
+      "project_state_calls": 0,
+      "wall_seconds": 0.012105
     }
   }
 }

@@ -3,9 +3,12 @@
 ## Unreleased
 
 - CLI and MCP now offer compact board, now, resume, and task reads with versioned, bounded JSON
-  and executable list continuations. Task show can page verification, assignment, finding, or event
-  records in 64,000-byte JSON section pages, with up to 20 files per verification record. Full detail
-  stays the default in 1.8 and compact becomes the default in 1.9.
+  that marks worker evidence and offers executable list continuations with resolved project paths.
+  Task show can page verification, assignment, finding, or event records in 64,000-byte JSON section
+  pages in every output mode, with up to 20 files per verification record. Section pages identify
+  invalid verification records and sections unavailable on older schemas. Compact resume text
+  includes result and finding IDs, project counts, and truncation details. Full detail stays the
+  default in 1.8 and compact becomes the default in 1.9.
 - Antigravity gives rate-limit and login evidence priority over model rejection and reports a bounded, redacted
   model diagnostic from the CLI's error channels. A private temporary settings file preserves user allow rules
   when granting declared checks to builders. Flow review briefs include bounded, redacted contents of new

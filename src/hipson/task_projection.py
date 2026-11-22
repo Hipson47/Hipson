@@ -19,6 +19,7 @@ from hipson.lead_context import GIT_READ_LIMIT
 from hipson.ledger import CHECK_ARG_LIMIT, FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
 from hipson.redaction import redact_text, redact_value
 from hipson.task_activity import LINE_LIMIT
+from hipson.task_context import EVIDENCE_POLICY
 from hipson.task_verification import _worker_context, argv_identity
 
 VIEW_SCHEMA = 1
@@ -32,6 +33,13 @@ SECTION_LIMIT = 5
 SECTION_FILE_LIMIT = 20
 Section = Literal["verification", "assignments", "findings", "events"]
 SECTIONS: tuple[Section, ...] = ("verification", "assignments", "findings", "events")
+TASK_UNTRUSTED_FIELDS = ("assignments[].actor", "assignments[].summary")
+SECTION_UNTRUSTED_FIELDS = {
+    "verification": ("subject", "output_tail", "error", "metadata_fallback_paths", "files", "generated_files", "changes"),
+    "assignments": ("actor", "result", "activity", "failure_journal", "changes"),
+    "findings": ("title", "detail", "location"),
+    "events": ("actor", "type", "summary", "refs"),
+}
 TERMINAL = ("done", "cancelled")
 GATE_NOTE = "task verify / task close evaluate the gates"
 REASON_LIMIT = 5
@@ -120,6 +128,8 @@ class ListProjection(TypedDict):
     hipson_version: str
     gate: Literal["not_evaluated"]
     gate_note: str
+    evidence_policy: str
+    untrusted_fields: list[str]
     kind: ListKind
     tasks: Sequence[TaskProjection | TaskStub]
     truncated: bool
@@ -442,6 +452,7 @@ def _read_call(tool: str, arguments: dict[str, str | int | bool], cli_db: str | 
 
 def show_task(store: Ledger, task: str, *, cli_db: str | None = None) -> dict[str, Any]:
     return {**project_task(store, task),
+            "evidence_policy": EVIDENCE_POLICY, "untrusted_fields": list(TASK_UNTRUSTED_FIELDS),
             "more": [_section_call(task, section, cli_db=cli_db) for section in SECTIONS]}
 
 
@@ -490,6 +501,9 @@ def _fit_section_record(page: dict[str, Any], record: dict[str, Any]) -> None:
         truncated.append(key)
         budget = max(2, SECTION_BUDGET - (_size(page) - size))
         prefix = _section_prefix(record[key], budget)
+        if prefix == record[key]:
+            truncated.pop()
+            continue
         record[key] = prefix
         if key == "files" and "files_total" in record:
             record["files_truncated"] = len(prefix) < record["files_total"]
@@ -497,12 +511,28 @@ def _fit_section_record(page: dict[str, Any], record: dict[str, Any]) -> None:
             break
 
 
+def _section_verification(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        evidence = json.loads(row["evidence"])
+    except (TypeError, ValueError, RecursionError):
+        evidence = None
+    if not isinstance(evidence, dict):
+        return {"seq": row["seq"], "invalid_evidence": True}
+    files = evidence.get("files")
+    files_total = len(files) if isinstance(files, list) else 0
+    evidence["files_total"] = files_total
+    evidence["files_truncated"] = files_total > SECTION_FILE_LIMIT
+    if isinstance(files, list) and files_total > SECTION_FILE_LIMIT:
+        evidence["files"] = files[:SECTION_FILE_LIMIT]
+    return evidence
+
+
 def read_section(store: Ledger, task: str, section: str, *, limit: int | None = None,
                  cursor: int | None = None) -> dict[str, Any]:
     """Page stored records within the byte and count caps, in ledger order."""
     queries: dict[str, tuple[int, str, Callable[[sqlite3.Row], Mapping[str, Any]]]] = {
-        "verification": (6, "SELECT evidence FROM verifications WHERE task = ? ORDER BY seq LIMIT ? OFFSET ?",
-                         lambda row: json.loads(row["evidence"])),
+        "verification": (6, "SELECT seq, evidence FROM verifications WHERE task = ? ORDER BY seq LIMIT ? OFFSET ?",
+                         _section_verification),
         "assignments": (1, "SELECT * FROM assignments WHERE task = ? ORDER BY started_at, id LIMIT ? OFFSET ?",
                         store._assignment_dict),
         "findings": (3, "SELECT * FROM findings WHERE task = ? ORDER BY created_at, id LIMIT ? OFFSET ?", dict),
@@ -515,26 +545,21 @@ def read_section(store: Ledger, task: str, section: str, *, limit: int | None = 
     _validate_page(cursor, limit, position="cursor")
     min_version, sql, decode = queries[section]
     records: list[dict[str, Any]] = []
-    page: dict[str, Any] = {"task": task, "section": section, "records": records, "next_cursor": None}
+    page: dict[str, Any] = {"task": task, "section": section, "records": records, "next_cursor": None,
+                            "evidence_policy": EVIDENCE_POLICY,
+                            "untrusted_fields": [f"records[].{field}" for field in SECTION_UNTRUSTED_FIELDS[section]]}
     if section == "verification":
         page["files_note"] = "Read the full file inventory with task show --detail full."
     with store._transaction(write=False):
         store._task(task)
         version = store.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0]
         if version < min_version:
+            page["unavailable"] = f"schema v{version} does not store {section}"
             return page
         rows = store.connection.execute(sql, (task, limit + 1, cursor))
         row = next(rows, None)
         while row is not None and len(records) < limit:
-            record = dict(decode(row))
-            if section == "verification":
-                files = record.get("files")
-                files_total = len(files) if isinstance(files, list) else 0
-                record["files_total"] = files_total
-                record["files_truncated"] = files_total > SECTION_FILE_LIMIT
-                if isinstance(files, list) and files_total > SECTION_FILE_LIMIT:
-                    record["files"] = files[:SECTION_FILE_LIMIT]
-            records.append(redact_value(record))
+            records.append(redact_value(dict(decode(row))))
             row = next(rows, None)
             position = cursor + len(records)
             page["next_cursor"] = position if row is not None else None
@@ -562,9 +587,12 @@ def _now_priority(row: dict[str, Any]) -> int:
 
 def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, remaining: int,
          *, filters: dict[str, str | int | bool], cli_db: str | None) -> ListProjection:
+    untrusted_fields = [f"tasks[].{field}" for field in TASK_UNTRUSTED_FIELDS]
+
     def envelope(count: int, *, stub: bool = False) -> ListProjection:
         omitted = remaining - count
         return ListProjection(view_schema=VIEW_SCHEMA, hipson_version=__version__, gate="not_evaluated", gate_note=GATE_NOTE,
+                              evidence_policy=EVIDENCE_POLICY, untrusted_fields=untrusted_fields,
                               kind=kind, tasks=[], truncated=omitted > 0 or stub, omitted=omitted,
                               more=_read_call(kind, {"detail": "compact", "offset": offset + count, **filters},
                                               cli_db) if omitted else None)

@@ -243,7 +243,7 @@ def build_compact(store: ledger.Ledger | None, *, project: str | None = None, in
     included: dict[str, list[Any]] = {key: [] for key in entries}
     result = {"kind": "lead.resume", "view_schema": now["view_schema"], "hipson_version": now["hipson_version"],
               "now": now, **included, "omitted": omitted, "truncated": False,
-              "evidence_policy": EVIDENCE_POLICY, "untrusted_fields": ["now.tasks", "projects"]}
+              "evidence_policy": EVIDENCE_POLICY, "untrusted_fields": [f"now.{field}" for field in now["untrusted_fields"]]}
     remaining = task_projection.RESUME_BUDGET - len(task_projection.dumps(result).encode("utf-8"))
     # Interleave categories so a large backlog cannot consume the entire summary.
     for group in zip_longest(*entries.values()):
