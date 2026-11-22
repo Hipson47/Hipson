@@ -1041,28 +1041,36 @@ def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path
     if row is None or row[0] >= SCHEMA_VERSION or row[0] not in SUPPORTED_SCHEMA_VERSIONS:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    counter = 0
-    while True:  # Never overwrite an earlier backup; a concurrent writer gets the next suffix.
-        target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}" + (f"-{counter}" if counter else ""))
-        try:
-            # The ledger holds briefs, journals and worker output: keep backups private, like init's.
-            os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        except FileExistsError:
-            counter += 1
-            continue
-        break
+    # Copy into a hidden working file and give it a backup name only once the copy is complete: a writer killed
+    # mid-copy (SIGKILL, OOM, power loss) runs no cleanup, and its partial file must never look like a backup.
+    working = path.with_name(f".{path.name}.v{row[0]}-backup-{stamp}-{os.getpid()}.partial")
+    # The ledger holds briefs, journals and worker output: keep backups private, like init's.
+    os.close(os.open(working, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     try:
-        with closing(sqlite3.connect(target)) as destination:
+        with closing(sqlite3.connect(working)) as destination:
             connection.backup(destination)
             copied = destination.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()
-    except BaseException:
-        target.unlink(missing_ok=True)  # A partial copy must not look like a good backup.
-        raise
-    if copied is None or copied[0] != row[0]:
-        # Another writer migrated in between; its own backup holds the old version, this copy does not.
-        target.unlink(missing_ok=True)
-        return None
-    return target
+        if copied is None or copied[0] != row[0]:
+            # Another writer migrated in between; its own backup holds the old version, this copy does not.
+            return None
+        counter = 0
+        while True:  # Never overwrite an earlier backup; a concurrent writer gets the next suffix.
+            target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}" + (f"-{counter}" if counter else ""))
+            try:
+                os.link(working, target)  # Fails instead of replacing an existing backup.
+            except FileExistsError:
+                counter += 1
+                continue
+            except OSError:
+                # No hard links on this filesystem: rename (exclusive on Windows; on POSIX only a same-microsecond
+                # backup by another writer could race, and it would hold the same old version).
+                if os.path.lexists(target):
+                    counter += 1
+                    continue
+                os.replace(working, target)
+            return target
+    finally:
+        working.unlink(missing_ok=True)  # After a link or a failure; a rename already moved it.
 
 
 class Ledger:
@@ -1441,6 +1449,7 @@ class Ledger:
                 current["task"], "hipson", "observed",
                 f"{assignment}: changes {changes['status']}; {unexpected} outside scope, "
                 f"{sum(counts.get('unattributed', {}).values())} unattributed"
+                + (f", {ignored} ignored" if (ignored := sum(counts.get("ignored", {}).values())) else "")
                 + ("; incomplete, not a clean result" if changes["status"] == "incomplete" else "")
                 + (f"; paths: {listed}" if listed else "")
                 + (f" (+{omitted} more in task show --json)" if omitted else "")

@@ -575,9 +575,21 @@ def _record_changes_contract(tmp_path):
             f"{other}: changes incomplete; 0 outside scope, 0 unattributed; incomplete, not a clean result")
         third = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
         store.finish(third, result="passed", summary="ok")
-        store.record_changes(third, _changes("clean"))
+        clean = _changes("clean")
+        clean["counts"]["ignored"] = {"created": 0, "modified": 0, "deleted": 0}
+        store.record_changes(third, clean)
         assert store.events(task)[-1]["summary"] == f"{third}: changes clean; 0 outside scope, 0 unattributed"
         assert store.events(task)[-1]["refs"] == [third]
+        fourth = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
+        store.finish(fourth, result="passed", summary="ok")
+        ignored = _changes(paths=[{"path": "report.html", "change": "created", "attribution": "ignored",
+                                   "evidence": "presence"}], omitted=5)
+        ignored["counts"]["ignored"] = {"created": 1, "modified": 2, "deleted": 3}
+        store.record_changes(fourth, ignored)
+        assert store.events(task)[-1]["summary"] == (
+            f"{fourth}: changes changes; 0 outside scope, 0 unattributed, 6 ignored; "
+            "paths: ignored created report.html (+5 more in task show --json)")
+        assert store.events(task)[-1]["refs"] == [fourth]
 
 
 def _overlapping_writers_contract(tmp_path):
@@ -868,6 +880,84 @@ def test_v12_usage_record_and_migration_exact_contract(_project_state, tmp_path)
         assert migrated.activity(assigned["id"])["usage"] is None
     with closing(ledger.Ledger(db)) as reopened:
         assert reopened.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+
+
+def _old_ledger(path):
+    with closing(ledger.Ledger(path)) as store:
+        store.open_task(project=path.parent, title="kept", objective="survives the backup")
+        store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
+        store.connection.execute("UPDATE schema_version SET version = 11")
+
+
+def _names(directory):
+    return sorted(item.name for item in directory.iterdir() if item.name.startswith(("ledger", ".ledger"))
+                  and item.name not in ("ledger.sqlite-wal", "ledger.sqlite-shm"))
+
+
+@pytest.mark.parametrize("case", ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile"])
+def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path, case):
+    import os
+    import sqlite3
+    import stat
+    from datetime import UTC, datetime
+
+    fixed = datetime(2026, 11, 22, 21, 0, 0, 7, tzinfo=UTC)
+    stamp = "20261122T210000000007Z"
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is UTC
+            return fixed
+
+    real_connect = sqlite3.connect
+    directory = tmp_path / case
+    directory.mkdir()
+    db = directory / "ledger.sqlite"
+    _old_ledger(db)
+    working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}.partial"
+    earlier = [f"ledger.sqlite.v11-backup-{stamp}"] if case in ("taken", "no_links_taken") else []
+    for name in earlier:
+        (directory / name).write_bytes(b"earlier")
+    seen = []
+
+    class Watch(sqlite3.Connection):
+        def backup(self, target, *args, **kwargs):
+            seen.append(_names(directory))  # What exists while the copy runs.
+            if case == "killed":
+                raise KeyboardInterrupt
+            super().backup(target, *args, **kwargs)
+            if case == "migrated_meanwhile":
+                target.execute("UPDATE schema_version SET version = 12")
+                target.commit()
+
+    def connect(*args, **kwargs):
+        return real_connect(*args, factory=Watch, **kwargs) if str(args[0]) == str(db) else real_connect(*args, **kwargs)
+
+    links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")) \
+        if case.startswith("no_links") else patch.object(ledger.os, "link", ledger.os.link)
+    with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), links:
+        if case == "killed":
+            with pytest.raises(KeyboardInterrupt):
+                ledger.Ledger(db)
+        else:
+            ledger.Ledger(db).close()
+    assert seen[0] == sorted(["ledger.sqlite", working, *earlier])  # No backup name before the copy ends.
+    names = _names(directory)
+    assert not any(name.endswith(".partial") or ".partial-" in name for name in names), names
+    backups = [name for name in names if "-backup-" in name and name not in earlier]
+    if case in ("killed", "migrated_meanwhile"):
+        assert backups == []
+        return
+    expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier else "")
+    assert backups == [expected], names
+    if earlier:
+        assert (directory / earlier[0]).read_bytes() == b"earlier"
+    if os.name == "posix":
+        assert stat.S_IMODE((directory / expected).stat().st_mode) == 0o600
+    with closing(real_connect(directory / expected)) as copy:
+        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+        assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
 
 
 def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):

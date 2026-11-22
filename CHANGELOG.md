@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.8.1 - unreleased
+
+A stabilization release from the first real project built with 1.8.0 and an overnight hardening run.
+The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
+
+### Fixes
+
+- **Pre-migration backups are atomic.** The copy is written to a hidden
+  `.<ledger>.v<old>-backup-<ts>-<pid>.partial` file and gets its backup name only when complete.
+  Before, a writer killed mid-copy left an empty or hot-journal file under a real backup name
+  (40 of 40 kills reproduced it), which the rollback steps would have restored.
+- **Git-ignored outputs are no longer flagged as out-of-scope writes.** Change observation lists
+  them as `ignored` instead of raising a major finding that stopped the flow. Examples are
+  Playwright reports, screenshots and test results written by a declared check. The check uses
+  only in-tree `.gitignore` files, isolated from the repository's Git directory and global
+  excludes. It never applies to read-only assignments, sensitive or redacted paths, incomplete
+  snapshots, or runs that changed a `.gitignore`.
+- **Native Codex runs record the model.** `hipson agent exec --runtime codex` now reads the model
+  from the run's own rollout file into the meta file's `models`.
+- **Permission denials say what was denied.** A `permission_denied` runtime failure quotes the
+  redacted denial line. For Antigravity it also explains that headless mode auto-denies commands
+  outside its allow list.
+
+### Text output
+
+- Done and cancelled tasks no longer show a stale-check count in compact text.
+- Usage prints as one readable line in compact and full task text, instead of indented JSON.
+  JSON output is unchanged.
+- Reviewer runs get a rule to list only defects, risks or open decisions as findings. Confirmations
+  that something works belong in the summary.
+
 ## 1.8.0 - 2026-11-22
 
 See the measurements and upgrade instructions in the [release notes](docs/release-1.8.md).

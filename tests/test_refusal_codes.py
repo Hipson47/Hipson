@@ -31,7 +31,6 @@ ALLOWLIST = {
     ("ledger._sidecar_read_only_connection", "sqlite3.OperationalError"): "Preserve SQLite WAL opening errors.",
     ("ledger._sidecar_read_only_connection", "BaseException"): "Re-raise after closing the snapshot.",
     ("ledger.Ledger.__init__", "BaseException"): "Re-raise initialization errors after closing the store.",
-    ("ledger._backup_before_migration", "BaseException"): "Re-raise the copy error after removing the partial backup.",
     ("ledger.Ledger._transaction", "BaseException"): "Propagate the operation's failure after rolling back.",
     ("task_verification._walk_error", "error"): "Forward os.walk's original error to the fingerprint evidence handler.",
     ("task_verification.run", "ledger.LedgerError(ledger.refusal_text(diagnostic))"):

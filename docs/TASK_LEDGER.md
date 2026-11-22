@@ -251,9 +251,13 @@ environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger 
 To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<ledger>-shm` if
 they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
 pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
-created with mode 0600 and never overwritten. A failed copy is removed rather than left behind
-(SQLite may leave a stray `<backup>-journal` file next to it). If the backup cannot be written, for example
-on a full disk, writers cannot open the older ledger until it can; reads still work.
+created with mode 0600 and never overwritten. The copy is written to a hidden working file,
+`.<ledger>.v<old>-backup-<UTC timestamp>-<pid>.partial`, and gets its backup name only once it is
+complete, so a file named `<ledger>.v<old>-backup-*` is always a whole copy. A failed copy is removed. A
+writer killed during the copy (SIGKILL, out of memory, power loss) can leave the hidden `.partial` file
+and its `-journal`. They are never a backup, hold ledger data, and can be deleted. The ledger itself is
+untouched and the next writer takes a fresh backup. If the backup cannot be written, for example on a
+full disk, writers cannot open the older ledger until it can; reads still work.
 
 Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
 adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
@@ -418,9 +422,17 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   assignment starts, the comparison is completed by `hipson task reap` (CLI or MCP) or the next `task run`.
 - Each created, modified or deleted path is classified: `in_scope` (inside the `rw` assignment's claimed
   scope), `unattributed` (inside the scope of another `rw` assignment in the same project that was alive
-  between this assignment's start and its final snapshot; never blamed on this worker), or `out_of_scope`.
-  A read-only (`ro`) assignment has no write scope, so every change outside other writers' claimed paths
-  counts as `out_of_scope`.
+  between this assignment's start and its final snapshot), `ignored` (otherwise outside scope, but Git
+  ignores the path; `rw` assignments only), or `out_of_scope` (all other changes). A read-only (`ro`)
+  assignment has no write scope and may not change anything, so its changes outside other writers' claimed
+  paths stay `out_of_scope` even when Git ignores them.
+- The ignore check reads the project's `.gitignore` files in isolation from the project's Git directory
+  and any global or repository-local excludes. It uses a bounded path list and times out. Sensitive paths
+  and paths stored as digests always keep their original scope classification. Any observed creation,
+  modification, or deletion of a `.gitignore` anywhere in the snapshot disables ignore classification for
+  the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
+  stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has
+  entries. Only `out_of_scope` paths raise findings.
 - `out_of_scope` changes raise one `major` finding per kind (created, modified, deleted) on the task,
   listing the paths. Like any major finding it blocks `done` until it is resolved: `fixed` after reverting,
   or `wontfix` with a reason when the change was expected. An `observed` event records the counts and a

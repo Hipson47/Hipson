@@ -8,6 +8,7 @@ import shlex
 import shutil
 import sqlite3
 import sys
+from collections.abc import Mapping
 from contextlib import closing, nullcontext
 from pathlib import Path
 from typing import Any, cast
@@ -1918,6 +1919,27 @@ def command_task_read(args: argparse.Namespace) -> int:
         return 1
 
 
+def _render_task_usage(usage: Mapping[str, Any]) -> str:
+    def number(value: int | float | None) -> str:
+        return "unknown" if value is None else str(value)
+
+    attempts = usage.get("attempts")
+    roles = (", ".join(f"{role}={number(count)}" for role, count in sorted(attempts.items())) or "none"
+             if attempts is not None else "unknown")
+    elapsed = usage.get("elapsed_seconds")
+    parts = [f"attempts {roles}", f"repair rounds {number(usage.get('repair_rounds'))}",
+             f"elapsed {'unknown' if elapsed is None else f'{elapsed:g}s'}"]
+    if sources := usage.get("tokens_by_source"):
+        for source, counts in sorted(sources.items()):
+            parts.append(f"{source} {number(counts.get('total_tokens'))} total tokens "
+                         f"({number(counts.get('cached_tokens'))} cached, {number(counts.get('output_tokens'))} output)")
+    else:
+        parts.append("tokens unknown")
+    if missing := usage.get("without_usage"):
+        parts.append(f"without usage {missing}")
+    return "Usage: " + _bounded_cli(" | ".join(parts), limit=512, escape_controls=True)
+
+
 def _render_compact_tasks(payload: dict[str, Any]) -> str:
     from hipson.next_actions import TEXT_SUMMARY_LIMIT, escape_summary
 
@@ -1932,14 +1954,16 @@ def _render_compact_tasks(payload: dict[str, Any]) -> str:
         else:
             checks = task["checks"]
             recorded_ok = sum(item["recorded"] == "ok" for item in checks)
-            stale = sum(item["current"] == "stale" for item in checks)
-            line += (f" | checks recorded OK {recorded_ok}/{len(checks)}, stale {stale}"
-                     f" | open findings {sum(task['open_findings'].values())}")
+            line += f" | checks recorded OK {recorded_ok}/{len(checks)}"
+            if task["status"] not in ledger.TERMINAL_STATUSES:
+                stale = sum(item["current"] == "stale" for item in checks)
+                line += f", stale {stale}"
+            line += f" | open findings {sum(task['open_findings'].values())}"
             if flag := task["stale"]:
                 line += f" | task stale {flag['days']} days since {flag['since']}"
         lines.append(line)
         if "usage" in payload:
-            lines.append(f"Usage: {_bounded_json(task['usage'], limit=2048, escape_controls=True)}")
+            lines.append(_render_task_usage(task["usage"]))
     if not lines:
         lines.append("No tasks on this page.")
     more = page["more"]
@@ -2165,7 +2189,7 @@ def command_task(args: argparse.Namespace) -> int:
                             print(f"    {_bounded_cli(finding['location'], limit=120, escape_controls=True)}")
                     if view["claims"]:
                         print(f"Claims: {_bounded_json(view['claims'], escape_controls=True)}")
-                    print(f"Usage: {_bounded_json(view['usage'], limit=2048, escape_controls=True)}")
+                    print(_render_task_usage(view["usage"]))
                     return 0
                 payload = view
             elif args.task_command == "events":
