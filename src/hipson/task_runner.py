@@ -341,6 +341,16 @@ def _message(text: str) -> None:
     print(f"hipson task run: {redact_text(text)}", file=sys.stderr, flush=True)
 
 
+# A ledger write that waited out SQLite's busy timeout because another process held the write lock (for example a
+# lead fingerprinting a large project on a slow filesystem). Transient: it says nothing about the worker.
+FINISH_BUSY_ATTEMPTS = 6
+
+
+def _ledger_busy(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return isinstance(exc, sqlite3.OperationalError) and ("database is locked" in text or "database is busy" in text)
+
+
 def _run_error(args: argparse.Namespace, error: BaseException, message: str) -> None:
     ledger.print_error(error, f"hipson task run: {redact_text(message)}", json_output=getattr(args, "json", False))
 
@@ -493,21 +503,28 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
     }
     if getattr(args, "role", None) == "reviewer":
         _record_review_tree(db, args.task, assignment, "end", project, getattr(args, "review_snapshot", None))
-    try:
-        with closing(ledger.Ledger(db)) as store:
-            try:
-                store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report,
-                             failure_journal=journal, usage=usage)
-            except Exception:
-                if report is None:
-                    raise
-                _message("result file rejected; recording process outcome without worker evidence")
-                journal['result_state'] = 'rejected'
-                store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs,
-                             failure_journal=journal, usage=usage)
-    except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        _run_error(args, exc, f"could not finish {assignment}: {exc}; run 'hipson task reap'")
-        return
+    for attempt in range(1, FINISH_BUSY_ATTEMPTS + 1):
+        try:
+            with closing(ledger.Ledger(db)) as store:
+                try:
+                    store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report,
+                                 failure_journal=journal, usage=usage)
+                except Exception as exc:
+                    if report is None or _ledger_busy(exc):
+                        raise
+                    _message("result file rejected; recording process outcome without worker evidence")
+                    journal['result_state'] = 'rejected'
+                    store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs,
+                                 failure_journal=journal, usage=usage)
+            break
+        except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+            # The worker has ended and its outcome is known: wait out another writer's lock rather than leave the
+            # assignment active for a reap that would record the result as lost.
+            if _ledger_busy(exc) and attempt < FINISH_BUSY_ATTEMPTS:
+                _message(f"ledger busy; retrying the final record of {assignment} ({attempt}/{FINISH_BUSY_ATTEMPTS})")
+                continue
+            _run_error(args, exc, f"could not finish {assignment}: {exc}; run 'hipson task reap'")
+            return
     try:
         observed = task_observation.complete(db, assignment, after=after)
         if observed is None and getattr(args, "observation_error", None):
@@ -898,8 +915,15 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         tree.members()
                     if not verifying and time.monotonic() >= next_heartbeat:
                         snapshot = activity.snapshot()
-                        with closing(ledger.Ledger(db)) as store:
-                            store.observe(assignment, snapshot)
+                        try:
+                            with closing(ledger.Ledger(db)) as store:
+                                store.observe(assignment, snapshot)
+                        except sqlite3.OperationalError as exc:
+                            # An activity heartbeat is evidence, not control: a busy ledger must never stop a
+                            # running worker. The next heartbeat (or the final record) carries the activity.
+                            if not _ledger_busy(exc):
+                                raise
+                            _message(f"ledger busy; skipped an activity heartbeat for {assignment}, worker keeps running")
                         next_heartbeat = time.monotonic() + task_activity.HEARTBEAT_SECONDS
                     time.sleep(0.05)
                 outcome = child.poll()
