@@ -51,7 +51,6 @@ SHARED_CONDITIONS = {
     "assignment.lease_invalid": ("ledger.Ledger.assign", "task_runner.run"),
     "assignment.not_found": ("ledger.Ledger._assignment", "cli.command_task"),
     "checks.command_required": ("ledger.validate_checks", "task_flow.parse_check"),
-    "close.refused": ("ledger.Ledger.close_task", "ledger.Ledger._set_status_locked", "ledger.Ledger._set_status_locked"),
     "close.status_not_allowed": ("ledger.Ledger.close_task", "task_flow.close", "task_flow.close"),
     "close.target_invalid": ("ledger.Ledger.close_task", "task_flow.close"),
     "finding.severity_invalid": ("ledger.Ledger.add_finding", "ledger.Ledger.findings"),
@@ -91,6 +90,7 @@ def test_every_refusal_has_a_documented_literal_code():
     message_codes = {}
     gate_codes = set()
     disallowed = []
+    gated = []
     for module in MODULES:
         path = ROOT / "src" / "hipson" / f"{module}.py"
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -99,9 +99,17 @@ def test_every_refusal_has_a_documented_literal_code():
                         and any(isinstance(target, ast.Name) and target.id == "_GATE_REASON_CODES"
                                 for target in node.targets))
             gate_codes.update(ast.literal_eval(mapping).values())
+            gate_codes.add("close.refused")  # The _gate_reason_codes fallback for an unclassified reason.
         for node, owner, expression in _raise_sites(module, tree):
             call = node.exc
             code = next((kw.value for kw in call.keywords if kw.arg == "code"), None) if isinstance(call, ast.Call) else None
+            # A gate refusal is never empty, so its first classified reason is its code.
+            if (code is None and isinstance(call, ast.Call)
+                    and ast.unparse(call.func).split(".")[-1] in {"GateRefusedError", "CloseRefusedError"}
+                    and any(kw.arg == "reason_codes" and isinstance(kw.value, ast.Call)
+                            and ast.unparse(kw.value.func) == "_gate_reason_codes" for kw in call.keywords)):
+                gated.append(owner)
+                continue
             if code is None and (owner, expression) in ALLOWLIST:
                 uncoded[owner, expression] += 1
                 continue
@@ -123,6 +131,7 @@ def test_every_refusal_has_a_documented_literal_code():
     assert all(reason and "\n" not in reason for reason in ALLOWLIST.values())
     duplicates = {code: Counter(owners) for code, owners in coded.items() if len(owners) > 1}
     assert duplicates == {code: Counter(owners) for code, owners in SHARED_CONDITIONS.items()}
+    assert Counter(gated) == Counter({"ledger.Ledger.close_task": 1, "ledger.Ledger._set_status_locked": 2})
 
     doc = (ROOT / "docs" / "TASK_LEDGER.md").read_text(encoding="utf-8")
     table = doc.split("## Refusal codes\n", 1)[1].split("\n## ", 1)[0]

@@ -559,7 +559,8 @@ _GATE_REASON_CODES = {
 
 def _gate_reason_codes(verification: dict[str, Any], reasons: list[str]) -> list[str]:
     raw = [reason for check in verification["checks"] for reason in check["reasons"]]
-    all_reasons = raw + reasons[len(raw):] if raw else reasons
+    # Raw check reasons replace their formatted copies; the gate's own reasons follow them.
+    all_reasons = raw + reasons[len(raw):]
     return [next((code for prefix, code in _GATE_REASON_CODES.items() if reason.startswith(prefix)), "close.refused")
             for reason in all_reasons]
 
@@ -1633,7 +1634,7 @@ class Ledger:
             # Review must not race a writer assigned after the caller's own checks either.
             reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]
             if reasons:
-                raise CloseRefusedError(task, reasons, code="close.refused",
+                raise CloseRefusedError(task, reasons,
                                         reason_codes=_gate_reason_codes(view["verification"], reasons),
                                         fix=_gate_fix_calls(reasons, self.path))
             if status == "open":
@@ -1690,7 +1691,7 @@ class Ledger:
                 hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
                         f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
                         if not verification['passing'] else '')
-                raise GateRefusedError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint, code="close.refused",
+                raise GateRefusedError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint,
                                        reason_codes=_gate_reason_codes(verification, blockers),
                                        fix=_gate_fix_calls(blockers, self.path))
             if force and to == 'review':
@@ -1709,7 +1710,7 @@ class Ledger:
         if to in ('review', 'done') and not final['verification']['passing']:
             if not force:
                 reasons = final['verification']['reasons']
-                raise GateRefusedError(f"Cannot mark {task} {to}: " + '; '.join(reasons), code="close.refused",
+                raise GateRefusedError(f"Cannot mark {task} {to}: " + '; '.join(reasons),
                                        reason_codes=_gate_reason_codes(final['verification'], reasons))
             if final['verification']['reasons'] != verification['reasons']:
                 self._append_event(task, actor, to + '_override',
