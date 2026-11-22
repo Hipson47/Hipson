@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import shlex
+import threading
 from contextlib import closing
 from unittest.mock import patch
 
@@ -913,7 +914,7 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
         real_connect = sqlite3.connect
         db = directory / "ledger.sqlite"
         _old_ledger(db)
-        working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}.partial"
+        working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}-{threading.get_ident()}.partial"
         earlier = [f"ledger.sqlite.v11-backup-{stamp}"] if case in ("taken", "no_links_taken") else []
         for name in earlier:
             (directory / name).write_bytes(b"earlier")

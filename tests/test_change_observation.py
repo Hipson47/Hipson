@@ -169,9 +169,20 @@ def test_tracked_files_and_scripts_are_never_ignored_output(tmp_path):
     assert attribution["dist/new.js"] == "ignored"
     assert attribution["dist/app.js"] == "out_of_scope" and attribution["deploy.ps1"] == "out_of_scope"
     assert {item["location"] for item in findings(record, "A-0012")} == {"deploy.ps1", "dist/app.js"}
+    # A project that is a subdirectory of the repository (a monorepo package) protects its tracked files too.
+    package = root / "packages" / "web"
+    package.mkdir(parents=True)
+    (package / ".gitignore").write_text("*.log\n")
+    (package / "kept.log").write_text("tracked")
+    run_git(root, "add", "packages/web/.gitignore")
+    run_git(root, "add", "-f", "packages/web/kept.log")
+    run_git(root, "commit", "-qm", "package")
+    (package / "fresh.log").write_text("untracked output")
+    assert task_observation._git_ignored(str(package), ["kept.log", "fresh.log"]) == {"fresh.log"}
     # A repository whose HEAD cannot be read downgrades nothing.
     (root / ".git" / "HEAD").write_text("ref: refs/heads/missing\n")
     assert task_observation._git_ignored(str(root), ["dist/new.js"]) == set()
+    assert task_observation._git_ignored(str(package), ["fresh.log"]) == set()
 
 
 def test_ignored_sensitive_and_hashed_paths_still_raise_a_finding(tmp_path):

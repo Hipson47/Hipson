@@ -329,14 +329,22 @@ def _git_ignored(root: str, paths: Sequence[str]) -> set[str]:
                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=GIT_IGNORE_TIMEOUT, check=True)
             # check-ignore --no-index also matches tracked files; a tracked file is source, never ignored output.
+            # The project may be a subdirectory of a repository (a monorepo package): ask Git, not the directory.
+            plain = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
+            inside = subprocess.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], cwd=directory,
+                                    env=plain, stdin=subprocess.DEVNULL, capture_output=True,
+                                    timeout=GIT_IGNORE_TIMEOUT, check=False)
             in_head: set[str] = set()
-            if os.path.lexists(os.path.join(root, ".git")):
+            if inside.returncode == 0 and inside.stdout.strip() == b"true":
+                # ls-tree from the project directory lists HEAD paths relative to it.
                 tracked = subprocess.run(["git", "-C", root, "ls-tree", "-r", "-z", "--name-only", "HEAD"],
-                                         cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         cwd=directory, env=plain, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                          stderr=subprocess.DEVNULL, timeout=GIT_IGNORE_TIMEOUT, check=False)
                 if tracked.returncode != 0:
                     return set()  # A repository whose HEAD cannot be read: nothing is downgraded.
                 in_head = {os.fsdecode(name) for name in tracked.stdout.split(b"\0") if name}
+            elif b"not a git repository" not in (inside.stderr or b""):
+                return set()  # Git could not tell whether files are tracked: nothing is downgraded.
             result = subprocess.run(["git", f"--git-dir={git_dir}", f"--work-tree={root}", "-c",
                                      f"core.excludesFile={empty}", "check-ignore", "--no-index", "-z", "--stdin"],
                                     cwd=directory, env=env, input=bytes(data), stdout=subprocess.PIPE,

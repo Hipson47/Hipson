@@ -4,7 +4,9 @@
 
 A stabilization release from the first real project built with 1.8.0 and an overnight hardening run.
 The ledger schema stays at 12. The one contract change is additive: a change observation may carry an
-`ignored` count group and `ignored` path attribution, both in `schemas/task.schema.json`.
+`ignored` count group and `ignored` path attribution, both in `schemas/task.schema.json`. Hipson 1.8.0
+reads 1.8.1 ledgers (same schema 12); only strict validation against the 1.8.0 task schema rejects
+observations that contain ignored paths.
 
 ### Fixes
 
@@ -12,7 +14,7 @@ The ledger schema stays at 12. The one contract change is additive: a change obs
   baseline in the ledger; a baseline file that is missing or changed, or a forged `.clean` marker, no
   longer reads as "nothing changed" and stops the flow with `needs_lead`.
 - **Pre-migration backups are atomic.** The copy is written to a hidden
-  `.<ledger>.v<old>-backup-<ts>-<pid>.partial` file and gets its backup name only when complete.
+  `.<ledger>.v<old>-backup-<ts>-<pid>-<thread>.partial` file and gets its backup name only when complete.
   Before, a writer killed mid-copy left an empty or hot-journal file under a real backup name
   (40 of 40 kills reproduced it), which the rollback steps would have restored.
 - **Git-ignored outputs are no longer flagged as out-of-scope writes.** Change observation lists
@@ -26,21 +28,23 @@ The ledger schema stays at 12. The one contract change is additive: a change obs
   tracked in `HEAD` that happen to match an ignore pattern.
 - **Native Codex runs record the model.** `hipson agent exec --runtime codex` now reads the model
   from the run's own rollout file into the meta file's `models`.
-- **Worker results, findings and event summaries no longer store secrets that activity already
-  masked.** Before, only pattern redaction applied, so an incomplete private-key block (a cut-off
+- **Worker results, findings and event summaries mask secret-named environment variables, as worker
+  activity does.** Before, only pattern redaction applied, so an incomplete private-key block (a cut-off
   read) or the value of a secret-named environment variable (`*_TOKEN`, `*_API_KEY`, `*_PASSWORD`,
   ...) in a worker result, a finding or a resolution note was written to the ledger as is. That
   includes the event summaries that quote them. Values shorter than 8 characters are not treated as
-  secrets, and neither are path values: names ending in `_FILE`, `_DIR`, `_DIRECTORY` or `_PATH`, or
-  values that are existing absolute paths (`GOOGLE_APPLICATION_CREDENTIALS`). Records written
+  secrets, and neither are path values (activity masks those too): names ending in `_FILE`, `_DIR`, `_DIRECTORY` or `_PATH`, or
+  values that are existing absolute paths (`GOOGLE_APPLICATION_CREDENTIALS`). The values come from the
+  environment of the process that records (the CLI, the MCP server or the worker supervisor). Records written
   before 1.8.1 are not rewritten.
 - **A busy ledger no longer kills or loses a worker.** When another process held the ledger write lock past
   SQLite's 10-second busy timeout (for example a lead opening or closing a task on a large project on a slow
   filesystem: 10-13 s to fingerprint 421 files on `/mnt/c` under WSL), the supervisor treated the failed
   activity heartbeat as a launch failure, stopped the worker with SIGTERM and recorded `failed`
-  (`run.launch_failed: database is locked`), and a busy final record left the assignment active. Heartbeats
-  now skip a busy ledger, and the final record retries up to six times. Holding the lock while
-  fingerprinting remains a known limitation.
+  (`run.launch_failed: database is locked`), and a busy final record left the assignment active. Activity
+  heartbeats now skip a busy ledger, and the final result record makes up to six attempts. Other end-of-run
+  records (the change observation, the reviewed-tree record) still report a busy ledger and are completed
+  by `hipson task reap`. Holding the lock while fingerprinting remains a known limitation.
 - **Permission denials say what was denied.** A `permission_denied` runtime failure quotes the
   redacted denial line. For Antigravity it also explains that headless mode auto-denies commands
   outside its allow list.

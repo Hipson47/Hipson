@@ -252,7 +252,7 @@ To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<
 they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
 pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
 created with mode 0600 and never overwritten. The copy is written to a hidden working file,
-`.<ledger>.v<old>-backup-<UTC timestamp>-<pid>.partial`, and gets its backup name only once it is
+`.<ledger>.v<old>-backup-<UTC timestamp>-<pid>-<thread>.partial`, and gets its backup name only once it is
 complete, so a file named `<ledger>.v<old>-backup-*` is always a whole copy. A failed copy is removed. A
 writer killed during the copy (SIGKILL, out of memory, power loss) can leave the hidden `.partial` file
 and its `-journal`. They are never a backup, hold ledger data, and can be deleted. The ledger itself is
@@ -434,8 +434,9 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   `.devcontainer/`, `.github/`, `.gitlab/`, `.circleci/`, `.agents/`, `.mcp.json`, `.gitattributes`,
   `.gitmodules`, `.pre-commit-config.yaml`, `.envrc`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`), script and binary types
   (`.sh`, `.bash`, `.zsh`, `.ps1`, `.psm1`, `.bat`, `.cmd`, `.exe`, `.com`, `.dll`, `.so`, `.dylib`; Windows has no
-  exec bits), and files tracked in `HEAD` that match an ignore pattern. A repository whose `HEAD` cannot be
-  read downgrades nothing. Any observed creation,
+  exec bits), and files tracked in `HEAD` that match an ignore pattern, also when the project is a
+  subdirectory of the repository. A repository whose `HEAD` cannot be read, or a Git that cannot tell,
+  downgrades nothing. Any observed creation,
   modification, or deletion of a `.gitignore` anywhere in the snapshot disables ignore classification for
   the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
   stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has
@@ -947,7 +948,9 @@ Writers hold SQLite's write lock while they fingerprint the project (opening a t
 status, closing). On a large tree or a slow filesystem this can take longer than the 10-second busy timeout
 (measured: 9.6 to 13 s for 421 files on `/mnt/c` under WSL, 0.05 s on ext4), and other writers then fail
 with `database is locked`. Since 1.8.1 a running worker's supervisor tolerates this: it skips busy activity
-heartbeats and retries its final record. Interactive commands report the error and can be repeated. Keep
+heartbeats and makes up to six attempts at its final result record; a busy change observation or
+reviewed-tree record is completed later by `hipson task reap`. Interactive commands report the error and
+can be repeated. Keep
 WSL projects on the Linux filesystem.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table

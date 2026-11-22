@@ -16,6 +16,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -1043,7 +1044,8 @@ def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     # Copy into a hidden working file and give it a backup name only once the copy is complete: a writer killed
     # mid-copy (SIGKILL, OOM, power loss) runs no cleanup, and its partial file must never look like a backup.
-    working = path.with_name(f".{path.name}.v{row[0]}-backup-{stamp}-{os.getpid()}.partial")
+    # Process and thread in the name: two migrators can never share a working file, even within one microsecond.
+    working = path.with_name(f".{path.name}.v{row[0]}-backup-{stamp}-{os.getpid()}-{threading.get_ident()}.partial")
     # The ledger holds briefs, journals and worker output: keep backups private, like init's.
     os.close(os.open(working, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     try:
