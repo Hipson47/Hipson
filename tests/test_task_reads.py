@@ -16,11 +16,15 @@ from tests.fixtures.agent_ux_ledger import build
 from tests.test_ledger_recovery import _v1_file
 
 SECTION_EVIDENCE_FIELDS = {
-    "verification": {"subject", "output_tail", "error", "metadata_fallback_paths", "files", "generated_files", "changes"},
+    "verification": {"actor", "context", "metadata_fallback_paths", "label", "command", "subject", "output_tail",
+                     "error", "files", "generated_files", "changes"},
     "assignments": {"actor", "result", "activity", "failure_journal", "changes"},
-    "findings": {"title", "detail", "location"},
+    "findings": {"title", "detail", "location", "resolution_note"},
     "events": {"actor", "type", "summary", "refs"},
 }
+# Columns a person or agent cannot write freely: identifiers, enums, references and timestamps.
+FINDING_SYSTEM_COLUMNS = {"id", "task", "source_assignment", "severity", "status", "resolved_by_assignment",
+                          "created_at", "updated_at", "resolved_at"}
 
 
 def _json_cli(*args):
@@ -440,3 +444,29 @@ def test_read_discovery_and_invalid_arguments(tmp_path):
                 except SystemExit as exc:
                     code = exc.code
             assert code and all(fragment in stderr.getvalue() for fragment in fragments)
+
+
+def test_section_untrusted_fields_cover_what_the_records_declare(tmp_path):
+    """Derive the expected fields from real records, not from the constants under test."""
+    from tests.test_task_flow import PASS, _open
+    from tests.test_task_verification import _project
+
+    db = tmp_path / "ledger.sqlite"
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(db)) as store:
+        task = _open(store, project, checks=(PASS,))
+        finding = store.add_finding(task, actor="reviewer", severity="minor", title="Title", detail="Detail")
+        store.update_finding(finding["id"], actor="claude", status="fixed", resolution_note="Note")
+        columns = {row["name"] for row in store.connection.execute("PRAGMA table_info(findings)")}
+    with redirect_stdout(StringIO()):
+        assert cli.main(["task", "verify", "--task", task, "--db", str(db), "--json"]) == 0
+    with patch.dict(os.environ, HIPSON_LEDGER=str(db)):
+        verification = _call_mcp("task.show", {"task": task, "section": "verification"})
+        findings = _call_mcp("task.show", {"task": task, "section": "findings"})
+    record, = verification["records"]
+    declared = set(record["untrusted_fields"])
+    assert declared and {f"records[].{field}" for field in declared} <= set(verification["untrusted_fields"])
+    assert findings["records"][0]["resolution_note"] == "Note"
+    free_text = columns - FINDING_SYSTEM_COLUMNS
+    assert free_text == {"title", "detail", "location", "resolution_note"}
+    assert {f"records[].{field}" for field in free_text} <= set(findings["untrusted_fields"])

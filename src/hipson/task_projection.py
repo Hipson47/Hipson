@@ -35,9 +35,11 @@ Section = Literal["verification", "assignments", "findings", "events"]
 SECTIONS: tuple[Section, ...] = ("verification", "assignments", "findings", "events")
 TASK_UNTRUSTED_FIELDS = ("assignments[].actor", "assignments[].summary")
 SECTION_UNTRUSTED_FIELDS = {
-    "verification": ("subject", "output_tail", "error", "metadata_fallback_paths", "files", "generated_files", "changes"),
+    # The fields task_verification marks untrusted in each stored evidence record.
+    "verification": ("actor", "context", "metadata_fallback_paths", "label", "command", "subject", "output_tail",
+                     "error", "files", "generated_files", "changes"),
     "assignments": ("actor", "result", "activity", "failure_journal", "changes"),
-    "findings": ("title", "detail", "location"),
+    "findings": ("title", "detail", "location", "resolution_note"),
     "events": ("actor", "type", "summary", "refs"),
 }
 TERMINAL = ("done", "cancelled")
