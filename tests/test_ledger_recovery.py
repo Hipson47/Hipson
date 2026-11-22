@@ -1002,3 +1002,24 @@ def test_migration_backup_is_private_and_a_failed_copy_is_removed(tmp_path: Path
     backup, = tmp_path.glob("ledger.sqlite.v1-backup-*")
     if os.name == "posix":
         assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+def test_migration_backup_takes_the_next_suffix_instead_of_overwriting(tmp_path: Path):
+    from datetime import UTC, datetime
+
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    fixed = datetime(2026, 11, 22, 12, 0, 0, 123456, tzinfo=UTC)
+    taken = tmp_path / f"ledger.sqlite.v1-backup-{fixed.strftime('%Y%m%dT%H%M%S%fZ')}"
+    taken.write_bytes(b"earlier backup")
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed
+
+    with patch.object(ledger, "datetime", Clock), closing(ledger.Ledger(db)):
+        pass
+    assert taken.read_bytes() == b"earlier backup"  # Never overwritten.
+    with closing(sqlite3.connect(tmp_path / f"{taken.name}-1")) as copy:
+        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 1

@@ -251,7 +251,9 @@ environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger 
 To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<ledger>-shm` if
 they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
 pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
-created with mode 0600; a failed copy is removed rather than left behind.
+created with mode 0600 and never overwritten. A failed copy is removed rather than left behind
+(SQLite may leave a stray  file next to it). If the backup cannot be written, for example
+on a full disk, writers cannot open the older ledger until it can; reads still work.
 
 Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
 adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
