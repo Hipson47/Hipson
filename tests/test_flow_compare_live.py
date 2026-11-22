@@ -111,7 +111,10 @@ def test_runtime_json_usage(tmp_path):
         assert evidence["turns"] == turns and evidence["usage_reason"] == (None if tokens else "runtime_error"), case
         assert bool(evidence["usage_source"])
         arm = compare._arm_usage([evidence])
-        assert arm == {"tokens": evidence["tokens"], "usage_missing_reasons": {} if tokens else {"runtime_error": 1}}
+        assert arm == {
+            "tokens_by_source": {evidence["usage_source"]: {"sessions": 1, **evidence["tokens"]}} if tokens else None,
+            "usage_missing_reasons": {} if tokens else {"runtime_error": 1},
+        }
 
 
 FAKE_RUN = r"""
@@ -189,12 +192,20 @@ def test_live_hidden_trim_measures_review_and_redacts_report(tmp_path):
     ]
     assert [session["runtime"] for session in flow["sessions"]] == ["claude", "agy", "claude", "agy"]
     assert [run["turns"] for run in data["runs"]] == [2, 2, None]
-    assert direct["tokens"] == previous["tokens"] == dict(zip(compare.TOKEN_KEYS, (4, 3, 2, 1, None, 10), strict=True))
-    assert flow["tokens"] == dict(zip(compare.TOKEN_KEYS, (22, 10, 10, None, None, 38), strict=True))
+    assert direct["tokens_by_source"] == previous["tokens_by_source"] == {
+        "claude_stream_json": {"sessions": 1, **dict(zip(compare.TOKEN_KEYS, (4, 3, 2, 1, None, 10), strict=True))},
+    }
+    assert flow["tokens_by_source"] == {
+        "agy_json": {"sessions": 2, **dict(zip(compare.TOKEN_KEYS, (14, 4, 6, None, None, 18), strict=True))},
+        "claude_stream_json": {"sessions": 2, **dict(zip(compare.TOKEN_KEYS, (8, 6, 4, 2, None, 20), strict=True))},
+    }
     assert all(run["usage_missing_reasons"] == {} for run in data["runs"])
     assert flow["brief_bytes"] == sum(session["brief_bytes"] for session in flow["sessions"])
     assert data["summary"]["A"]["sum"]["check_runs"] is None
-    assert data["summary"]["C"]["median"]["input_tokens"] == 22
+    token_summary = data["summary"]["C"]["tokens_by_source"]
+    assert {source: stats["median"]["input"] for source, stats in token_summary.items()} == {
+        "agy_json": 14, "claude_stream_json": 8,
+    }
     for run in (direct, flow):
         assert "~/fixture token=[REDACTED]" in run["summary"] and len(run["summary"]) <= 400
 

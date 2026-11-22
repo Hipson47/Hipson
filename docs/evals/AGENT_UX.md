@@ -81,17 +81,20 @@ PY
 
 Compact text saves 685 bytes and makes one more call than the 1.7.0 reference. The fixture's first
 delivery carries runner activity and a populated journal, so the suggested activity read precedes
-acknowledgment in both compact formats. The call-count target remains unmet.
-
-The owner accepted this result on 2026-11-22. A worker's activity and failure journal are read before
-its result is acknowledged, even though that adds a call. Five calls is the minimum for this
-scenario, so the 1.7.0 reference, which hard-codes the IDs and skips that read, cannot be beaten on
-calls. P0-2's "fewer calls" criterion is therefore waived for this scenario. "Fewer bytes" is met.
+acknowledgment in both compact formats. The original call-count target was unmet.
 
 On the larger S0 fixture, the original S3 actions included nine verification calls and one activity
 read. The repaired list contains one acknowledgment, two verification calls, two task reads, and
 two findings reads. Bounded CLI and MCP JSON sizes with actions included are 29,101 bytes for now
 and 29,852 bytes for resume. Both make zero full fingerprints. [S3 report](agent-ux-1.8-s3.json)
+
+### Owner decision on resume call count
+
+On 2026-11-22 the owner chose to read worker activity and the failure journal before acknowledging
+the result whenever the summary leaves those records out. Under that decision, the five calls in
+the 1.7.0 reference are a lower bound for this scenario. The reference hard-codes the IDs and skips
+the activity read. The compact runs need that sixth call to review the evidence before acknowledgment.
+The owner waived P0-2's fewer-calls criterion. Compact text meets the fewer-bytes criterion.
 
 ## S7 MCP tool profiles
 
@@ -109,6 +112,40 @@ Since `scripts/agent_e2e.py` drives the CLI, the S7 scenario exercises `--profil
 MCP stdio with a temporary ledger and a simulated worker delivery. The scenario opens, starts,
 inspects, acknowledges, verifies, closes and runs cleanup for one task.
 
+## 1.8.0 release candidate
+
+The RC and the 1.7.0 baseline use the same 22-task S0 fixture. Run the S3 commands with
+`docs/evals/agent-ux-1.8-rc.json` as the output path to reproduce the RC measurements.
+The report records HEAD `55160e0` and marks the working tree as dirty for the uncommitted release candidate.
+[1.7.0 baseline](agent-ux-baseline-1.7.0.json) · [RC report](agent-ux-1.8-rc.json)
+
+| Read | 1.7.0 full CLI JSON (bytes) | 1.8.0 RC compact CLI JSON (bytes) | 1.7.0 full MCP JSON (bytes) | 1.8.0 RC compact MCP JSON (bytes) | 1.7.0 full CLI text (bytes) | 1.8.0 RC compact CLI text (bytes) | Full fingerprints, 1.7.0 → RC compact |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `task board` | 5,614,904 | 30,497 | 4,391,961 | 30,497 | 1,350 | 2,264 | 3 → 0 |
+| `task now` | 5,812,325 | 32,704 | 4,382,200 | 32,704 | 4,024 | 3,580 | 3 → 0 |
+| `lead resume` | 11,853,633 | 33,455 | 8,778,936 | 33,455 | 4,043 | 4,001 | 3 → 0 |
+| `task show` | 766,795 | 2,441 | 623,094 | 2,441 | 538 | 455 | 1 → 0 |
+
+The RC artifact also records the full-detail reads, which remain the default in the CLI and the
+full MCP profile for 1.8. The compact CLI board text gives more evidence per task than the old board text.
+
+| MCP profile | 1.7.0 tools | 1.7.0 `tools/list` bytes | 1.8.0 RC tools | 1.8.0 RC `tools/list` bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `full` (default) | 34 | 16,223 | 35 | 18,463 |
+| `lead` (opt-in) | — | — | 14 | 5,954 |
+
+The baseline tool list was measured separately at the baseline report's revision `daa8934` with the
+same stdio JSON-RPC request and UTF-8 byte counting, including the response line feed.
+
+| Lead resumes mid-task | Hipson calls | Output bytes | Read bytes | Oracle |
+| --- | ---: | ---: | ---: | --- |
+| 1.7.0 full text | 5 | 7,339 | 3,265 | Passed |
+| 1.8.0 RC compact text | 6 | 7,037 | 2,753 | Passed |
+| 1.8.0 RC compact JSON (informational) | 6 | 10,763 | 6,478 | Passed |
+
+RC compact text saves 512 read bytes. Both compact formats inspect activity before acknowledgment,
+as specified in the [owner decision](#owner-decision-on-resume-call-count).
+
 ## Reading the report
 
 - `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `git_dirty` records whether the checkout has changes when measurement begins. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.
@@ -118,6 +155,6 @@ inspects, acknowledges, verifies, closes and runs cleanup for one task.
 - `cli_json` and `cli_text` count UTF-8 stdout bytes, including any final newline and JSON indentation. Compact CLI JSON omits the trailing newline. `mcp_json` counts UTF-8 bytes of the JSON text returned by `tools/call` before JSON-RPC envelope encoding.
 - Each surface has its own `project_state_calls` and `wall_seconds`. The count covers calls to the full `task_verification.project_state` fingerprint. Resume's separate stat-only Git checks contribute to elapsed time. Wall time includes command parsing or request dispatch, reads and rendering. Both entry points run in-process with one sample per surface and mode. Fixture setup and process startup are outside the timed calls. Compare timings on the same machine.
 - `resume_e2e` holds `scenario`, `driver`, the oracle result `passed`, and `measurement_valid` for the harness recording. `hipson_invocations` counts audited CLI calls. `read_commands` counts successful workflow reads by command, and `task_history_lookups` counts reads beyond `lead resume` and `task now`. `used_lead_resume`, `used_task_now`, and `first_hipson_command` describe how the driver found its context. `help_lookups` and `docs_lookups` count matching transcript commands.
-- The S3 report stores the compact text run in `resume_e2e` and the informational compact JSON run in `resume_e2e_json`.
+- The S3 and RC reports store the compact text run in `resume_e2e` and the informational compact JSON run in `resume_e2e_json`. The RC report stores the separate 1.7.0 tool-list measurement in `baseline_mcp_tools_list_bytes`.
 - `resume_e2e.metrics.hipson_output_bytes` counts the UTF-8 stdout and stderr emitted by audited Hipson CLI calls during the run, before log redaction. `hipson_read_output_bytes` counts the subset from successful workflow reads. Both exclude setup output, including the resume text embedded in the mission. These are output sizes at the recorder, with shell redirection or filtering downstream. `token_usage` is `null` for the fake driver.
 - The other harness metrics record transcript `total_commands` and `turns`, complete run `duration_seconds`, nonzero Hipson exits in `failing_invocations`, and whether the driver read a failure journal before starting recovery. The journal field is `null` when no recovery is observed.

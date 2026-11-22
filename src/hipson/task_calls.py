@@ -5,7 +5,9 @@ from __future__ import annotations
 import shlex
 from collections.abc import Mapping
 from contextlib import closing
+from itertools import chain, groupby
 from math import isfinite
+from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
@@ -37,6 +39,8 @@ class CleanupTask(TypedDict):
     project: str
     status: str
     assignments: list[CleanupAssignment]
+    omitted_assignments: int
+    omitted_claims: int
 
 
 class CleanupReport(TypedDict):
@@ -47,6 +51,8 @@ class CleanupReport(TypedDict):
 
 # A path such as / or a home directory can match many tasks: keep the report and the fix list bounded.
 CLEANUP_TASK_LIMIT = 50
+CLEANUP_ASSIGNMENT_LIMIT = 20
+CLEANUP_CLAIM_LIMIT = 20
 CLEANUP_FIX_LIMIT = 30
 
 
@@ -122,37 +128,62 @@ def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError 
 
     reads: list[ReadCall] = []
     templates: list[ReadCall] = []
-    nonterminal = active = 0
+    nonterminal = active = read_count = 0
     cli_db = str(db)
     with closing(Ledger(db, create=False, read_only=True, sidecar_free=True)) as store, store._transaction(write=False):
         for task in store.connection.execute("SELECT id, project, status, lead FROM tasks ORDER BY id"):
             registered = Path(task["project"])
             if not any(_same_project(str(parent), root) for parent in (registered, *registered.parents)):
                 continue
-            assignments: dict[str, CleanupAssignment] = {}
-            for item in store.connection.execute(
+            shown = len(report["tasks"]) < CLEANUP_TASK_LIMIT
+            assignments: list[CleanupAssignment] = []
+            active_ids: list[str] = []
+            assignment_count = active_count = claims_shown = omitted_claims = 0
+            items = store.connection.execute(
                 """SELECT a.id, a.role, a.mode, a.status, c.path
                    FROM assignments AS a LEFT JOIN claims AS c ON c.assignment = a.id
-                   WHERE a.task = ? ORDER BY a.id, c.path""",
+                   WHERE a.task = ? ORDER BY (a.status = 'active') DESC, a.id, c.path""",
                 (task["id"],),
-            ):
-                assignment = assignments.setdefault(item["id"], CleanupAssignment(
-                    id=item["id"], role=item["role"], mode=item["mode"], status=item["status"], claims=[]))
-                if item["path"] is not None:
-                    assignment["claims"].append(item["path"])
-            if len(report["tasks"]) < CLEANUP_TASK_LIMIT:
+            )
+            for assignment_id, rows in groupby(items, key=itemgetter("id")):
+                first = next(rows)
+                assignment_count += 1
+                if first["status"] == "active":
+                    active_count += 1
+                    if len(reads) + len(active_ids) < CLEANUP_FIX_LIMIT:
+                        active_ids.append(assignment_id)
+                if not shown:
+                    continue
+                show_assignment = len(assignments) < CLEANUP_ASSIGNMENT_LIMIT
+                claims: list[str] = []
+                for row in chain((first,), rows):
+                    if row["path"] is None:
+                        continue
+                    if show_assignment and claims_shown < CLEANUP_CLAIM_LIMIT:
+                        claims.append(row["path"])
+                        claims_shown += 1
+                    else:
+                        omitted_claims += 1
+                if show_assignment:
+                    assignments.append(CleanupAssignment(
+                        id=assignment_id, role=first["role"], mode=first["mode"], status=first["status"],
+                        claims=claims))
+            if shown:
                 report["tasks"].append(CleanupTask(
                     id=task["id"], project=task["project"], status=task["status"],
-                    assignments=list(assignments.values())))
+                    assignments=assignments, omitted_assignments=assignment_count - len(assignments),
+                    omitted_claims=omitted_claims))
             else:
                 report["omitted_tasks"] += 1
 
             is_open = task["status"] not in TERMINAL_STATUSES
-            active_ids = [item["id"] for item in assignments.values() if item["status"] == "active"]
-            if is_open or active_ids:
-                reads.append(read_call("task.show", {"task": task["id"], "detail": "compact"}, cli_db))
-                reads.extend(read_call("task.activity", {"assignment": item}, cli_db) for item in active_ids)
-            if is_open:
+            if is_open or active_count:
+                read_count += 1 + active_count
+                if len(reads) < CLEANUP_FIX_LIMIT:
+                    reads.append(read_call("task.show", {"task": task["id"], "detail": "compact"}, cli_db))
+                    reads.extend(read_call("task.activity", {"assignment": item}, cli_db)
+                                 for item in active_ids[:CLEANUP_FIX_LIMIT - len(reads)])
+            if is_open and len(templates) < CLEANUP_FIX_LIMIT:
                 args = {"task": task["id"]}
                 templates.extend((
                     read_call("task.close", args, cli_db),
@@ -160,10 +191,12 @@ def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError 
                               template=("--summary", "REASON")),
                 ))
             nonterminal += is_open
-            active += len(active_ids)
+            active += active_count
 
-    fix = (reads + templates)[:CLEANUP_FIX_LIMIT]
-    omitted_fix = len(reads) + len(templates) - len(fix)
+    # Leave room for a close and cancel pair whenever there is a nonterminal task.
+    fix = reads[:CLEANUP_FIX_LIMIT - min(2, len(templates))]
+    fix.extend(templates[:CLEANUP_FIX_LIMIT - len(fix)])
+    omitted_fix = read_count + 2 * nonterminal - len(fix)
     refusal = LedgerError(
         f"Cleanup refused: {nonterminal} nonterminal task(s), {active} active assignment(s)."
         + (f" {omitted_fix} more suggested call(s) omitted; narrow the path or read task now." if omitted_fix else ""),

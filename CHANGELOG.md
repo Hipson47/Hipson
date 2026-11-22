@@ -1,38 +1,52 @@
 # Changelog
 
-## Unreleased
+## 1.8.0 - 2026-11-22
 
-- Record runtime-reported tokens and ledger elapsed time per assignment in schema 12. Full and compact
-  task show and the assignments section report attempts by role, repair rounds, token totals per
-  runtime source (never added across sources) and missing-usage reasons. Native probes and flow
-  comparisons include the usage evidence.
-- **Ledger schema 12.** Any write open of an older ledger now backs it up next to the ledger
-  (`<ledger>.v<old>-backup-<timestamp>`) before migrating. Hipson 1.7.0 refuses a v12 ledger, so
-  upgrade every Hipson that shares a ledger together.
-- Opt in to the 14-tool lead MCP profile with `hipson mcp serve --stdio --profile lead` or
-  register it with `hipson init --mcp-profile lead`. The lead profile defaults board, now,
-  resume and task reads to compact detail and returns a coded refusal for unlisted tools.
-  Full remains the default tool profile in 1.8. Changing that default is a later breaking change.
-- Compact task reads flag stale open or in-progress tasks after seven days of ledger inactivity.
-  Compact now and resume accept a custom threshold and suggest inspecting each stale task.
-  Read-only task cleanup reports tasks, assignments and claims before a project or worktree is
-  removed, with a coded refusal when unfinished work remains.
-- Ledger refusals expose stable codes and can suggest executable fix calls. MCP appends an
-  `error_schema: 1` JSON item beside the human message, and CLI `--json` writes the same
-  object to stderr. CLI text shows a `fix:` line for each suggested call.
-- Lifecycle refusals suggest recovery calls for blocked gates, mismatched flow specs and runner
-  setup. Acknowledgment records an explicit actor when supplied, and timed-out checks suggest
-  a retry with twice the per-check timeout up to the supported maximum.
-- Compact task now and lead resume suggest up to ten ranked next actions with executable MCP
-  arguments and CLI commands. The views suggest direct acknowledgment when they show the complete
-  result summary and the assignment has no extra activity or journal.
+See the measurements and upgrade instructions in the [release notes](docs/release-1.8.md).
+
+### Agent-facing reads and actions
+
 - CLI and MCP now offer compact board, now, resume, and task reads with versioned, bounded JSON
   that marks worker evidence and offers executable list continuations with resolved project paths.
   Task show can page verification, assignment, finding, or event records in 64,000-byte JSON section
   pages in every output mode, with up to 20 files per verification record. Section pages identify
   invalid verification records and sections unavailable on older schemas. Compact resume text
-  includes result and finding IDs, project counts, and truncation details. Full detail stays the
-  default in 1.8 and compact becomes the default in 1.9.
+  includes result and finding IDs, project counts, and truncation details. The CLI and full MCP profile
+  default to full detail in 1.8 and move to compact detail in 1.9.
+- Compact task now and lead resume suggest up to ten ranked next actions with executable MCP
+  arguments and CLI commands. The views suggest direct acknowledgment when they show the complete
+  result summary and the assignment has no extra activity or journal.
+- Opt in to the 14-tool lead MCP profile with `hipson mcp serve --stdio --profile lead` or
+  register it with `hipson init --mcp-profile lead`. It defaults board, now, resume and task show
+  to compact detail and returns a coded refusal for known tools outside the profile.
+  The full tool profile remains the default in 1.8.
+
+### Refusals and cleanup
+
+- Ledger refusals expose stable codes and can suggest fix calls. MCP appends an
+  `error_schema: 1` JSON item beside the human message, and CLI `--json` writes the same
+  object to stderr. CLI text shows a `fix:` line for each suggested call.
+- Lifecycle refusals suggest recovery calls for blocked gates, mismatched flow specs and runner
+  setup. Acknowledgment records an explicit actor when supplied, and timed-out checks suggest
+  a retry with twice the per-check timeout up to the supported maximum.
+- Compact task reads flag stale open or in-progress tasks after seven days of ledger inactivity.
+  Compact now and resume accept a custom threshold and suggest inspecting each stale task.
+  Read-only task cleanup reports tasks, assignments and claims before a project or worktree is
+  removed. It refuses with `cleanup.tasks_open` when unfinished work remains, counts omitted
+  records and reserves room for close and cancel templates.
+
+### Usage and ledger upgrade
+
+- Record runtime-reported tokens and ledger elapsed time per assignment in schema 12. Full and compact
+  task show and the assignments section report attempts by role, repair rounds, token totals per
+  runtime source and missing-usage reasons. Native probes and flow comparisons include the usage evidence.
+  New flow comparison reports group arm totals by runtime source.
+- Any write open of an older ledger backs it up next to the ledger
+  (`<ledger>.v<old>-backup-<timestamp>`) before migrating. `hipson init` also keeps its own backup.
+  Hipson 1.7.0 refuses a v12 ledger, so upgrade every Hipson that shares a ledger together.
+
+### Runtime and review fixes
+
 - Antigravity gives rate-limit and login evidence priority over model rejection and reports a bounded, redacted
   model diagnostic from the CLI's error channels. A private temporary settings file preserves user allow rules
   when granting declared checks to builders. Flow review briefs include bounded, redacted contents of new

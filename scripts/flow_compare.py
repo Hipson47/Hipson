@@ -424,16 +424,19 @@ def _ledger_evidence(db: Path, strategy: str, workers: int | None) -> tuple[
 
 
 def _arm_usage(reports: list[dict[str, Any]]) -> dict[str, Any]:
-    observed = []
+    observed: dict[str, list[dict[str, int | None]]] = {}
     missing: dict[str, int] = {}
     for report in reports or [{"tokens": None, "usage_reason": "runtime_error"}]:
         if (counts := report["tokens"]) is not None:
-            observed.append(counts)
+            observed.setdefault(report["usage_source"], []).append(counts)
         else:
             reason = report["usage_reason"]
             missing[reason] = missing.get(reason, 0) + 1
-    return {"tokens": {key: _known_total([item[key] for item in observed]) for key in TOKEN_KEYS} if observed else None,
-            "usage_missing_reasons": missing}
+    by_source = {
+        source: {"sessions": len(items), **{key: _known_total([item[key] for item in items]) for key in TOKEN_KEYS}}
+        for source, items in sorted(observed.items())
+    }
+    return {"tokens_by_source": by_source or None, "usage_missing_reasons": missing}
 
 
 def _live_process(argv: list[str], workdir: Path, env: dict[str, str], stdin: str | None,
@@ -541,6 +544,12 @@ def _run_live(case: str, strategy: str, base: Path, options: argparse.Namespace)
             "sessions": sessions, "summary": _live_text(summary)}
 
 
+def _sample_stats(samples: dict[str, list[Any]]) -> dict[str, Any]:
+    return {"reported": {key: len(values) for key, values in samples.items()},
+            "sum": {key: round(sum(values), 3) if values else None for key, values in samples.items()},
+            "median": {key: round(median(values), 3) if values else None for key, values in samples.items()}}
+
+
 def _summarize_live(runs: list[dict[str, Any]]) -> dict[str, Any]:
     summary = {}
     for strategy in LIVE_STRATEGIES:
@@ -548,17 +557,19 @@ def _summarize_live(runs: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = ("accepted", "ground_truth_ok", "false_completion", "scope_violation", "tampered_tests",
                    "duration_seconds", "model_sessions", "worker_runs", "check_runs", "brief_bytes", "turns")
         samples = {key: [run[key] for run in mine if run[key] is not None] for key in metrics}
-        samples.update({f"{key}_tokens": [run["tokens"][key] for run in mine
-                                          if run["tokens"] is not None and run["tokens"][key] is not None]
-                        for key in TOKEN_KEYS})
+        token_samples: dict[str, dict[str, list[Any]]] = {}
         missing: dict[str, int] = {}
         for run in mine:
+            for source, counts in (run["tokens_by_source"] or {}).items():
+                counters = token_samples.setdefault(source, {key: [] for key in TOKEN_KEYS})
+                for key in TOKEN_KEYS:
+                    if counts[key] is not None:
+                        counters[key].append(counts[key])
             for reason, count in run["usage_missing_reasons"].items():
                 missing[reason] = missing.get(reason, 0) + count
-        summary[strategy] = {"runs": len(mine), "reported": {key: len(values) for key, values in samples.items()},
-                             "sum": {key: round(sum(values), 3) if values else None for key, values in samples.items()},
-                             "median": {key: round(median(values), 3) if values else None
-                                        for key, values in samples.items()},
+        summary[strategy] = {"runs": len(mine), **_sample_stats(samples),
+                             "tokens_by_source": {source: _sample_stats(counters)
+                                                  for source, counters in sorted(token_samples.items())} or None,
                              "usage_missing_reasons": missing}
     return summary
 
@@ -612,8 +623,9 @@ def _live_main(options: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         runs = [_run_live(case, strategy, Path(base), options) for case in cases for strategy in LIVE_STRATEGIES]
     report = {**config, **_report_context(), "runtime_versions": versions,
               "note": "Input excludes reported cache reads. Total uses each runtime's own convention. "
-                      "Counters aggregate the sessions reporting usage. A counter missing from any of those "
-                      "sessions stays null. Strategy sums and medians use the reported runs only.",
+                      "Counters aggregate the sessions reporting usage per runtime source. A counter missing from "
+                      "any of those sessions stays null for that source. Strategy sums and medians use the "
+                      "reported runs only, grouped by source for tokens.",
               "summary": _summarize_live(runs), "runs": runs}
     serialized = json.dumps(report, indent=2) + "\n"
     if options.output:

@@ -252,7 +252,7 @@ To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<
 they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
 pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
 created with mode 0600 and never overwritten. A failed copy is removed rather than left behind
-(SQLite may leave a stray  file next to it). If the backup cannot be written, for example
+(SQLite may leave a stray `<backup>-journal` file next to it). If the backup cannot be written, for example
 on a full disk, writers cannot open the older ledger until it can; reads still work.
 
 Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
@@ -340,14 +340,17 @@ and statuses, plus each task's assignments and their current claim paths. Use `-
 JSON on stdout in place of the text report. With no ledger or no matches, the report has an empty
 `tasks` list. Only tasks registered at the path or below it match; a task registered at a parent
 directory is not reported. The report lists at most 50 tasks and counts the rest in
-`omitted_tasks`; the refusal suggests at most 30 calls and says how many it left out.
+`omitted_tasks`. Each listed task shows up to 20 assignments, active ones first, and up to
+20 claim paths across those assignments. `omitted_assignments` and `omitted_claims` count the
+remaining records for that task, including any claims on assignments outside the cap.
 
 Cleanup exits 1 with `cleanup.tasks_open` if any matching task is nonterminal or any assignment
 is active, including active assignments on cancelled tasks. Inspect the suggested reads, then
 decide how to resolve the blockers. The suggested close and cancel commands are templates: their
 MCP arguments omit `approved` and the cancellation summary on purpose, because closing or
-cancelling is the lead's decision. For cancellation, replace `REASON` with the lead's explanation
-in `--summary`. A blocked task must
+cancelling is the lead's decision. The refusal suggests at most 30 calls and reserves space for
+a close and cancel pair if there is a nonterminal task. Its message states how many calls it
+omitted. For cancellation, replace `REASON` with the lead's explanation in `--summary`. A blocked task must
 return to `in_progress` before it can close. Cleanup uses a sidecar-free read of the ledger.
 Run directory removal separately after reviewing the report. A later ledger write can change
 the result.
@@ -1394,7 +1397,7 @@ argument validation, approval and ledger gates.
 
 Read tools use the read-only access rules above. With no store,
 `task.list` and `task.board` return empty arrays; `task.now` and `lead.resume` return empty view objects;
-`task.cleanup` returns the resolved project and an empty `tasks` list;
+`task.cleanup` returns the resolved project, an empty `tasks` list and `omitted_tasks: 0`;
 `task.show`, `task.brief`, `task.context`, and `task.events`
 return `Task not found` errors. Approved write tools may initialize the store.
 
@@ -1478,8 +1481,10 @@ calls in compact reads. An empty array means the refusal supplies no call. A gat
 with several reasons uses the first reason's code in the JSON body. In Python,
 `CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
 CLI `task close`, `task flow`, and `task cleanup` also keep their structured command results on
-stdout with `--json`. An MCP cleanup refusal sets `isError: true` and keeps the report as the third
-text item, after the human message and the refusal envelope. MCP close and verification refusals that recorded a result
+stdout with `--json`. An MCP `task.cleanup` refusal sets `isError: true` and keeps the report as the third
+text item, after the human message and the refusal envelope. The report's `omitted_tasks` counts
+tasks outside the 50-task cap. If the fix list leaves calls out, the message gives their count.
+MCP close and verification refusals that recorded a result
 keep `isError: false` and the result as the first text content, as before 1.8, and
 add the refusal envelope as a second text content. Flow run states (such as `worker_failed`) and
 check exit statuses carry evidence. Rejected specs and resume requests emit the
@@ -1544,7 +1549,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `checks.shell_syntax` | The check string cannot be parsed into argv. | Correct its quoting and retry. |
 | `checks.task_terminal` | A terminal task's checks cannot change. | Declare new checks on a follow-up task. |
 | `claim.conflict` | The write scope overlaps a held claim. | Inspect the holding assignment, then wait or reap if the owner died. |
-| `cleanup.tasks_open` | The selected path contains nonterminal tasks or active assignments. | Inspect the task and assignment reads, then finish active assignments and close or cancel the nonterminal tasks. |
+| `cleanup.tasks_open` | The selected path contains nonterminal tasks or active assignments. | Inspect the task and assignment reads, then finish active assignments and close or cancel nonterminal tasks. The report counts omitted tasks in `omitted_tasks`, and the message counts any omitted fix calls. |
 | `close.assignment_active` | An active assignment blocks the gate. | Wait for the assignment or inspect it for orphan recovery. |
 | `close.checks_failed` | Recorded verification exited nonzero. | Address the check failure and verify again. |
 | `close.checks_mismatch` | The declared checks differ from the checks expected by the caller. | Read the current declarations and reconcile the expected checks. |
@@ -1578,7 +1583,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
 | `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
 | `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |
-| `mcp.tool_not_in_profile` | The configured MCP tool profile does not expose the requested tool. | Reconnect with `hipson mcp serve --stdio --profile full` (named in the message; the fix list is empty). |
+| `mcp.tool_not_in_profile` | A known tool outside the configured profile. | Reconnect with `hipson mcp serve --stdio --profile full` (named in the message; the fix list is empty). |
 | `observation.already_recorded` | The assignment already has a change observation. | Read the existing observation. |
 | `observation.baseline_failed` | The runner could not capture the requested baseline. | Address the reported baseline error and retry. |
 | `observation.limit_invalid` | An observation cap is zero or negative. | Supply a positive file or byte limit. |

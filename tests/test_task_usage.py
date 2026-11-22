@@ -88,6 +88,25 @@ def test_usage_missing_reasons_and_unknown_counters(tmp_path):
         "source": "agy_json", "tokens": None, "reason": "runtime_error"}
 
 
+def test_resumed_rollout_counter_below_baseline_stays_unknown():
+    rollout = (FIXTURES / "codex-rollout.jsonl").read_text(encoding="utf-8")
+    baseline = json.loads(rollout.splitlines()[2])
+    baseline["payload"]["info"]["total_token_usage"]["cached_input_tokens"] += 1
+    assert task_runner._rollout_usage(f"{json.dumps(baseline)}\n{rollout}", NONCE, failed=False) == _expected(
+        "codex_rollout", 0, 0, None, 0, 0, 0)
+
+
+def test_adapter_usage_source_handles_python_and_inline_runtime_arguments():
+    cases = (
+        (["python", "-P", "-m", "hipson.cli", "agent", "exec", "--runtime", "codex"], "codex_rollout"),
+        (["python", "-m", "hipson.cli", "agent", "exec", "--runtime=agy"], "agy_json"),
+        (["hipson.exe", "agent", "exec", "--runtime=claude"], "claude_stream_json"),
+        (["python", "-P", "-m", "other.cli", "agent", "exec", "--runtime=agy"], None),
+    )
+    for command, source in cases:
+        assert task_runner._adapter_source(command) == source, command
+
+
 def _show(db, task, *flags):
     stdout = StringIO()
     with redirect_stdout(stdout):

@@ -113,7 +113,9 @@ Acceptance:
 - A test validates every emitted action against the target tool's input schema.
 - On the fixture, each action executed verbatim either succeeds or is refused with a P1-3 fix.
 - The e2e scenario "lead resumes mid-task" is first recorded on 1.7.0 as a committed baseline artifact
-  (tool calls, bytes read). On 1.8 it completes with fewer tool calls and fewer bytes read.
+  (tool calls, bytes read). On 1.8 compact text must read fewer bytes. The owner waived the fewer-calls
+  target so the lead reads worker activity and the failure journal before acknowledging the result.
+  See the [owner decision](evals/AGENT_UX.md#owner-decision-on-resume-call-count).
 
 ### P1-3 Refusals that name the fix
 

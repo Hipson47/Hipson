@@ -36,7 +36,8 @@ def test_cleanup_refuses_before_removing_the_worktree_in_the_november_incident(t
         assert code == 1 and "\n" not in stdout
         report, refusal = json.loads(stdout), json.loads(stderr)
         assert report == {"project": str(worktree), "omitted_tasks": 0, "tasks": [
-            {"id": task, "project": str(worktree), "status": "open", "assignments": []},
+            {"id": task, "project": str(worktree), "status": "open", "assignments": [],
+             "omitted_assignments": 0, "omitted_claims": 0},
         ]}
         assert refusal["error_schema"] == 1 and refusal["code"] == "cleanup.tasks_open"
         show, close, cancel = refusal["fix"]
@@ -144,7 +145,42 @@ def test_cleanup_report_and_fix_list_are_bounded(tmp_path):
     assert len(report["tasks"]) == task_calls.CLEANUP_TASK_LIMIT and report["omitted_tasks"] == 5
     assert refusal is not None and refusal.code == "cleanup.tasks_open"
     assert len(refusal.fix) == task_calls.CLEANUP_FIX_LIMIT
-    assert "omitted" in str(refusal) and str(task_calls.CLEANUP_TASK_LIMIT + 5) in str(refusal)
+    assert [call["tool"] for call in refusal.fix[-2:]] == ["task.close", "task.status"]
+    assert all(call["tool"] == "task.show" for call in refusal.fix[:-2])
+    total_tasks = task_calls.CLEANUP_TASK_LIMIT + 5
+    assert f"{total_tasks} nonterminal" in str(refusal)
+    assert f"{total_tasks * 3 - len(refusal.fix)} more suggested call(s) omitted" in str(refusal)
+
+
+def test_cleanup_bounds_assignment_and_claim_evidence_without_hiding_blockers(tmp_path):
+    from hipson import task_calls
+
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Many claims", objective="Review cleanup")["id"]
+        finished = store.assign(task, actor="reader", role="reviewer", mode="ro")["id"]
+        store.finish(finished, result="passed", summary="Read-only work finished")
+        active = [
+            store.assign(task, actor=f"builder{i}", role="builder", mode="rw", scope=scope)["id"]
+            for i, scope in enumerate((["a.txt", "b.txt"], ["c.txt", "d.txt"], ["e.txt"]))
+        ]
+        store.set_status(task, to="cancelled", actor="claude")
+    args = ("task", "cleanup", "--db", str(db), "--project", str(tmp_path))
+    with (patch.object(task_calls, "CLEANUP_ASSIGNMENT_LIMIT", 2), patch.object(task_calls, "CLEANUP_CLAIM_LIMIT", 3)):
+        code, stdout, stderr = run_cli_inprocess(*args, "--json")
+        text_code, text, _ = run_cli_inprocess(*args)
+        result = _call(tmp_path, "task.cleanup", ledger_db=db, project=str(tmp_path))
+    assert code == text_code == 1 and result["isError"] is True
+    report = json.loads(stdout)
+    entry, = report["tasks"]
+    assert entry["omitted_assignments"] == 2 and entry["omitted_claims"] == 2
+    assert [item["id"] for item in entry["assignments"]] == active[:2]
+    assert [item["claims"] for item in entry["assignments"]] == [["a.txt", "b.txt"], ["c.txt"]]
+    assert "2 more assignment(s) omitted" in text and "2 more claim(s) omitted" in text
+    refusal = json.loads(stderr)
+    assert "0 nonterminal task(s), 3 active assignment(s)" in refusal["message"]
+    assert [call["arguments"]["assignment"] for call in refusal["fix"] if call["tool"] == "task.activity"] == active
+    assert json.loads(result["content"][2]["text"]) == report
 
 
 def test_cleanup_text_names_omitted_tasks(tmp_path):

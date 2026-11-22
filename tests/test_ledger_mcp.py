@@ -148,7 +148,6 @@ def test_ledger_mcp_catalog_schemas_and_contract(tmp_path: Path):
     contract = _payload(_call(tmp_path, "contract.show"))
     assert_schema_valid("agent-contract.schema.json", contract)
     capabilities = contract["adapter_capabilities"]["mcp_stdio"]["capabilities"]
-    # The tools/list and catalog checks above cover cleanup. S7 owns the static agent contract's profile inventory.
     for name in TASK_TOOLS.keys() - {"task.cleanup"}:
         capability = name.replace(".", "_")
         assert ("gated_" + capability if name in WRITE_ARGUMENTS else capability) in capabilities
@@ -580,6 +579,7 @@ def test_lead_profile_refuses_unlisted_tools_without_dispatch(tmp_path):
     requests = [
         _request(1, "task.assign", {**WRITE_ARGUMENTS["task.assign"], "task": "T-0001", "approved": True}),
         _request(2, "work.create", {"project": str(tmp_path)}),
+        _request(3, "task.brief", {"task": "T-0001", "role": "builder"}),
         {"jsonrpc": "2.0", "id": 4, "method": "tools/list"},
     ]
     db = tmp_path / "ledger.sqlite"
@@ -588,7 +588,7 @@ def test_lead_profile_refuses_unlisted_tools_without_dispatch(tmp_path):
     dispatch.assert_not_called()
     assert discovery["tools"]
     assert not db.exists()
-    for request, refusal in zip(requests, refusals, strict=False):
+    for request, refusal in zip(requests[:-1], refusals, strict=True):
         _assert_error(refusal, request["params"]["name"])
         body = json.loads(refusal["content"][1]["text"])
         assert body == {
@@ -703,5 +703,5 @@ def test_lead_profile_lifecycle_over_stdio(tmp_path):
     assert report["tasks"] == [
         {"id": task, "project": str(project), "status": "done", "assignments": [
             {"id": assignment, "role": "builder", "mode": "rw", "status": "passed", "claims": []},
-        ]},
+            ], "omitted_assignments": 0, "omitted_claims": 0},
     ]

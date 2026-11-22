@@ -111,8 +111,10 @@ was marked dirty only by the regenerated offline report beside it). One sample p
 | hidden-trim C | yes / ok | 25.3 | 2 | 28.5k | 200.9k | 1,508 |
 
 New live reports read worker token evidence from the ledger for arms B and C and from runtime stdout
-for arm A. Each run reports available token counters and `usage_missing_reasons`, with a null
-`tokens` field when the arm observes no usage.
+for arm A. Each run reports `tokens_by_source` and `usage_missing_reasons`. Each source sums the
+counters for its reporting sessions. A counter missing from any of those sessions stays null.
+`tokens_by_source` is null when the arm observes no usage. Strategy summaries group token
+sums and medians by the same source.
 
 `Uncached input` is input not read from a cache for every runtime (Codex reports `input_tokens` including its
 `cached_input_tokens`; the script subtracts them). Claude also writes about 28k tokens to its cache per session.
