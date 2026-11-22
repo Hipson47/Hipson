@@ -50,7 +50,9 @@ def test_agent_ux_fixture_and_report(tmp_path):
     assert agent_ux_measure.main(["--db", str(fixture.db), "--output", str(output)]) == 0
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report.keys() == {"schema_version", "hipson_version", "git_revision", "git_dirty", "ledger_source",
-                             "task_show_id", "reads", "resume_e2e"}
+                             "task_show_id", "reads", "mcp_tools_list_bytes", "resume_e2e"}
+    assert report["mcp_tools_list_bytes"].keys() == {"full", "lead"}
+    assert 0 < report["mcp_tools_list_bytes"]["lead"] <= 6_000 < report["mcp_tools_list_bytes"]["full"]
     assert report["schema_version"] == 1 and report["hipson_version"] == __version__
     assert len(report["git_revision"]) in {40, 64} and int(report["git_revision"], 16) > 0
     assert isinstance(report["git_dirty"], bool)

@@ -204,6 +204,26 @@ def test_init_yes_registers_both_preserves_foreign_config_and_is_idempotent(tmp_
     assert len(second["next_steps"]) == 8  # Nothing new to approve once registered.
 
 
+def test_init_registers_the_opt_in_lead_profile_for_both_clients(tmp_path):
+    setup = _Setup(tmp_path)
+    args = setup.registration()["args"] + ["--profile", "lead"]
+    flags = ("--mcp-profile", "lead", "--json")
+    before = setup.snapshots()
+    plan = setup.run("--dry-run", *flags)
+    actions = {action["kind"]: action for action in plan["actions"]}
+    assert actions["claude"]["command"][-len(args):] == args
+    assert tomllib.loads(actions["codex"]["append"])["mcp_servers"]["hipson"]["args"] == args
+    assert plan["verification"]["command"][1:] == args
+    assert setup.snapshots() == before and setup.calls() == []
+
+    applied = setup.run("--yes", *flags)
+    assert applied["verification"]["status"] == "passed" and applied["verification"]["tools_count"] == 14
+    assert json.loads((setup.project / ".mcp.json").read_bytes())["mcpServers"]["hipson"]["args"] == args
+    assert tomllib.loads(setup.codex_config.read_text(encoding="utf-8"))["mcp_servers"]["hipson"]["args"] == args
+    again = setup.run(*flags)
+    assert all(action["status"] == "skipped" for action in again["actions"])
+
+
 def test_init_claude_user_scope_backs_up_before_cli_edit(tmp_path):
     setup = _Setup(tmp_path)
     setup.foreign_configs()

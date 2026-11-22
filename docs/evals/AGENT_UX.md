@@ -93,6 +93,22 @@ read. The repaired list contains one acknowledgment, two verification calls, two
 two findings reads. Bounded CLI and MCP JSON sizes with actions included are 29,101 bytes for now
 and 29,852 bytes for resume. Both make zero full fingerprints. [S3 report](agent-ux-1.8-s3.json)
 
+## S7 MCP tool profiles
+
+Run `UV_OFFLINE=1 uv run python scripts/agent_ux_measure.py` and read `mcp_tools_list_bytes`.
+These are UTF-8 bytes of the complete stdio JSON-RPC `tools/list` response, including its line
+feed. S0's approximately 16 kB figure predates subsequent tool and schema additions.
+
+| Profile | Tools | `tools/list` bytes |
+| --- | ---: | ---: |
+| `full` (default) | 35 | 18,463 |
+| `lead` | 14 | 5,954 |
+
+The full `initialize` and `tools/list` replies match the pre-S7 wire output at `0b12334`.
+Since `scripts/agent_e2e.py` drives the CLI, the S7 scenario exercises `--profile lead` over
+MCP stdio with a temporary ledger and a simulated worker delivery. The scenario opens, starts,
+inspects, acknowledges, verifies, closes and runs cleanup for one task.
+
 ## Reading the report
 
 - `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `git_dirty` records whether the checkout has changes when measurement begins. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.

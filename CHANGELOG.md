@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Opt in to the 14-tool lead MCP profile with `hipson mcp serve --stdio --profile lead` or
+  register it with `hipson init --mcp-profile lead`. The lead profile defaults board, now,
+  resume and task reads to compact detail and returns a coded refusal for unlisted tools.
+  Full remains the default tool profile in 1.8. Changing that default is a later breaking change.
 - Compact task reads flag stale open or in-progress tasks after seven days of ledger inactivity.
   Compact now and resume accept a custom threshold and suggest inspecting each stale task.
   Read-only task cleanup reports tasks, assignments and claims before a project or worktree is

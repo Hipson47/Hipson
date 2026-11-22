@@ -245,7 +245,8 @@ def command_scan_many(args: argparse.Namespace) -> int:
 
 
 def command_init(args: argparse.Namespace) -> int:
-    plan = init_setup.build_plan(project_path=args.project, client=args.client, scope=args.scope, dry_run=args.dry_run)
+    plan = init_setup.build_plan(project_path=args.project, client=args.client, scope=args.scope, dry_run=args.dry_run,
+                                 mcp_profile=args.mcp_profile)
     report = plan.report
     needs_consent = any(action["status"] == "planned" for action in report["actions"])
     if report["ok"] and not args.dry_run:
@@ -633,9 +634,9 @@ def command_policy_validate(args: argparse.Namespace) -> int:
 def command_mcp_serve(args: argparse.Namespace) -> int:
     try:
         if args.stdio:
-            mcp_server.serve_stdio(project_path=args.project, stdin=sys.stdin, stdout=sys.stdout)
+            mcp_server.serve_stdio(project_path=args.project, profile=args.profile, stdin=sys.stdin, stdout=sys.stdout)
             return 0
-        payload = mcp_server.server_catalog(project_path=args.project)
+        payload = mcp_server.server_catalog(project_path=args.project, profile=args.profile)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return int(exc.code or 1) if isinstance(exc.code, int) else 1
@@ -2585,6 +2586,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_serve.add_argument("--project", default=".", help="Target repository; defaults to current directory")
     mcp_serve.add_argument("--catalog", action="store_true", help="Print catalog-only MCP metadata")
     mcp_serve.add_argument("--stdio", action="store_true", help="Run the minimal MCP stdio JSON-RPC server")
+    mcp_serve.add_argument("--profile", choices=mcp_server.MCP_PROFILES, default="full", help="MCP tool profile (default: full)")
     mcp_serve.add_argument("--json", action="store_true", help="Print machine-readable MCP catalog")
     mcp_serve.set_defaults(func=command_mcp_serve)
 
@@ -2805,6 +2807,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--project", default=".", help="Project directory; defaults to current directory")
     init.add_argument("--client", choices=init_setup.CLIENTS, default="auto", help="Auto detects both clients on PATH; none sets up only the ledger")
     init.add_argument("--scope", choices=("project", "user"), default="project", help="Claude registration scope; Codex uses CODEX_HOME/config.toml")
+    init.add_argument("--mcp-profile", choices=mcp_server.MCP_PROFILES, default="full", help="Register the given MCP tool profile (default: full)")
     init.add_argument("--dry-run", action="store_true", help="Print exact commands and config additions without applying setup")
     init.add_argument("--yes", action="store_true", help="Approve the displayed setup without an interactive prompt")
     init.add_argument("--json", action="store_true", help="Print checks, actions and MCP verification as JSON")

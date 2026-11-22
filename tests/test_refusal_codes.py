@@ -205,7 +205,8 @@ def test_every_refusal_has_a_documented_literal_code():
     table = doc.split("## Refusal codes\n", 1)[1].split("\n## ", 1)[0]
     documented = re.findall(r"^\| `([a-z0-9_.]+)` \|", table, flags=re.M)
     flow_codes = {"flow.spec_invalid", "flow.resume_required", "flow.resume_mismatch", "flow.conflict"}
-    assert Counter(documented) == Counter(set(coded) | gate_codes | flow_codes)
+    transport_codes = {"mcp.tool_not_in_profile"}  # Exercised over tools/call in test_ledger_mcp.py.
+    assert Counter(documented) == Counter(set(coded) | gate_codes | flow_codes | transport_codes)
     assert VERIFIER_REFUSAL_CODES <= set(documented)
 
 

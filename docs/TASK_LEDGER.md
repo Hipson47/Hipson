@@ -149,8 +149,9 @@ for wall-clock activity ages. Git and ledger are separate observations, not an a
 
 Use `--detail compact` on `hipson task board`, `hipson task now`, `hipson lead resume`, or
 `hipson task show --task T-0001`. The MCP tools `task.board`, `task.now`, `lead.resume`, and
-`task.show` take `"detail": "compact"`. Full output stays the default in 1.8. Compact becomes the
-default in 1.9, and callers can keep requesting `detail=full` explicitly.
+`task.show` take `"detail": "compact"`. In 1.8, the CLI and `full` MCP profile default to full
+detail. The opt-in [`lead` MCP profile](#lead-mcp-profile) defaults to compact. Compact detail is
+planned as the general default in 1.9. Callers can request `detail=full` explicitly.
 
 Compact views read one SQLite snapshot and carry `view_schema: 1` and `hipson_version`. Task and
 list views carry `gate: "not_evaluated"` and `gate_note: "task verify / task close evaluate the gates"`.
@@ -1286,6 +1287,47 @@ detected Hipson home when unset). MCP arguments cannot select a database;
 `db` is rejected. The CLI's `--db` option remains available. Relative paths
 resolve against the server's working directory, as in the CLI.
 
+### Lead MCP profile
+
+Hipson 1.8 defaults to the `full` tool profile. Use `hipson mcp serve --stdio --profile lead`
+for a smaller tool list or `hipson mcp serve --catalog --profile lead` to inspect it.
+Changing the default profile is a breaking change reserved for a later release.
+
+Preview a new registration with `hipson init --client claude --mcp-profile lead --dry-run`.
+Use `--client codex` for Codex. Apply the same command without `--dry-run` after reviewing
+the plan. For an existing registration, append `--profile lead` to the server's arguments
+and reconnect the client. A manual stdio command is
+`hipson mcp serve --project /path/to/project --stdio --profile lead`.
+
+| Lead tool | Purpose |
+| --- | --- |
+| `lead.resume` | Restore lead context after an interruption. |
+| `task.now` | Read current priorities, pending results and suggested actions. |
+| `task.board` | Scan tasks in board order. |
+| `task.show` | Inspect a task or page through its evidence. |
+| `task.open` | Register a task and its acceptance checks. |
+| `task.status` | Start work or record transitions subject to existing gates. |
+| `task.verify` | Run and record lead verification. |
+| `task.close` | Run fresh checks and advance to review or done. |
+| `task.ack` | Acknowledge a worker result after inspection. |
+| `task.activity` | Inspect assignment activity, result and failure journal. |
+| `task.findings` | List review findings. |
+| `task.finding_update` | Resolve or reopen a finding. |
+| `task.cleanup` | Check whether outstanding work blocks removing a project directory. |
+| `task.reap` | Follow the compact view's orphan preview and recover orphaned assignments. |
+
+Run workers through the CLI. Declare acceptance checks with `task.open` and use the
+CLI's `task checks` for later revisions. `task.show` with `section=events` covers event history.
+Workflow, packet and run-bundle tools are available in `full`. Calls outside `lead` return
+`mcp.tool_not_in_profile` with a fix that tells the client how to start the `full` profile.
+
+`task.board`, `task.now`, `lead.resume`, and `task.show` default to `detail=compact` in `lead`.
+Pass `detail=full` for full output. When reading a specific `task.show` section, omit
+`detail` or pass `detail=full` to get the bounded section page. Both profiles apply the same
+argument validation, approval and ledger gates.
+
+### Full profile ledger tools
+
 Read tools use the read-only access rules above. With no store,
 `task.list` and `task.board` return empty arrays; `task.now` and `lead.resume` return empty view objects;
 `task.cleanup` returns the resolved project and an empty `tasks` list;
@@ -1472,6 +1514,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
 | `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
 | `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |
+| `mcp.tool_not_in_profile` | The configured MCP tool profile does not expose the requested tool. | Reconnect with `hipson mcp serve --stdio --profile full`. |
 | `observation.already_recorded` | The assignment already has a change observation. | Read the existing observation. |
 | `observation.baseline_failed` | The runner could not capture the requested baseline. | Address the reported baseline error and retry. |
 | `observation.limit_invalid` | An observation cap is zero or negative. | Supply a positive file or byte limit. |

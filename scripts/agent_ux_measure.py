@@ -58,6 +58,16 @@ def _tool_text(name: str, arguments: dict[str, str]) -> str:
     return result["content"][0]["text"]
 
 
+def _measure_tools_list() -> dict[str, int]:
+    request = json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n"
+    sizes = {}
+    for profile in mcp_server.MCP_PROFILES:
+        stdout = StringIO()
+        mcp_server.serve_stdio(project_path=ROOT, profile=profile, stdin=StringIO(request), stdout=stdout)
+        sizes[profile] = len(stdout.getvalue().encode("utf-8"))
+    return sizes
+
+
 def _measure(read: Callable[[], str]) -> dict[str, Any]:
     with patch.object(task_verification, "project_state", wraps=task_verification.project_state) as fingerprint:
         start = perf_counter()
@@ -156,7 +166,7 @@ def measure(db: Path, *, task: str | None = None, ledger_source: str = "provided
         detail_tools = {tool["name"] for tool in _mcp("tools/list", {})["tools"]
                         if "detail" in tool["inputSchema"].get("properties", {})}
         reads = {name: _measure_read(name, task, mcp_detail=name in detail_tools) for name in READS}
-    return {**report, "reads": reads}
+    return {**report, "reads": reads, "mcp_tools_list_bytes": _measure_tools_list()}
 
 
 def _resume_e2e(path: Path) -> dict[str, Any]:
