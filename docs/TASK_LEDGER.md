@@ -727,6 +727,14 @@ resuming continues. A builder allowed to write the acceptance tests needs them l
 test a check reaches only indirectly (a whole suite) is protected only when listed. Later rewrites by the checks
 themselves (a report file they name) are not blamed on the builder.
 
+The saved baseline lives in a directory the builder can reach, so the flow also records its SHA-256 in the
+ledger (`protected baseline N: sha256 <hex>`) before it launches builder N. When that event exists, a baseline file
+that is missing, unreadable or different stops the flow with `needs_lead` (it cannot prove the acceptance
+inputs are untouched; inspect the builder's changes, then continue manually or start a new flow), and the
+`protected-N.clean` marker is ignored: a clean comparison is recorded as `protected baseline N: unchanged after
+A-...` and later comparisons are skipped only when that event exists. A flow without the event (started
+before this check) keeps the file-only behavior.
+
 Snapshot creation fails closed, refusing the reviewer before an assignment exists (`task run` exit 75, the flow
 `verification_inconclusive`), for: content over the fingerprint hash budget, special files, symlinks that point
 out of the project, Git submodules, a repository without a commit, and Git operations that fail or time out

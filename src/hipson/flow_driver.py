@@ -607,28 +607,68 @@ def protected_state(project: str, paths: list[str]) -> dict[str, str]:
     return state
 
 
-def protected_changes(db: Path, view: ledger.TaskView, spec: dict[str, Any]) -> list[str]:
-    """Protected paths the latest ended builder changed since its launch (from the state saved at launch).
+def _baseline_prefix(number: int) -> str:
+    return f'protected baseline {number}: '
 
-    Compared once, when the builder has ended and before anything else runs; a clean comparison is recorded
-    (`protected-N.clean`), so a later check that rewrites a file it names is not blamed on the builder.
+
+def protected_check(db: Path, view: ledger.TaskView, events: list[ledger.TaskEvent] | None = None,
+                    ) -> tuple[list[str], str | None, str | None]:
+    """(changed paths, baseline problem, builder to record as unchanged) for the latest ended builder.
+
+    The flow records the SHA-256 of the saved baseline in the ledger before it launches builder N, because the
+    builder can reach the flow directory. With that event, a baseline file that is missing, unreadable or
+    different is a problem (never "nothing changed"), and the `.clean` file is ignored: a clean comparison is
+    recorded in the ledger instead. Without it (a flow that predates the event) the file-only behavior stays.
     """
     builders = [item for item in view['assignments'] if item['role'] == 'builder']
     if not builders or builders[-1]['status'] == 'active':
-        return []
+        return [], None, None
+    number, last = len(builders), builders[-1]['id']
     directory = _flow_dir(db, view['id'])
-    saved, clean = directory / f'protected-{len(builders)}.json', directory / f'protected-{len(builders)}.clean'
-    if clean.exists():
-        return []
+    saved, clean = directory / f'protected-{number}.json', directory / f'protected-{number}.clean'
+    prefix = _baseline_prefix(number)
+    flow = [event['summary'] for event in events or [] if event['type'] == 'flow']
+    recorded = [text.removeprefix(prefix + 'sha256 ') for text in flow if text.startswith(prefix + 'sha256 ')]
+    if not recorded:
+        if clean.exists():
+            return [], None, None
+        try:
+            before = json.loads(saved.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return [], None, None  # A flow started before protection existed, or a launch that never recorded it.
+        now = protected_state(view['project'], sorted(before))
+        changed = [name for name in sorted(before) if before[name] != now.get(name)]
+        if not changed:
+            clean.touch()
+        return changed, None, None
+    if f'{prefix}unchanged after {last}' in flow:
+        return [], None, None
+    problem = (f'the protected-path baseline for builder {last} is missing or was changed outside the flow, so the '
+               "flow cannot prove the acceptance inputs are untouched; inspect the builder's changes (git diff, "
+               'git status), then continue manually or start a new flow whose spec you have reviewed')
     try:
-        before = json.loads(saved.read_text(encoding='utf-8'))
+        data = saved.read_bytes()
+        if hashlib.sha256(data).hexdigest() != recorded[-1]:
+            return [], problem, None
+        before = json.loads(data.decode('utf-8'))
+        if not isinstance(before, dict):
+            return [], problem, None
     except (OSError, ValueError):
-        return []  # A flow started before protection existed, or a launch that never recorded it.
+        return [], problem, None
     now = protected_state(view['project'], sorted(before))
     changed = [name for name in sorted(before) if before[name] != now.get(name)]
-    if not changed:
-        clean.touch()
-    return changed
+    return changed, None, (None if changed else last)
+
+
+def protected_changes(db: Path, view: ledger.TaskView, spec: dict[str, Any],
+                      events: list[ledger.TaskEvent] | None = None) -> list[str]:
+    """Protected paths the latest ended builder changed since its launch (from the state saved at launch).
+
+    Compared once, when the builder has ended and before anything else runs; a clean comparison is recorded
+    (`protected-N.clean`, or a ledger event when the launch recorded the baseline hash), so a later check that
+    rewrites a file it names is not blamed on the builder.
+    """
+    return protected_check(db, view, events)[0]
 
 
 def _private_dir(db: Path, task: str) -> Path:
@@ -819,10 +859,12 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                        and event['summary'].startswith('interrupted') for ref in event['refs']}
             overrides = _current_overrides(events)
             records = [record for record in store.verifications(task) if record['id'] not in ignored]
-            changed = protected_changes(db, view, spec)
+            changed, baseline_problem, unchanged = protected_check(db, view, events)
             if view['checks'] != spec['checks']:  # Acceptance cannot change under a running flow either.
                 step = Step('stop', 'conflict', [f"declared checks changed while the flow ran: "
                                                  f"{ledger.checks_text(view['checks'])}"])
+            elif baseline_problem:
+                step = Step('stop', 'needs_lead', [baseline_problem])
             elif changed:
                 last = [item for item in view['assignments'] if item['role'] == 'builder'][-1]['id']
                 step = Step('stop', 'needs_lead', [
@@ -846,6 +888,10 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                 if snapshot is not None:
                     review_snapshot.remove(snapshot)
                 raise
+        if unchanged:
+            number = sum(item['role'] == 'builder' for item in view['assignments'])
+            _record(db, task, lead, f'{_baseline_prefix(number)}unchanged after {unchanged}', [unchanged])
+            (_flow_dir(db, task) / f'protected-{number}.clean').touch()
         steps.append(step.kind if not step.stage else f'{step.kind}:{step.stage}')
         if step.kind == 'stop':
             if step.state != 'accepted':
@@ -877,8 +923,9 @@ def _advance(db: Path, spec: dict[str, Any], task: str, retry: bool, echo: Calla
                 saved = _private_dir(db, task) / f'protected-{number}.json'
                 saved.unlink(missing_ok=True)
                 saved.with_suffix('.clean').unlink(missing_ok=True)
-                saved.write_text(json.dumps(protected_state(view['project'], protected_paths(view['project'], spec))),
-                                 encoding='utf-8')
+                data = json.dumps(protected_state(view['project'], protected_paths(view['project'], spec))).encode()
+                saved.write_bytes(data)
+                _record(db, task, lead, f'{_baseline_prefix(number)}sha256 {hashlib.sha256(data).hexdigest()}', [])
             seen = len(task_runner.SIGNALS_SEEN)
             try:
                 code = _launch(db, spec, view, role, step.stage or 'review', brief, echo, snapshot)
