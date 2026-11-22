@@ -25,6 +25,7 @@ from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
+from hipson.task_calls import ReadCall, read_call, task_lookup_calls
 
 SCHEMA_VERSION = 11
 BUSY_TIMEOUT_MS = 10_000
@@ -377,13 +378,52 @@ class TaskEvent(TypedDict):
 class LedgerError(ValueError):
     """Invalid ledger operation, suitable for a CLI error message."""
 
+    def __init__(self, message: str, *, code: str | None = None, fix: list[ReadCall] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.fix = [] if fix is None else fix
 
-class CloseRefusedError(LedgerError):
-    """A close was refused before any transition; reasons name the command that clears each blocker."""
+    def error_payload(self) -> dict[str, Any] | None:
+        if self.code is None:
+            return None
+        from hipson.task_activity import safe_text
+        return {"error_schema": 1, "code": self.code, "message": safe_text(self, 65536),
+                "fix": redact_value(self.fix)}
 
-    def __init__(self, task: str, reasons: list[str]) -> None:
-        super().__init__(f"Cannot close {task}: " + "; ".join(reasons))
+
+class LedgerOpenError(LedgerError, sqlite3.OperationalError):
+    """A database was unavailable before SQLite opened the read connection."""
+
+
+class GateRefusedError(LedgerError):
+    """A gate can refuse on several reasons, in the order reported to the caller."""
+
+    def __init__(self, message: str, *, code: str | None = None, reason_codes: Sequence[str] = (),
+                 fix: list[ReadCall] | None = None) -> None:
+        super().__init__(message, code=reason_codes[0] if reason_codes else code, fix=fix)
+        self.reason_codes = list(reason_codes)
+
+
+class CloseRefusedError(GateRefusedError):
+    """A close was refused before any transition."""
+
+    def __init__(self, task: str, reasons: list[str], *, code: str | None = None,
+                 reason_codes: Sequence[str] = (), fix: list[ReadCall] | None = None) -> None:
+        if code is not None and not reason_codes:
+            reason_codes = [code] * len(reasons)
+        super().__init__(f"Cannot close {task}: " + "; ".join(reasons), code=code, reason_codes=reason_codes, fix=fix)
         self.reasons = reasons
+
+
+def print_error(error: BaseException, message: str, *, json_output: bool) -> None:
+    payload = error.error_payload() if isinstance(error, LedgerError) else None
+    if json_output and payload is not None:
+        print(json.dumps(payload, ensure_ascii=True), file=sys.stderr, flush=True)
+        return
+    print(message, file=sys.stderr, flush=True)
+    if payload is not None:
+        for call in payload["fix"]:
+            print(f"fix: {call['cli']}", file=sys.stderr, flush=True)
 
 
 RESERVED_EVENT_TYPES = frozenset({
@@ -491,6 +531,45 @@ def done_blockers(view: TaskView) -> list[str]:
     return blockers
 
 
+# Classify existing gate reasons at the error boundary. Declared checks keep their raw reasons
+# in verification["checks"], so command text never participates in matching these prefixes.
+_GATE_REASON_CODES = {
+    "missing": "close.checks_missing",
+    "failing verification": "close.checks_failed",
+    "stale: HEAD moved": "verify.head_moved",
+    "stale: working tree changed": "verify.tree_changed",
+    "stale:": "close.checks_stale",
+    "unavailable working-tree fingerprint: Project directory is unavailable": "project.unavailable",
+    "unavailable working-tree fingerprint: HEAD moved while fingerprinting": "verify.head_moved",
+    "unavailable working-tree fingerprint: Project changed while fingerprinting": "verify.tree_changed",
+    "unavailable working-tree fingerprint": "verify.fingerprint_unavailable",
+    "verification was not recorded": "verify.lead_required",
+    "partial content coverage": "verify.coverage_partial",
+    "verification process cleanup": "verify.cleanup_unconfirmed",
+    "declared checks differ": "close.checks_mismatch",
+    "active assignment": "close.assignment_active",
+    "claim ": "close.claims_held",
+    "held claims": "close.claims_held",
+    "unacknowledged result": "close.results_unacknowledged",
+    "open blocking finding": "close.findings_open",
+    "open major finding": "close.findings_open",
+    "review required": "close.review_required",
+}
+
+
+def _gate_reason_codes(verification: dict[str, Any], reasons: list[str]) -> list[str]:
+    raw = [reason for check in verification["checks"] for reason in check["reasons"]]
+    all_reasons = raw + reasons[len(raw):] if raw else reasons
+    return [next((code for prefix, code in _GATE_REASON_CODES.items() if reason.startswith(prefix)), "close.refused")
+            for reason in all_reasons]
+
+
+def _gate_fix_calls(reasons: list[str], db: Path) -> list[ReadCall]:
+    prefix = "unacknowledged result "
+    return [read_call("task.activity", {"assignment": reason.removeprefix(prefix).split()[0].rstrip(":")}, str(db))
+            for reason in reasons if reason.startswith(prefix)]
+
+
 class ClaimConflictError(LedgerError):
     """A conflicting assignment was refused and its conflict event committed."""
 
@@ -507,10 +586,12 @@ def normalize_scope(scope: Sequence[str]) -> list[str]:
         value = raw.replace("\\", "/")
         path = PurePosixPath(value)
         if not value or "\x00" in value or path.is_absolute() or PureWindowsPath(value).drive or ".." in path.parts:
-            raise LedgerError("Scope must contain relative repository paths without '..' or drive prefixes")
+            raise LedgerError("Scope must contain relative repository paths without '..' or drive prefixes",
+                code="scope.path_invalid")
         # Stripping would silently rename a path ('src ' -> 'src') and hide overlaps; refuse edge whitespace instead.
         if any(part != part.strip() for part in path.parts):
-            raise LedgerError(f"Scope path components must not start or end with whitespace: {raw!r}")
+            raise LedgerError(f"Scope path components must not start or end with whitespace: {raw!r}",
+                code="scope.path_whitespace")
         normalized.append(path.as_posix())
     return list(dict.fromkeys(normalized))
 
@@ -543,30 +624,31 @@ def validate_assignment_scope(scope: Sequence[str], *, mode: str) -> list[str]:
     paths = normalize_scope(scope)
     if mode == "rw" and not paths:
         # An rw assignment without claims would let two writers share a tree unnoticed.
-        raise LedgerError("An rw assignment needs at least one scope path; use '.' for the whole project")
+        raise LedgerError("An rw assignment needs at least one scope path; use '.' for the whole project",
+            code="scope.required")
     if mode == "rw" and any(redact_text(path) != path for path in paths):
         # Redacting a claim would silently change the path it protects.
-        raise LedgerError("Write scope paths must not contain secret-shaped text")
+        raise LedgerError("Write scope paths must not contain secret-shaped text", code="scope.path_sensitive")
     return [redact_text(path) for path in paths]
 
 
 def validate_status_override(*, to: str, force: bool, reason: str) -> None:
     if type(force) is not bool or not isinstance(reason, str):
-        raise LedgerError("force must be boolean and reason must be text")
+        raise LedgerError("force must be boolean and reason must be text", code="status.override_type")
     if force:
         require_text(reason, "Override reason")
         if to not in ("review", "done"):
-            raise LedgerError("--force and --reason apply only to review or done")
+            raise LedgerError("--force and --reason apply only to review or done", code="status.override_target")
     elif reason:
-        raise LedgerError("--reason requires --force")
+        raise LedgerError("--reason requires --force", code="status.override_reason_without_force")
 
 
 def require_text(value: str, field: str) -> str:
     """Require nonblank text at both the ledger and transport boundaries."""
     if not value.strip():
-        raise LedgerError(f"{field} must not be empty")
+        raise LedgerError(f"{field} must not be empty", code="input.text_required")
     if _has_surrogate(value):
-        raise LedgerError(f"{field} must be valid Unicode text (lone surrogate)")
+        raise LedgerError(f"{field} must be valid Unicode text (lone surrogate)", code="input.text_invalid_unicode")
     return value.strip()
 
 
@@ -578,21 +660,24 @@ def _has_surrogate(value: str) -> bool:
 def validate_checks(checks: Sequence[Sequence[str]]) -> list[list[str]]:
     """Acceptance checks are exact argv lists run by the lead without a shell."""
     if isinstance(checks, str) or len(checks) > MAX_CHECKS:
-        raise LedgerError(f"Acceptance checks must be a list of at most {MAX_CHECKS} argv lists")
+        raise LedgerError(f"Acceptance checks must be a list of at most {MAX_CHECKS} argv lists",
+            code="checks.list_invalid")
     normalized: list[list[str]] = []
     for check in checks:
         if isinstance(check, str) or not isinstance(check, Sequence) or not check or len(check) > MAX_CHECK_ARGS:
-            raise LedgerError(f"Each acceptance check must be a nonempty argv list of at most {MAX_CHECK_ARGS} items")
+            raise LedgerError(f"Each acceptance check must be a nonempty argv list of at most {MAX_CHECK_ARGS} items",
+                code="checks.argv_invalid")
         argv = list(check)
         for arg in argv:
             if (not isinstance(arg, str) or len(arg) > CHECK_ARG_LIMIT
                     or any(ord(char) < 32 or ord(char) == 127 for char in arg)):
                 raise LedgerError(f"Acceptance check arguments must be strings of at most {CHECK_ARG_LIMIT} "
-                                  "characters without control characters")
+                                  "characters without control characters", code="checks.argument_invalid")
             if redact_text(arg) != arg:
-                raise LedgerError("Acceptance checks must not contain secret-shaped text; pass secrets via the environment")
+                raise LedgerError("Acceptance checks must not contain secret-shaped text; pass secrets via the environment",
+                    code="checks.argument_sensitive")
         if not argv[0].strip():
-            raise LedgerError("An acceptance check needs a command name")
+            raise LedgerError("An acceptance check needs a command name", code="checks.command_required")
         if argv not in normalized:
             normalized.append(argv)
     return normalized
@@ -605,11 +690,13 @@ def checks_text(checks: Sequence[Sequence[str]]) -> str:
 def validate_needs(needs: Sequence[str]) -> list[str]:
     """Capability tags a task or run needs (e.g. code_write, web_research): lower-case slugs, deduplicated."""
     if isinstance(needs, str) or len(needs) > MAX_NEEDS:
-        raise LedgerError(f"Capability tags must be a list of at most {MAX_NEEDS} names")
+        raise LedgerError(f"Capability tags must be a list of at most {MAX_NEEDS} names",
+            code="capability.tags_invalid")
     tags: list[str] = []
     for tag in needs:
         if not isinstance(tag, str) or not NEED_PATTERN.fullmatch(tag):
-            raise LedgerError(f"Capability tags are lower-case names such as code_write, not {tag!r}")
+            raise LedgerError(f"Capability tags are lower-case names such as code_write, not {tag!r}",
+                code="capability.tag_invalid")
         if tag not in tags:
             tags.append(tag)
     return tags
@@ -620,20 +707,24 @@ def _validate_result_value(value: Any, schema: dict[str, Any], path: str) -> Non
     types = {"object": dict, "array": list, "string": str, "integer": int, "null": type(None)}
     names = schema["type"] if isinstance(schema["type"], list) else [schema["type"]]
     if not any(type(value) is types[name] for name in names):
-        raise LedgerError(f"Invalid worker result at {path}: expected {' or '.join(names)}")
+        raise LedgerError(f"Invalid worker result at {path}: expected {' or '.join(names)}",
+            code="result.type_invalid")
     if "enum" in schema and value not in schema["enum"]:
-        raise LedgerError(f"Invalid worker result at {path}: expected one of {schema['enum']}")
+        raise LedgerError(f"Invalid worker result at {path}: expected one of {schema['enum']}",
+            code="result.value_invalid")
     if isinstance(value, str) and "pattern" in schema and re.search(schema["pattern"], value) is None:
-        raise LedgerError(f"Invalid worker result at {path}: must not be empty or blank")
+        raise LedgerError(f"Invalid worker result at {path}: must not be empty or blank", code="result.text_blank")
     if isinstance(value, str) and _has_surrogate(value):
-        raise LedgerError(f"Invalid worker result at {path}: lone surrogate is not valid Unicode text")
+        raise LedgerError(f"Invalid worker result at {path}: lone surrogate is not valid Unicode text",
+            code="result.text_invalid_unicode")
     if isinstance(value, dict):
         properties = schema["properties"]
         if set(value) - properties.keys():
-            raise LedgerError(f"Invalid worker result at {path}: unknown properties")
+            raise LedgerError(f"Invalid worker result at {path}: unknown properties", code="result.properties_unknown")
         for key in schema["required"]:
             if key not in value:
-                raise LedgerError(f"Invalid worker result at {path}.{key}: required property missing")
+                raise LedgerError(f"Invalid worker result at {path}.{key}: required property missing",
+                    code="result.property_required")
             _validate_result_value(value[key], properties[key], f"{path}.{key}")
     elif isinstance(value, list):
         for index, item in enumerate(value):
@@ -662,19 +753,20 @@ def load_task_result(path: str | Path) -> TaskResult:
         result: dict[str, object] = {}
         for key, value in pairs:
             if key in result:
-                raise LedgerError("Invalid worker result JSON: duplicate object property")
+                raise LedgerError("Invalid worker result JSON: duplicate object property",
+                    code="result.json_duplicate_property")
             result[key] = value
         return result
 
     def invalid_constant(value: str) -> None:
-        raise LedgerError("Invalid worker result JSON: non-finite number")
+        raise LedgerError("Invalid worker result JSON: non-finite number", code="result.json_nonfinite")
 
     try:
         # Bound the allocation even if a worker grows/replaces the file while read.
         with Path(path).expanduser().open("rb") as stream:
             data = stream.read(2**20 + 1)
         if len(data) > 2**20:
-            raise LedgerError("Invalid worker result JSON: exceeds 1 MiB limit")
+            raise LedgerError("Invalid worker result JSON: exceeds 1 MiB limit", code="result.json_too_large")
         value = json.loads(
             data.decode("utf-8"),
             object_pairs_hook=unique_object, parse_constant=invalid_constant,
@@ -683,11 +775,13 @@ def load_task_result(path: str | Path) -> TaskResult:
     except LedgerError:
         raise
     except json.JSONDecodeError as exc:
-        raise LedgerError(f"Invalid worker result JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})") from exc
+        raise LedgerError(f"Invalid worker result JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})",
+            code="result.json_invalid") from exc
     except UnicodeError as exc:
-        raise LedgerError("Invalid worker result JSON: expected UTF-8") from exc
+        raise LedgerError("Invalid worker result JSON: expected UTF-8", code="result.json_encoding") from exc
     except (ValueError, RecursionError, MemoryError) as exc:
-        raise LedgerError("Invalid worker result JSON: parser resource limit") from exc
+        raise LedgerError("Invalid worker result JSON: parser resource limit",
+            code="result.json_resource_limit") from exc
 
 
 def _changes(raw: str) -> dict[str, Any]:
@@ -800,7 +894,7 @@ def _read_only_connection(path: Path) -> sqlite3.Connection:
     permissions prevent that. Every source connection is mode=ro; snapshots are private to memory.
     """
     if not path.is_file():
-        raise sqlite3.OperationalError("unable to open database file")
+        raise LedgerOpenError("unable to open database file", code="ledger.database_unavailable")
     deadline = time.monotonic() + BUSY_TIMEOUT_MS / 1000
     if os.access(path.parent, os.W_OK):
         try:
@@ -826,15 +920,17 @@ def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: 
 
     def check_budget(status: int, remaining: int, total: int) -> None:
         if time.monotonic() >= deadline:
-            raise LedgerError(message)
+            raise LedgerError(message, code="ledger.snapshot_changed")
 
     while time.monotonic() < deadline:
         if journal.exists():
-            raise LedgerError("Task ledger has a rollback journal; retry after its writable owner completes recovery")
+            raise LedgerError("Task ledger has a rollback journal; retry after its writable owner completes recovery",
+                code="ledger.rollback_journal")
         wal_before = wal.stat() if sidecar_free and wal.exists() else None
         if wal_before is not None and wal_before.st_size:
             raise LedgerError('Task ledger has a nonempty WAL; retry after its writable owner completes recovery '
-                              'and checkpoints/closes the store (sidecar-free read refused)')
+                              'and checkpoints/closes the store (sidecar-free read refused)',
+                code="ledger.wal_pending")
         if wal.exists() and not sidecar_free:
             try:
                 return _open_read_only(path, "&readonly_shm=1", deadline)
@@ -872,7 +968,7 @@ def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: 
                 snapshot.close()
         time.sleep(min(delay, max(0, deadline - time.monotonic())))
         delay = min(delay * 2, 0.1)
-    raise LedgerError(message)
+    raise LedgerError(message, code="ledger.snapshot_changed")
 
 
 class Ledger:
@@ -896,7 +992,8 @@ class Ledger:
         self._pid_namespace = pid_namespace
         self._pid_alive = pid_alive
         if sidecar_free and not read_only:
-            raise LedgerError('A sidecar-free connection requires read_only=True')
+            raise LedgerError('A sidecar-free connection requires read_only=True',
+                code="ledger.sidecar_free_requires_read_only")
         if create and not read_only:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         # mode=rw refuses to create a missing file, even if it disappears after a caller's existence check.
@@ -925,7 +1022,8 @@ class Ledger:
                     self.connection.execute("INSERT INTO schema_version VALUES (1, ?)", (SCHEMA_VERSION,))
                 elif version is None or version[0] not in SUPPORTED_SCHEMA_VERSIONS:
                     found = version[0] if version is not None else None
-                    raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}")
+                    raise LedgerError(f"Unsupported task ledger schema version {found}; expected {SCHEMA_VERSION}",
+                        code="ledger.schema_unsupported")
                 elif not read_only:
                     if version[0] == 1:
                         for statement in MIGRATION_V1_TO_V2:
@@ -987,10 +1085,10 @@ class Ledger:
         review_policy: str = "none",
     ) -> TaskView:
         if review_policy not in REVIEW_POLICIES:
-            raise LedgerError(f"Review policy must be one of {REVIEW_POLICIES}")
+            raise LedgerError(f"Review policy must be one of {REVIEW_POLICIES}", code="review.policy_invalid")
         project_path = str(Path(project).expanduser().resolve())
         if redact_text(project_path) != project_path:
-            raise LedgerError("Project paths must not contain secret-shaped text")
+            raise LedgerError("Project paths must not contain secret-shaped text", code="project.path_sensitive")
         title = redact_text(require_text(title, "title"))
         objective = redact_text(require_text(objective, "objective"))
         lead = redact_text(require_text(lead, "lead"))
@@ -1024,9 +1122,11 @@ class Ledger:
         with self._transaction():
             current = self._task(task)
             if current["status"] in ("done", "cancelled"):
-                raise LedgerError(f"Cannot change acceptance checks of {current['status']} task {task}")
+                raise LedgerError(f"Cannot change acceptance checks of {current['status']} task {task}",
+                    code="checks.task_terminal")
             if current["checks"] and not reason.strip():
-                raise LedgerError(f"Replacing declared acceptance checks of {task} requires --reason")
+                raise LedgerError(f"Replacing declared acceptance checks of {task} requires --reason",
+                    code="checks.replace_reason_required")
             self.connection.execute("UPDATE tasks SET checks = ? WHERE id = ?", (json.dumps(declared), task))
             summary = "acceptance checks: " + checks_text(declared)
             if current["checks"]:
@@ -1052,27 +1152,31 @@ class Ledger:
     ) -> Assignment:
         actor = redact_text(require_text(actor, "actor"))
         if role not in ROLES or mode not in MODES:
-            raise LedgerError(f"Assignment requires role in {ROLES} and mode in {MODES}")
+            raise LedgerError(f"Assignment requires role in {ROLES} and mode in {MODES}",
+                code="assignment.role_or_mode_invalid")
         paths = validate_assignment_scope(scope, mode=mode)
         if owner_pid is not None and (type(owner_pid) is not int or not 1 <= owner_pid <= 2**31 - 1):
-            raise LedgerError("owner_pid must be an integer between 1 and 2147483647")
+            raise LedgerError("owner_pid must be an integer between 1 and 2147483647",
+                code="assignment.owner_pid_invalid")
         owner_boot_id = redact_text(require_text(owner_boot_id, "owner_boot_id")) if owner_boot_id is not None else None
         owner_host = redact_text(require_text(owner_host, "owner_host")) if owner_host is not None else None
         if owner_pid_namespace is not None and not isinstance(owner_pid_namespace, str):
-            raise LedgerError("owner_pid_namespace must be a string")
+            raise LedgerError("owner_pid_namespace must be a string", code="assignment.owner_namespace_invalid")
         owner_pid_namespace = redact_text(require_text(owner_pid_namespace, "owner_pid_namespace")) if owner_pid_namespace is not None else None
         if lease_seconds is not None and (type(lease_seconds) is not int or lease_seconds < 0):
-            raise LedgerError("lease_seconds must be a nonnegative integer")
+            raise LedgerError("lease_seconds must be a nonnegative integer", code="assignment.lease_invalid")
         if environment is not None and (not isinstance(environment, dict)
                                         or environment.get("mode") not in ("inherit", "minimal")):
-            raise LedgerError("environment must be an object with mode inherit or minimal")
+            raise LedgerError("environment must be an object with mode inherit or minimal",
+                code="assignment.environment_invalid")
         tags = validate_needs(needs) if needs is not None else None
         result: Assignment | None = None
         conflict = ""
         with self._transaction():
             current = self._task(task)
             if current["status"] in ("done", "cancelled"):
-                raise LedgerError(f"Cannot assign to terminal task {task} ({current['status']})")
+                raise LedgerError(f"Cannot assign to terminal task {task} ({current['status']})",
+                    code="assignment.task_terminal")
             now = _timestamp()
             try:
                 lease_until = (
@@ -1080,7 +1184,7 @@ class Ledger:
                     if lease_seconds is not None else None
                 )
             except OverflowError as exc:
-                raise LedgerError("lease_seconds is too large") from exc
+                raise LedgerError("lease_seconds is too large", code="assignment.lease_overflow") from exc
             if mode == "rw":
                 holders = self.connection.execute(
                     """SELECT c.assignment, c.path, t.project AS project, a.* FROM claims c
@@ -1138,7 +1242,8 @@ class Ledger:
         # No new assignment or claims have been created in this branch.
         if result is None:
             raise ClaimConflictError(conflict + f"; inspect it with hipson task activity --assignment "
-                                     f"{holder['assignment']} and wait, or run hipson task reap if its owner died")
+                                     f"{holder['assignment']} and wait, or run hipson task reap if its owner died",
+                code="claim.conflict")
         return cast(Assignment, redact_value(result))
 
     def reap(self, *, task: str | None = None, dry_run: bool = False) -> list[ReapedAssignment]:
@@ -1211,13 +1316,15 @@ class Ledger:
                        findings: Sequence[dict[str, str]] = ()) -> Assignment:
         """Record a post-run change observation once, with its findings and an 'observed' event, atomically."""
         if not isinstance(changes, dict) or changes.get("status") not in ("clean", "changes", "incomplete", "unobserved"):
-            raise LedgerError("Change observation must be an object with a known status")
+            raise LedgerError("Change observation must be an object with a known status",
+                code="observation.status_invalid")
         with self._transaction():
             current = self._assignment(assignment)
             if current["status"] == "active":
-                raise LedgerError(f"Assignment {assignment} is still active")
+                raise LedgerError(f"Assignment {assignment} is still active", code="assignment.active")
             if current["changes"] is not None:
-                raise LedgerError(f"Assignment {assignment} already has a change observation")
+                raise LedgerError(f"Assignment {assignment} already has a change observation",
+                    code="observation.already_recorded")
             self.connection.execute("UPDATE assignments SET changes = ? WHERE id = ?",
                                     (json.dumps(redact_value(changes)), assignment))
             ids = [self._insert_finding(current["task"], actor="hipson", severity="major", title=item["title"],
@@ -1262,7 +1369,7 @@ class Ledger:
         with self._transaction():
             current = self._assignment(assignment)
             if current['status'] != 'active':
-                raise LedgerError(f'Assignment {assignment} is already finished')
+                raise LedgerError(f'Assignment {assignment} is already finished', code="assignment.already_finished")
             self.connection.execute('UPDATE assignments SET activity = ? WHERE id = ?',
                                     (json.dumps(snapshot), assignment))
 
@@ -1275,7 +1382,7 @@ class Ledger:
         with self._transaction():
             current = self._assignment(assignment)
             if current['status'] == 'active':
-                raise LedgerError(f'Cannot acknowledge active assignment {assignment}')
+                raise LedgerError(f'Cannot acknowledge active assignment {assignment}', code="assignment.active")
             if current['acknowledged_at'] is None:
                 from hipson.task_activity import safe_text
                 self.connection.execute('UPDATE assignments SET acknowledged_at = ?, ack_note = ? WHERE id = ?',
@@ -1290,7 +1397,7 @@ class Ledger:
         failure_journal: dict[str, Any] | None = None,
     ) -> Assignment:
         if result not in RESULTS:
-            raise LedgerError(f"Assignment result must be one of {RESULTS}")
+            raise LedgerError(f"Assignment result must be one of {RESULTS}", code="assignment.result_invalid")
         summary = require_text(summary, "summary")
         report = validate_task_result(worker_result) if worker_result is not None else None
         from hipson.task_activity import bounded_journal
@@ -1298,7 +1405,8 @@ class Ledger:
         with self._transaction():
             current = self._assignment(assignment)
             if current["status"] != "active":
-                raise LedgerError(f"Assignment {assignment} is already finished ({current['status']})")
+                raise LedgerError(f"Assignment {assignment} is already finished ({current['status']})",
+                    code="assignment.already_finished")
             self.connection.execute(
                 "UPDATE assignments SET status = ?, ended_at = ?, result = ?, failure_journal = ? WHERE id = ?",
                 (result, _timestamp(), json.dumps(report) if report is not None else None,
@@ -1330,7 +1438,7 @@ class Ledger:
         actor = require_text(actor, "actor")
         title = require_text(title, "title")
         if severity not in FINDING_SEVERITIES:
-            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}")
+            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}", code="finding.severity_invalid")
         with self._transaction():
             self._task(task)
             self._check_finding_assignment(task, source_assignment)
@@ -1341,7 +1449,8 @@ class Ledger:
 
     def _check_finding_assignment(self, task: str, assignment: str | None) -> None:
         if assignment is not None and self._assignment(assignment)["task"] != task:
-            raise LedgerError(f"Assignment {assignment} does not belong to task {task}")
+            raise LedgerError(f"Assignment {assignment} does not belong to task {task}",
+                code="assignment.task_mismatch")
 
     def _insert_finding(
         self, task: str, *, actor: str, severity: str, title: str, detail: str, location: str,
@@ -1378,16 +1487,18 @@ class Ledger:
     ) -> Finding:
         actor = require_text(actor, "actor")
         if status not in FINDING_STATUSES:
-            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}")
+            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}", code="finding.status_invalid")
         with self._transaction():
             current = self._finding(finding)
             previous = current["status"]
             if previous == status or (previous != "open" and status != "open"):
-                raise LedgerError(f"Invalid finding transition for {finding}: {previous} -> {status}")
+                raise LedgerError(f"Invalid finding transition for {finding}: {previous} -> {status}",
+                    code="finding.transition_not_allowed")
             if status == "open":
                 resolution_note = require_text(resolution_note, "Reopening note")
                 if resolved_by_assignment is not None:
-                    raise LedgerError("A reopened finding cannot have a resolved-by assignment")
+                    raise LedgerError("A reopened finding cannot have a resolved-by assignment",
+                        code="finding.reopen_resolution")
             # A review task may delegate its fix to a separate task. Keep the FK
             # validated, and record that task in the immutable resolution event.
             fix_task = self._assignment(resolved_by_assignment)["task"] if resolved_by_assignment is not None else None
@@ -1413,9 +1524,9 @@ class Ledger:
         self, *, task: str | None = None, status: str | None = None, severity: str | None = None,
     ) -> list[Finding]:
         if status is not None and status not in FINDING_STATUSES:
-            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}")
+            raise LedgerError(f"Finding status must be one of {FINDING_STATUSES}", code="finding.status_invalid")
         if severity is not None and severity not in FINDING_SEVERITIES:
-            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}")
+            raise LedgerError(f"Finding severity must be one of {FINDING_SEVERITIES}", code="finding.severity_invalid")
         with self._transaction(write=False):
             if task is not None:
                 self._task(task)
@@ -1436,7 +1547,7 @@ class Ledger:
     def _finding(self, finding: str) -> Finding:
         row = self.connection.execute("SELECT * FROM findings WHERE id = ?", (finding,)).fetchone()
         if row is None:
-            raise LedgerError(f"Finding not found: {finding}")
+            raise LedgerError(f"Finding not found: {finding}", code="finding.not_found")
         return cast(Finding, dict(row))
 
     def add_event(self, task: str, *, actor: str, type: str, summary: str, refs: Sequence[str] = ()) -> TaskEvent:
@@ -1445,7 +1556,7 @@ class Ledger:
         summary = require_text(summary, "summary")
         if reserved_event_type(type):
             raise LedgerError(f"Event type {type!r} is reserved for ledger-recorded transitions; "
-                              "use a descriptive type such as progress or note")
+                              "use a descriptive type such as progress or note", code="event.type_reserved")
         with self._transaction():
             self._task(task)
             return self._append_event(task, actor, type, summary, refs)
@@ -1465,13 +1576,14 @@ class Ledger:
         source is "snapshot" when the fingerprint was re-hashed from the reviewer's immutable snapshot, "live" when
         it is the project's working tree (which a required review never accepts)."""
         if phase not in ("start", "end"):
-            raise LedgerError("Review tree phase is start or end")
+            raise LedgerError("Review tree phase is start or end", code="review.tree_phase_invalid")
         if source not in ("live", "snapshot"):
-            raise LedgerError("Review tree source is live or snapshot")
+            raise LedgerError("Review tree source is live or snapshot", code="review.tree_source_invalid")
         with self._transaction():
             current = self._assignment(assignment)
             if current["role"] != "reviewer" or current["status"] != "active":
-                raise LedgerError(f"Assignment {assignment} is not an active reviewer")
+                raise LedgerError(f"Assignment {assignment} is not an active reviewer",
+                    code="review.assignment_not_active")
             return self._append_event(current["task"], "hipson", "reviewed",
                                       f"{assignment}: {phase} revision={revision or 'none'}; "
                                       f"fingerprint={fingerprint or 'none'}; source={source}", [assignment])
@@ -1487,7 +1599,7 @@ class Ledger:
     def record_checkpoint(self, assignment: str, *, type: str, summary: str) -> TaskEvent:
         """Record a host-owned checkpoint or restore of an assignment's scope (counts, never contents)."""
         if type not in ("checkpointed", "restored"):
-            raise LedgerError("Checkpoint events are checkpointed or restored")
+            raise LedgerError("Checkpoint events are checkpointed or restored", code="checkpoint.event_invalid")
         with self._transaction():
             current = self._assignment(assignment)
             return self._append_event(current["task"], "hipson", type,
@@ -1506,13 +1618,14 @@ class Ledger:
         """Move through review (and done) in one transaction; any refused gate rolls back every step."""
         actor = require_text(actor, "actor")
         if to not in ("review", "done"):
-            raise LedgerError("Close target must be review or done")
+            raise LedgerError("Close target must be review or done", code="close.target_invalid")
         with self._transaction():
             view = self._view(task)
             status = view["status"]
             if status not in ("open", "in_progress", "review") or (status == "review" and to == "review"):
-                raise CloseRefusedError(task, [f"{task} is {status}; close works from open, in_progress or review"
-                                               + ("" if status != "review" else " (use --to done)")])
+                raise CloseRefusedError(
+                    task, [f"{task} is {status}; close works from open, in_progress or review"
+                           + ("" if status != "review" else " (use --to done)")], code="close.status_not_allowed")
             reasons = [] if view["verification"]["passing"] else list(view["verification"]["reasons"])
             if expected_checks is not None and view["checks"] != [list(check) for check in expected_checks]:
                 reasons.append("declared checks differ from the ones this close expects: " + checks_text(view["checks"]))
@@ -1520,7 +1633,9 @@ class Ledger:
             # Review must not race a writer assigned after the caller's own checks either.
             reasons += blockers if to == "done" else [item for item in blockers if item.startswith("active assignment")]
             if reasons:
-                raise CloseRefusedError(task, reasons)
+                raise CloseRefusedError(task, reasons, code="close.refused",
+                                        reason_codes=_gate_reason_codes(view["verification"], reasons),
+                                        fix=_gate_fix_calls(reasons, self.path))
             if status == "open":
                 self._set_status_locked(task, to="in_progress", actor=actor, summary="started by close",
                                         force=False, reason="")
@@ -1538,7 +1653,8 @@ class Ledger:
         if to not in TRANSITIONS[previous]:
             allowed = ', '.join(sorted(TRANSITIONS[previous])) or 'none (terminal)'
             hint = f"; hipson task close --task {task} verifies and closes in one step" if to == 'done' else ''
-            raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}")
+            raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}",
+                code="status.transition_not_allowed")
         refs: list[str] = []
         view = self._view(task)
         verification = view['verification']
@@ -1574,7 +1690,9 @@ class Ledger:
                 hint = (f"; next: hipson task close --task {task} (runs declared checks), or "
                         f"hipson task verify --task {task} -- COMMAND (MCP: task.close / task.verify)"
                         if not verification['passing'] else '')
-                raise LedgerError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint)
+                raise GateRefusedError(f"Cannot mark {task} {to}: " + "; ".join(blockers) + hint, code="close.refused",
+                                       reason_codes=_gate_reason_codes(verification, blockers),
+                                       fix=_gate_fix_calls(blockers, self.path))
             if force and to == 'review':
                 self._append_event(task, actor, 'review_override',
                                    f"Reason: {reason.strip()}; blockers: " + ('; '.join(blockers) or 'none'), [])
@@ -1590,7 +1708,9 @@ class Ledger:
         final = self._view(task)
         if to in ('review', 'done') and not final['verification']['passing']:
             if not force:
-                raise LedgerError(f"Cannot mark {task} {to}: " + '; '.join(final['verification']['reasons']))
+                reasons = final['verification']['reasons']
+                raise GateRefusedError(f"Cannot mark {task} {to}: " + '; '.join(reasons), code="close.refused",
+                                       reason_codes=_gate_reason_codes(final['verification'], reasons))
             if final['verification']['reasons'] != verification['reasons']:
                 self._append_event(task, actor, to + '_override',
                                    f"Reason: {reason.strip()}; final verification blockers: "
@@ -1632,7 +1752,8 @@ class Ledger:
 
     def events(self, task: str, *, after: int = 0) -> list[TaskEvent]:
         if after < 0 or after > SQLITE_MAX_INTEGER:
-            raise LedgerError(f"Event cursor --after must be between 0 and {SQLITE_MAX_INTEGER}")
+            raise LedgerError(f"Event cursor --after must be between 0 and {SQLITE_MAX_INTEGER}",
+                code="event.cursor_invalid")
         with self._transaction(write=False):
             self._task(task)
             return [
@@ -1644,7 +1765,7 @@ class Ledger:
 
     def list_tasks(self, *, project: str | Path | None = None, status: str | None = None) -> list[Task]:
         if status is not None and status not in STATUSES:
-            raise LedgerError(f"Task status must be one of {STATUSES}")
+            raise LedgerError(f"Task status must be one of {STATUSES}", code="status.value_invalid")
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         return cast(list[Task], redact_value([
             self._task_dict(row)
@@ -1677,7 +1798,9 @@ class Ledger:
                  *((LEGACY_ACK_NOTE,) if version >= 5 else ())),
             )}
             if task is not None and not tasks:
-                raise LedgerError(f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)")
+                raise LedgerError(
+                    f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)",
+                    code="task.not_found", fix=task_lookup_calls(self.path))
 
             def select(sql: str, *args: Any) -> Iterator[sqlite3.Row]:
                 # The only interpolation here is a bounded list of parameter placeholders.
@@ -1842,13 +1965,15 @@ class Ledger:
     def _task(self, task: str) -> Task:
         row = self.connection.execute("SELECT * FROM tasks WHERE id = ?", (task,)).fetchone()
         if row is None:
-            raise LedgerError(f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)")
+            raise LedgerError(
+                f"Task not found: {task} (list tasks with hipson task list or hipson task now --all)",
+                code="task.not_found", fix=task_lookup_calls(self.path))
         return self._task_dict(row)
 
     def _assignment(self, assignment: str) -> Assignment:
         row = self.connection.execute("SELECT * FROM assignments WHERE id = ?", (assignment,)).fetchone()
         if row is None:
-            raise LedgerError(f"Assignment not found: {assignment}")
+            raise LedgerError(f"Assignment not found: {assignment}", code="assignment.not_found")
         return self._assignment_dict(row)
 
     def _view(self, task: str, *, active_only: bool = False, states: dict[str, dict[str, Any]] | None = None) -> TaskView:

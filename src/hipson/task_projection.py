@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -19,6 +18,8 @@ from hipson.lead_context import GIT_READ_LIMIT
 from hipson.ledger import CHECK_ARG_LIMIT, FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
 from hipson.redaction import redact_text, redact_value
 from hipson.task_activity import LINE_LIMIT
+from hipson.task_calls import ReadCall
+from hipson.task_calls import read_call as _read_call
 from hipson.task_context import EVIDENCE_POLICY
 from hipson.task_verification import _worker_context, argv_identity
 
@@ -120,12 +121,6 @@ class TaskStub(TypedDict):
     title: str
     too_large: Literal[True]
     hint: str
-
-
-class ReadCall(TypedDict):
-    tool: str
-    arguments: dict[str, str | int | bool]
-    cli: str
 
 
 class ListProjection(TypedDict):
@@ -441,21 +436,6 @@ def _project_rows(rows: Sequence[dict[str, Any]]) -> list[TaskProjection]:
 def project_task(store: Ledger, task: str) -> TaskProjection:
     result, = _project_rows(store.projection_rows(task=task, include_terminal=True))
     return result
-
-
-def _read_call(tool: str, arguments: dict[str, str | int | bool], cli_db: str | None) -> ReadCall:
-    command = ["hipson", *("task finding list".split() if tool == "task.findings" else tool.split("."))]
-    for key, value in arguments.items():
-        key = key.replace("_", "-")
-        if isinstance(value, str) and value.startswith("-"):
-            command.append(f"--{key}={value}")
-            continue
-        command.append(f"--{key}")
-        if value is not True:
-            command.append(str(value))
-    if cli_db is not None:
-        command.extend(["--db", cli_db])
-    return {"tool": tool, "arguments": arguments, "cli": shlex.join([*command, "--json"])}
 
 
 def show_task(store: Ledger, task: str, *, cli_db: str | None = None) -> dict[str, Any]:

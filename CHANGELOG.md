@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Ledger refusals expose stable codes and can suggest executable fix calls. MCP appends an
+  `error_schema: 1` JSON item beside the human message, and CLI `--json` writes the same
+  object to stderr. CLI text shows a `fix:` line for each suggested call.
 - Compact task now and lead resume suggest up to ten ranked next actions with executable MCP
   arguments and CLI commands. The views suggest direct acknowledgment when they show the complete
   result summary and the assignment has no extra activity or journal.

@@ -8,7 +8,8 @@ from collections.abc import Sequence
 from typing import Any, NotRequired
 
 from hipson.ledger import Ledger
-from hipson.task_projection import TERMINAL, ListProjection, ReadCall, TaskProjection, _read_call
+from hipson.task_calls import ReadCall, read_call
+from hipson.task_projection import TERMINAL, ListProjection, TaskProjection
 
 NEXT_ACTIONS_LIMIT = 10
 WHY_LIMIT = 200
@@ -29,8 +30,7 @@ class NextAction(ActionCall):
 
 def _call(tool: str, arguments: dict[str, str | int | bool], cli_db: str | None, *,
           writes: bool = False, gated: bool = False) -> ActionCall:
-    return {**_read_call(tool, arguments, cli_db), "writes": writes,
-            "arguments": {**arguments, "approved": True} if gated else arguments}
+    return {**read_call(tool, {**arguments, "approved": True} if gated else arguments, cli_db), "writes": writes}
 
 
 def _action(why: str, call: ActionCall, *, then: ActionCall | None = None) -> NextAction:

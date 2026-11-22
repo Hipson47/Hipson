@@ -1326,3 +1326,150 @@ before retrying a write whose response was lost. `tools/list` and
 with the same bounded/redacted text as CLI `--json`. They require no approval;
 `approved` is an unknown argument. Context defaults come from the MCP server's
 environment, so pass `task` explicitly when the server has no `HIPSON_TASK`.
+
+## Refusal codes
+
+A coded MCP refusal keeps its human message as the first text item and adds a second
+text item with a JSON object. The CLI prints the message and a `fix: <cli>` line for
+each suggested call in text mode. With `--json` it writes the same JSON object to
+stderr. The object has `error_schema: 1`, a stable `code`, a `message` and a `fix`
+array. Each fix has `tool`, `arguments` and `cli` fields in the same shape as the
+calls in compact reads. An empty array means the refusal supplies no call. A gate
+with several reasons uses the first reason's code in the JSON body. In Python,
+`CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
+The table describes typical resolutions, including those that require judgment or
+manual work.
+
+| Code | Meaning | Typical fix |
+| --- | --- | --- |
+| `agents.target_required` | Agent installation has no selected target. | Select a target or pass `--all`. |
+| `assignment.active` | The operation requires an ended assignment. | Wait for it to finish or check whether its owner needs reaping. |
+| `assignment.already_finished` | The assignment already ended. | Read its recorded result with `task activity`. |
+| `assignment.environment_invalid` | The assignment environment record has an unsupported shape or mode. | Use an object with mode `inherit` or `minimal`. |
+| `assignment.lease_invalid` | The lease duration is invalid. | Supply a nonnegative integer number of seconds. |
+| `assignment.lease_overflow` | The lease expiration cannot be represented. | Supply a shorter lease. |
+| `assignment.not_found` | The assignment ID is absent from the ledger. | Read assignments on the task and retry with the correct ID. |
+| `assignment.owner_namespace_invalid` | The PID namespace is invalid. | Supply the namespace as a string. |
+| `assignment.owner_pid_invalid` | The owner PID is outside the supported integer range. | Supply its actual PID in range. |
+| `assignment.result_invalid` | The assignment outcome is unsupported. | Use `passed`, `failed` or `cancelled`. |
+| `assignment.role_or_mode_invalid` | The assignment role or mode is unsupported. | Choose a supported role and `ro` or `rw`. |
+| `assignment.task_mismatch` | The assignment belongs to another task. | Use an assignment from the selected task. |
+| `assignment.task_terminal` | A terminal task cannot receive an assignment. | Open a follow-up task. |
+| `capability.tag_invalid` | A capability tag uses invalid characters. | Use a lower-case name such as `code_write`. |
+| `capability.tags_invalid` | Capability tags exceed the limit or have the wrong shape. | Supply a bounded list of tag names. |
+| `chat.demo_tool_not_allowed` | The fake tool demo cannot use the selected tool. | Choose a read-risk tool that requires no approval. |
+| `chat.provider_unsupported` | The selected chat provider is unsupported. | Use the supported provider option. |
+| `checkpoint.capture_failed` | The runner could not save the checkpoint. | Inspect the diagnostic and correct the capture problem before retrying. |
+| `checkpoint.event_invalid` | The checkpoint event type is unsupported. | Use `checkpointed` or `restored`. |
+| `checkpoint.limit_invalid` | A checkpoint cap is zero or negative. | Supply a positive file or byte limit. |
+| `checkpoint.write_scope_required` | Checkpointing requires a write assignment. | Use `--mode rw` with a claimed scope. |
+| `checks.argument_invalid` | A check argument has an invalid type, length or control character. | Supply valid bounded text arguments. |
+| `checks.argument_sensitive` | A check argument contains secret-shaped text. | Pass credentials through the environment. |
+| `checks.argv_invalid` | A declared check is empty or has an invalid argument list. | Supply a nonempty argv list within the limit. |
+| `checks.command_required` | A check lacks a command name. | Supply an executable name. |
+| `checks.list_invalid` | The outer check list has the wrong shape or exceeds its limit. | Supply a bounded list of argv lists. |
+| `checks.operation_required` | No single check update operation was selected. | Pass repeatable `--check` or pass `--clear`. |
+| `checks.replace_reason_required` | Replacing declared checks requires a reason. | Pass `--reason` with the reason for replacing them. |
+| `checks.shell_backslash` | A backslash would be parsed as a shell escape in a check argument. | Use forward slashes in paths. |
+| `checks.shell_syntax` | The check string cannot be parsed into argv. | Correct its quoting and retry. |
+| `checks.task_terminal` | A terminal task's checks cannot change. | Declare new checks on a follow-up task. |
+| `claim.conflict` | The write scope overlaps a held claim. | Inspect the holding assignment, then wait or reap if the owner died. |
+| `close.assignment_active` | An active assignment blocks the gate. | Wait for the assignment or inspect it for orphan recovery. |
+| `close.checks_failed` | Recorded verification exited nonzero. | Address the check failure and verify again. |
+| `close.checks_mismatch` | The declared checks differ from the checks expected by the caller. | Read the current declarations and reconcile the expected checks. |
+| `close.checks_missing` | The task or a declared check has no recorded verification. | Run the declared checks or record a lead verification. |
+| `close.checks_stale` | Verification predates a completed builder or the project was unstable during the check. | Verify the final candidate again. |
+| `close.claims_held` | One or more remaining claims block the gate. | Inspect the holding assignments and reap orphaned claims if appropriate. |
+| `close.findings_open` | An open blocking or major finding prevents done. | Address and resolve the finding. |
+| `close.refused` | The gate reported an unclassified refusal reason. | Read the reason and address the reported blocker. |
+| `close.results_unacknowledged` | An ended assignment has an unread delivery. | Read its `task activity` and acknowledge it. |
+| `close.review_required` | A qualifying review of the verified snapshot is missing. | Run an independent read-only snapshot review of the verified candidate. |
+| `close.status_not_allowed` | Close cannot run from the current status to that target. | Read the current task status and use an allowed close target. |
+| `close.target_invalid` | Close only accepts review or done as a target. | Use `--to review` or `--to done`. |
+| `event.cursor_invalid` | The event cursor is outside SQLite's integer range. | Supply a nonnegative cursor within range. |
+| `event.type_reserved` | A free-form event uses a ledger-owned event type. | Use a descriptive type such as `progress` or `note`. |
+| `finding.not_found` | The finding ID is absent from the ledger. | List the task's findings and use the correct ID. |
+| `finding.reopen_resolution` | A reopen request supplies a resolved-by assignment. | Reopen without that assignment. |
+| `finding.severity_invalid` | The finding severity is unsupported. | Use a supported severity such as `major`. |
+| `finding.status_invalid` | The finding status is unsupported. | Use a supported status such as `open` or `fixed`. |
+| `finding.transition_not_allowed` | The requested finding status transition is forbidden. | Read the current finding status and choose a valid transition. |
+| `input.text_invalid_unicode` | A text field contains a lone surrogate. | Replace it with valid Unicode text. |
+| `input.text_required` | A required text field is empty or blank. | Supply a nonblank value for the named field. |
+| `kit.resume_run_required` | The review kit resume command has no run path. | Pass `--run runs/<work_id>`. |
+| `ledger.database_unavailable` | The ledger database could not be opened for a read. | Check the selected ledger path and its availability. |
+| `ledger.path_unresolvable` | The configured database path cannot be resolved. | Use a valid database path. |
+| `ledger.rollback_journal` | A rollback journal prevents a read-only snapshot. | Retry after the writable owner finishes recovery. |
+| `ledger.schema_unsupported` | The database has an unsupported ledger schema. | Use a compatible Hipson version or migrate with the supported upgrade path. |
+| `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
+| `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
+| `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |
+| `observation.already_recorded` | The assignment already has a change observation. | Read the existing observation. |
+| `observation.baseline_failed` | The runner could not capture the requested baseline. | Address the reported baseline error and retry. |
+| `observation.limit_invalid` | An observation cap is zero or negative. | Supply a positive file or byte limit. |
+| `observation.status_invalid` | The change observation has an invalid shape or status. | Supply an observation object with a supported status. |
+| `project.path_sensitive` | The project path contains secret-shaped text. | Use a project path without credential material. |
+| `project.unavailable` | The bound project directory is unavailable. | Restore access to the task's project directory. |
+| `result.json_duplicate_property` | Worker result JSON contains a repeated key. | Keep a single value for each property. |
+| `result.json_encoding` | The result file is not encoded as UTF-8. | Save it as UTF-8 JSON. |
+| `result.json_invalid` | The result file contains malformed JSON. | Correct the JSON at the reported location. |
+| `result.json_nonfinite` | Worker result JSON contains a nonfinite number. | Use finite numbers. |
+| `result.json_resource_limit` | The worker result exceeded a parser resource limit. | Reduce the nesting or numeric size. |
+| `result.json_too_large` | The result file exceeds 1 MiB. | Condense the result. |
+| `result.properties_unknown` | The result includes undeclared properties. | Use the fields in the worker result schema. |
+| `result.property_required` | A required result property is absent. | Include the named property. |
+| `result.text_blank` | A result field requires nonblank text. | Supply text for the named field. |
+| `result.text_invalid_unicode` | A result field contains a lone surrogate. | Replace it with valid Unicode text. |
+| `result.type_invalid` | A result field has a mismatched type. | Use the type reported by the schema validator. |
+| `result.value_invalid` | A result field value is outside the schema's allowed values. | Use one of the reported values. |
+| `review.assignment_not_active` | The reviewed-tree event refers to an inactive assignment or a non-reviewer. | Record review evidence against an active reviewer. |
+| `review.policy_invalid` | The review policy is unsupported. | Use `none` or `required`. |
+| `review.tree_phase_invalid` | The review-tree event phase is unsupported. | Use `start` or `end`. |
+| `review.tree_source_invalid` | The review-tree event source is unsupported. | Use `live` or `snapshot` as recorded by the runner. |
+| `run.brief_unreadable` | The runner could not read the worker brief. | Check the brief path and its permissions. |
+| `run.command_required` | A worker command after `--` is missing. | Append `-- COMMAND [ARGS...]`. |
+| `run.grace_invalid` | The configured worker cleanup grace is invalid. | Use a finite nonnegative number of seconds. |
+| `run.output_pipes_unavailable` | The runner could not obtain worker output pipes. | Inspect the worker supervisor and retry after resolving the launch issue. |
+| `run.windows_command_invalid` | The Windows batch launch rejected the command. | Correct the command arguments or use a native executable. |
+| `run.worker_env_policy_unreadable` | An unreadable policy may configure the worker environment. | Correct `.hipson/policy.json` or set `--env` explicitly. |
+| `run.worker_env_yaml` | An effective YAML policy may configure the worker environment. | Move the setting to `.hipson/policy.json` or set `--env` explicitly. |
+| `scope.path_invalid` | A scope path is absolute or uses a parent traversal or drive prefix. | Supply a repository-relative path. |
+| `scope.path_sensitive` | A write scope contains secret-shaped text. | Choose a scope without credential material. |
+| `scope.path_whitespace` | A scope path component starts or ends with whitespace. | Use the intended path without surrounding whitespace. |
+| `scope.required` | An `rw` assignment has no write scope. | Supply `--scope PATH`, using `.` for the whole project when intended. |
+| `session.not_found` | The CLI tool session ID does not exist. | List sessions and use an existing ID. |
+| `sidecar.profile_required` | Sidecar execution lacks an explicit agent or model profile. | Supply `--ai-profile`. |
+| `status.override_reason_without_force` | An override reason was supplied without force. | Use `--force` with the reason if overriding is intended. |
+| `status.override_target` | The selected status does not accept override flags. | Remove override flags or use the intended review/done target. |
+| `status.override_type` | Force or reason has the wrong type. | Supply a boolean force flag and a text reason. |
+| `status.transition_not_allowed` | The task cannot move from its current status to the requested status. | Use an allowed transition or the close workflow. |
+| `status.value_invalid` | The task status filter is unsupported. | Use one of the ledger's recorded status names. |
+| `task.not_found` | The task ID is absent from the selected ledger. | Use `task list` or `task now --detail compact` to locate it. |
+| `task_read.compact_filter_required` | Task board filtering fields require a compact view. | Pass `--detail compact` with the filter. |
+| `task_read.compact_paging_required` | List pagination flags require a compact view. | Pass `--detail compact` with the paging flags. |
+| `task_read.section_required` | A task-show page has no section. | Pass `--section` with the paging flags. |
+| `task_read.section_with_compact` | A section read was combined with compact detail. | Choose the section read or the compact summary. |
+| `verify.argv_invalid` | The verification command argv is missing or invalid. | Supply a command with valid text arguments and no NULs. |
+| `verify.checks_undeclared` | No acceptance checks were declared for this task. | Declare checks or provide a verification command. |
+| `verify.cleanup_unconfirmed` | The supervisor could not confirm verification process cleanup. | Confirm the check's descendants have exited before retrying. |
+| `verify.command_required` | An explicit verification command is missing or lacks its delimiter. | Pass `-- COMMAND [ARGS...]` or omit it to run declared checks. |
+| `verify.coverage_partial` | Some content was verified by metadata only. | Restore readable content and verify again. |
+| `verify.directory_symlink` | A directory symlink prevents a contained fingerprint. | Verify a candidate with a contained directory layout. |
+| `verify.evidence_unavailable` | The supervisor returned no recorded verification evidence. | Inspect its diagnostic and retry verification. |
+| `verify.external_symlink` | A symlink points outside the project snapshot. | Replace it with a contained link or file. |
+| `verify.fingerprint_unavailable` | Verification lacks a usable working-tree fingerprint. | Address the reported fingerprint error and verify again. |
+| `verify.git_filters_unavailable` | Git filter settings cannot be read within the limit. | Check Git config readability and size. |
+| `verify.git_hash_unavailable` | Git could not normalize and hash candidate content. | Inspect Git attributes and the named project content. |
+| `verify.git_head_unavailable` | Git has no usable HEAD. | Create the initial revision or restore a valid checkout. |
+| `verify.git_inventory_unavailable` | Git's content inventory is unreadable or exceeds the limit. | Restore Git access or verify a smaller project. |
+| `verify.git_state_unavailable` | The Git repository is present but its state cannot be read. | Restore repository access and retry. |
+| `verify.git_submodules` | A submodule requires separate verification. | Verify the submodule separately. |
+| `verify.head_moved` | HEAD changed while fingerprinting or differs from verified HEAD. | Run verification against the current HEAD. |
+| `verify.inventory_path_invalid` | The fingerprint inventory contains an invalid path. | Inspect the Git inventory and correct the invalid path. |
+| `verify.lead_required` | The record lacks the task lead's verification in a lead context. | Verify as the recorded task lead. |
+| `verify.snapshot_budget` | Project content exceeds the per-file or aggregate snapshot budget. | Verify a smaller project or reduce the candidate content. |
+| `verify.special_file` | A special filesystem entry prevents fingerprinting. | Remove it from the verification candidate. |
+| `verify.supervisor_timeout` | The verification supervisor exceeded its execution budget. | Inspect the check and supervisor or retry with an appropriate timeout. |
+| `verify.timeout_invalid` | The verification timeout is outside the supported range. | Supply a positive, finite timeout up to 86400 seconds. |
+| `verify.tree_changed` | Working-tree content changed while fingerprinting or since verification. | Stabilize the working tree and verify the candidate again. |
+| `verify.walk_limit` | A non-Git project exceeded the fingerprint walk limits. | Use a Git repository or a smaller project folder. |
+| `verify.worker_context` | A worker context tried to perform a lead operation. | Run it from the lead session. |

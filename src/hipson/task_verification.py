@@ -16,11 +16,12 @@ import time
 import uuid
 from contextlib import closing, nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from hipson import ledger, task_activity
 from hipson.display import escape_display_controls
 from hipson.redaction import redact_text
+from hipson.task_calls import ReadCall
 
 OUTPUT_LIMIT = 8192
 FILE_HASH_LIMIT = 16 * 1024 * 1024
@@ -92,7 +93,8 @@ def _filter_overrides(project: str) -> list[str]:
 
     names = _git(project, 'config', '--null', '--name-only', '--list')
     if names is None:
-        raise ValueError('Git filter configuration is unavailable or exceeds its read limit')
+        raise ledger.LedgerError('Git filter configuration is unavailable or exceeds its read limit',
+            code="verify.git_filters_unavailable")
     overrides: list[str] = []
     for key in sorted(set(names.split(b'\0')[:-1])):
         if key.startswith(b'filter.') and key.rsplit(b'.', 1)[-1] in (b'clean', b'smudge', b'process', b'required'):
@@ -121,17 +123,19 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                               'dirty': None, 'error': None, 'files': [], 'generated_files': []}
     try:
         if not root.is_dir():
-            raise ValueError('Project directory is unavailable')
+            raise ledger.LedgerError('Project directory is unavailable', code="project.unavailable")
         top = _git(project, 'rev-parse', '--show-toplevel')
         git = top is not None
         index_dirty = False
         if not git and any((parent / '.git').is_file() or (parent / '.git' / 'HEAD').is_file()
                            for parent in (root, *root.parents)):
-            raise ValueError('Git repository is present but its state is unavailable')
+            raise ledger.LedgerError('Git repository is present but its state is unavailable',
+                code="verify.git_state_unavailable")
         head = _git(project, 'rev-parse', '--verify', 'HEAD') if git else None
         if top is not None:
             if not head:
-                raise ValueError('Git HEAD is unavailable (commit the initial revision first)')
+                raise ledger.LedgerError('Git HEAD is unavailable (commit the initial revision first)',
+                    code="verify.git_head_unavailable")
             result['revision'] = head.decode('ascii').strip()
             subject = _git(project, 'show', '--no-patch', '--no-show-signature', '--format=%s', 'HEAD', '--')
             result['subject'] = task_activity.safe_text(subject.decode('utf-8', errors='replace').strip()) if subject else None
@@ -144,14 +148,16 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
             index = _git(str(root), 'ls-files', '--stage', '-z')
             others = _git(str(root), 'ls-files', '--others', '--exclude-standard', '-z')
             if tree is None or index is None or others is None:
-                raise ValueError('Git content inventory is unavailable or exceeds its read limit')
+                raise ledger.LedgerError('Git content inventory is unavailable or exceeds its read limit',
+                    code="verify.git_inventory_unavailable")
             baseline = {}
             for row in tree.split(b'\0'):
                 if row:
                     metadata, name = row.split(b'\t', 1)
                     mode, kind, blob = metadata.split()
                     if kind != b'blob':
-                        raise ValueError('Git submodules require separate verification; project fingerprint unavailable')
+                        raise ledger.LedgerError('Git submodules require separate verification; project fingerprint unavailable',
+                            code="verify.git_submodules")
                     baseline[name] = (mode, blob)
             paths = set(baseline)
             indexed = set()
@@ -160,7 +166,8 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                 if row:
                     metadata, name = row.split(b'\t', 1)
                     if metadata.startswith(b'160000 '):
-                        raise ValueError('Git submodules require separate verification; project fingerprint unavailable')
+                        raise ledger.LedgerError('Git submodules require separate verification; project fingerprint unavailable',
+                            code="verify.git_submodules")
                     mode, blob, stage = metadata.split()
                     index_dirty |= stage != b'0' or baseline.get(name) != (mode, blob)
                     indexed.add(name)
@@ -174,7 +181,7 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
             deadline = time.monotonic() + WALK_SECONDS
             for directory, dirs, walk_files in os.walk(root, followlinks=False, onerror=_walk_error):
                 if time.monotonic() > deadline:
-                    raise ValueError(_walk_limit_message(root))
+                    raise ledger.LedgerError(_walk_limit_message(root), code="verify.walk_limit")
                 for entry in list(dirs):
                     path = Path(directory) / entry
                     if _is_tool_cache(path.relative_to(root), directory=True):
@@ -184,7 +191,7 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                         dirs.remove(entry)
                 paths.update(os.fsencode((Path(directory) / name).relative_to(root).as_posix()) for name in walk_files)
                 if len(paths) > WALK_PATH_LIMIT:
-                    raise ValueError(_walk_limit_message(root))
+                    raise ledger.LedgerError(_walk_limit_message(root), code="verify.walk_limit")
         files: list[dict[str, Any]] = []
         dirty = index_dirty
         content_bytes = 0
@@ -196,7 +203,7 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
         for name in sorted(paths):
             relative = Path(os.fsdecode(name))
             if relative.is_absolute() or '..' in relative.parts:
-                raise ValueError('Invalid repository path in content inventory')
+                raise ledger.LedgerError('Invalid repository path in content inventory', code="verify.inventory_path_invalid")
             path = root / relative
             tracked = name in baseline or name in indexed
             # The verification's own ledger writes must not invalidate it; private state never hides tracked content.
@@ -207,7 +214,8 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                 continue  # Earlier test runs' caches must not become covered project content.
             # A tracked directory can have been replaced by a symlink to outside the tree.
             if any(parent.is_symlink() for parent in path.parents if parent != root and parent.is_relative_to(root)):
-                raise ValueError('Directory symlink prevents contained project fingerprinting')
+                raise ledger.LedgerError('Directory symlink prevents contained project fingerprinting',
+                    code="verify.directory_symlink")
             try:
                 info = path.lstat()
             except FileNotFoundError:
@@ -225,12 +233,12 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                 size = info.st_size
                 mode = b'100755' if os.name == 'posix' and info.st_mode & stat.S_IXUSR else b'100644'
             else:
-                raise ValueError('Special file prevents project fingerprinting')
+                raise ledger.LedgerError('Special file prevents project fingerprinting', code="verify.special_file")
             if size > FILE_HASH_LIMIT or size > TOTAL_HASH_LIMIT - content_bytes:
                 reason = 'file_limit' if size > FILE_HASH_LIMIT else 'total_limit'
                 if copy_to is not None:
-                    raise ValueError(f'Project content exceeds the snapshot budget ({reason}: {FILE_HASH_LIMIT} bytes '
-                                     f'per file, {TOTAL_HASH_LIMIT} in total)')
+                    raise ledger.LedgerError(f'Project content exceeds the snapshot budget ({reason}: {FILE_HASH_LIMIT} bytes '
+                                     f'per file, {TOTAL_HASH_LIMIT} in total)', code="verify.snapshot_budget")
                 metadata_fallback = True
                 files.append({'path': filename,
                               'state': f'{mode.decode()}:metadata:{reason}:file_limit_bytes={FILE_HASH_LIMIT}:'
@@ -257,7 +265,8 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                     resolved = os.path.normpath(os.path.join(os.path.dirname(filename), link))
                     if os.path.isabs(link) or resolved == os.pardir or resolved.startswith(os.pardir + os.sep):
                         # A link out of the tree would let the reviewer read mutable content through the copy.
-                        raise ValueError('A symlink points outside the project, so the snapshot cannot be immutable')
+                        raise ledger.LedgerError('A symlink points outside the project, so the snapshot cannot be immutable',
+                            code="verify.external_symlink")
                     os.symlink(link, target)
             else:
                 with path.open('rb') as stream, (target.open('xb') if target is not None else nullcontext()) as copy:
@@ -265,7 +274,7 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                     while remaining:
                         chunk = stream.read(min(65536, remaining))
                         if not chunk:
-                            raise ValueError('Project changed while fingerprinting')
+                            raise ledger.LedgerError('Project changed while fingerprinting', code="verify.tree_changed")
                         blob_hash.update(chunk)
                         file_hash.update(chunk)
                         if copy is not None:
@@ -283,13 +292,13 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
                     filter_overrides = _filter_overrides(str(root))
                 normalized = _git(str(root), *filter_overrides, 'hash-object', '--', filename)
                 if normalized is None:
-                    raise ValueError('Git normalized content hash is unavailable')
+                    raise ledger.LedgerError('Git normalized content hash is unavailable', code="verify.git_hash_unavailable")
                 blob = normalized.strip()
             if content is None:
                 after = path.lstat()
                 if (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
                         after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
-                    raise ValueError('Project changed while fingerprinting')
+                    raise ledger.LedgerError('Project changed while fingerprinting', code="verify.tree_changed")
             files.append({'path': filename, 'state': mode.decode() + ':' + file_hash.hexdigest(),
                           'index': hashlib.sha256(index_entries[name]).hexdigest() if name in index_entries else None,
                           'tracked': tracked})
@@ -301,7 +310,7 @@ def project_state(project: str, db: Path, *, copy_to: Path | None = None) -> dic
         if copy_to is not None:
             result['entries'] = [{'path': item['path'], 'state': item['state']} for item in files]
         if git and _git(project, 'rev-parse', '--verify', 'HEAD') != head:
-            raise ValueError('HEAD moved while fingerprinting')
+            raise ledger.LedgerError('HEAD moved while fingerprinting', code="verify.head_moved")
     except (OSError, ValueError, UnicodeError) as exc:
         result.update(fingerprint=None, error=task_activity.safe_text(exc))
     return result
@@ -323,7 +332,8 @@ def _worker_context(context: dict[str, Any]) -> bool:
 def invocation_context() -> dict[str, Any]:
     context = {key: os.environ.get('HIPSON_' + key.upper()) for key in ('role', 'assignment', 'task')}
     if _worker_context(context):
-        raise ledger.LedgerError('Lead verification is unavailable in a known worker context (HIPSON_ROLE/HIPSON_ASSIGNMENT)')
+        raise ledger.LedgerError('Lead verification is unavailable in a known worker context (HIPSON_ROLE/HIPSON_ASSIGNMENT)',
+            code="verify.worker_context")
     return {key: task_activity.safe_text(value) if value is not None else None for key, value in context.items()}
 
 
@@ -417,9 +427,11 @@ def configure(parser: argparse.ArgumentParser) -> None:
 
 def validate(command: list[str], timeout: float) -> None:
     if not command or any(not isinstance(item, str) or '\0' in item for item in command) or not command[0].strip():
-        raise ledger.LedgerError('Verification requires a nonempty command argv without NULs')
+        raise ledger.LedgerError('Verification requires a nonempty command argv without NULs',
+            code="verify.argv_invalid")
     if not math.isfinite(timeout) or not 0 < timeout <= 86400:
-        raise ledger.LedgerError('Verification timeout must be positive, finite and at most 86400 seconds')
+        raise ledger.LedgerError('Verification timeout must be positive, finite and at most 86400 seconds',
+            code="verify.timeout_invalid")
 
 
 def command(args: argparse.Namespace) -> int:
@@ -432,7 +444,8 @@ def command(args: argparse.Namespace) -> int:
         if not args.worker_command:
             return _command_checks(db, args)
         if args.worker_command[0] != '--':
-            raise ledger.LedgerError('A verification command after -- is required (or no command to run declared checks)')
+            raise ledger.LedgerError('A verification command after -- is required (or no command to run declared checks)',
+                code="verify.command_required")
         argv = args.worker_command[1:]
         validate(argv, args.timeout)
         with closing(ledger.Ledger(db, create=False, read_only=True)) as store:
@@ -450,14 +463,15 @@ def command(args: argparse.Namespace) -> int:
             records = store.verifications(args.task)
         record = next((item for item in records if item['id'] == args.verification_id), None)
         if record is None:
-            raise ledger.LedgerError(f'Verification evidence unavailable (command exit {code}); closure remains gated')
+            raise ledger.LedgerError(f'Verification evidence unavailable (command exit {code}); closure remains gated',
+                code="verify.evidence_unavailable")
         print(json.dumps(record, ensure_ascii=True) if args.json else render(record))
         if record['fingerprint'] is None:
             print(f"Warning: this run cannot be closure evidence: {task_activity.safe_text(record.get('error') or 'fingerprint unavailable')}."
                   " Fix that (for example commit the initial revision) and verify again.", file=sys.stderr)
         return code
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(task_activity.safe_text(exc), file=sys.stderr)
+        ledger.print_error(exc, task_activity.safe_text(exc), json_output=args.json)
         return 1
 
 
@@ -493,7 +507,8 @@ def _command_checks(db: Path, args: argparse.Namespace) -> int:
     checks = declared_checks(db, args.task)
     if not checks:
         raise ledger.LedgerError(f'{args.task} declares no acceptance checks; pass -- COMMAND [ARGS...] or declare them '
-                                 f"with: hipson task checks --task {args.task} --check 'COMMAND ARGS'")
+                                 f"with: hipson task checks --task {args.task} --check 'COMMAND ARGS'",
+            code="verify.checks_undeclared")
     validate(checks[0], args.timeout)
     records = run_checks(db, args.task, checks, label=args.label, timeout=args.timeout, actor=args.actor,
                          on_record=None if args.json else lambda record: print(render(record), flush=True))
@@ -508,6 +523,20 @@ def _command_checks(db: Path, args: argparse.Namespace) -> int:
     print(f"Check failed: {shlex.join(failed['command'])} (exit {failed['exit_code']})"
           + (f'; {skipped} later checks not run' if skipped else ''), file=sys.stderr)
     return int(failed['exit_code']) or 1
+
+
+def _supervisor_refusal(stderr: str) -> ledger.LedgerError | None:
+    # The private verifier does not relay the check's output to stderr. Its final error line
+    # can carry the CLI error envelope even when runner diagnostics preceded it.
+    line = stderr.rstrip().rsplit('\n', 1)[-1]
+    try:
+        body = json.loads(line)
+    except (ValueError, RecursionError):
+        return None
+    if (isinstance(body, dict) and body.get('error_schema') == 1 and isinstance(body.get('code'), str)
+            and isinstance(body.get('message'), str) and isinstance(body.get('fix'), list)):
+        return ledger.LedgerError(body['message'], code=body['code'], fix=cast(list[ReadCall], body['fix']))
+    return None
 
 
 def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: float = 300,
@@ -526,12 +555,17 @@ def run(db: Path, task: str, command: list[str], *, label: str = '', timeout: fl
         # Forward Ctrl+C/TERM to the supervisor so it stops its check tree and records the outcome.
         _, stdout, stderr = supervise(invocation, capture=True, timeout=timeout + 30)
     except subprocess.SubprocessError as exc:
-        raise ledger.LedgerError('Verification supervisor did not finish within its execution budget') from exc
+        raise ledger.LedgerError('Verification supervisor did not finish within its execution budget',
+            code="verify.supervisor_timeout") from exc
     try:
         return json.loads(stdout)
     except (ValueError, UnicodeError) as exc:
-        raise ledger.LedgerError(task_activity.safe_text(stderr.decode(errors='replace')) or
-                                 'Verification did not return recorded evidence') from exc
+        diagnostic = stderr.decode(errors='replace')
+        refusal = _supervisor_refusal(diagnostic)
+        if refusal is not None:
+            raise refusal from exc
+        raise ledger.LedgerError(task_activity.safe_text(diagnostic) or 'Verification did not return recorded evidence',
+                                 code="verify.evidence_unavailable") from exc
 
 
 def finish(db: Path, args: argparse.Namespace, code: int, started_at: str, started: float,

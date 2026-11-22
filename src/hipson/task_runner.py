@@ -151,7 +151,7 @@ def supervise_command(command: list[str]) -> int:
                     stopped = False
                 if not stopped:
                     _stop_without_tracking(child)
-                    raise OSError('could not confirm verification process cleanup')
+                    raise ledger.LedgerError('could not confirm verification process cleanup', code="verify.cleanup_unconfirmed")
                 child.wait(timeout=5)
         finally:
             if job:
@@ -292,8 +292,9 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
     # separators or escapes between the words, \u escapes, NUL bytes (UTF-16 that happens to decode), non-UTF-8.
     if path.name != POLICY_JSON.name:
         if not explicit and _may_mean_worker_env(text):
-            raise ValueError("worker_env is read only from .hipson/policy.json, and the policy.yaml in effect may "
-                             "set it; move the setting to policy.json or pass --env explicitly")
+            raise ledger.LedgerError("worker_env is read only from .hipson/policy.json, and the policy.yaml in effect may "
+                             "set it; move the setting to policy.json or pass --env explicitly",
+                code="run.worker_env_yaml")
         return worker_env.resolve(args, {"valid": True, "policy": {}})
     try:
         # One snapshot: the bytes inspected above are the ones parsed, so a concurrent edit cannot slip between.
@@ -302,8 +303,9 @@ def worker_environment(args: argparse.Namespace, project: str) -> tuple[str, lis
         payload = policy_payload(project, str(path), json.loads(text))
     except (SystemExit, ValueError, RecursionError) as exc:
         if not explicit and _may_mean_worker_env(text):
-            raise ValueError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
-                             "fix .hipson/policy.json or pass --env explicitly") from None
+            raise ledger.LedgerError(f"project policy cannot be read ({type(exc).__name__}) and may set worker_env; "
+                             "fix .hipson/policy.json or pass --env explicitly",
+                code="run.worker_env_policy_unreadable") from None
         payload = {}  # A broken policy that never mentions it keeps the pre-1.7 behaviour.
     # Parsed keys are exact: near-miss spellings make the policy invalid, which refuses without --env.
     return worker_env.resolve(args, payload)
@@ -335,6 +337,10 @@ def observation_caps(args: argparse.Namespace, project: str) -> task_observation
 
 def _message(text: str) -> None:
     print(f"hipson task run: {redact_text(text)}", file=sys.stderr, flush=True)
+
+
+def _run_error(args: argparse.Namespace, error: BaseException, message: str) -> None:
+    ledger.print_error(error, f"hipson task run: {redact_text(message)}", json_output=getattr(args, "json", False))
 
 
 def _project_check(project: str) -> dict[str, object]:
@@ -487,30 +493,33 @@ def run(args: argparse.Namespace) -> int:
     command = args.worker_command
     try:
         if not command or command[0] != "--" or len(command) == 1:
-            raise ValueError("a command after -- is required")
+            raise ledger.LedgerError("a command after -- is required", code="run.command_required")
         ledger.require_text(args.task, "task")
         ledger.require_text(args.actor, "actor")
         ledger.validate_assignment_scope(args.scope, mode=args.mode)
         if args.lease_seconds is not None:
             if args.lease_seconds < 0:
-                raise ValueError("--lease-seconds must be nonnegative")
+                raise ledger.LedgerError("--lease-seconds must be nonnegative", code="assignment.lease_invalid")
             datetime.now(UTC) + timedelta(seconds=args.lease_seconds)
         grace = float(os.environ.get("AGENT_RUN_GRACE_SECONDS", "15"))
         if not math.isfinite(grace) or grace < 0:
-            raise ValueError("AGENT_RUN_GRACE_SECONDS must be finite and nonnegative")
+            raise ledger.LedgerError("AGENT_RUN_GRACE_SECONDS must be finite and nonnegative", code="run.grace_invalid")
         for name in ("observe_max_files", "observe_max_bytes"):
             value = getattr(args, name, None)
             if value is not None and value < 1:
-                raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
+                raise ledger.LedgerError(f"--{name.replace('_', '-')} must be a positive integer",
+                    code="observation.limit_invalid")
         args.run_needs = parse_needs(getattr(args, "needs", None) or []) or None
         for name in ("checkpoint_max_files", "checkpoint_max_bytes"):
             value = getattr(args, name, None)
             if value is not None and value < 1:
-                raise ValueError(f"--{name.replace('_', '-')} must be a positive integer")
+                raise ledger.LedgerError(f"--{name.replace('_', '-')} must be a positive integer",
+                    code="checkpoint.limit_invalid")
         if getattr(args, "checkpoint", False) and args.mode != "rw":
-            raise ValueError("--checkpoint needs --mode rw: it saves the claimed write scope")
+            raise ledger.LedgerError("--checkpoint needs --mode rw: it saves the claimed write scope",
+                code="checkpoint.write_scope_required")
     except (ValueError, OverflowError, ledger.LedgerError) as exc:
-        _message(str(exc))
+        _run_error(args, exc, str(exc))
         return 64
     db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
     try:
@@ -518,7 +527,7 @@ def run(args: argparse.Namespace) -> int:
             shown = store.show(args.task)
             project, review_required = shown["project"], shown.get("review_policy") == "required"
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        _message(f"could not read task {args.task}: {exc}; worker not started")
+        _run_error(args, exc, f"could not read task {args.task}: {exc}; worker not started")
         return 75
     if review_required and args.role == "reviewer" and not args.result_file:
         _message("required review needs --result-file because the gate requires a completed structured result. "
@@ -542,7 +551,7 @@ def run(args: argparse.Namespace) -> int:
             task_checkpoint.scan(str(check["expected"]), args.scope, caps=checkpoint,
                                  private=task_checkpoint.private_paths(db))
     except (ValueError, OSError) as exc:
-        _message(f"{exc}; worker not started")
+        _run_error(args, exc, f"{exc}; worker not started")
         return 64
     review: ReviewTree | None = None
     if args.role == "reviewer" and not getattr(args, "live_tree", False):
@@ -679,7 +688,8 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         task_observation.start_failed(db, assignment, reason)
                     except OSError:
                         args.observation_error = reason  # Storage itself fails: _finish records it directly.
-                    raise OSError(f"could not take the observation baseline: {exc}") from exc
+                    raise ledger.LedgerError(f"could not take the observation baseline: {exc}",
+                        code="observation.baseline_failed") from exc
             # assign() may have recovered orphans; finish their observations now rather than at the next reap.
             task_observation.complete_pending(db)
             if getattr(args, "role", None) == "reviewer":
@@ -691,7 +701,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 try:
                     saved = task_checkpoint.take(db, assignment, str(check['expected']), args.scope, checkpoint)
                 except (task_checkpoint.CheckpointError, OSError) as exc:
-                    raise OSError(f"could not take the checkpoint: {exc}") from exc
+                    raise ledger.LedgerError(f"could not take the checkpoint: {exc}", code="checkpoint.capture_failed") from exc
                 with closing(ledger.Ledger(db)) as store:
                     store.record_checkpoint(assignment, type="checkpointed", summary=(
                         f"{assignment}: checkpoint of {', '.join(saved['scope'])}: {saved['files']} files, "
@@ -742,7 +752,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 while not ready.wait(0.05) and not signum:
                     pass
                 if errors and not signum:
-                    raise OSError(f"could not read worker brief: {errors[0]}")
+                    raise ledger.LedgerError(f"could not read worker brief: {errors[0]}", code="run.brief_unreadable")
             if not signum:
                 if windows:
                     job = Job()
@@ -753,7 +763,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                     try:  # .cmd/.bat targets (npm, npx, claude) would otherwise reparse argument text.
                         launch, env = batch_command(command, env, 'HIPSON_RUN_ARG_')
                     except ValueError as exc:
-                        raise OSError(str(exc)) from exc
+                        raise ledger.LedgerError(str(exc), code="run.windows_command_invalid") from exc
                 child = subprocess.Popen(launch, env=env, stdin=brief if args.rollout else None,
                                          cwd=str(check['expected']) if verifying else
                                          env.get('HIPSON_REVIEW_SNAPSHOT') if review is not None else None,
@@ -771,7 +781,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                         child.wait()
                         raise
                 if child.stdout is None or child.stderr is None:
-                    raise OSError('worker output pipes are unavailable')
+                    raise ledger.LedgerError('worker output pipes are unavailable', code="run.output_pipes_unavailable")
                 activity.relay(child.stdout, 'stdout', None if verifying else sys.stdout.fileno())
                 activity.relay(child.stderr, 'stderr', None if verifying else sys.stderr.fileno())
                 while child.poll() is None and not signum:
@@ -801,7 +811,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
             if signum:
                 code = 128 + signum
     except (ledger.LedgerError, OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
-        _message(f"{exc}; worker not started" if child is None else str(exc))
+        _run_error(args, exc, f"{exc}; worker not started" if child is None else str(exc))
         if child is not None:
             try:
                 safe = _stop(child, job, signal.SIGTERM, grace, tree)

@@ -110,7 +110,9 @@ def _execute_cli(call, db, *, refusal=None):
     ):
         code = cli.main(args)
     if refusal is not None:
-        assert code == 1 and err.getvalue().strip() == refusal
+        assert code == 1
+        error = json.loads(err.getvalue())
+        assert error == {"error_schema": 1, "code": "verify.tree_changed", "message": refusal, "fix": []}
     else:
         assert code == 0, err.getvalue()
         json.loads(out.getvalue())

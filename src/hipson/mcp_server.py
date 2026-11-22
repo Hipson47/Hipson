@@ -26,6 +26,7 @@ from hipson import (
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import resolve_project
 from hipson.redaction import is_sensitive_path, redact_text
+from hipson.task_calls import task_lookup_calls
 
 MCP_TOOL_NAMES = (
     'task.now',
@@ -76,7 +77,8 @@ MCP_INSTRUCTIONS = (
     "For task.board, task.now, lead.resume and task.show, pass detail=compact for a bounded view (view_schema 1). "
     "Full stays the default in 1.8 and changes to compact in 1.9. Follow more calls to page lists or read task sections. "
     "Compact task.now and lead.resume include ranked next_actions with tool arguments and CLI commands. "
-    "Read a result before following its then acknowledgment. Compact views use recorded evidence and do not evaluate gates."
+    "Read a result before following its then acknowledgment. Compact views use recorded evidence and do not evaluate gates. "
+    "Coded tool errors include a second text item with JSON error_schema 1, a stable code, message and fix calls."
 )
 _DETAIL = {"type": "string", "enum": ["compact", "full"], "default": "full"}
 _CURSOR = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
@@ -631,6 +633,8 @@ def _handle_request(line: str, *, project: Path) -> dict[str, Any] | None:
             return _result(request_id, _call_tool(params, project=project))
     except SystemExit as exc:
         return _tool_error(request_id, str(exc))
+    except ledger.LedgerError as exc:
+        return _tool_error(request_id, str(exc), body=exc.error_payload() if method == "tools/call" else None)
     except (OSError, json.JSONDecodeError, ValueError, RuntimeError, sqlite3.Error) as exc:
         return _tool_error(request_id, str(exc))
     except (TypeError, KeyError, AttributeError, ArithmeticError) as exc:  # e.g. int(1e309) -> OverflowError
@@ -849,7 +853,7 @@ def _task_read_projection(name: str, arguments: dict[str, Any], db: Path) -> obj
         if name == "task.show":
             task = arguments["task"]
             if store is None:
-                raise ledger.LedgerError(f"Task not found: {task}")
+                raise ledger.LedgerError(f"Task not found: {task}", code="task.not_found", fix=task_lookup_calls(db))
             if "section" in arguments:
                 return task_projection.read_section(store, task, arguments["section"],
                                                     limit=arguments.get("limit"), cursor=arguments.get("cursor"))
@@ -884,7 +888,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
                        timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
         checks = declared_checks(db, arguments['task'])
         if not checks:
-            raise ledger.LedgerError(f"{arguments['task']} declares no acceptance checks; pass command or use task.checks")
+            raise ledger.LedgerError(f"{arguments['task']} declares no acceptance checks; pass command or use task.checks",
+                                     code="verify.checks_undeclared")
         records = run_checks(db, arguments['task'], checks, label=arguments.get('label', ''),
                              timeout=arguments.get('timeout', 300), actor=arguments.get('actor'))
         return {'records': records, 'passing': len(records) == len(checks) and all(
@@ -906,9 +911,10 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
             return lead_context.build(None, project=arguments.get('project'), resume=name == 'lead.resume',
                                       include_all=arguments.get('all', False))
         if name == 'task.activity':
-            raise ledger.LedgerError(f"Assignment not found: {arguments['assignment']}")
+            raise ledger.LedgerError(f"Assignment not found: {arguments['assignment']}", code="assignment.not_found")
         if name in ("task.show", "task.events", "task.brief", "task.context") or (name in ("task.reap", "task.findings") and "task" in arguments):
-            raise ledger.LedgerError(f"Task not found: {arguments['task']}")
+            raise ledger.LedgerError(f"Task not found: {arguments['task']}", code="task.not_found",
+                                     fix=task_lookup_calls(db))
         return []
     # closing() preserves the ledger's own transactions, including committed conflicts.
     connection = (ledger.Ledger(db, create=False, read_only=True, sidecar_free=True)
@@ -1078,8 +1084,11 @@ def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:
         raise SystemExit(f"{tool_name} requires approved=true for MCP write/gated execution")
 
 
-def _tool_error(request_id: object, message: str) -> dict[str, Any]:
-    return _result(request_id, {"content": [{"type": "text", "text": redact_text(message)}], "isError": True})
+def _tool_error(request_id: object, message: str, *, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    content = [{"type": "text", "text": redact_text(message) if body is None else body["message"]}]
+    if body is not None:
+        content.append({"type": "text", "text": json.dumps(body, ensure_ascii=True)})
+    return _result(request_id, {"content": content, "isError": True})
 
 
 def _result(request_id: object, result: dict[str, Any]) -> dict[str, Any]:

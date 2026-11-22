@@ -85,6 +85,7 @@ from hipson.runtime import HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
 from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
+from hipson.task_calls import task_lookup_calls
 from hipson.tools import ToolContext, ToolRegistryError, ToolSpec, bounded_tool_output, build_default_registry
 
 PACKAGE_ROOT = package_root()
@@ -128,7 +129,7 @@ def _agent_install_targets(args: argparse.Namespace) -> list[str]:
         if getattr(args, name):
             targets.append(name)
     if not targets:
-        raise SystemExit("Select at least one agent target or pass --all.")
+        raise ledger.LedgerError("Select at least one agent target or pass --all.", code="agents.target_required")
     return targets
 
 
@@ -351,10 +352,12 @@ def command_route_actor(args: argparse.Namespace) -> int:
         try:
             db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         except RuntimeError as exc:  # e.g. ~unknown-user
-            raise actor_routing.RoutingError(f"--db path cannot be resolved: {exc}") from None
+            raise ledger.LedgerError(f"--db path cannot be resolved: {exc}",
+                code="ledger.path_unresolvable") from None
         registry = actor_routing.load_registry(actor_routing.registry_path(args.config))
         if args.task is not None and not db.exists():
-            raise actor_routing.RoutingError(f"Task not found: {args.task} (no ledger at {db})")
+            raise ledger.LedgerError(f"Task not found: {args.task} (no ledger at {db})", code="task.not_found",
+                fix=task_lookup_calls(db))
         # History is read without migrating or creating a ledger; only recording opens it for writing.
         store = ledger.Ledger(db, create=False, read_only=not record) if db.exists() else None
         try:
@@ -365,7 +368,8 @@ def command_route_actor(args: argparse.Namespace) -> int:
             if store is not None:
                 store.close()
     except (actor_routing.RoutingError, ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(f"hipson route actor: {_bounded_cli(str(exc), limit=1200, escape_controls=True)}", file=sys.stderr)
+        ledger.print_error(exc, f"hipson route actor: {_bounded_cli(str(exc), limit=1200, escape_controls=True)}",
+                           json_output=args.json)
         return 2
     print(json.dumps(route, indent=2) if args.json else actor_routing.render(route))
     return 0
@@ -405,7 +409,7 @@ def command_install_agents(args: argparse.Namespace) -> int:
             mcp_home=args.mcp_home,
         )
     except (SystemExit, ValueError, OSError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -428,7 +432,8 @@ def command_kit_review(args: argparse.Namespace) -> int:
     try:
         if getattr(args, "review_action", None) == "resume":
             if not args.resume_run:
-                raise SystemExit("hipson kit review resume requires --run runs/<work_id>")
+                raise ledger.LedgerError("hipson kit review resume requires --run runs/<work_id>",
+                    code="kit.resume_run_required")
             result = review_kit.resume_review_kit(
                 run_path=args.resume_run,
                 verify_profile=args.verify_profile,
@@ -463,7 +468,7 @@ def command_kit_review(args: argparse.Namespace) -> int:
                 approved_operations=args.approve_operation,
             )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -477,7 +482,8 @@ def command_kit_review(args: argparse.Namespace) -> int:
 def command_autopilot_review(args: argparse.Namespace) -> int:
     try:
         if args.run_sidecar and not args.ai_profile:
-            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+            raise ledger.LedgerError("--run-sidecar requires --ai-profile so the agent/model choice is explicit",
+                code="sidecar.profile_required")
         policy_mod.enforce_autopilot_policy(
             project_path=args.project,
             operation="autopilot_review",
@@ -503,7 +509,7 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
             approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     result = {**result, "artifact_kind": "hipson.autopilot_review_run", "autopilot": True}
     if args.json:
@@ -518,7 +524,8 @@ def command_autopilot_review(args: argparse.Namespace) -> int:
 def command_autopilot_implement(args: argparse.Namespace) -> int:
     try:
         if args.run_sidecar and not args.ai_profile:
-            raise SystemExit("--run-sidecar requires --ai-profile so the agent/model choice is explicit")
+            raise ledger.LedgerError("--run-sidecar requires --ai-profile so the agent/model choice is explicit",
+                code="sidecar.profile_required")
         policy_mod.enforce_autopilot_policy(
             project_path=args.project,
             operation="autopilot_implement",
@@ -550,7 +557,7 @@ def command_autopilot_implement(args: argparse.Namespace) -> int:
             approved_operations=args.approve_operation,
         )
     except (SystemExit, ValueError, OSError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
+        ledger.print_error(exc, str(exc), json_output=args.json)
         return int(exc.code or 1) if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 1
     result = {**result, "artifact_kind": "hipson.autopilot_implement_run", "autopilot": True}
     if args.json:
@@ -1130,7 +1137,7 @@ def command_chat(args: argparse.Namespace) -> int:
                 print(exc, file=sys.stderr)
                 return 2
             except (ValueError, ToolRegistryError) as exc:
-                print(exc, file=sys.stderr)
+                ledger.print_error(exc, str(exc), json_output=False)
                 return 1
             provider = FakeProvider(
                 responses=[
@@ -1151,8 +1158,8 @@ def command_chat(args: argparse.Namespace) -> int:
     elif args.provider:
         try:
             provider = _build_chat_provider(args)
-        except ProviderError as exc:
-            print(f"Chat provider is not configured: {exc}", file=sys.stderr)
+        except (ProviderError, ledger.LedgerError) as exc:
+            ledger.print_error(exc, f"Chat provider is not configured: {exc}", json_output=False)
             return 1
         runtime_mode = RuntimeMode.REAL
         model = args.model or DEFAULT_PROVIDER_MODEL
@@ -1196,7 +1203,8 @@ def command_chat(args: argparse.Namespace) -> int:
 
 def _build_chat_provider(args: argparse.Namespace) -> OpenAICompatibleProvider:
     if args.provider != "openai-compatible":
-        raise ProviderError("Unsupported chat provider", str(args.provider))
+        raise ledger.LedgerError(f"Unsupported chat provider: {redact_text(str(args.provider))}",
+                                 code="chat.provider_unsupported")
     return OpenAICompatibleProvider.from_env(
         base_url=args.provider_url or DEFAULT_BASE_URL,
         api_key_env=args.api_key_env,
@@ -1209,7 +1217,8 @@ def _validate_fake_demo_tool(tool_name: str) -> ToolSpec:
     registry = build_default_registry()
     spec = registry.get(tool_name)
     if spec.risk_level != "read" or spec.approval_required:
-        raise ToolRegistryError("Fake tool-call demo is limited to read-risk tools that do not require approval")
+        raise ledger.LedgerError("Fake tool-call demo is limited to read-risk tools that do not require approval",
+            code="chat.demo_tool_not_allowed")
     return spec
 
 
@@ -1465,7 +1474,7 @@ def command_tool_run(args: argparse.Namespace) -> int:
             store = open_session_store(_session_db_path(args))
             try:
                 session_id = _tool_run_session_id(store, args.session_id, cwd)
-            except ToolRegistryError as exc:
+            except ledger.LedgerError as exc:
                 payload = _tool_run_payload(
                     spec.name,
                     status="rejected",
@@ -1475,6 +1484,8 @@ def command_tool_run(args: argparse.Namespace) -> int:
                     error=str(exc),
                 )
                 _print_tool_run_payload(payload, json_output=args.json)
+                if args.json:
+                    ledger.print_error(exc, str(exc), json_output=True)
                 return 1
 
         context = ToolContext(cwd=cwd, repo_root=project_mod.git_root(cwd), session_id=session_id or "cli-tool-run")
@@ -1746,7 +1757,7 @@ def _print_tool_run_payload(payload: dict[str, object], *, json_output: bool) ->
 def _tool_run_session_id(store: SessionStore, session_id: str | None, cwd: Path) -> str:
     if session_id:
         if store.get_session(session_id) is None:
-            raise ToolRegistryError(f"Session does not exist: {session_id}")
+            raise ledger.LedgerError(f"Session does not exist: {session_id}", code="session.not_found")
         return session_id
     return store.create_session(cwd=str(cwd), repo_root=str(project_mod.git_root(cwd) or ""), title="Hipson tool run")
 
@@ -1848,14 +1859,17 @@ def command_task_read(args: argparse.Namespace) -> int:
     cursor = getattr(args, "cursor", None)
     try:
         if section is not None and args.detail == "compact":
-            raise ValueError("--section and --detail compact are mutually exclusive")
+            raise ledger.LedgerError("--section and --detail compact are mutually exclusive",
+                code="task_read.section_with_compact")
         if action == "show" and section is None and (limit is not None or cursor is not None):
-            raise ValueError("--limit and --cursor require --section")
+            raise ledger.LedgerError("--limit and --cursor require --section", code="task_read.section_required")
         if args.detail == "full" and section is None:
             if action in ("board", "now") and (offset is not None or limit is not None):
-                raise ValueError("--offset and --limit require --detail compact")
+                raise ledger.LedgerError("--offset and --limit require --detail compact",
+                    code="task_read.compact_paging_required")
             if action == "board" and (args.project is not None or args.all):
-                raise ValueError("--project and --all on task board require --detail compact")
+                raise ledger.LedgerError("--project and --all on task board require --detail compact",
+                    code="task_read.compact_filter_required")
             return command_lead_view(args) if action in ("now", "resume") else command_task(args)
 
         from hipson import task_projection
@@ -1872,7 +1886,8 @@ def command_task_read(args: argparse.Namespace) -> int:
             if action == "show":
                 if store is None:
                     raise ledger.LedgerError(
-                        f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)")
+                        f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)",
+                        code="task.not_found", fix=task_lookup_calls(db))
                 if section is not None:
                     payload = task_projection.read_section(store, args.task, section, limit=limit, cursor=cursor)
                 else:
@@ -1891,7 +1906,7 @@ def command_task_read(args: argparse.Namespace) -> int:
             print(_render_compact_tasks(payload))
         return 0
     except (ValueError, OSError, sqlite3.Error) as exc:
-        print(redact_text(str(exc)), file=sys.stderr)
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
 
 
@@ -1964,7 +1979,7 @@ def command_lead_view(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else lead_context.render(payload))
         return 0
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(redact_text(str(exc)), file=sys.stderr)
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
 
 
@@ -1991,9 +2006,11 @@ def command_task(args: argparse.Namespace) -> int:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
         if read_only and not db.exists():
             if args.task_command == 'activity':
-                raise ledger.LedgerError(f'Assignment not found: {args.assignment}')
+                raise ledger.LedgerError(f'Assignment not found: {args.assignment}', code="assignment.not_found")
             if args.task_command in ("show", "events", "brief", "context") or ((dry_run or finding_list) and args.task is not None):
-                raise ledger.LedgerError(f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)")
+                raise ledger.LedgerError(
+                    f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)",
+                    code="task.not_found", fix=task_lookup_calls(db))
             print("No active tasks." if args.task_command == "board" and not args.json else "[]")
             return 0
         with closing(ledger.Ledger(db, read_only=read_only)) as store:
@@ -2127,7 +2144,7 @@ def command_task(args: argparse.Namespace) -> int:
                     return 0
                 payload = tasks
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
-        print(redact_text(str(exc)), file=sys.stderr)
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
     print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else _bounded_json(payload, escape_controls=True))
     return 0

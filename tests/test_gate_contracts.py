@@ -1024,3 +1024,48 @@ def test_close_task_expected_checks_exact_contract(tmp_path):
         assert error.value.reasons == ["declared checks differ from the ones this close expects: pytest -q"]
         assert store.show(task)["status"] == "in_progress"
         assert store.close_task(task, to="review", actor=LEAD, expected_checks=[("pytest", "-q")])["status"] == "review"
+
+
+def test_gate_refusals_keep_distinct_verification_codes(tmp_path):
+    with (patch.object(task_verification, "project_state", return_value=dict(STATE)) as project_state,
+          closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store):
+        task = store.open_task(project=tmp_path, title="Candidate", objective="Verify", lead=LEAD, checks=[CHECK])["id"]
+        store.set_status(task, to="in_progress", actor=LEAD)
+        with pytest.raises(ledger.CloseRefusedError) as missing:
+            store.close_task(task, to="review", actor=LEAD)
+        assert missing.value.code == "close.checks_missing"
+        assert missing.value.reason_codes == ["close.checks_missing"]
+
+        _verified(store, task)
+        project_state.return_value = {**STATE, "revision": "c" * 40}
+        with pytest.raises(ledger.GateRefusedError) as moved:
+            store.set_status(task, to="review", actor=LEAD)
+        assert moved.value.code == "verify.head_moved"
+        assert moved.value.reason_codes == ["verify.head_moved"]
+
+        project_state.return_value = {**STATE, "files": [{"path": "new.py", "state": "file:hash"}]}
+        with pytest.raises(ledger.CloseRefusedError) as changed:
+            store.close_task(task, to="review", actor=LEAD)
+        assert changed.value.code == "verify.tree_changed"
+        assert changed.value.reason_codes == ["verify.tree_changed"]
+        assert changed.value.fix == []
+        assert store.show(task)["status"] == "in_progress"
+
+
+def test_close_refusal_pairs_codes_with_reasons_and_suggests_the_unread_activity(tmp_path):
+    with patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        store, task = _store(tmp_path)
+        with closing(store):
+            assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
+            store.finish(assignment, result="passed", summary="unread")
+            store.add_finding(task, actor="r", severity="major", title="Open major")
+            with pytest.raises(ledger.CloseRefusedError) as error:
+                store.close_task(task, actor=LEAD)
+            refusal = error.value
+            assert [reason.split()[0] for reason in refusal.reasons] == ["missing", "unacknowledged", "open"]
+            assert refusal.reason_codes == ["close.checks_missing", "close.results_unacknowledged", "close.findings_open"]
+            assert refusal.code == refusal.reason_codes[0]
+            fix, = refusal.fix
+            assert fix["tool"] == "task.activity"
+            assert fix["arguments"] == {"assignment": assignment}
+            assert f"task activity --assignment {assignment}" in fix["cli"]
