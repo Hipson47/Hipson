@@ -431,3 +431,45 @@ def test_a_task_without_required_review_falls_back_to_the_live_tree_when_a_snaps
         events = [event['summary'] for event in store.events('T-0001') if event['type'] == 'reviewed']
         assert len(store.show('T-0002')['assignments']) == 0  # Required review: refused before any assignment.
     assert events and all(summary.endswith('source=live') for summary in events)
+
+
+def test_line_ending_settings_are_copied_without_a_git_write(tmp_path):
+    """The Windows-only CI flake: one `git config` write per key could fail on a slow runner."""
+    project, copy = tmp_path / 'project', tmp_path / 'copy'
+    for repo in (project, copy):
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    subprocess.run(['git', '-C', str(project), 'config', 'core.autocrlf', 'input'], check=True)
+    subprocess.run(['git', '-C', str(project), 'config', 'core.eol', 'lf'], check=True)
+    real = review_snapshot._git
+
+    def no_writes(repo, *args):
+        assert not (args[:1] == ('config',) and args[1] != '--get'), 'snapshot config was written through Git'
+        return real(repo, *args)
+
+    with patch.object(review_snapshot, '_git', side_effect=no_writes):
+        review_snapshot._copy_line_endings(str(project), copy)
+    for key, value in (('core.autocrlf', 'input'), ('core.eol', 'lf')):
+        read = subprocess.run(['git', '-C', str(copy), 'config', '--get', key], capture_output=True, text=True)
+        assert read.stdout.strip() == value, key
+
+
+def test_unusual_line_ending_value_goes_through_git_with_one_retry(tmp_path):
+    project, copy = tmp_path / 'project', tmp_path / 'copy'
+    for repo in (project, copy):
+        subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+    subprocess.run(['git', '-C', str(project), 'config', 'core.safecrlf', 'odd value'], check=True)
+    real = review_snapshot._git
+    writes = []
+
+    def flaky(repo, *args):
+        if args[:1] == ('config',) and args[1] != '--get':
+            writes.append(args)
+            if len(writes) == 1:
+                return None  # The first write fails, the retry succeeds.
+        return real(repo, *args)
+
+    with patch.object(review_snapshot, '_git', side_effect=flaky):
+        review_snapshot._copy_line_endings(str(project), copy)
+    assert len(writes) == 2
+    read = subprocess.run(['git', '-C', str(copy), 'config', '--get', 'core.safecrlf'], capture_output=True, text=True)
+    assert read.stdout.strip() == 'odd value'

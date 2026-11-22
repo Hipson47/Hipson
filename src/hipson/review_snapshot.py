@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -95,6 +96,32 @@ def workdir(directory: Path, manifest: dict[str, Any]) -> Path:
     return tree(directory) / relative
 
 
+LINE_ENDING_KEYS = ('core.autocrlf', 'core.eol', 'core.safecrlf')
+SIMPLE_CONFIG_VALUE = re.compile(r'[A-Za-z0-9_.-]{1,64}\Z')
+
+
+def _copy_line_endings(project: str, copy: Path) -> None:
+    """Give the snapshot repository the project's line-ending settings.
+
+    These values are plain tokens (true, input, lf, warn ...), so they are written straight into the new
+    repository's own config: a separate `git config` process per key was the one step that intermittently
+    failed on slow Windows runners. Any other value still goes through Git, with one retry.
+    """
+    settings: dict[str, str] = {}
+    for key in LINE_ENDING_KEYS:
+        raw = _git(project, 'config', '--get', key)
+        if raw is not None:
+            settings[key] = raw.decode('utf-8', 'replace').strip()
+    simple = {key: value for key, value in settings.items() if SIMPLE_CONFIG_VALUE.fullmatch(value)}
+    if simple:
+        lines = ''.join(f'\t{key.split(".", 1)[1]} = {value}\n' for key, value in simple.items())
+        with open(copy / '.git' / 'config', 'ab') as handle:
+            handle.write(('[core]\n' + lines).encode('ascii'))
+    for key, value in settings.items():
+        if key not in simple and all(_git(str(copy), 'config', key, value) is None for _ in range(2)):
+            raise SnapshotError(f'could not copy {key} into the snapshot repository')
+
+
 def _repository(project: str, copy: Path, revision: str) -> None:
     """Make the copy a repository whose HEAD and index are the base commit, sharing the project's objects."""
     objects = _git(project, 'rev-parse', '--path-format=absolute', '--git-path', 'objects')
@@ -106,10 +133,7 @@ def _repository(project: str, copy: Path, revision: str) -> None:
     (copy / '.git' / 'objects' / 'info' / 'alternates').write_bytes(os.fsencode(source) + b'\n')
     # Line-ending settings decide how Git compares the copied bytes with the base commit: without the project's
     # own, every CRLF file of a Windows checkout would show as changed in the reviewer's diff.
-    for key in ('core.autocrlf', 'core.eol', 'core.safecrlf'):
-        value = _git(project, 'config', '--get', key)
-        if value is not None and _git(str(copy), 'config', key, value.decode('utf-8', 'replace').strip()) is None:
-            raise SnapshotError(f'could not copy {key} into the snapshot repository')
+    _copy_line_endings(project, copy)
     attributes = _git(project, 'rev-parse', '--path-format=absolute', '--git-path', 'info/attributes')
     if attributes is not None:
         source_attributes = Path(attributes.decode('utf-8', errors='surrogateescape').strip())
