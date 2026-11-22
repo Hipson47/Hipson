@@ -298,3 +298,61 @@ def test_result_actions_require_the_complete_visible_summary(tmp_path):
         assert f"task activity --assignment {assignments['text_cut']}" in lines[end + 2]
         assert lines[end + 3].startswith(f"Then: hipson task ack --assignment {assignments['text_cut']}")
     _schema_and_execute(db, tmp_path)
+
+
+def test_no_verify_for_terminal_tasks_or_while_a_worker_is_active(tmp_path):
+    """A stale check alone must not propose task.verify on closed work or under a live worker (S3 review)."""
+    project = _project(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        def started(title):
+            task = store.open_task(project=project, title=title, objective="Stale check", checks=[PASS])["id"]
+            store.set_status(task, to="in_progress", actor="claude")
+            _evidence(store, task, project)
+            return task
+
+        closed = started("Closed")
+        store.set_status(closed, to="cancelled", actor="claude")
+        busy = started("Busy")
+        active = store.assign(busy, actor="builder", role="builder", mode="rw", scope=["source.py"])["id"]
+        idle = started("Idle")
+    (project / "source.py").write_text("value = 2\n")
+    _commit(project, "Move HEAD")
+
+    actions = _now(db, "--all")["next_actions"]
+    verified = [action["arguments"]["task"] for action in actions if action["tool"] == "task.verify"]
+    assert verified == [idle], actions
+    assert all(action["arguments"].get("task") not in (closed, busy) for action in actions
+               if action["tool"] in ("task.verify", "task.show"))
+
+    with closing(ledger.Ledger(db)) as store:
+        store.finish(active, result="passed", summary="Builder finished")
+    verified = [action["arguments"]["task"] for action in _now(db)["next_actions"] if action["tool"] == "task.verify"]
+    assert verified == [busy, idle]
+
+
+def test_direct_ack_only_when_the_structured_result_has_no_hidden_parts(tmp_path):
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Results", objective="Hidden result parts")["id"]
+        assignments = {}
+        for name in ("plain", "empty", "risks", "findings", "files", "commands"):
+            assignment = store.assign(task, actor="worker", role="explorer", mode="ro")["id"]
+            result = None if name == "plain" else _worker_result("Short summary")
+            if name == "risks":
+                result["risks"] = ["Ran out of time"]
+            elif name == "findings":
+                result["findings"] = [{"severity": "major", "title": "Hidden", "detail": "Not in the view",
+                                       "location": "src/x.py"}]
+            elif name == "files":
+                result["files_changed"] = [{"path": "src/x.py", "change": "Edited"}]
+            elif name == "commands":
+                result["commands"] = [{"command": "pytest", "exit_code": 1}]
+            store.finish(assignment, result="passed", summary="Short summary", worker_result=result)
+            assignments[assignment] = name
+
+    for action in _now(db)["next_actions"]:
+        name = assignments[action["arguments"]["assignment"]]
+        # Without a structured result the payload shows no result status, so the lead reads first.
+        expected = "task.ack" if name == "empty" else "task.activity"
+        assert action["tool"] == expected, (name, action)

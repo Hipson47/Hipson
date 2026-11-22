@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Sequence
 from typing import Any, NotRequired
@@ -13,6 +14,8 @@ NEXT_ACTIONS_LIMIT = 10
 WHY_LIMIT = 200
 TEXT_SUMMARY_LIMIT = 160
 PENDING_CHECK_STATES = ("missing", "partial", "unknown")
+# Worker result fields the compact payload does not show; any content there means read before acking.
+HIDDEN_RESULT_PARTS = ("files_changed", "commands", "findings", "risks")
 
 
 class ActionCall(ReadCall):
@@ -39,13 +42,15 @@ def _action(why: str, call: ActionCall, *, then: ActionCall | None = None) -> Ne
 
 def _check_action(row: dict[str, Any], task: TaskProjection, cli_db: str | None) -> NextAction | None:
     status = task["status"]
-    if status == "open":
+    # Never propose checks for work that has not started or is closed, and never verify a tree that a live
+    # worker may still be editing: task.verify runs the declared commands and records lead evidence.
+    if status == "open" or status in TERMINAL or row["has_active"]:
         return None
     counts: Counter[str] = Counter(check["recorded"] for check in task["checks"])
     stale = sum(check["current"] == "stale" for check in task["checks"])
     builder_finished = row["builder_finished_seq"] > row["latest_verification_seq"]
     args: dict[str, str | int | bool] = {"task": task["id"]}
-    if counts["failing"] and status not in TERMINAL:
+    if counts["failing"]:
         call = _call("task.show", {**args, "section": "verification"}, cli_db)
     elif stale or ((status in ("verify", "review") or builder_finished)
                    and any(counts[state] for state in PENDING_CHECK_STATES)):
@@ -61,6 +66,17 @@ def _check_action(row: dict[str, Any], task: TaskProjection, cli_db: str | None)
 def escape_summary(summary: str) -> str:
     # The projection has already escaped display controls.
     return summary.replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _result_has_no_hidden_parts(result: str | None) -> bool:
+    """True when a structured worker result adds nothing beyond the status and summary the payload shows."""
+    if result is None:
+        return True
+    try:
+        report = json.loads(result)
+    except (TypeError, ValueError, RecursionError):
+        return False
+    return isinstance(report, dict) and not any(report.get(key) for key in HIDDEN_RESULT_PARTS)
 
 
 def acknowledge_visible_results(store: Ledger, page: ListProjection, *, text: bool) -> None:
@@ -82,10 +98,10 @@ def acknowledge_visible_results(store: Ledger, page: ListProjection, *, text: bo
         if (task_id := visible.get(assignment)) is None:
             continue
         evidence = store.connection.execute(
-            "SELECT activity IS NULL AND failure_journal IS NULL FROM assignments WHERE id = ?",
+            "SELECT activity IS NULL AND failure_journal IS NULL, result FROM assignments WHERE id = ?",
             (assignment,),
         ).fetchone()
-        if evidence and evidence[0]:
+        if evidence and evidence[0] and _result_has_no_hidden_parts(evidence[1]):
             actions[index] = _action(
                 f"{task_id}/{assignment} result is shown in this payload under that task and assignment.", action["then"],
             )

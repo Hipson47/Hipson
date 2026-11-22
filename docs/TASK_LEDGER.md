@@ -221,16 +221,20 @@ requested project and terminal-task filters, including tasks beyond the returned
 now and resume each carry `next_actions` and `next_actions_omitted` at the top level. Resume's nested
 `now` contains the task page and its continuation. The top level supplies the evidence policy.
 
-1. Unacknowledged results. Use `task.ack` when the view shows the complete result status and
-   summary and the assignment has no activity or journal. Otherwise read `task.activity` before
-   following its `then` call to `task.ack`.
-2. Checks. Read the verification section for recorded failures on live tasks that have started.
-   Each task gets at most one check action. Stale checks prompt `task.verify` once the task has
-   started. Missing, partial, or unknown checks prompt verification in `verify` or `review`, or
-   after a builder finishes with no newer verification.
+1. Unacknowledged results. Use `task.ack` when the view shows the result status and the untruncated
+   summary, the assignment has no activity or journal, and its structured result has no files,
+   commands, findings or risks, which the compact view does not show. Otherwise read
+   `task.activity` before following its `then` call to `task.ack`.
+2. Checks. Only tasks that have started, are not terminal and have no active assignment get a
+   check action, at most one each, so verification never runs against a tree a worker may still be
+   editing. A recorded failure gets a read of the verification section. Stale checks prompt
+   `task.verify`. Missing, partial, or unknown checks prompt verification in `verify` or `review`,
+   or after a builder finishes with no newer verification.
 3. Tasks in review. The projection suggests `task.status` to `done` as the task lead when the
    verification and review records qualify and the projection shows no recorded blockers.
-   The reason says “recorded ok, not re-checked” and the status call evaluates the live gate.
+   The reason says “recorded ok, not re-checked”: the status call evaluates the live gate and may
+   still refuse, for example after a working-tree edit at the same HEAD. Open minor findings do not
+   hold back the suggestion.
    Other tasks in review link to compact `task.show`.
 4. Open blocking or major findings. Read `task.findings` once per task and severity.
 5. Stale tasks. Reserved for a later slice.
