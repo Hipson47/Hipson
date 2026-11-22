@@ -118,6 +118,37 @@ def test_a_read_only_assignment_writing_ignored_output_still_raises_a_finding(tm
     assert rw["status"] == "clean" and "ignored" not in rw["counts"]
 
 
+def test_ignored_writes_that_could_run_later_keep_their_finding(tmp_path):
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text("*.local.json\n.vscode/\n.mcp.json\n/tools/\n/out/\n")
+    for directory in (".claude", ".vscode", "tools", "out"):
+        (root / directory).mkdir()
+
+    def change(root):
+        (root / ".claude/settings.local.json").write_text('{"hooks": {}}')
+        (root / ".vscode/tasks.json").write_text("{}")
+        (root / ".mcp.json").write_text("{}")
+        (root / "tools/run.sh").write_text("#!/bin/sh\n")
+        if os.name == "posix":
+            os.chmod(root / "tools/run.sh", 0o755)
+            (root / "out/link").symlink_to(root / "README.md")
+        (root / "out/report.html").write_text("plain output")
+
+    record = _observe(root, change)
+    attribution = {item["path"]: item["attribution"] for item in record["paths"]}
+    assert attribution["out/report.html"] == "ignored"  # Plain build output is still harmless.
+    kept = [".claude/settings.local.json", ".vscode/tasks.json", ".mcp.json"]
+    if os.name == "posix":
+        kept += ["tools/run.sh", "out/link"]
+    for path in kept:
+        assert attribution[path] == "out_of_scope", path
+    raised, = findings(record, "A-0011")
+    assert raised["title"] == f"Observed {len(kept)} created path(s) outside the scope of assignment A-0011"
+    assert task_observation._runs_later(str(root), "gone/.claude/x", "deleted") is True
+    assert task_observation._runs_later(str(root), "gone/report.html", "deleted") is False
+    assert task_observation._runs_later(str(root), "missing.html", "created") is True  # Unknown: keep.
+
+
 def test_ignored_sensitive_and_hashed_paths_still_raise_a_finding(tmp_path):
     root = _tree(tmp_path)
     (root / ".gitignore").write_text(".env\n*.txt\n")

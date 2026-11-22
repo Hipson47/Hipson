@@ -934,7 +934,20 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
 
         links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")) \
             if case.startswith("no_links") else patch.object(ledger.os, "link", ledger.os.link)
-        with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), links:
+        real_rename = ledger.os.rename
+        refused = []
+
+        def rename(source, target):
+            if case == "rename_refused" and not refused:
+                refused.append(target)
+                raise FileExistsError(target)  # Windows: another writer took the name after the check.
+            return real_rename(source, target)
+
+        renames = patch.object(ledger.os, "rename", side_effect=rename)
+        if case == "rename_refused":
+            links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links"))
+        with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), \
+                links, renames:
             if case == "killed":
                 with pytest.raises(KeyboardInterrupt):
                     ledger.Ledger(db)
@@ -947,7 +960,9 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
         if case in ("killed", "migrated_meanwhile"):
             assert backups == [], case
             return
-        expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier else "")
+        expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier or case == "rename_refused" else "")
+        if case == "rename_refused":
+            assert [os.path.basename(item) for item in refused] == [f"ledger.sqlite.v11-backup-{stamp}"]
         assert backups == [expected], (case, names)
         if earlier:
             assert (directory / earlier[0]).read_bytes() == b"earlier"
@@ -957,7 +972,7 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
             assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
             assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
 
-    for case in ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile"]:
+    for case in ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile", "rename_refused"]:
         directory = tmp_path / case
         directory.mkdir()
         check_case(case, directory)

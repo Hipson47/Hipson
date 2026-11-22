@@ -282,6 +282,30 @@ def _covered(key: str, scope: Sequence[str]) -> bool:
     return any(item == "." or _prefix_of(_match(item.rstrip("/")), key) for item in scope)
 
 
+# Often git-ignored, yet read and executed later in the lead's own context (editor and agent settings with hooks,
+# MCP server lists, Git hooks, environment loaders, dev containers, CI definitions): a write there is never
+# treated as harmless build output.
+EXECUTABLE_CONFIG_DIRS = frozenset({".claude", ".codex", ".cursor", ".vscode", ".idea", ".husky", ".githooks",
+                                    ".direnv", ".devcontainer", ".github", ".gitlab", ".circleci", ".agents"})
+EXECUTABLE_CONFIG_NAMES = frozenset({".mcp.json", ".gitattributes", ".gitmodules", ".pre-commit-config.yaml",
+                                     ".envrc", "conftest.py", "sitecustomize.py", "usercustomize.py"})
+
+
+def _runs_later(root: str, path: str, change: str) -> bool:
+    """Whether an ignored path could still change what runs later: execution-capable config, or an executable or
+    linked file. Such writes keep their out-of-scope finding even when Git ignores them."""
+    parts = [part.casefold() for part in path.split("/")]
+    if any(part in EXECUTABLE_CONFIG_DIRS for part in parts[:-1]) or parts[-1] in EXECUTABLE_CONFIG_NAMES:
+        return True
+    if change == "deleted":
+        return False
+    try:
+        info = os.lstat(os.path.join(root, *path.split("/")))
+    except OSError:
+        return True  # Unknown: keep the finding.
+    return stat.S_ISLNK(info.st_mode) or bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+
 def _git_ignored(root: str, paths: Sequence[str]) -> set[str]:
     """Consult only in-tree .gitignore files, with no real Git directory, index or user configuration."""
     data = bytearray()
@@ -335,7 +359,7 @@ def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope:
             listed.append(item)
             # A read-only assignment may not change anything, ignored output included.
             if (mode == "rw" and group == "out_of_scope" and not _hashed(key) and key == display
-                    and not is_sensitive_path(key)):
+                    and not is_sensitive_path(key) and not _runs_later(after["root"], key, change)):
                 candidates.append(item)
     # The ignore rules must be unchanged throughout the observed tree, even in another assignment's scope.
     if candidates and not reasons and not any(_same(key.rsplit("/", 1)[-1], ".gitignore")

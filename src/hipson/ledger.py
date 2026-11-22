@@ -1062,12 +1062,16 @@ def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path
                 counter += 1
                 continue
             except OSError:
-                # No hard links on this filesystem: rename (exclusive on Windows; on POSIX only a same-microsecond
-                # backup by another writer could race, and it would hold the same old version).
+                # No hard links on this filesystem: rename. os.rename refuses an existing target on Windows; on
+                # POSIX only a same-microsecond backup by another writer could race, holding the same version.
                 if os.path.lexists(target):
                     counter += 1
                     continue
-                os.replace(working, target)
+                try:
+                    os.rename(working, target)
+                except FileExistsError:
+                    counter += 1
+                    continue
             return target
     finally:
         working.unlink(missing_ok=True)  # After a link or a failure; a rename already moved it.

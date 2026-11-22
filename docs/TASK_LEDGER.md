@@ -428,7 +428,11 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   paths stay `out_of_scope` even when Git ignores them.
 - The ignore check reads the project's `.gitignore` files in isolation from the project's Git directory
   and any global or repository-local excludes. It uses a bounded path list and times out. Sensitive paths
-  and paths stored as digests always keep their original scope classification. Any observed creation,
+  and paths stored as digests always keep their original scope classification, as do paths that could run
+  later in the lead's context: executable files and links, and agent, editor, hook and CI configuration
+  (`.claude/`, `.codex/`, `.cursor/`, `.vscode/`, `.idea/`, `.husky/`, `.githooks/`, `.direnv/`,
+  `.devcontainer/`, `.github/`, `.gitlab/`, `.circleci/`, `.agents/`, `.mcp.json`, `.gitattributes`,
+  `.gitmodules`, `.pre-commit-config.yaml`, `.envrc`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`). Any observed creation,
   modification, or deletion of a `.gitignore` anywhere in the snapshot disables ignore classification for
   the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
   stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has

@@ -281,6 +281,16 @@ def test_codex_rollout_model_read_is_byte_bounded(tmp_path):
     with (patch.dict(os.environ, {"CODEX_HOME": str(tmp_path)}),
           patch.object(runtimes, "MAX_CODEX_ROLLOUT_BYTES", len(first) + len(second) - 2)):
         assert runtimes._codex_rollout_models(thread, 0) == ["first"]
+    # A planted rollout cannot flood the meta file: at most 8 models of at most 80 characters, controls escaped.
+    lines = [json.dumps({"type": "turn_context", "payload": {"model": f"m{index:02}" + "x" * 200}})
+             for index in range(20)]
+    lines.append(json.dumps({"type": "turn_context", "payload": {"model": "evil\u001b[31m"}}))
+    (sessions / f"rollout-test-{thread}.jsonl").write_text("\n".join(lines) + "\n")
+    with patch.dict(os.environ, {"CODEX_HOME": str(tmp_path)}):
+        models = runtimes._codex_rollout_models(thread, 0)
+    assert models is not None and len(models) == runtimes.MAX_ROLLOUT_MODELS == 8
+    assert all(len(model) <= runtimes.MAX_MODEL_CHARS == 80 for model in models)
+    assert [model[:3] for model in models] == [f"m{index:02}" for index in range(8)]
 
 
 def test_agy_permission_failure_reports_first_redacted_line_and_headless_hint(tmp_path):
@@ -298,7 +308,9 @@ print('second auto-denied diagnostic', file=sys.stderr)
     assert meta["outcome"] == "permission_denied"
     original, line, hint = meta["detail"].split("; ", 2)
     assert original == "no structured_output in the runtime result"
-    assert line.startswith(r"jetski: command with [REDACTED]\u001b[0m\twas auto-denied ") and len(line) <= 300
+    label = "runtime output (untrusted): "
+    assert line.startswith(label + r"jetski: command with [REDACTED]\u001b[0m\twas auto-denied ")
+    assert len(line) <= len(label) + 300
     assert hint == ("Antigravity auto-denies commands outside its allow list in headless mode; "
                     "grant the command in agy's settings or use another builder runtime.")
     assert secret not in json.dumps(meta)
@@ -310,7 +322,8 @@ def test_other_runtime_permission_failures_include_the_denial_without_agy_hint(t
         with pytest.raises(runtimes.RuntimeFailure) as error:
             runtimes.normalize(runtime, 7, denial, "other permission denied", tmp_path / "last")
         assert error.value.kind == "permission_denied", runtime
-        assert error.value.detail.endswith(f"; {denial}") and "Antigravity" not in error.value.detail, runtime
+        assert error.value.detail.endswith(f"; runtime output (untrusted): {denial}"), runtime
+        assert "Antigravity" not in error.value.detail, runtime
 
 
 def test_exec_refuses_symlinked_runtime_state(tmp_path):

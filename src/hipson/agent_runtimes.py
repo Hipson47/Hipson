@@ -34,7 +34,7 @@ from typing import Any
 
 from hipson import ledger
 from hipson.display import bounded_text
-from hipson.redaction import redact_incomplete_private_keys, redact_text
+from hipson.redaction import redact_incomplete_private_keys, redact_text, redact_worker_text
 
 PROFILES = ("native", "controlled")
 # Observed live (agy 1.5.12, 2026-11-19): a reviewer in --mode plan created a file when its brief asked it to.
@@ -44,6 +44,8 @@ READ_ONLY_GAP = ("--mode plan is not an enforced read-only sandbox (observed liv
 MAX_BRIEF_BYTES = 256 * 1024
 MAX_AGY_PROMPT_BYTES = 100_000
 MAX_CODEX_ROLLOUT_BYTES = 16 * 1024 * 1024
+MAX_ROLLOUT_MODELS = 8
+MAX_MODEL_CHARS = 80
 CODEX_THREAD_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
 
 # Flags each capability needs, looked up in the runtime's own help output (documented, not verified).
@@ -602,7 +604,10 @@ def _codex_rollout_models(thread_id: object, started: float) -> list[str] | None
                         if isinstance(event, dict) and event.get("type") == "turn_context":
                             payload = event.get("payload")
                             if isinstance(payload, dict) and isinstance(model := payload.get("model"), str) and model.strip():
-                                models.add(redact_text(model))
+                                # A worker could plant a rollout: keep the evidence small and inert.
+                                models.add(bounded_text(model, limit=MAX_MODEL_CHARS, escape_controls=True))
+                                if len(models) >= MAX_ROLLOUT_MODELS:
+                                    break
                 return sorted(models) or None
             except OSError:
                 continue
@@ -618,7 +623,8 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
             denied = next((line for stream in (stdout, stderr) for line in stream.split("\n")
                            if PERMISSION_DENIAL.search(line)), None)
             if denied is not None:
-                detail += f"; {bounded_text(redact_incomplete_private_keys(denied), limit=300, escape_controls=True)}"
+                detail += ("; runtime output (untrusted): "
+                           f"{bounded_text(redact_worker_text(denied), limit=300, escape_controls=True)}")
             if name == "agy":
                 detail += ("; Antigravity auto-denies commands outside its allow list in headless mode; "
                            "grant the command in agy's settings or use another builder runtime.")
