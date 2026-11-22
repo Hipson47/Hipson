@@ -284,11 +284,11 @@ def _assert_gate_parity(view, compact):
         current = full["current"]
         if check["freshness"] == "missing":
             assert projected["recorded"] == "missing"
+        elif any(reason.startswith("failing verification") for reason in reasons):
+            assert projected["recorded"] == "failing"
         elif current["fingerprint"] and any(reason.startswith("unavailable working-tree fingerprint")
                                             for reason in reasons):
             assert projected["recorded"] == "unknown"
-        elif any(reason.startswith("failing verification") for reason in reasons):
-            assert projected["recorded"] == "failing"
         elif any(reason.startswith("partial content coverage") for reason in reasons):
             if not any(":metadata:" in item["state"] for item in current["files"]):
                 assert projected["recorded"] == "partial"
@@ -331,6 +331,7 @@ def test_projection_parity_for_recorded_checks_and_review_eligibility(tmp_path):
             ("changed", "ok", "stale", {"state_changed": True}),
             ("HEAD", "ok", "stale", {"revision": "a" * 40}),
             ("changed and failed", "failing", "stale", {"state_changed": True, "exit_code": 1}),
+            ("failed without fingerprint", "failing", "not_checked", {"exit_code": 2, "fingerprint": ""}),
             ("inventory metadata", "partial", "not_checked",
              {"files": [{"path": "large", "state": "100644:metadata:file_limit"}]}),
             ("unrecorded cleanup", "unknown", "not_checked", {"cleanup_confirmed": None}),
@@ -382,12 +383,24 @@ def test_projection_parity_for_recorded_checks_and_review_eligibility(tmp_path):
         latest = _evidence(store, adhoc, project, command=SECOND, exit_code=3)
         states[adhoc] = ("failing", "not_checked", "not_required")
         empty = store.open_task(project=project, title="No checks or records", objective="No checks or records")["id"]
+        unverified = store.open_task(project=project, title="Review without verification",
+                                     objective="Review without verification", checks=[PASS],
+                                     review_policy="required")["id"]
+        _finish_review(store, unverified, {"revision": "a" * 40, "fingerprint": "never-verified"})
 
         compact = task_projection.project_list(store, kind="task.board", byte_budget=64_000)
         by_id = {task["id"]: task for task in compact["tasks"]}
-        assert set(by_id) == {*states, empty}
+        assert set(by_id) == {*states, empty, unverified}
         assert by_id[empty]["checks"] == []
+        assert by_id[empty]["reasons"] == [task_projection.NO_VERIFICATION]
         _assert_gate_parity(store.show(empty), by_id[empty])
+        # review_state alone passes without an accepted verification; the verification gate is what refuses.
+        assert not store.show(unverified)["verification"]["passing"]
+        assert by_id[unverified]["review"]["state"] == "unverified"
+        assert by_id[unverified]["checks"][0]["recorded"] == "missing"
+        _assert_gate_parity(store.show(unverified), by_id[unverified])
+        failed = next(view for view in by_id.values() if view["title"] == "failed without fingerprint")
+        assert failed["reasons"][0] == "Check 1: Verification exit code: 2"
         for task, (recorded, current, review) in states.items():
             projected = by_id[task]
             full = store.show(task)

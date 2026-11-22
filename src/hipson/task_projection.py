@@ -232,6 +232,10 @@ def _record(row: dict[str, Any]) -> dict[str, Any] | None:
     return record
 
 
+RECORDED_RANK: dict[str, int] = {"failing": 0, "partial": 1, "unknown": 2, "missing": 3}
+NO_VERIFICATION = "No lead verification recorded; run hipson task verify"
+
+
 def _recorded_issues(record: dict[str, Any], lead: str) -> list[tuple[Recorded, str]]:
     issues: list[tuple[Recorded, str]] = []
     if not record["fingerprint"]:
@@ -282,7 +286,8 @@ def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None
         elif record is None:
             issues = [("missing", "No recorded verification")]
         else:
-            issues = _recorded_issues(record, row["lead"])
+            # Most severe first, so `recorded` and the bounded reason list never hide a failing exit code.
+            issues = sorted(_recorded_issues(record, row["lead"]), key=lambda issue: RECORDED_RANK[issue[0]])
         revision = record["revision"] if record is not None else None
         matches = head == revision if head is not None and revision is not None else None
         if record is not None:
@@ -299,6 +304,9 @@ def _checks(row: dict[str, Any], records: list[SelectedRecord], head: str | None
             recorded_revision=revision,
             head_matches=matches,
         ))
+    if not pairs:
+        # No declared checks and no records: the gate reports a missing lead verification, so the view must too.
+        reasons.append(NO_VERIFICATION)
     return checks
 
 
@@ -335,6 +343,9 @@ def _review(row: dict[str, Any], records: list[SelectedRecord]) -> ReviewProject
         # snapshot to match the latest applicable recorded tree in either case.
         ids = {item["id"] for _, identity, item in records if item is not None and (not wanted or identity in wanted)}
         verified_tree = next((tree for refs, tree in reversed(row["verification_events"]) if ids.intersection(refs)), None)
+        if not ids or verified_tree is None:
+            # A snapshot review without a recorded lead verification cannot satisfy the gate.
+            return {"state": "unverified", "assignment_id": assignment}
         state = ("recorded_snapshot" if
                  review_state("required", row["lead"], [*builders, candidate], *seqs, trees, verified_tree)["passing"]
                  else "changed")
