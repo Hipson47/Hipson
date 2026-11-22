@@ -19,7 +19,9 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
   Playwright reports, screenshots and test results written by a declared check. The check uses
   only in-tree `.gitignore` files, isolated from the repository's Git directory and global
   excludes. It never applies to read-only assignments, sensitive or redacted paths, incomplete
-  snapshots, or runs that changed a `.gitignore`.
+  snapshots, runs that changed a `.gitignore`, or paths that could run later: executable files and links,
+  agent, editor, hook and CI configuration (`.claude/`, `.vscode/`, `.husky/`, `.github/`, `.mcp.json`,
+  `conftest.py` and similar).
 - **Native Codex runs record the model.** `hipson agent exec --runtime codex` now reads the model
   from the run's own rollout file into the meta file's `models`.
 - **Worker results, findings and event summaries no longer store secrets that activity already
