@@ -832,16 +832,18 @@ def _assert_no_lead_verification(db):
     assert [item['role'] for item in _view(db)[0]['assignments']] == ['builder']
 
 
-@pytest.mark.parametrize('actions', [EDIT + DELETE, EDIT + REWRITE, DELETE],
-                         ids=['edit-and-delete-json', 'edit-and-rewrite-json', 'delete-json-only'])
-def test_a_builder_cannot_disable_protected_paths_through_the_flow_directory(tmp_path, actions):
-    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
-    proc, result = _flow(project, db, _use_builder_script(_spec(tmp_path, project), actions))
-    assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress', result
-    reason = result['reasons'][0]
-    assert 'protected-path baseline for builder A-0001' in reason and 'changed outside the flow' in reason
-    assert 'inspect' in reason and 'start a new flow' in reason
-    _assert_no_lead_verification(db)
+def test_a_builder_cannot_disable_protected_paths_through_the_flow_directory(tmp_path):
+    cases = {'edit-and-delete-json': EDIT + DELETE, 'edit-and-rewrite-json': EDIT + REWRITE, 'delete-json-only': DELETE}
+    for case, actions in cases.items():
+        case_dir = tmp_path / case
+        case_dir.mkdir()
+        project, db = _repo(case_dir), case_dir / 'ledger.sqlite'
+        proc, result = _flow(project, db, _use_builder_script(_spec(case_dir, project), actions))
+        assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress', (case, result)
+        reason = result['reasons'][0]
+        assert 'protected-path baseline for builder A-0001' in reason and 'changed outside the flow' in reason, case
+        assert 'inspect' in reason and 'start a new flow' in reason, case
+        _assert_no_lead_verification(db)
 
 
 def test_a_builder_cannot_skip_the_comparison_with_a_clean_marker(tmp_path):

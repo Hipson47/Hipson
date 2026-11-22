@@ -7,7 +7,7 @@ import os
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
@@ -135,28 +135,28 @@ def test_ignored_sensitive_and_hashed_paths_still_raise_a_finding(tmp_path):
     assert secret not in json.dumps(record)
 
 
-@pytest.mark.parametrize("kind", ["created", "modified", "deleted"])
-def test_any_gitignore_change_disables_downgrades_even_under_hashed_in_scope_dir(tmp_path, kind):
-    root = _tree(tmp_path)
-    (root / ".gitignore").write_text("*.png\n")
-    nested = root / "src" / ("ghp_" + "a" * 36) / ".gitignore"
-    nested.parent.mkdir()
-    if kind != "created":
-        nested.write_text("old\n")
+def test_any_gitignore_change_disables_downgrades_even_under_hashed_in_scope_dir(tmp_path):
+    for kind in ["created", "modified", "deleted"]:
+        root = _tree(tmp_path / kind)
+        (root / ".gitignore").write_text("*.png\n")
+        nested = root / "src" / ("ghp_" + "a" * 36) / ".gitignore"
+        nested.parent.mkdir()
+        if kind != "created":
+            nested.write_text("old\n")
 
-    def change(root):
-        if kind == "deleted":
-            nested.unlink()
-        else:
-            nested.write_text("new\n")
-        (root / "output.png").write_bytes(b"png")
+        def change(root, kind=kind, nested=nested):
+            if kind == "deleted":
+                nested.unlink()
+            else:
+                nested.write_text("new\n")
+            (root / "output.png").write_bytes(b"png")
 
-    record = _observe(root, change)
-    assert record["counts"]["in_scope"][kind] == 1 and "ignored" not in record["counts"]
-    assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"]
+        record = _observe(root, change)
+        assert record["counts"]["in_scope"][kind] == 1 and "ignored" not in record["counts"], kind
+        assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"], kind
 
 
-def test_git_ignore_check_excludes_repo_global_and_injected_git_configuration(tmp_path, monkeypatch):
+def test_git_ignore_check_excludes_repo_global_and_injected_git_configuration(tmp_path):
     root = init_git_repo(tmp_path)
     (root / ".gitignore").write_text("tree.txt\n")
     info = root / ".git/info"
@@ -166,42 +166,43 @@ def test_git_ignore_check_excludes_repo_global_and_injected_git_configuration(tm
     global_excludes = tmp_path / "global-excludes"
     global_excludes.write_text("global.txt\n")
     run_git(root, "config", "--file", str(global_config), "core.excludesFile", str(global_excludes))
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
-    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(root / ".git"))
-    monkeypatch.setenv("GIT_COMMON_DIR", str(root / ".git"))
 
     def change(root):
         for path in ("tree.txt", "local.txt", "global.txt"):
             (root / path).write_text("new")
 
-    record = _observe(root, change)
+    injected = {"GIT_CONFIG_GLOBAL": str(global_config), "GIT_TEMPLATE_DIR": str(root / ".git"),
+                "GIT_COMMON_DIR": str(root / ".git")}
+    with patch.dict(os.environ, injected):
+        record = _observe(root, change)
     assert {item["path"]: item["attribution"] for item in record["paths"]} == {
         "tree.txt": "ignored", "local.txt": "out_of_scope", "global.txt": "out_of_scope",
     }
 
 
-@pytest.mark.parametrize("failure", ["missing", "timeout", "nonzero", "input_limit"])
-def test_git_ignore_check_fails_closed(tmp_path, monkeypatch, failure):
-    root = _tree(tmp_path)
-    (root / ".gitignore").write_text("*.png\n")
+def test_git_ignore_check_fails_closed(tmp_path):
+    for failure in ["missing", "timeout", "nonzero", "input_limit"]:
+        root = _tree(tmp_path / failure)
+        (root / ".gitignore").write_text("*.png\n")
 
-    def git(argv, **kwargs):
-        if failure == "missing":
-            raise FileNotFoundError(argv[0])
-        if "init" in argv:
-            return subprocess.CompletedProcess(argv, 0)
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        if failure == "nonzero":
-            return subprocess.CompletedProcess(argv, 128, stdout=b"./output.png\0")
-        pytest.fail("Git should not launch when the input exceeds the budget")
+        def git(argv, failure=failure, **kwargs):
+            if failure == "missing":
+                raise FileNotFoundError(argv[0])
+            if "init" in argv:
+                return subprocess.CompletedProcess(argv, 0)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if failure == "nonzero":
+                return subprocess.CompletedProcess(argv, 128, stdout=b"./output.png\0")
+            pytest.fail("Git should not launch when the input exceeds the budget")
 
-    if failure == "input_limit":
-        monkeypatch.setattr(task_observation, "MAX_IGNORE_INPUT", 1)
-    monkeypatch.setattr(task_observation.subprocess, "run", git)
-    record = _observe(root, lambda root: (root / "output.png").write_bytes(b"png"))
-    assert "ignored" not in record["counts"]
-    assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"]
+        with ExitStack() as stack:
+            if failure == "input_limit":
+                stack.enter_context(patch.object(task_observation, "MAX_IGNORE_INPUT", 1))
+            stack.enter_context(patch.object(task_observation.subprocess, "run", git))
+            record = _observe(root, lambda root: (root / "output.png").write_bytes(b"png"))
+        assert "ignored" not in record["counts"], failure
+        assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"], failure
 
 
 def test_any_write_by_a_read_only_assignment_raises_a_finding(tmp_path):

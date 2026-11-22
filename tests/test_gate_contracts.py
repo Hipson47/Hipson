@@ -894,8 +894,7 @@ def _names(directory):
                   and item.name not in ("ledger.sqlite-wal", "ledger.sqlite-shm"))
 
 
-@pytest.mark.parametrize("case", ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile"])
-def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path, case):
+def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path):
     import os
     import sqlite3
     import stat
@@ -910,86 +909,91 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path,
             assert tz is UTC
             return fixed
 
-    real_connect = sqlite3.connect
-    directory = tmp_path / case
-    directory.mkdir()
-    db = directory / "ledger.sqlite"
-    _old_ledger(db)
-    working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}.partial"
-    earlier = [f"ledger.sqlite.v11-backup-{stamp}"] if case in ("taken", "no_links_taken") else []
-    for name in earlier:
-        (directory / name).write_bytes(b"earlier")
-    seen = []
+    def check_case(case, directory):
+        real_connect = sqlite3.connect
+        db = directory / "ledger.sqlite"
+        _old_ledger(db)
+        working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}.partial"
+        earlier = [f"ledger.sqlite.v11-backup-{stamp}"] if case in ("taken", "no_links_taken") else []
+        for name in earlier:
+            (directory / name).write_bytes(b"earlier")
+        seen = []
 
-    class Watch(sqlite3.Connection):
-        def backup(self, target, *args, **kwargs):
-            seen.append(_names(directory))  # What exists while the copy runs.
+        class Watch(sqlite3.Connection):
+            def backup(self, target, *args, **kwargs):
+                seen.append(_names(directory))  # What exists while the copy runs.
+                if case == "killed":
+                    raise KeyboardInterrupt
+                super().backup(target, *args, **kwargs)
+                if case == "migrated_meanwhile":
+                    target.execute("UPDATE schema_version SET version = 12")
+                    target.commit()
+
+        def connect(*args, **kwargs):
+            return real_connect(*args, factory=Watch, **kwargs) if str(args[0]) == str(db) else real_connect(*args, **kwargs)
+
+        links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")) \
+            if case.startswith("no_links") else patch.object(ledger.os, "link", ledger.os.link)
+        with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), links:
             if case == "killed":
-                raise KeyboardInterrupt
-            super().backup(target, *args, **kwargs)
-            if case == "migrated_meanwhile":
-                target.execute("UPDATE schema_version SET version = 12")
-                target.commit()
+                with pytest.raises(KeyboardInterrupt):
+                    ledger.Ledger(db)
+            else:
+                ledger.Ledger(db).close()
+        assert seen[0] == sorted(["ledger.sqlite", working, *earlier]), case  # No backup name before the copy ends.
+        names = _names(directory)
+        assert not any(name.endswith(".partial") or ".partial-" in name for name in names), (case, names)
+        backups = [name for name in names if "-backup-" in name and name not in earlier]
+        if case in ("killed", "migrated_meanwhile"):
+            assert backups == [], case
+            return
+        expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier else "")
+        assert backups == [expected], (case, names)
+        if earlier:
+            assert (directory / earlier[0]).read_bytes() == b"earlier"
+        if os.name == "posix":
+            assert stat.S_IMODE((directory / expected).stat().st_mode) == 0o600
+        with closing(real_connect(directory / expected)) as copy:
+            assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+            assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
 
-    def connect(*args, **kwargs):
-        return real_connect(*args, factory=Watch, **kwargs) if str(args[0]) == str(db) else real_connect(*args, **kwargs)
-
-    links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")) \
-        if case.startswith("no_links") else patch.object(ledger.os, "link", ledger.os.link)
-    with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), links:
-        if case == "killed":
-            with pytest.raises(KeyboardInterrupt):
-                ledger.Ledger(db)
-        else:
-            ledger.Ledger(db).close()
-    assert seen[0] == sorted(["ledger.sqlite", working, *earlier])  # No backup name before the copy ends.
-    names = _names(directory)
-    assert not any(name.endswith(".partial") or ".partial-" in name for name in names), names
-    backups = [name for name in names if "-backup-" in name and name not in earlier]
-    if case in ("killed", "migrated_meanwhile"):
-        assert backups == []
-        return
-    expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier else "")
-    assert backups == [expected], names
-    if earlier:
-        assert (directory / earlier[0]).read_bytes() == b"earlier"
-    if os.name == "posix":
-        assert stat.S_IMODE((directory / expected).stat().st_mode) == 0o600
-    with closing(real_connect(directory / expected)) as copy:
-        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
-        assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
+    for case in ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile"]:
+        directory = tmp_path / case
+        directory.mkdir()
+        check_case(case, directory)
 
 
-def test_worker_results_findings_and_notes_persist_without_env_secrets_or_cut_key_blocks(tmp_path, monkeypatch):
+def test_worker_results_findings_and_notes_persist_without_env_secrets_or_cut_key_blocks(tmp_path):
+    import os
     import sqlite3
 
-    monkeypatch.setenv("SVC_TOKEN", "zq9plainvalue77")
     cut = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsecretbody"
-    store, task = _store(tmp_path)
-    db = store.path
-    with closing(store):
-        result = ledger.validate_task_result({
-            "status": "completed", "summary": "env zq9plainvalue77 and " + cut, "files_changed": [{"path": "a zq9plainvalue77", "change": "modified"}],
-            "commands": [{"command": "echo zq9plainvalue77", "exit_code": 0}], "risks": ["key " + cut],
-            "findings": [{"severity": "minor", "title": "t zq9plainvalue77", "detail": cut, "location": "x"}]})
-        assert result["summary"] == "env [REDACTED] and [REDACTED]"
-        assert result["files_changed"] == [{"path": "a [REDACTED]", "change": "modified"}] and result["risks"] == ["key [REDACTED]"]
-        assert result["commands"][0]["command"] == "echo [REDACTED]"
-        assert result["findings"][0]["title"] == "t [REDACTED]" and result["findings"][0]["detail"] == "[REDACTED]"
-        assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
-        store.finish(assignment, result="passed", summary="done", worker_result=result)
-        finding = store.add_finding(task, actor="w", severity="minor", title="title zq9plainvalue77",
-                                    detail="detail " + cut, location="loc zq9plainvalue77")
-        assert (finding["title"], finding["detail"], finding["location"]) == (
-            "title [REDACTED]", "detail [REDACTED]", "loc [REDACTED]")
-        updated = store.update_finding(finding["id"], actor="lead", status="wontfix",
-                                       resolution_note="note zq9plainvalue77 " + cut)
-        assert updated["resolution_note"] == "note [REDACTED] [REDACTED]"
-        store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    raw = db.read_bytes()
-    assert b"zq9plainvalue77" not in raw and b"MIIEowIBAAKCAQEAsecretbody" not in raw
-    with closing(sqlite3.connect(db)) as check:
-        assert check.execute("SELECT count(*) FROM findings").fetchone()[0] == 2  # The result's own and the added one.
+    with patch.dict(os.environ, {"SVC_TOKEN": "zq9plainvalue77"}):
+        store, task = _store(tmp_path)
+        db = store.path
+        with closing(store):
+            result = ledger.validate_task_result({
+                "status": "completed", "summary": "env zq9plainvalue77 and " + cut, "files_changed": [{"path": "a zq9plainvalue77", "change": "modified"}],
+                "commands": [{"command": "echo zq9plainvalue77", "exit_code": 0}], "risks": ["key " + cut],
+                "findings": [{"severity": "minor", "title": "t zq9plainvalue77", "detail": cut, "location": "x"}]})
+            assert result["summary"] == "env [REDACTED] and [REDACTED]"
+            assert result["files_changed"] == [{"path": "a [REDACTED]", "change": "modified"}] and result["risks"] == ["key [REDACTED]"]
+            assert result["commands"][0]["command"] == "echo [REDACTED]"
+            assert result["findings"][0]["title"] == "t [REDACTED]" and result["findings"][0]["detail"] == "[REDACTED]"
+            assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
+            store.finish(assignment, result="passed", summary="done", worker_result=result)
+            finding = store.add_finding(task, actor="w", severity="minor", title="title zq9plainvalue77",
+                                        detail="detail " + cut, location="loc zq9plainvalue77")
+            assert (finding["title"], finding["detail"], finding["location"]) == (
+                "title [REDACTED]", "detail [REDACTED]", "loc [REDACTED]")
+            updated = store.update_finding(finding["id"], actor="lead", status="wontfix",
+                                           resolution_note="note zq9plainvalue77 " + cut)
+            assert updated["resolution_note"] == "note [REDACTED] [REDACTED]"
+            store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        raw = db.read_bytes()
+        assert b"zq9plainvalue77" not in raw and b"MIIEowIBAAKCAQEAsecretbody" not in raw
+        with closing(sqlite3.connect(db)) as check:
+            assert check.execute("SELECT count(*) FROM findings").fetchone()[0] == 2  # The result's own and the added one.
 
 
 def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):
