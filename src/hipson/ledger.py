@@ -1656,8 +1656,11 @@ class Ledger:
         ]))
 
     def projection_rows(self, *, task: str | None = None, project: str | Path | None = None,
-                        include_terminal: bool = False) -> list[dict[str, Any]]:
-        """Load compact read inputs in batches from one SQLite snapshot."""
+                        include_terminal: bool) -> list[dict[str, Any]]:
+        """Load compact read inputs in batches from one SQLite snapshot.
+
+        include_terminal has no default: every caller states it, and a task lookup always includes terminal tasks.
+        """
         project_path = str(Path(project).expanduser().resolve()) if project is not None else None
         with self._transaction(write=False):
             version = self.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0]
