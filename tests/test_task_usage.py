@@ -116,7 +116,10 @@ def test_task_show_usage_totals_include_unpaged_assignments_and_preserve_full_vi
     assert full == full_before_usage
     assert totals == {"attempts": {"builder": 3, "reviewer": 1, "explorer": 7},
                       "repair_rounds": 2, "without_usage": 8,
-                      "tokens": _expected("", 28, 7, 16, None, 2, 35)["tokens"],
+                      "tokens_by_source": {
+                          "agy_json": {"assignments": 1, **_expected("", 8, 2, 12, None, 0, 10)["tokens"]},
+                          "codex_rollout": {"assignments": 1, **_expected("", 20, 5, 4, None, 2, 25)["tokens"]},
+                      },
                       "missing_reasons": {"not_an_agent_runtime": 8}, "elapsed_seconds": 10.0}
     assert "Usage: " in _show(db, task, "--detail", "full")
     with patch.object(task_verification, "project_state", side_effect=AssertionError("fingerprint computed")):
@@ -131,3 +134,28 @@ def test_task_show_usage_totals_include_unpaged_assignments_and_preserve_full_vi
     assert assignments["records"][0]["usage"]["reason"] == "not_an_agent_runtime"
     assert len(task_projection.dumps(assignments).encode()) <= task_projection.SECTION_BUDGET
     assert "Usage: " in text
+
+
+def test_totals_stay_per_source_and_a_cancelled_reviewer_starts_no_repair_count(tmp_path):
+    """S8 review: runtimes count tokens differently, and a reviewer that never reviewed is not a review."""
+    db = tmp_path / "ledger.sqlite"
+    plan = [("builder", "passed", _expected("codex_rollout", 10, 1, 4, 0, 1, 11)),
+            ("reviewer", "cancelled", None),
+            ("builder", "passed", _expected("codex_rollout", 20, 2, 8, None, 1, 22)),
+            ("reviewer", "passed", _expected("claude_stream_json", 3, 4, 50, 6, 0, 63)),
+            ("builder", "passed", None)]
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Mixed", objective="Per source")["id"]
+        for i, (role, result, usage) in enumerate(plan):
+            with patch.object(ledger, "_timestamp", return_value=f"2026-11-22T00:01:{i*2:02d}Z"):
+                assignment = store.assign(task, actor="worker", role=role, mode="ro")["id"]
+            with patch.object(ledger, "_timestamp", return_value=f"2026-11-22T00:01:{i*2+1:02d}Z"):
+                store.finish(assignment, result=result, summary="Done", usage=usage)
+    totals = json.loads(_show(db, task, "--detail", "full", "--json"))["usage"]
+    assert totals["tokens_by_source"] == {
+        "claude_stream_json": {"assignments": 1, **_expected("", 3, 4, 50, 6, 0, 63)["tokens"]},
+        # cache_write_tokens is missing from one Codex record, so its Codex sum is unknown, not partial.
+        "codex_rollout": {"assignments": 2, **_expected("", 30, 3, 12, None, 2, 33)["tokens"]},
+    }
+    # Only the builder after the passed review is a repair round; the cancelled reviewer did not review.
+    assert totals["repair_rounds"] == 1

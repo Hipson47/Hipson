@@ -3,8 +3,12 @@
 ## Unreleased
 
 - Record runtime-reported tokens and ledger elapsed time per assignment in schema 12. Full and compact
-  task show and the assignments section report attempts by role, repair rounds, token totals and
-  missing-usage reasons. Native probes and flow comparisons include the usage evidence.
+  task show and the assignments section report attempts by role, repair rounds, token totals per
+  runtime source (never added across sources) and missing-usage reasons. Native probes and flow
+  comparisons include the usage evidence.
+- **Ledger schema 12.** Any write open of an older ledger now backs it up next to the ledger
+  (`<ledger>.v<old>-backup-<timestamp>`) before migrating. Hipson 1.7.0 refuses a v12 ledger, so
+  upgrade every Hipson that shares a ledger together.
 - Opt in to the 14-tool lead MCP profile with `hipson mcp serve --stdio --profile lead` or
   register it with `hipson init --mcp-profile lead`. The lead profile defaults board, now,
   resume and task reads to compact detail and returns a coded refusal for unlisted tools.

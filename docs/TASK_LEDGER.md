@@ -210,13 +210,19 @@ CLI text. Usage does not evaluate gates, change statuses or run checks. Reading 
 working-tree fingerprint, and compact size and paging limits still apply.
 
 - `attempts` counts every assignment by role, including active attempts. An absent role has zero
-  attempts. `repair_rounds` counts builder assignments started after the first reviewer assignment ended.
-- `tokens` sums known counts per field from finished assignments. Each field stays null until at
-  least one assignment supplies that count. `tokens` itself is null if none report usage.
-  `without_usage` counts finished assignments without usage. When it is nonzero, `missing_reasons`
-  counts each reason.
+  attempts. `repair_rounds` counts builder assignments started after the first reviewer assignment
+  that ended with a result (`passed` or `failed`); a cancelled or reaped reviewer did not review.
+- `tokens_by_source` keeps one total per runtime source (`codex_rollout`, `agy_json`,
+  `claude_stream_json`), because the runtimes count differently: Codex input includes cached
+  input, Claude input excludes it and Claude's total adds cache reads and writes. Hipson never adds
+  counts across sources. Each source has `assignments` and the six token fields; a field is a sum
+  only while every assignment of that source reported it, otherwise it is null. `tokens_by_source`
+  is null if no assignment reports usage. `without_usage` counts finished assignments without usage.
+  When it is nonzero, `missing_reasons` counts each reason.
 - `elapsed_seconds` sums assignment time from the ledger's start and end timestamps. Concurrent
   assignments each contribute their duration. Active assignments contribute only to attempt counts.
+  A reaped assignment ends when it is reaped, so its time includes any gap after its supervisor
+  stopped.
 
 Each ended assignment in schema v12 has `usage.source`, `usage.tokens`, `usage.reason` and
 `usage.elapsed_seconds`. Token fields are `input_tokens`, `output_tokens`, `cached_tokens`
@@ -234,8 +240,20 @@ exact total. Totals retain each runtime's counting convention. See the
 | `runtime_error` | A runtime failed without reporting usage, or its supervisor could not deliver telemetry before the assignment was reaped. |
 | `not_recorded` | A historical assignment predates usage recording. The summary still counts its ledger elapsed time. |
 
-Schema v12 adds one nullable `usage` column to `assignments`. `hipson init` backs up a ledger before
-migrating. Older ledgers remain readable without migration. Active and historical assignment rows
+Schema v12 adds one nullable `usage` column to `assignments`. Any write open of an older ledger
+(`hipson init`, a `task` command, an MCP write) first copies it with SQLite's backup API to
+`<ledger>.v<old>-backup-<UTC timestamp>` next to it, then migrates. `hipson init` also keeps its
+own backup. Older ledgers remain readable without migration.
+
+Upgrading from 1.7: a ledger is shared by every Hipson that uses it, including other virtual
+environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger with
+`ledger.schema_unsupported`, so upgrade every installation that uses the ledger to 1.8 together.
+To go back, stop every Hipson that uses the ledger and copy the pre-migration backup over the
+ledger file.
+
+Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
+adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
+the first transcript under `CODEX_HOME/sessions` that carries the run marker. Nothing gates on usage. Active and historical assignment rows
 without a usage record show `usage: null`. The adapter's `brief_tokens_estimate` is a bytes/4
 heuristic for the brief and never contributes to usage totals.
 

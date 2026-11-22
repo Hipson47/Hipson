@@ -519,7 +519,7 @@ def test_v2_reads_return_empty_findings_null_results_without_migration(tmp_path:
         assert store.findings(task="T-0001") == [] and store.board()
         assert_strict_schema("task.schema.json", view)
     view["usage"] = {
-        "attempts": {"builder": 1, "reviewer": 1}, "repair_rounds": 0, "tokens": None,
+        "attempts": {"builder": 1, "reviewer": 1}, "repair_rounds": 0, "tokens_by_source": None,
         "without_usage": 1, "elapsed_seconds": 1.0, "missing_reasons": {"not_recorded": 1},
     }
     for command in (("show", "--task", "T-0001"), ("finding", "list"),

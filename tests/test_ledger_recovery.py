@@ -950,3 +950,22 @@ sys.stdin.readline()
                         break
         finally:
             assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+
+
+def test_any_writer_backs_up_an_older_ledger_before_migrating(tmp_path: Path):
+    """S8 review: migration ran on any write open, but only hipson init made a backup."""
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    original = sqlite3.connect(db).execute("SELECT * FROM tasks").fetchall()
+    with closing(ledger.Ledger(db, read_only=True)):
+        pass
+    assert not list(tmp_path.glob("ledger.sqlite.v*-backup-*"))  # Reads never migrate or back up.
+    with closing(ledger.Ledger(db)) as store:
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
+    backup, = tmp_path.glob("ledger.sqlite.v1-backup-*")
+    with closing(sqlite3.connect(backup)) as copy:
+        assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+        assert copy.execute("SELECT * FROM tasks").fetchall() == original
+    with closing(ledger.Ledger(db)):
+        pass
+    assert len(list(tmp_path.glob("ledger.sqlite.v*-backup-*"))) == 1  # A current ledger is not copied again.

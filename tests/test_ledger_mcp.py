@@ -202,7 +202,7 @@ def test_ledger_mcp_full_lifecycle_and_strict_payloads(tmp_path: Path):
     assert command("task.events", task=task, after=events[-1]["seq"]) == []
     shown = command("task.show", task=task)
     assert shown.pop("usage") == {
-        "attempts": {"builder": 1}, "repair_rounds": 0, "tokens": None, "without_usage": 1,
+        "attempts": {"builder": 1}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 1,
         "elapsed_seconds": finished["usage"]["elapsed_seconds"], "missing_reasons": {"not_an_agent_runtime": 1},
     }
     assert shown == view
@@ -366,7 +366,7 @@ def test_ledger_mcp_missing_store_reads_create_nothing(tmp_path: Path):
         assert list(tmp_path.iterdir()) == []
 
 
-EMPTY_TASK_USAGE = {"attempts": {}, "repair_rounds": 0, "tokens": None, "without_usage": 0, "elapsed_seconds": 0.0}
+EMPTY_TASK_USAGE = {"attempts": {}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 0, "elapsed_seconds": 0.0}
 
 
 def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):

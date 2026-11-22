@@ -102,7 +102,7 @@ class StaleTask(TypedDict):
 class TaskUsage(TypedDict):
     attempts: dict[str, int]
     repair_rounds: int
-    tokens: dict[str, int | None] | None
+    tokens_by_source: dict[str, dict[str, int | None]] | None
     without_usage: int
     missing_reasons: NotRequired[dict[str, int]]
     elapsed_seconds: float
@@ -425,9 +425,11 @@ def usage_totals(assignments: Iterable[Mapping[str, Any]]) -> TaskUsage:
     attempts: dict[str, int] = {}
     builders: list[datetime] = []
     first_review: datetime | None = None
-    tokens: dict[str, int | None] = dict.fromkeys(TOKEN_FIELDS)
+    # Runtimes count tokens differently (Codex input includes cached input; Claude's excludes it and its
+    # total adds cache reads and writes), so totals are kept per source and never added across sources.
+    by_source: dict[str, dict[str, int | None]] = {}
     missing: dict[str, int] = {}
-    reported, elapsed = False, 0.0
+    elapsed = 0.0
     for item in assignments:
         role = item["role"]
         attempts[role] = attempts.get(role, 0) + 1
@@ -436,7 +438,8 @@ def usage_totals(assignments: Iterable[Mapping[str, Any]]) -> TaskUsage:
             builders.append(started)
         if ended is None:
             continue
-        if role == "reviewer" and (first_review is None or ended < first_review):
+        # Only a review that produced a result starts the repair count; a cancelled or reaped reviewer did not review.
+        if role == "reviewer" and item["status"] in ("passed", "failed") and (first_review is None or ended < first_review):
             first_review = ended
         usage = item["usage"]
         if isinstance(usage, str):
@@ -447,16 +450,23 @@ def usage_totals(assignments: Iterable[Mapping[str, Any]]) -> TaskUsage:
         else:
             elapsed += usage["elapsed_seconds"]
         if usage is not None and (counts := usage["tokens"]) is not None:
-            reported = True
+            source = str(usage["source"])
+            bucket = by_source.get(source)
+            if bucket is None:
+                by_source[source] = {"assignments": 1, **{key: counts.get(key) for key in TOKEN_FIELDS}}
+                continue
+            bucket["assignments"] = (bucket["assignments"] or 0) + 1
             for key in TOKEN_FIELDS:
-                if (value := counts.get(key)) is not None:
-                    tokens[key] = (tokens[key] or 0) + value
+                # A field stays a sum only while every assignment of this source reported it.
+                value, current = counts.get(key), bucket[key]
+                bucket[key] = None if value is None or current is None else current + value
         else:
             reason = usage["reason"] if usage is not None else "not_recorded"
             missing[reason] = missing.get(reason, 0) + 1
     totals = TaskUsage(attempts=attempts,
                        repair_rounds=sum(first_review is not None and start > first_review for start in builders),
-                       tokens=tokens if reported else None, without_usage=sum(missing.values()),
+                       tokens_by_source=dict(sorted(by_source.items())) or None,
+                       without_usage=sum(missing.values()),
                        elapsed_seconds=round(elapsed, 6))
     if missing:
         totals["missing_reasons"] = missing
@@ -633,8 +643,8 @@ def read_section(store: Ledger, task: str, section: str, *, limit: int | None = 
             page["unavailable"] = f"schema v{version} does not store {section}"
             return page
         if section == "assignments":
-            sql_usage = ("SELECT role, started_at, ended_at, usage FROM assignments WHERE task = ?" if version >= 12
-                         else "SELECT role, started_at, ended_at, NULL AS usage FROM assignments WHERE task = ?")
+            sql_usage = ("SELECT role, status, started_at, ended_at, usage FROM assignments WHERE task = ?" if version >= 12
+                         else "SELECT role, status, started_at, ended_at, NULL AS usage FROM assignments WHERE task = ?")
             page["usage"] = usage_totals(dict(item) for item in store.connection.execute(sql_usage, (task,)))
         rows = store.connection.execute(sql, (task, limit + 1, cursor))
         row = next(rows, None)

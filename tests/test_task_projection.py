@@ -162,7 +162,7 @@ def test_projection_reads_v1_without_migration(tmp_path):
     assert task["assignments"][1]["summary"] is None
     assert task["usage"] == {
         "attempts": {"builder": 1, "reviewer": 1},
-        "repair_rounds": 0, "tokens": None, "without_usage": 1,
+        "repair_rounds": 0, "tokens_by_source": None, "without_usage": 1,
         "missing_reasons": {"not_recorded": 1}, "elapsed_seconds": 1.0,
     }
     assert db.read_bytes() == before

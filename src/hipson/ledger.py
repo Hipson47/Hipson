@@ -1029,6 +1029,26 @@ def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: 
     raise LedgerError(message, code="ledger.snapshot_changed")
 
 
+def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path | None:
+    """Copy an older ledger with SQLite's backup API before any writer migrates it, not only hipson init.
+
+    A ledger is shared by every Hipson on the machine (and may be synced elsewhere); once migrated, older
+    releases refuse it, so the pre-migration copy is the way back. Returns the backup path, or None.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'").fetchone()
+    row = connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone() if exists else None
+    if row is None or row[0] >= SCHEMA_VERSION or row[0] not in SUPPORTED_SCHEMA_VERSIONS:
+        return None
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}")
+    with open(target, "xb"):  # Never overwrite an earlier backup.
+        pass
+    with closing(sqlite3.connect(target)) as destination:
+        connection.backup(destination)
+    return target
+
+
 class Ledger:
     """One SQLite connection; callers must close it (or use contextlib.closing)."""
 
@@ -1070,6 +1090,7 @@ class Ledger:
             self.connection.execute("PRAGMA foreign_keys = ON")
             if not read_only:
                 self.connection.execute("PRAGMA journal_mode = WAL")
+                _backup_before_migration(self.connection, self.path)
             with self._transaction(write=not read_only):
                 if not read_only:
                     self.connection.execute(SCHEMA[0])

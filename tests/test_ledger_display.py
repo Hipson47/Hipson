@@ -20,7 +20,7 @@ def test_plain_ledger_actor_redaction_and_bounds(tmp_path: Path):
         store.assign(task, actor=actor, role="reviewer", mode="ro")
         long_assignment = store.assign(task, actor=long_actor, role="reviewer", mode="ro")["id"]
         store.add_event(task, actor=actor, type="note", summary="Ready")
-        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens": None,
+        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens_by_source": None,
                  "without_usage": 0, "elapsed_seconds": 0.0}
         expected = [{**store.show(task), "usage": usage}, store.board(), store.list_tasks(), store.events(task)]
 
@@ -54,7 +54,7 @@ def test_plain_ledger_views_escape_worker_controls_and_preserve_json(tmp_path: P
         store.assign(task, actor=f"active {unsafe}", role="reviewer", mode="ro")
         cursor = store.events(task)[-1]["seq"]
         store.add_event(task, actor=f"actor {unsafe}", type="note", summary=f"event {unsafe}")
-        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens": None, "without_usage": 1,
+        usage = {"attempts": {"reviewer": 2}, "repair_rounds": 0, "tokens_by_source": None, "without_usage": 1,
                  "elapsed_seconds": finished["usage"]["elapsed_seconds"],
                  "missing_reasons": {"not_an_agent_runtime": 1}}
         cases = (
