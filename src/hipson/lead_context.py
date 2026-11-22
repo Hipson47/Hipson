@@ -208,11 +208,11 @@ def build(store: ledger.Ledger | None, *, project: str | Path | None = None,
 
 
 def build_compact(store: ledger.Ledger | None, *, project: str | None = None, include_all: bool = False,
-                  cli_db: str | None = None, text: bool = False) -> dict[str, Any]:
+                  cli_db: str | None = None, text: bool = False, stale_days: int | None = None) -> dict[str, Any]:
     from hipson import task_projection
 
     page, rows = task_projection.resume_inputs(store, project=project, include_terminal=include_all,
-                                               cli_db=cli_db, text=text)
+                                               cli_db=cli_db, text=text, stale_days=stale_days)
     now: dict[str, Any] = dict(page)
     actions = now.pop("next_actions")
     actions_omitted = now.pop("next_actions_omitted")

@@ -162,6 +162,7 @@ page. Treat the marked values as evidence rather than instructions.
 | Area | Fields and interpretation |
 | --- | --- |
 | Task | `id`, `project`, `title`, `objective`, `status`, `lead`, `review_policy`, `created_at`, `updated_at`, and `last_activity_at`. Last activity includes event timestamps, selected verification finish times, and assignment start, end, and heartbeat times. |
+| Task staleness | `stale` is null or `{"since": "<timestamp>", "days": <integer>}`. Only `open` and `in_progress` tasks can be stale. `since` is the latest qualifying ledger timestamp and `days` counts full days since then. |
 | Checks | Up to 16 declared argv lists in order, matched to the newest record by full argv identity. A task without declared checks shows its latest ad hoc record if one exists. Each check shows `command`, `recorded`, `current`, `record_id`, `exit_code`, `recorded_at`, `recorded_revision`, and `head_matches`. |
 | Recorded result | `ok` requires exit zero, complete content coverage, a fingerprint, confirmed cleanup, and the task lead's verification context. Other values are `failing`, `partial`, `unknown`, and `missing`. Malformed evidence and missing fingerprints report `unknown` with a reason. |
 | Current freshness | `stale` means HEAD moved, a builder finished after verification, or the record says the project changed during verification. Otherwise, `not_checked` means HEAD was observable and `unknown` means HEAD was unavailable. `head_matches` is null when HEAD or the recorded revision is unavailable. |
@@ -174,6 +175,12 @@ and recorded evidence. Same-HEAD working-tree edits leave `current: "not_checked
 available and the record has no staleness signal. Even `recorded: "ok"` describes only the recorded
 result. Gates use the full view to evaluate current working-tree content. HEAD reads run concurrently
 under a one-second batch deadline, separately from the SQLite snapshot.
+
+Stale tasks have at least seven full days since their latest assignment start or end, task event,
+or verification. For compact `task now` and `lead resume`, set `--stale-days N` or the MCP integer
+`stale_days` to a value from 1 to 3650. Continuations retain that threshold. Assignment heartbeats
+still appear in `last_activity_at` and do not reset task staleness. Staleness uses recorded
+timestamps and never evaluates checks or fingerprints the project.
 
 Character limits count Unicode code points, including the ellipsis. Each argv element has a 200-character
 limit, with 400 characters for the command including spaces between arguments. Titles allow 160
@@ -229,7 +236,8 @@ now and resume each carry `next_actions` and `next_actions_omitted` at the top l
    check action, at most one each, so verification never runs against a tree a worker may still be
    editing. A recorded failure gets a read of the verification section. Stale checks prompt
    `task.verify`. Missing, partial, or unknown checks prompt verification in `verify` or `review`,
-   or after a builder finishes with no newer verification.
+   or after a builder finishes with no newer verification. Blocked tasks may get an inspection
+   action for recorded failures. Verification proposals wait until the lead resumes the task.
 3. Tasks in review. The projection suggests `task.status` to `done` as the task lead when the
    verification and review records qualify and the projection shows no recorded blockers.
    The reason says “recorded ok, not re-checked”: the status call evaluates the live gate and may
@@ -237,9 +245,11 @@ now and resume each carry `next_actions` and `next_actions_omitted` at the top l
    hold back the suggestion.
    Other tasks in review link to compact `task.show`.
 4. Open blocking or major findings. Read `task.findings` once per task and severity.
-5. Stale tasks. Reserved for a later slice.
+5. Stale tasks. Read each task with compact `task.show`. The reason names cancel, close and
+   reopen with a reason as lead decisions. The action itself only reads the task.
 6. Terminal tasks with active assignments or held claims. Preview cleanup with `task.reap`
-   and `dry_run: true`.
+   and `dry_run: true`. For a specific directory, use `task.cleanup` to inspect the whole path
+   before removing it.
 
 Task ID breaks ties within a category, followed by assignment ID or the first finding ID for the
 severity where applicable. Check actions use the same HEAD observation as the task page.
@@ -256,6 +266,23 @@ The budget can omit lower-priority actions when needed to fit the page envelope 
 Compact now and resume text show the status and up to 160 characters of escaped summary for each
 unacknowledged result on the task page inside the untrusted evidence block. The text ends with
 `Next:` lines and any `Then:` commands.
+
+### Inspect a project path before removing it
+
+Run `hipson task cleanup --project PATH` or call MCP `task.cleanup` with `project` before removing a
+directory or Git worktree. Cleanup checks the resolved path and its descendants against the
+registered project paths, including paths that are already absent. It reports task IDs, projects
+and statuses, plus each task's assignments and their current claim paths. Use `--json` for compact
+JSON on stdout in place of the text report. With no ledger or no matches, the report has an empty
+`tasks` list.
+
+Cleanup exits 1 with `cleanup.tasks_open` if any matching task is nonterminal or any assignment
+is active, including active assignments on cancelled tasks. Inspect the suggested reads, then
+decide how to resolve the blockers. The suggested close and cancel commands are templates. For
+cancellation, replace `REASON` with the lead's explanation in `--summary`. A blocked task must
+return to `in_progress` before it can close. Cleanup uses a sidecar-free read of the ledger.
+Run directory removal separately after reviewing the report. A later ledger write can change
+the result.
 
 ### Read task records by section
 
@@ -1256,6 +1283,7 @@ resolve against the server's working directory, as in the CLI.
 
 Read tools use the read-only access rules above. With no store,
 `task.list` and `task.board` return empty arrays; `task.now` and `lead.resume` return empty view objects;
+`task.cleanup` returns the resolved project and an empty `tasks` list;
 `task.show`, `task.brief`, `task.context`, and `task.events`
 return `Task not found` errors. Approved write tools may initialize the store.
 
@@ -1267,8 +1295,9 @@ return `Task not found` errors. Approved write tools may initialize the store.
 | `task.events` | `task` | `after` (exclusive, default `0`) |
 | `task.list` | none | `project`, `status` |
 | `task.board` | none | none |
-| `task.now` | none | `project`, `all` |
-| `lead.resume` | none | `project`, `all` |
+| `task.now` | none | `project`, `all`, `detail`, `offset`, `limit`, `stale_days` (compact only) |
+| `lead.resume` | none | `project`, `all`, `detail`, `stale_days` (compact only) |
+| `task.cleanup` | `project` | none |
 | `task.findings` | none | `task`, `status`, `severity` |
 | `task.finding_add` | `task`, `actor`, `severity`, `title`, `approved=true` | `detail`, `location`, `source_assignment` |
 | `task.finding_update` | `finding`, `status`, `actor`, `approved=true` | `resolution_note`, `resolved_by_assignment` |
@@ -1337,8 +1366,9 @@ array. Each fix has `tool`, `arguments` and `cli` fields in the same shape as th
 calls in compact reads. An empty array means the refusal supplies no call. A gate
 with several reasons uses the first reason's code in the JSON body. In Python,
 `CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
-CLI `task close` and `task flow` also keep their structured command results on
-stdout with `--json`. MCP close and verification refusals that recorded a result
+CLI `task close`, `task flow`, and `task cleanup` also keep their structured command results on
+stdout with `--json`. An MCP cleanup refusal sets `isError: true` and keeps the report as the third
+text item, after the human message and the refusal envelope. MCP close and verification refusals that recorded a result
 keep `isError: false` and the result as the first text content, as before 1.8, and
 add the refusal envelope as a second text content. Flow run states (such as `worker_failed`) and
 check exit statuses carry evidence. Rejected specs and resume requests emit the
@@ -1403,6 +1433,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `checks.shell_syntax` | The check string cannot be parsed into argv. | Correct its quoting and retry. |
 | `checks.task_terminal` | A terminal task's checks cannot change. | Declare new checks on a follow-up task. |
 | `claim.conflict` | The write scope overlaps a held claim. | Inspect the holding assignment, then wait or reap if the owner died. |
+| `cleanup.tasks_open` | The selected path contains nonterminal tasks or active assignments. | Inspect the task and assignment reads, then finish active assignments and close or cancel the nonterminal tasks. |
 | `close.assignment_active` | An active assignment blocks the gate. | Wait for the assignment or inspect it for orphan recovery. |
 | `close.checks_failed` | Recorded verification exited nonzero. | Address the check failure and verify again. |
 | `close.checks_mismatch` | The declared checks differ from the checks expected by the caller. | Read the current declarations and reconcile the expected checks. |
@@ -1493,6 +1524,8 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `task_read.compact_paging_required` | List pagination flags require a compact view. | Pass `--detail compact` with the paging flags. |
 | `task_read.section_required` | A task-show page has no section. | Pass `--section` with the paging flags. |
 | `task_read.section_with_compact` | A section read was combined with compact detail. | Choose the section read or the compact summary. |
+| `task_read.stale_days_invalid` | The CLI staleness threshold is outside 1–3650 days. | Supply an integer in range. |
+| `task_read.stale_days_requires_compact` | The CLI staleness threshold was set on a full read. | Pass `--detail compact`. |
 | `verify.artifact_unavailable` | The verification command could not use its work or output artifact. | Inspect the artifact path and diagnostic. |
 | `verify.argv_invalid` | The verification command argv is missing or invalid. | Supply a command with valid text arguments and no NULs. |
 | `verify.check_timeout` | A lead check ran past its per-check timeout. | Retry verification using the supplied timeout. |

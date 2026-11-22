@@ -85,7 +85,7 @@ from hipson.runtime import HipsonRuntime, RuntimeMode, default_session_db
 from hipson.scheduler import Scheduler, parse_json_object
 from hipson.session import SessionStore, open_session_store
 from hipson.skills import SkillLookupError, format_validation_results, list_skill_metadata, validate_skills, view_skill
-from hipson.task_calls import task_lookup_calls
+from hipson.task_calls import DEFAULT_STALE_DAYS, MAX_STALE_DAYS, MIN_STALE_DAYS, cleanup_project, task_lookup_calls
 from hipson.tools import ToolContext, ToolRegistryError, ToolSpec, bounded_tool_output, build_default_registry
 
 PACKAGE_ROOT = package_root()
@@ -1857,7 +1857,14 @@ def command_task_read(args: argparse.Namespace) -> int:
     offset = getattr(args, "offset", None)
     limit = getattr(args, "limit", None)
     cursor = getattr(args, "cursor", None)
+    stale_days = getattr(args, "stale_days", None)
     try:
+        if stale_days is not None:
+            if args.detail != "compact":
+                raise ledger.LedgerError("--stale-days requires --detail compact", code="task_read.stale_days_requires_compact")
+            if not MIN_STALE_DAYS <= stale_days <= MAX_STALE_DAYS:
+                raise ledger.LedgerError(f"--stale-days must be between {MIN_STALE_DAYS} and {MAX_STALE_DAYS}",
+                                         code="task_read.stale_days_invalid")
         if section is not None and args.detail == "compact":
             raise ledger.LedgerError("--section and --detail compact are mutually exclusive",
                 code="task_read.section_with_compact")
@@ -1894,12 +1901,12 @@ def command_task_read(args: argparse.Namespace) -> int:
                     payload = task_projection.show_task(store, args.task, cli_db=cli_db)
             elif action == "resume":
                 payload = lead_context.build_compact(store, project=project, include_all=args.all,
-                                                     cli_db=cli_db, text=not args.json)
+                                                     cli_db=cli_db, text=not args.json, stale_days=stale_days)
             else:
                 kind: task_projection.ListKind = "task.board" if action == "board" else "task.now"
                 payload = dict(task_projection.project_list(store, kind=kind, project=project,
                                                             include_terminal=args.all, offset=offset or 0,
-                                                            limit=limit, cli_db=cli_db, text=not args.json))
+                                                            limit=limit, cli_db=cli_db, text=not args.json, stale_days=stale_days))
         if args.json or section is not None:
             sys.stdout.write(task_projection.dumps(payload))
         else:
@@ -1927,6 +1934,8 @@ def _render_compact_tasks(payload: dict[str, Any]) -> str:
             stale = sum(item["current"] == "stale" for item in checks)
             line += (f" | checks recorded OK {recorded_ok}/{len(checks)}, stale {stale}"
                      f" | open findings {sum(task['open_findings'].values())}")
+            if flag := task["stale"]:
+                line += f" | task stale {flag['days']} days since {flag['since']}"
         lines.append(line)
     if not lines:
         lines.append("No tasks on this page.")
@@ -1979,6 +1988,30 @@ def command_lead_view(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False) if args.json else lead_context.render(payload))
         return 0
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
+        ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
+        return 1
+
+
+def command_task_cleanup(args: argparse.Namespace) -> int:
+    try:
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        report, refusal = cleanup_project(db, args.project)
+        if args.json:
+            sys.stdout.write(json.dumps(report, separators=(",", ":")))
+        else:
+            print(f"Project: {_escape_cli_controls(report['project'])}")
+            if not report["tasks"]:
+                print("No tasks bound to this path.")
+            for task in report["tasks"]:
+                print(f"{task['id']} [{task['status']}] {_escape_cli_controls(task['project'])}")
+                for assignment in task["assignments"]:
+                    claims = ", ".join(_escape_cli_controls(path) for path in assignment["claims"]) or "none"
+                    print(f"  {assignment['id']} [{assignment['status']}] {assignment['role']}/{assignment['mode']} | claims: {claims}")
+        if refusal is not None:
+            ledger.print_error(refusal, str(refusal), json_output=args.json)
+            return 1
+        return 0
+    except (ValueError, OSError, sqlite3.Error) as exc:
         ledger.print_error(exc, redact_text(str(exc)), json_output=args.json)
         return 1
 
@@ -2198,6 +2231,7 @@ def build_parser() -> argparse.ArgumentParser:
             ('activity', 'Read assignment activity and its failure journal (untrusted evidence)'),
             ('ack', 'Acknowledge an ended assignment result or failure journal'),
             ("reap", "Cancel orphaned assignments and release their claims"),
+            ("cleanup", "Inspect tasks, assignments and claims before removing a project path (read-only)"),
             ("event", "Append a task event"),
             ("status", "Transition a task"),
             ("show", "Show a task with assignments and claims"),
@@ -2218,7 +2252,7 @@ def build_parser() -> argparse.ArgumentParser:
             task_parser.add_argument("--task", required=True)
         if name in ("assign", "event", "status"):
             task_parser.add_argument("--actor", required=True, help="Recorded actor label; not authenticated")
-        elif name not in ("open", "run", "verify", "close", "checks", "do", "finding"):
+        elif name not in ("open", "run", "verify", "close", "checks", "do", "finding", "cleanup"):
             task_parser.add_argument("--actor", help="Caller label for a shared lifecycle invocation")
         if name in ("finish", "event"):
             task_parser.add_argument("--summary", required=True)
@@ -2293,6 +2327,8 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
+    task_parsers["cleanup"].add_argument("--project", required=True, help="Project path or parent directory")
+    task_parsers["cleanup"].set_defaults(func=command_task_cleanup)
     for name in ("board", "now", "show"):
         read = task_parsers[name]
         read.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
@@ -2316,6 +2352,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
     resume.add_argument('--json', action='store_true', help='Print machine-readable context')
     resume.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
+    for stale_parser in (task_parsers["now"], resume):
+        stale_parser.add_argument("--stale-days", type=int, help=(
+            f"Compact task inactivity threshold in days ({MIN_STALE_DAYS}–{MAX_STALE_DAYS}, default: {DEFAULT_STALE_DAYS})"))
     resume.set_defaults(func=command_task_read)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")

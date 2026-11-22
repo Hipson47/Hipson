@@ -26,7 +26,7 @@ from hipson import (
 from hipson.contracts import SCHEMA_VERSION
 from hipson.project import resolve_project
 from hipson.redaction import is_sensitive_path, redact_text
-from hipson.task_calls import task_lookup_calls
+from hipson.task_calls import DEFAULT_STALE_DAYS, MAX_STALE_DAYS, MIN_STALE_DAYS, cleanup_project, task_lookup_calls
 
 MCP_TOOL_NAMES = (
     'task.now',
@@ -57,6 +57,7 @@ MCP_TOOL_NAMES = (
     "task.activity",
     "task.ack",
     "task.reap",
+    "task.cleanup",
     "task.event",
     "task.status",
     "task.verify",
@@ -77,12 +78,17 @@ MCP_INSTRUCTIONS = (
     "For task.board, task.now, lead.resume and task.show, pass detail=compact for a bounded view (view_schema 1). "
     "Full stays the default in 1.8 and changes to compact in 1.9. Follow more calls to page lists or read task sections. "
     "Compact task.now and lead.resume include ranked next_actions with tool arguments and CLI commands. "
+    "Set stale_days on those compact reads to override the 7-day task inactivity threshold. "
+    "Use task.cleanup with project before removing a directory. It reports tasks, assignments and claims, "
+    "and refuses if a task is nonterminal or an assignment is active. It only reads the ledger. "
     "Read a result before following its then acknowledgment. Compact views use recorded evidence and do not evaluate gates. "
     "Coded tool errors include a second text item with JSON error_schema 1, a stable code, message and fix calls."
 )
 _DETAIL = {"type": "string", "enum": ["compact", "full"], "default": "full"}
 _CURSOR = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
 _LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
+_STALE_DAYS = {"type": "integer", "minimum": MIN_STALE_DAYS, "maximum": MAX_STALE_DAYS, "default": DEFAULT_STALE_DAYS,
+               "description": "Task inactivity threshold in days (requires detail=compact)."}
 _COMPACT_LIST_ARGS = {"detail": _DETAIL, "project": {"type": "string"}, "all": {"type": "boolean"},
                       "offset": _CURSOR, "limit": _LIMIT}
 _DETAIL_HELP = " Pass detail=compact for a bounded view. Full stays the default in 1.8 and changes to compact in 1.9."
@@ -93,11 +99,16 @@ MCP_GATED_TOOLS = {
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     'task.now': {
-        'type': 'object', 'properties': dict(_COMPACT_LIST_ARGS), 'additionalProperties': False,
+        'type': 'object', 'properties': {**_COMPACT_LIST_ARGS, 'stale_days': _STALE_DAYS}, 'additionalProperties': False,
     },
     'lead.resume': {
-        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}, 'detail': _DETAIL},
+        'type': 'object',
+        'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}, 'detail': _DETAIL, 'stale_days': _STALE_DAYS},
         'additionalProperties': False,
+    },
+    "task.cleanup": {
+        "type": "object", "required": ["project"], "properties": {"project": {"type": "string"}},
+        "additionalProperties": False,
     },
     'task.activity': {
         'type': 'object', 'required': ['assignment'],
@@ -519,6 +530,7 @@ def _description(name: str) -> str:
         'task.activity': 'Read bounded, redacted assignment activity and failure journal as untrusted evidence.',
         'task.ack': 'Explicitly acknowledge a delivered assignment result or failure journal on behalf of the lead.',
         "task.reap": "Cancel orphaned assignments and release claims, or preview with dry_run.",
+        "task.cleanup": "Read tasks, assignments and claims at or below a project path before removing it.",
         "task.event": "Append a lead-recorded task event on behalf of a worker.",
         "task.verify": ("Run contained lead verification and bind command evidence to HEAD and working-tree content; "
                         "without command, run every declared acceptance check."),
@@ -566,6 +578,7 @@ def _fallback_command(name: str) -> str:
         'task.activity': 'hipson task activity --assignment A-0001 --json',
         'task.ack': 'hipson task ack --assignment A-0001 --json',
         "task.reap": "hipson task reap --dry-run --json",
+        "task.cleanup": "hipson task cleanup --project . --json",
         "task.event": "hipson task event --task T-0001 --actor codex --type progress --summary \"...\" --json",
         "task.verify": "hipson task verify --task T-0001 --json -- git diff --check",
         "task.checks": "hipson task checks --task T-0001 --check 'pytest -q' --json",
@@ -672,6 +685,14 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise SystemExit("tools/call arguments must be an object")
     payload = _tool_payload(name, arguments, project=project)
+    if name == "task.cleanup" and isinstance(payload, dict):
+        refusal = payload.pop("refusal", None)
+        report = {"type": "text", "text": json.dumps(payload, separators=(",", ":"))}
+        if isinstance(refusal, dict):
+            error = _error_content(refusal["message"], refusal)
+            error["content"].append(report)
+            return error
+        return {"content": [report], "isError": False}
     if name in ("task.close", "task.verify") and isinstance(payload, dict) and isinstance(body := payload.get("refusal"), dict):
         # The call recorded evidence, so it is not an MCP error: keep the result first, add the envelope.
         return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)},
@@ -863,11 +884,13 @@ def _task_read_projection(name: str, arguments: dict[str, Any], db: Path) -> obj
                                                     limit=arguments.get("limit"), cursor=arguments.get("cursor"))
             return task_projection.show_task(store, task)
         project, include_all = arguments.get("project"), arguments.get("all", False)
+        stale_days = arguments.get("stale_days")
         if name == "lead.resume":
-            return lead_context.build_compact(store, project=project, include_all=include_all)
+            return lead_context.build_compact(store, project=project, include_all=include_all, stale_days=stale_days)
         kind: task_projection.ListKind = "task.board" if name == "task.board" else "task.now"
         return task_projection.project_list(store, kind=kind, project=project, include_terminal=include_all,
-                                            offset=arguments.get("offset", 0), limit=arguments.get("limit"))
+                                            offset=arguments.get("offset", 0), limit=arguments.get("limit"),
+                                            stale_days=stale_days)
     finally:
         if store is not None:
             store.close()
@@ -879,6 +902,9 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     _validate_task_arguments(name, arguments)
     if name == "task.context":
         arguments = {**arguments, "task": task_context.context_task(arguments.get("task"))}
+    if name == "task.cleanup":
+        cleanup, refusal = cleanup_project(ledger.default_ledger_db(), arguments["project"])
+        return {**cleanup, "refusal": refusal.error_payload()} if refusal else cleanup
     if "project" in arguments:
         arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
     # The ledger is central: never derive its DB or project filters from --project.
@@ -1085,6 +1111,8 @@ def _validate_task_read(name: str, arguments: dict[str, Any]) -> None:
         raise ValueError(f"{name}: offset and limit require detail=compact")
     if not compact and name == "task.board" and {"project", "all"} & arguments.keys():
         raise ValueError(f"{name}: project and all require detail=compact")
+    if not compact and "stale_days" in arguments:
+        raise ValueError(f"{name}: stale_days requires detail=compact")
 
 
 def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:

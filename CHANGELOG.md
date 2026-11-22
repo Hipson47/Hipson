@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Compact task reads flag stale open or in-progress tasks after seven days of ledger inactivity.
+  Compact now and resume accept a custom threshold and suggest inspecting each stale task.
+  Read-only task cleanup reports tasks, assignments and claims before a project or worktree is
+  removed, with a coded refusal when unfinished work remains.
 - Ledger refusals expose stable codes and can suggest executable fix calls. MCP appends an
   `error_schema: 1` JSON item beside the human message, and CLI `--json` writes the same
   object to stderr. CLI text shows a `fix:` line for each suggested call.

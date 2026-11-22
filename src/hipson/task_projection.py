@@ -12,13 +12,21 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, TypeVar, cast
 
-from hipson import __version__
+from hipson import __version__, ledger
 from hipson.display import escape_display_controls
 from hipson.lead_context import GIT_READ_LIMIT
-from hipson.ledger import CHECK_ARG_LIMIT, FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
+from hipson.ledger import (
+    CHECK_ARG_LIMIT,
+    FINDING_SEVERITIES,
+    MAX_CHECKS,
+    TERMINAL_STATUSES,
+    Assignment,
+    Ledger,
+    review_state,
+)
 from hipson.redaction import redact_text, redact_value
 from hipson.task_activity import LINE_LIMIT
-from hipson.task_calls import ReadCall
+from hipson.task_calls import DEFAULT_STALE_DAYS, ReadCall
 from hipson.task_calls import read_call as _read_call
 from hipson.task_context import EVIDENCE_POLICY
 from hipson.task_verification import _worker_context, argv_identity
@@ -46,7 +54,6 @@ SECTION_UNTRUSTED_FIELDS = {
     "findings": ("title", "detail", "location", "resolution_note"),
     "events": ("actor", "type", "summary", "refs"),
 }
-TERMINAL = ("done", "cancelled")
 GATE_NOTE = "task verify / task close evaluate the gates"
 REASON_LIMIT = 5
 ASSIGNMENT_LIMIT = 8
@@ -86,6 +93,11 @@ class ReviewProjection(TypedDict):
     assignment_id: str | None
 
 
+class StaleTask(TypedDict):
+    since: str
+    days: int
+
+
 class TaskProjection(TypedDict):
     view_schema: int
     hipson_version: str
@@ -113,6 +125,7 @@ class TaskProjection(TypedDict):
     created_at: str
     updated_at: str
     last_activity_at: str
+    stale: StaleTask | None
 
 
 class TaskStub(TypedDict):
@@ -385,16 +398,30 @@ def _review(row: dict[str, Any], records: list[SelectedRecord]) -> ReviewProject
     return {"state": state, "assignment_id": assignment}
 
 
-def _project(row: dict[str, Any], head: str | None) -> TaskProjection:
+def _stale_flag(status: str, activity: Sequence[str | None], now: datetime | None, threshold: int) -> StaleTask | None:
+    if status not in ("open", "in_progress") or now is None:
+        return None
+    latest = max(((stamp, value) for value in activity if value is not None and (stamp := _timestamp(value)) is not None),
+                 key=lambda item: item[0], default=None)
+    if latest is None:
+        return None
+    stamp, since = latest
+    days = (now - stamp).days
+    return {"since": since, "days": days} if days >= threshold else None
+
+
+def _project(row: dict[str, Any], head: str | None, now: datetime | None, stale_days: int) -> TaskProjection:
     truncated: list[str] = []
     reasons: list[str] = []
     records = [(item["seq"], item["identity"], _record(item)) for item in row["verifications"]]
     checks = _checks(row, records, head, reasons, truncated)
     assignments = []
     activity = [row["updated_at"], row["created_at"], row["last_event_at"]]
+    stale_activity = activity + [item["finished_at"] for _, _, item in records if item is not None]
     activity.extend(check["recorded_at"] for check in checks)
     for item in row["assignments"]:
         activity.extend((item["started_at"], item["ended_at"], item["heartbeat_at"]))
+        stale_activity.extend((item["started_at"], item["ended_at"]))
     for index, item in enumerate(row["assignments"][-ASSIGNMENT_LIMIT:]):
         summary = item["result_summary"]
         assignments.append(AssignmentProjection(
@@ -425,12 +452,14 @@ def _project(row: dict[str, Any], head: str | None) -> TaskProjection:
         last_activity_at=max((item for item in activity if _timestamp(item) is not None),
                              key=lambda item: _timestamp(item) or datetime.min.replace(tzinfo=UTC),
                              default=row["updated_at"]),
+        stale=_stale_flag(row["status"], stale_activity, now, stale_days),
     )
 
 
-def _project_rows(rows: Sequence[dict[str, Any]]) -> list[TaskProjection]:
+def _project_rows(rows: Sequence[dict[str, Any]], stale_days: int = DEFAULT_STALE_DAYS) -> list[TaskProjection]:
+    now = _timestamp(ledger._timestamp())
     heads = _observe(list(dict.fromkeys(row["project"] for row in rows)), _head)
-    return [_project(row, heads.get(row["project"])) for row in rows]
+    return [_project(row, heads.get(row["project"]), now, stale_days) for row in rows]
 
 
 def project_task(store: Ledger, task: str) -> TaskProjection:
@@ -564,7 +593,7 @@ def read_section(store: Ledger, task: str, section: str, *, limit: int | None = 
 def _now_priority(row: dict[str, Any]) -> int:
     if row["has_unacknowledged"]:
         return 0
-    if row["status"] in TERMINAL:
+    if row["status"] in TERMINAL_STATUSES:
         return 5
     if row["status"] == "blocked" or any(item["severity"] in ("blocking", "major") for item in row["findings"]):
         return 1
@@ -637,7 +666,8 @@ def _validate_page(value: int, limit: int | None, *, position: str) -> None:
 
 def _list_page(store: Ledger | None, rows: list[dict[str, Any]], *, kind: ListKind, project: str | None,
                include_terminal: bool, byte_budget: int | None = None, offset: int = 0,
-               limit: int | None = None, cli_db: str | None = None, text: bool = False) -> ListProjection:
+               limit: int | None = None, cli_db: str | None = None, text: bool = False,
+               stale_days: int | None = None) -> ListProjection:
     """Project tasks in board creation order or now attention order."""
     filters: dict[str, str | int | bool] = {}
     if limit is not None:
@@ -646,6 +676,8 @@ def _list_page(store: Ledger | None, rows: list[dict[str, Any]], *, kind: ListKi
         filters["project"] = project
     if include_terminal:
         filters["all"] = True
+    if stale_days is not None:
+        filters["stale_days"] = stale_days
     end = None if limit is None else offset + limit
     actions: list[NextAction] = []
     omitted = 0
@@ -653,7 +685,7 @@ def _list_page(store: Ledger | None, rows: list[dict[str, Any]], *, kind: ListKi
         from hipson import next_actions
 
         rows.sort(key=lambda row: (_now_priority(row), row["id"]))
-        projected = _project_rows(rows)
+        projected = _project_rows(rows, DEFAULT_STALE_DAYS if stale_days is None else stale_days)
         actions, omitted = next_actions.build(rows, projected, cli_db=cli_db)
         tasks = projected[offset:end]
     else:
@@ -670,15 +702,16 @@ def _list_page(store: Ledger | None, rows: list[dict[str, Any]], *, kind: ListKi
 
 def project_list(store: Ledger | None, *, kind: ListKind, project: str | None = None, include_terminal: bool = False,
                  byte_budget: int | None = None, offset: int = 0, limit: int | None = None,
-                 cli_db: str | None = None, text: bool = False) -> ListProjection:
+                 cli_db: str | None = None, text: bool = False, stale_days: int | None = None) -> ListProjection:
     _validate_page(offset, limit, position="offset")
     rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
     return _list_page(store, rows, kind=kind, project=project, include_terminal=include_terminal,
-                      byte_budget=byte_budget, offset=offset, limit=limit, cli_db=cli_db, text=text)
+                      byte_budget=byte_budget, offset=offset, limit=limit, cli_db=cli_db, text=text, stale_days=stale_days)
 
 
 def resume_inputs(store: Ledger | None, *, project: str | None, include_terminal: bool,
-                  cli_db: str | None = None, text: bool = False) -> tuple[ListProjection, list[dict[str, Any]]]:
+                  cli_db: str | None = None, text: bool = False,
+                  stale_days: int | None = None) -> tuple[ListProjection, list[dict[str, Any]]]:
     rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
     return _list_page(store, rows, kind="task.now", project=project, include_terminal=include_terminal,
-                      cli_db=cli_db, text=text), rows
+                      cli_db=cli_db, text=text, stale_days=stale_days), rows

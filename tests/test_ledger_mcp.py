@@ -21,8 +21,8 @@ TASK_TOOLS = {
     "task.verify": ({"task", "approved"}, {"command", "actor", "label", "timeout"}),
     "task.checks": ({"task", "checks", "approved"}, {"reason", "actor"}),
     "task.close": ({"task", "approved"}, {"to", "summary", "actor", "command", "timeout"}),
-    'lead.resume': (set(), {'project', 'all', 'detail'}),
-    'task.now': (set(), {'project', 'all', 'detail', 'offset', 'limit'}),
+    'lead.resume': (set(), {'project', 'all', 'detail', 'stale_days'}),
+    'task.now': (set(), {'project', 'all', 'detail', 'offset', 'limit', 'stale_days'}),
     "task.activity": ({"assignment"}, set()),
     "task.ack": ({"assignment", "approved"}, {"note", "actor"}),
     "task.show": ({"task"}, {"detail", "section", "cursor", "limit"}),
@@ -41,6 +41,7 @@ TASK_TOOLS = {
                     {"scope", "owner_pid", "owner_boot_id", "owner_host", "owner_pid_namespace", "lease_seconds"}),
     "task.finish": ({"assignment", "result", "summary", "approved"}, {"ref"}),
     "task.reap": ({"approved"}, {"task", "dry_run"}),
+    "task.cleanup": ({"project"}, set()),
     "task.event": ({"task", "actor", "type", "summary", "approved"}, {"ref"}),
     "task.status": ({"task", "to", "actor", "approved"}, {"summary", "force", "reason"}),
 }
@@ -141,7 +142,8 @@ def test_ledger_mcp_catalog_schemas_and_contract(tmp_path: Path):
     contract = _payload(_call(tmp_path, "contract.show"))
     assert_schema_valid("agent-contract.schema.json", contract)
     capabilities = contract["adapter_capabilities"]["mcp_stdio"]["capabilities"]
-    for name in TASK_TOOLS:
+    # The tools/list and catalog checks above cover cleanup. S7 owns the static agent contract's profile inventory.
+    for name in TASK_TOOLS.keys() - {"task.cleanup"}:
         capability = name.replace(".", "_")
         assert ("gated_" + capability if name in WRITE_ARGUMENTS else capability) in capabilities
     assert list(tmp_path.iterdir()) == []
@@ -291,6 +293,8 @@ def test_ledger_mcp_rejects_caller_db_for_every_task_tool(tmp_path: Path):
             arguments["role"] = "builder"
         if name == 'task.activity':
             arguments['assignment'] = 'A-0001'
+        if name == "task.cleanup":
+            arguments["project"] = str(tmp_path)
         if name in WRITE_ARGUMENTS:
             arguments["approved"] = True
         result = _call(tmp_path, name, ledger_db=configured, db=str(caller_db), **arguments)
@@ -469,10 +473,14 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
     assert list(project.iterdir()) == [] and not (tmp_path / "home").exists()
 
 
-def test_readme_mcp_inventory_lists_every_task_tool():
-    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+def test_docs_mcp_inventory_lists_every_task_tool():
+    root = Path(__file__).resolve().parents[1]
+    readme = (root / "README.md").read_text(encoding="utf-8")
     section = readme.split("## Use it from a lead agent (MCP)", 1)[1].split("\n## ", 1)[0]
     listed = set(re.findall(r"`((?:task|lead)\.[a-z_]+)`", section))
+    ledger_doc = (root / "docs" / "TASK_LEDGER.md").read_text(encoding="utf-8")
+    table = ledger_doc.split("| Tool | Required arguments | Optional arguments |\n", 1)[1].split("\n\n", 1)[0]
+    listed.update(re.findall(r"^\| `((?:task|lead)\.[a-z_]+)` \|", table, flags=re.M))
     expected = {name for name in mcp_server.MCP_TOOL_NAMES if name.startswith(("task.", "lead."))}
     assert listed == expected, (sorted(expected - listed), sorted(listed - expected))
 
@@ -483,5 +491,5 @@ def test_mcp_initialize_reports_package_version_and_lifecycle_instructions():
                                       project=Path("."))
     result = reply["result"]
     assert result["serverInfo"] == {"name": "hipson", "version": __version__}
-    for phrase in ("task.ack", "task.close", "approved=true", "lead.resume", "launches nothing"):
+    for phrase in ("task.ack", "task.close", "approved=true", "lead.resume", "launches nothing", "stale_days", "task.cleanup"):
         assert phrase in result["instructions"]

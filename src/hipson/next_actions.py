@@ -7,9 +7,9 @@ from collections import Counter
 from collections.abc import Sequence
 from typing import Any, NotRequired
 
-from hipson.ledger import Ledger
+from hipson.ledger import TERMINAL_STATUSES, Ledger
 from hipson.task_calls import ReadCall, read_call
-from hipson.task_projection import TERMINAL, ListProjection, TaskProjection
+from hipson.task_projection import ListProjection, TaskProjection
 
 NEXT_ACTIONS_LIMIT = 10
 WHY_LIMIT = 200
@@ -44,7 +44,7 @@ def _check_action(row: dict[str, Any], task: TaskProjection, cli_db: str | None)
     status = task["status"]
     # Never propose checks for work that has not started or is closed, and never verify a tree that a live
     # worker may still be editing: task.verify runs the declared commands and records lead evidence.
-    if status == "open" or status in TERMINAL or row["has_active"]:
+    if status == "open" or status in TERMINAL_STATUSES or row["has_active"]:
         return None
     counts: Counter[str] = Counter(check["recorded"] for check in task["checks"])
     stale = sum(check["current"] == "stale" for check in task["checks"])
@@ -52,8 +52,8 @@ def _check_action(row: dict[str, Any], task: TaskProjection, cli_db: str | None)
     args: dict[str, str | int | bool] = {"task": task["id"]}
     if counts["failing"]:
         call = _call("task.show", {**args, "section": "verification"}, cli_db)
-    elif stale or ((status in ("verify", "review") or builder_finished)
-                   and any(counts[state] for state in PENDING_CHECK_STATES)):
+    elif status != "blocked" and (stale or ((status in ("verify", "review") or builder_finished)
+                                            and any(counts[state] for state in PENDING_CHECK_STATES))):
         call = _call("task.verify", args, cli_db, writes=True, gated=True)
     else:
         return None
@@ -114,7 +114,7 @@ def build(rows: Sequence[dict[str, Any]], tasks: Sequence[TaskProjection], *,
     checks: list[NextAction] = []
     reviews: list[NextAction] = []
     findings: list[NextAction] = []
-    stale_tasks: list[NextAction] = []  # Reserved for S5.
+    stale_tasks: list[NextAction] = []
     cleanup: list[NextAction] = []
     for row, projected in sorted(zip(rows, tasks, strict=True), key=lambda pair: pair[1]["id"]):
         task = projected["id"]
@@ -149,9 +149,16 @@ def build(rows: Sequence[dict[str, Any]], tasks: Sequence[TaskProjection], *,
             findings.append(_action(f"{task} has {count} open {severity} {'finding' if count == 1 else 'findings'}.",
                                      _call("task.findings", {**args, "status": "open", "severity": severity}, cli_db)))
 
+        if stale := projected["stale"]:
+            stale_tasks.append(_action(
+                f"{task} is {status}, stale for {stale['days']} days. Templates: cancel with REASON, close, "
+                "or reopen with REASON.",
+                _call("task.show", {**args, "detail": "compact"}, cli_db),
+            ))
+
         # Claims are created with active assignments and released in the same
         # transaction that ends them. The projection exposes the active signal.
-        if status in TERMINAL and row["has_active"]:
+        if status in TERMINAL_STATUSES and row["has_active"]:
             cleanup.append(_action(f"{task} is {status} with active assignments.",
                                    _call("task.reap", {**args, "dry_run": True}, cli_db, gated=True)))
 

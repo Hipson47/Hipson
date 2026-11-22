@@ -428,12 +428,24 @@ def test_read_discovery_and_invalid_arguments(tmp_path):
          ["--section", "events", "--detail", "compact"], ("mutually exclusive",)),
         ("task.show", {"cursor": 1}, ["--cursor", "1"], ("cursor", "section")),
     ]
+    for name in ("task.now", "lead.resume"):
+        illegal_calls.append((name, {"stale_days": 7}, ["--stale-days", "7"], ("compact",)))
+        for days, bound in ((0, "1"), (3651, "3650")):
+            illegal_calls.append((name, {"detail": "compact", "stale_days": days},
+                                  ["--detail", "compact", "--stale-days", str(days)], (bound,)))
     with patch.dict(os.environ, HIPSON_LEDGER=str(tmp_path / "missing.sqlite")):
         for name in ("task.board", "task.now", "lead.resume"):
             payload = _call_mcp(name, {"detail": "compact"})
             assert payload == _json_cli(*name.split("."), "--detail", "compact")
             page = payload.get("now", payload)
             assert page["tasks"] == [] and page["more"] is None
+            if name != "task.board":
+                for invalid in (True, 7.5, "7"):
+                    request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                        "name": name, "arguments": {"detail": "compact", "stale_days": invalid},
+                    }})
+                    result = mcp_server._handle_request(request, project=Path("."))["result"]
+                    assert result["isError"] and "stale_days must be integer" in result["content"][0]["text"]
         for name, arguments, flags, fragments in illegal_calls:
             command = name.split(".")
             if name == "task.show":

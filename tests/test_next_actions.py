@@ -5,6 +5,7 @@ import os
 import shlex
 from collections import Counter
 from contextlib import closing, redirect_stderr, redirect_stdout
+from datetime import UTC, datetime
 from io import StringIO
 from shutil import copyfile
 from unittest.mock import patch
@@ -175,6 +176,7 @@ def test_next_actions_fixture_bounds_and_text(tmp_path):
     fixture = build(tmp_path / "s0")
     with (
         patch.dict(os.environ, HIPSON_LEDGER=str(fixture.db)),
+        patch.object(ledger, "_timestamp", return_value=datetime.now(UTC).isoformat()),
         patch.object(task_verification, "project_state", side_effect=AssertionError("content fingerprint")) as state,
     ):
         actions_by_tool = {}
@@ -184,15 +186,32 @@ def test_next_actions_fixture_bounds_and_text(tmp_path):
             assert len(text.encode("utf-8")) <= budget
             assert text == _tool_text(command, {"detail": "compact"})
             payload = json.loads(text)
+            tasks = payload.get("now", payload)["tasks"]
+            stale = [task for task in tasks if task["stale"] is not None]
+            expected_ids = sorted(task["id"] for task in tasks if task["title"].startswith("Dormant "))
+            assert sorted(task["id"] for task in stale) == expected_ids
+            assert len(stale) == 3 and all(task["stale"]["days"] == 10 for task in stale)
             actions = payload["next_actions"]
             actions_by_tool[command] = actions
             histogram = Counter(action["tool"] for action in actions)
             print(f"S0 {command} next actions: {dict(sorted(histogram.items()))}")
-            assert histogram == {"task.ack": 1, "task.verify": 2, "task.show": 2, "task.findings": 2}
+            assert histogram == {"task.ack": 1, "task.verify": 2, "task.show": 5, "task.findings": 2}
             assert payload["next_actions_omitted"] == 0
             assert "1 stale" in actions[1]["why"]
-            next_lines = _cli(args).splitlines()[-len(actions):]
+            for task_id, action in zip(expected_ids, actions[-3:], strict=True):
+                assert action["tool"] == "task.show" and action["arguments"] == {"task": task_id, "detail": "compact"}
+                assert not action["writes"] and "then" not in action
+                assert "cancel with REASON, close, or reopen with REASON" in action["why"]
+            lines = _cli(args).splitlines()
+            assert sum("task stale 10 days since" in line for line in lines) == 3
+            next_lines = lines[-len(actions):]
             assert next_lines == [f"Next: {action['why']} {action['cli']}" for action in actions]
+            custom = _cli([*args, "--stale-days", "11", "--json"])
+            assert custom == _tool_text(command, {"detail": "compact", "stale_days": 11})
+            adjusted = json.loads(custom)
+            assert all(task["stale"] is None for task in adjusted.get("now", adjusted)["tasks"])
+            assert adjusted["next_actions"] == actions[:-3]
+            print(f"S0 {command} stale tasks: {len(stale)} at 7 days, 0 at 11 days")
         assert actions_by_tool["task.now"] == actions_by_tool["lead.resume"]
         for args in (["task", "board"], ["task", "show", "--task", fixture.heavy_task]):
             assert "next_actions" not in json.loads(_cli([*args, "--detail", "compact", "--json"]))
@@ -259,6 +278,105 @@ def test_check_actions_follow_recorded_state_and_observed_head(tmp_path):
             head.assert_called_once_with(str(project))
         assert moved["tool"] == "task.verify" and moved["arguments"]["task"] == okay
         assert "1 stale" in moved["why"] and still_pending == rebuilt
+
+
+def test_review_proposals_fall_back_to_compact_show_for_each_blocker(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+        def proposals(task):
+            page = task_projection.project_list(store, kind="task.now", project=str(project))
+            return [action for action in page["next_actions"] if action["arguments"].get("task") == task
+                    and action["tool"] in {"task.status", "task.show"}]
+
+        for blocker in ("active", "unread", "blocking", "major"):
+            task = store.open_task(project=project, title="Review candidate", objective="Check the fallback")["id"]
+            store.set_status(task, to="in_progress", actor="claude")
+            _evidence(store, task, project)
+            store.set_status(task, to="review", actor="claude")
+
+            ready, = proposals(task)
+            assert ready["tool"] == "task.status" and ready["arguments"]["to"] == "done"
+            if blocker in ("active", "unread"):
+                assignment = store.assign(task, actor="explorer", role="explorer", mode="ro")["id"]
+                if blocker == "unread":
+                    store.finish(assignment, result="passed", summary="Result still unread")
+            else:
+                store.add_finding(task, actor="reviewer", severity=blocker, title="Needs work")
+            fallback, = proposals(task)
+            assert fallback["tool"] == "task.show" and fallback["arguments"] == {"task": task, "detail": "compact"}
+            assert not fallback["writes"] and "then" not in fallback
+
+
+def test_blocked_tasks_keep_failure_reads_but_have_no_verify_proposal(tmp_path):
+    project = _project(tmp_path)
+    with closing(ledger.Ledger(tmp_path / "ledger.sqlite")) as store:
+        def check_actions(task):
+            return [action for action in task_projection.project_list(store, kind="task.now")["next_actions"]
+                    if action["arguments"].get("task") == task]
+
+        for exit_code in (0, 1):
+            task = store.open_task(project=project, title="Parked work", objective="Check proposals", checks=[PASS])["id"]
+            store.set_status(task, to="in_progress", actor="claude")
+            _evidence(store, task, project, exit_code=exit_code, state_changed=True)
+
+            expected = "task.show" if exit_code else "task.verify"
+            assert [action["tool"] for action in check_actions(task)] == [expected]
+            store.set_status(task, to="blocked", actor="claude")
+            assert [action["tool"] for action in check_actions(task)] == (["task.show"] if exit_code else [])
+            store.set_status(task, to="in_progress", actor="claude")
+            assert [action["tool"] for action in check_actions(task)] == [expected]
+
+
+def test_stale_task_threshold_and_activity_timestamps(tmp_path):
+    project = _project(tmp_path)
+    db = tmp_path / "ledger.sqlite"
+    old = "2026-11-10T00:00:00Z"
+    recent = "2026-11-16T00:00:01Z"
+    now = "2026-11-17T00:00:00Z"
+    with closing(ledger.Ledger(db)) as store:
+        with patch.object(ledger, "_timestamp", return_value=old):
+            tasks = {name: store.open_task(project=project, title=name, objective="Check task age")["id"]
+                     for name in ("dormant", "heartbeat", "start", "end", "event", "verification", "terminal")}
+            heartbeat = store.assign(tasks["heartbeat"], actor="worker", role="explorer", mode="ro")["id"]
+            finished = store.assign(tasks["end"], actor="worker", role="explorer", mode="ro")["id"]
+            store.assign(tasks["terminal"], actor="worker", role="explorer", mode="ro")
+            store.set_status(tasks["terminal"], to="cancelled", actor="claude")
+            _evidence(store, tasks["verification"], project, finished_at=recent)
+        with patch.object(ledger, "_timestamp", side_effect=[recent, old]):
+            store.assign(tasks["start"], actor="worker", role="explorer", mode="ro")
+        with patch.object(ledger, "_timestamp", side_effect=[recent, old]):
+            store.finish(finished, result="passed", summary="Delivery")
+        with patch.object(ledger, "_timestamp", return_value=recent):
+            store.add_event(tasks["event"], actor="claude", type="progress", summary="Recent work")
+            store.observe(heartbeat, {"heartbeat_at": recent})
+
+    with (
+        patch.object(ledger, "_timestamp", return_value=now),
+        patch.object(task_verification, "project_state", side_effect=AssertionError("content fingerprint")) as state,
+    ):
+        page = _now(db)
+        flags = {task["id"]: task["stale"] for task in page["tasks"]}
+        assert flags == {task_id: {"since": old, "days": 7} if name in {"dormant", "heartbeat"} else None
+                         for name, task_id in tasks.items()}
+        assert next(task for task in page["tasks"] if task["id"] == tasks["heartbeat"])["last_activity_at"] == recent
+        inspections = [action for action in page["next_actions"] if action["tool"] == "task.show"]
+        assert [action["arguments"]["task"] for action in inspections] == [tasks["dormant"], tasks["heartbeat"]]
+        for action in inspections:
+            _execute(action, db)
+            _execute_cli(action, db)
+        assert page["next_actions"][-1]["tool"] == "task.reap"
+        assert page["next_actions"][-1]["arguments"]["task"] == tasks["terminal"]
+        for command in (["task", "now"], ["lead", "resume"]):
+            flags = [*command, "--db", str(db), "--detail", "compact", "--stale-days", "8", "--json"]
+            if command == ["task", "now"]:
+                flags.extend(("--limit", "1"))
+            view = json.loads(_cli(flags))
+            if command == ["task", "now"]:
+                assert view["more"]["arguments"]["stale_days"] == 8
+                assert "--stale-days 8" in view["more"]["cli"]
+                _execute_cli(view["more"], db)
+            assert all(task["stale"] is None for task in view.get("now", view)["tasks"])
+        state.assert_not_called()
 
 
 def test_result_actions_require_the_complete_visible_summary(tmp_path):

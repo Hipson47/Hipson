@@ -175,14 +175,15 @@ _READ_DISPATCH = {
             (None, "resume.set_defaults(func=command_task_read)"),
         ),
         "command_task_read": (("action == 'resume'", "payload = lead_context.build_compact("
-                               "store, project=project, include_all=args.all, cli_db=cli_db, text=not args.json)"),),
+                               "store, project=project, include_all=args.all, cli_db=cli_db, text=not args.json, "
+                               "stale_days=stale_days)"),),
     },
     "mcp_server.py": {
         "_call_tool": ((None, "text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)"),),
         "_task_tool_payload": (("name in _TASK_READS and (arguments.get('detail') == 'compact' or 'section' in arguments)",
                                 "return _task_read_projection(name, arguments, db)"),),
         "_task_read_projection": (("name == 'lead.resume'", "return lead_context.build_compact("
-                                   "store, project=project, include_all=include_all)"),),
+                                   "store, project=project, include_all=include_all, stale_days=stale_days)"),),
     },
 }
 

@@ -21,7 +21,7 @@ from tests.test_ledger_mcp import _call
 from tests.test_task_verification import _git, _project
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULES = ("ledger", "task_flow", "task_verification", "task_runner", "cli")
+MODULES = ("ledger", "task_flow", "task_verification", "task_runner", "task_calls", "cli")
 
 # Bare re-raises are identified by their handler, and other exceptions by the raised expression.
 ALLOWLIST = {
@@ -758,7 +758,7 @@ def test_verify_fix_never_replays_a_redacted_or_truncated_command(tmp_path):
     db = tmp_path / "ledger.sqlite"
     plain = verify_call("T-0001", LEAD, db, command=["pytest", "-q"], explicit=True)
     assert plain["arguments"]["command"] == ["pytest", "-q"] and "COMMAND" not in plain["cli"]
-    from hipson.redaction import redact_text
+    from hipson.redaction import redact_text, redact_value
 
     raw_secret = "--token=" + "a" * 24
     assert redact_text(raw_secret) != raw_secret  # A raw secret the error body would redact later.
@@ -766,6 +766,9 @@ def test_verify_fix_never_replays_a_redacted_or_truncated_command(tmp_path):
              ["run", "password:", "hunter2hunter2"])
     for command in split:
         assert all(redact_text(arg) == arg for arg in command)  # Only the joined line is redacted.
+        refusal = task_verification.timeout_refusal(
+            {"task": "T-0001", "timeout_seconds": 3}, db, command=command, lead=LEAD)
+        assert redact_value(refusal.error_payload()["fix"]) == refusal.fix
     for command in (["run", "--token=[REDACTED]"], ["run", "x" * 4096], ["run", raw_secret],
                     ["run", "﻿bom"], ["run", "[unsupported encoded observation]"], *split):
         call = verify_call("T-0001", LEAD, db, command=command, explicit=True)

@@ -4,17 +4,44 @@ from __future__ import annotations
 
 import shlex
 from collections.abc import Mapping
+from contextlib import closing
 from math import isfinite
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
+
+if TYPE_CHECKING:
+    from hipson.ledger import LedgerError
 
 CallValue = str | int | bool | float | list[str]
+DEFAULT_STALE_DAYS = 7
+MIN_STALE_DAYS = 1
+MAX_STALE_DAYS = 3650
 
 
 class ReadCall(TypedDict):
     tool: str
     arguments: dict[str, CallValue]
     cli: str
+
+
+class CleanupAssignment(TypedDict):
+    id: str
+    role: str
+    mode: str
+    status: str
+    claims: list[str]
+
+
+class CleanupTask(TypedDict):
+    id: str
+    project: str
+    status: str
+    assignments: list[CleanupAssignment]
+
+
+class CleanupReport(TypedDict):
+    project: str
+    tasks: list[CleanupTask]
 
 
 # Only codes the private verification command can emit cross this boundary.
@@ -74,6 +101,62 @@ def task_lookup_calls(db: Path) -> list[ReadCall]:
 
 def project_fix_calls(task: str, db: Path) -> list[ReadCall]:
     return [read_call("task.show", {"task": task}, str(db)), read_call("task.run", {"help": True}, str(db))]
+
+
+def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError | None]:
+    """Read the tasks and claims registered at or below a path in one ledger snapshot."""
+    from hipson.ledger import TERMINAL_STATUSES, Ledger, LedgerError, _same_project, require_text
+    from hipson.redaction import redact_value
+
+    require_text(project, "Cleanup project path")
+    root = str(Path(project).expanduser().resolve())
+    report = CleanupReport(project=root, tasks=[])
+    if not db.exists():
+        return redact_value(report), None
+
+    reads: list[ReadCall] = []
+    templates: list[ReadCall] = []
+    nonterminal = active = 0
+    cli_db = str(db)
+    with closing(Ledger(db, create=False, read_only=True, sidecar_free=True)) as store, store._transaction(write=False):
+        for task in store.connection.execute("SELECT id, project, status, lead FROM tasks ORDER BY id"):
+            registered = Path(task["project"])
+            if not any(_same_project(str(parent), root) for parent in (registered, *registered.parents)):
+                continue
+            assignments: dict[str, CleanupAssignment] = {}
+            for item in store.connection.execute(
+                """SELECT a.id, a.role, a.mode, a.status, c.path
+                   FROM assignments AS a LEFT JOIN claims AS c ON c.assignment = a.id
+                   WHERE a.task = ? ORDER BY a.id, c.path""",
+                (task["id"],),
+            ):
+                assignment = assignments.setdefault(item["id"], CleanupAssignment(
+                    id=item["id"], role=item["role"], mode=item["mode"], status=item["status"], claims=[]))
+                if item["path"] is not None:
+                    assignment["claims"].append(item["path"])
+            report["tasks"].append(CleanupTask(
+                id=task["id"], project=task["project"], status=task["status"], assignments=list(assignments.values())))
+
+            is_open = task["status"] not in TERMINAL_STATUSES
+            active_ids = [item["id"] for item in assignments.values() if item["status"] == "active"]
+            if is_open or active_ids:
+                reads.append(read_call("task.show", {"task": task["id"], "detail": "compact"}, cli_db))
+                reads.extend(read_call("task.activity", {"assignment": item}, cli_db) for item in active_ids)
+            if is_open:
+                args = {"task": task["id"]}
+                templates.extend((
+                    read_call("task.close", args, cli_db),
+                    read_call("task.status", {**args, "to": "cancelled", "actor": task["lead"]}, cli_db,
+                              template=("--summary", "REASON")),
+                ))
+            nonterminal += is_open
+            active += len(active_ids)
+
+    refusal = LedgerError(
+        f"Cleanup refused: {nonterminal} nonterminal task(s), {active} active assignment(s).",
+        code="cleanup.tasks_open", fix=reads + templates,
+    ) if nonterminal or active else None
+    return redact_value(report), refusal
 
 
 def replayable(command: list[str] | None) -> list[str] | None:
