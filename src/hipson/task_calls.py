@@ -64,6 +64,8 @@ def read_call(tool: str, arguments: Mapping[str, CallValue], cli_db: str | None,
 
 
 REPLAY_ARG_LIMIT = 4096  # task_verification stores each argument through safe_text(arg, 4096).
+# safe_text stores these in place of a whole argument it could not keep.
+STORED_PLACEHOLDERS = ("[unsupported encoded observation]", "[observation exceeded size limit]")
 
 
 def task_lookup_calls(db: Path) -> list[ReadCall]:
@@ -75,8 +77,17 @@ def project_fix_calls(task: str, db: Path) -> list[ReadCall]:
 
 
 def replayable(command: list[str] | None) -> list[str] | None:
-    """A stored command whose arguments were redacted or cut is not the argv that ran; never replay it."""
-    if not command or any("[REDACTED]" in arg or len(arg) >= REPLAY_ARG_LIMIT for arg in command):
+    """Replay only an argv that every display and storage path keeps byte for byte.
+
+    Verification stores each argument through safe_text (redaction, environment secrets, whole-argument
+    placeholders, a 4,096-character cut) and error bodies redact fix calls again, so an argument any of them
+    would change is not the argv that ran.
+    """
+    from hipson.redaction import redact_text
+    from hipson.task_activity import safe_text
+
+    if not command or any("[REDACTED]" in arg or len(arg) >= REPLAY_ARG_LIMIT or arg in STORED_PLACEHOLDERS
+                          or redact_text(arg) != arg or safe_text(arg, REPLAY_ARG_LIMIT) != arg for arg in command):
         return None
     return command
 
@@ -110,7 +121,7 @@ def gate_fix_calls(cases: list[tuple[str, str]], view: Mapping[str, Any], db: Pa
             calls.append(read_call("task.show", {"task": task, "section": "verification"}, str(db)))
             timeout = latest.get("timeout_seconds") if latest and reason == "failing verification: exit 124" else None
             calls.append(verify_call(task, lead, db, command=latest["command"] if not checks else None,
-                                     timeout=min(86400, 2 * timeout)) if timeout else retry)
+                                     timeout=min(86400, 2 * timeout), explicit=not checks) if timeout else retry)
         elif code in {"close.checks_stale", "close.checks_missing", "verify.lead_missing", "verify.head_moved",
                       "verify.tree_changed"}:
             calls.append(retry)

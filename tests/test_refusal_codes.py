@@ -758,10 +758,27 @@ def test_verify_fix_never_replays_a_redacted_or_truncated_command(tmp_path):
     db = tmp_path / "ledger.sqlite"
     plain = verify_call("T-0001", LEAD, db, command=["pytest", "-q"], explicit=True)
     assert plain["arguments"]["command"] == ["pytest", "-q"] and "COMMAND" not in plain["cli"]
-    for command in (["run", "--token=[REDACTED]"], ["run", "x" * 4096]):
+    from hipson.redaction import redact_text
+
+    raw_secret = "--token=" + "a" * 24
+    assert redact_text(raw_secret) != raw_secret  # A raw secret the error body would redact later.
+    for command in (["run", "--token=[REDACTED]"], ["run", "x" * 4096], ["run", raw_secret],
+                    ["run", "﻿bom"], ["run", "[unsupported encoded observation]"]):
         call = verify_call("T-0001", LEAD, db, command=command, explicit=True)
         assert "command" not in call["arguments"], call
         assert shlex.split(call["cli"])[-2:] == ["--", "COMMAND"]
+
+
+def test_timeout_retry_keeps_the_command_template_when_the_stored_command_is_not_replayable(tmp_path):
+    from hipson.task_calls import gate_fix_calls
+
+    view = {"id": "T-0001", "lead": LEAD, "checks": [],
+            "verification": {"passing": False, "latest": {"command": ["run", "--token=[REDACTED]"], "timeout_seconds": 5}}}
+    show, retry = gate_fix_calls([("failing verification: exit 124", "close.checks_failed")], view,
+                                 tmp_path / "ledger.sqlite")
+    assert show["arguments"]["section"] == "verification"
+    assert retry["tool"] == "task.verify" and retry["arguments"]["timeout"] == 10
+    assert "command" not in retry["arguments"] and shlex.split(retry["cli"])[-2:] == ["--", "COMMAND"]
 
 
 def test_head_moved_code_comes_from_the_recorded_revision_not_a_path_name(tmp_path):
