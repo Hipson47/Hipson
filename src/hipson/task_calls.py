@@ -94,14 +94,20 @@ def replayable(command: list[str] | None) -> list[str] | None:
 
 def verify_call(task: str, lead: str, db: Path, *, command: list[str] | None = None,
                 timeout: float | None = None, explicit: bool = False) -> ReadCall:
+    from hipson.redaction import redact_value
+
+    explicit = explicit or command is not None
     command = replayable(command)
     args: dict[str, CallValue] = {"task": task, "actor": lead, "approved": True}
-    if command:
-        args["command"] = command
     if timeout is not None:
         args["timeout"] = int(timeout) if int(timeout) == timeout else timeout
-    template = ("--", "COMMAND") if explicit and not command else ()
-    return read_call("task.verify", args, str(db), template=template)
+    if command:
+        call = read_call("task.verify", {**args, "command": command}, str(db))
+        # Error bodies redact fix calls as a whole, joined cli line included, so a secret split across
+        # arguments ("Bearer" "TOKEN", "token" "=" "VALUE") changes the call: then it is not a replay.
+        if redact_value(call) == call:
+            return call
+    return read_call("task.verify", args, str(db), template=("--", "COMMAND") if explicit else ())
 
 
 def reviewer_call(task: str, db: Path) -> ReadCall:

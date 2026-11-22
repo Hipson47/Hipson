@@ -762,8 +762,12 @@ def test_verify_fix_never_replays_a_redacted_or_truncated_command(tmp_path):
 
     raw_secret = "--token=" + "a" * 24
     assert redact_text(raw_secret) != raw_secret  # A raw secret the error body would redact later.
+    split = (["curl", "Bearer", "abcdefghijklmnop"], ["run", "token", "=", "abc123secret"],
+             ["run", "password:", "hunter2hunter2"])
+    for command in split:
+        assert all(redact_text(arg) == arg for arg in command)  # Only the joined line is redacted.
     for command in (["run", "--token=[REDACTED]"], ["run", "x" * 4096], ["run", raw_secret],
-                    ["run", "﻿bom"], ["run", "[unsupported encoded observation]"]):
+                    ["run", "﻿bom"], ["run", "[unsupported encoded observation]"], *split):
         call = verify_call("T-0001", LEAD, db, command=command, explicit=True)
         assert "command" not in call["arguments"], call
         assert shlex.split(call["cli"])[-2:] == ["--", "COMMAND"]
@@ -793,3 +797,22 @@ def test_head_moved_code_comes_from_the_recorded_revision_not_a_path_name(tmp_pa
     moved = task_verification.check_refusal({**forged, "changes": ["HEAD before=abc after=def"]}, db, lead=LEAD)
     assert moved is not None and moved.code == "verify.head_moved"
     assert moved.fix[0]["tool"] == "task.verify"
+
+
+def test_verification_refusal_retries_keep_the_command_template(tmp_path):
+    """timeout_refusal and check_refusal were given an explicit argv; a dropped argv must stay a template."""
+    from hipson import task_verification
+
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Candidate", objective="Retry", lead=LEAD)["id"]
+    hidden = ["run", "--token=[REDACTED]"]
+    timeout = task_verification.timeout_refusal({"task": task, "timeout_seconds": 3}, db, command=hidden, lead=LEAD)
+    moved = task_verification.check_refusal({"task": task, "error": None, "changes": ["HEAD before=a after=b"]},
+                                            db, command=hidden, lead=LEAD)
+    for refusal in (timeout, moved):
+        retry, = refusal.fix
+        assert "command" not in retry["arguments"] and shlex.split(retry["cli"])[-2:] == ["--", "COMMAND"]
+    kept = task_verification.check_refusal({"task": task, "error": None, "changes": ["HEAD before=a after=b"]},
+                                           db, command=["pytest", "-q"], lead=LEAD)
+    assert kept.fix[0]["arguments"]["command"] == ["pytest", "-q"]
