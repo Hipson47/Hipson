@@ -248,13 +248,16 @@ own backup. Older ledgers remain readable without migration.
 Upgrading from 1.7: a ledger is shared by every Hipson that uses it, including other virtual
 environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger with
 `ledger.schema_unsupported`, so upgrade every installation that uses the ledger to 1.8 together.
-To go back, stop every Hipson that uses the ledger and copy the pre-migration backup over the
-ledger file.
+To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<ledger>-shm` if
+they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
+pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
+created with mode 0600; a failed copy is removed rather than left behind.
 
 Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
 adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
-the first transcript under `CODEX_HOME/sessions` that carries the run marker. Nothing gates on usage. Active and historical assignment rows
-without a usage record show `usage: null`. The adapter's `brief_tokens_estimate` is a bytes/4
+the first transcript under `CODEX_HOME/sessions` that carries the run marker. Nothing gates on usage.
+
+Active and historical assignment rows without a usage record show `usage: null`. The adapter's `brief_tokens_estimate` is a bytes/4
 heuristic for the brief and never contributes to usage totals.
 
 ### Page through board and now

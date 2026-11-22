@@ -969,3 +969,36 @@ def test_any_writer_backs_up_an_older_ledger_before_migrating(tmp_path: Path):
     with closing(ledger.Ledger(db)):
         pass
     assert len(list(tmp_path.glob("ledger.sqlite.v*-backup-*"))) == 1  # A current ledger is not copied again.
+
+
+def test_migration_backup_is_private_and_a_failed_copy_is_removed(tmp_path: Path):
+    """S8 re-review: backups keep 0600 like init's, and a failed copy must not look like a good backup."""
+    import os
+    import stat
+
+    db = tmp_path / "ledger.sqlite"
+    _v1_file(db)
+    real_connect = sqlite3.connect
+
+    class Boom(sqlite3.Connection):
+        def backup(self, *args, **kwargs):
+            raise sqlite3.OperationalError("disk full")
+
+    def failing_connect(*args, **kwargs):
+        return real_connect(*args, factory=Boom, **kwargs)
+
+    with patch.object(ledger.sqlite3, "connect", side_effect=failing_connect):
+        try:
+            ledger.Ledger(db)
+        except sqlite3.OperationalError as exc:
+            assert "disk full" in str(exc)
+        else:
+            raise AssertionError("the failed backup did not stop the migration")
+    assert not list(tmp_path.glob("ledger.sqlite.v*-backup-*"))
+    with closing(real_connect(db)) as check:
+        assert check.execute("SELECT version FROM schema_version").fetchone()[0] == 1  # Not migrated.
+    with closing(ledger.Ledger(db)):
+        pass
+    backup, = tmp_path.glob("ledger.sqlite.v1-backup-*")
+    if os.name == "posix":
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
