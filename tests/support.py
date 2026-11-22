@@ -7,6 +7,24 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# A Hipson worker's own context. When the suite runs inside a Hipson builder (Hipson building Hipson), these
+# would make lead verification refuse (`verify.worker_context`) and point ledger writes at the real ledger.
+WORKER_CONTEXT_VARIABLES = ("HIPSON_ROLE", "HIPSON_ASSIGNMENT", "HIPSON_TASK", "HIPSON_RUN_DB",
+                            "HIPSON_RUN_USAGE_FILE", "HIPSON_FLOW_RESULT", "HIPSON_FLOW_BRIEF", "HIPSON_FLOW_STAGE")
+
+
+def isolate_test_environment(directory: str) -> None:
+    """Keep every test away from the developer's real ledger and Hipson home, and out of any worker context.
+
+    A test that forgets --db, or a mutant under mutation testing that breaks the ledger path, would otherwise
+    write to ~/.config/hipson/ledger.sqlite (it did: test tasks and a schema migration reached a real ledger).
+    Tests that need other values still set them explicitly. Both runners call this before importing tests.
+    """
+    for name in WORKER_CONTEXT_VARIABLES:
+        os.environ.pop(name, None)
+    os.environ["HIPSON_LEDGER"] = os.path.join(directory, "ledger.sqlite")
+    os.environ["HIPSON_HOME"] = os.path.join(directory, "home")
+
 # Exact reasons only: missing tools, broken imports and other unexpected skips fail CI.
 # Linux/WSL2 runs every integration. macOS lacks Linux process inspection, while native
 # Windows also lacks POSIX process groups, chmod directory permissions and guaranteed symlinks.
