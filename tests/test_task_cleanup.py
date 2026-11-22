@@ -145,3 +145,17 @@ def test_cleanup_report_and_fix_list_are_bounded(tmp_path):
     assert refusal is not None and refusal.code == "cleanup.tasks_open"
     assert len(refusal.fix) == task_calls.CLEANUP_FIX_LIMIT
     assert "omitted" in str(refusal) and str(task_calls.CLEANUP_TASK_LIMIT + 5) in str(refusal)
+
+
+def test_cleanup_text_names_omitted_tasks(tmp_path):
+    from hipson import task_calls
+
+    db = tmp_path / "ledger.sqlite"
+    root = tmp_path / "many"
+    with closing(ledger.Ledger(db)) as store:
+        for index in range(task_calls.CLEANUP_TASK_LIMIT + 2):
+            project = root / f"p{index}"
+            project.mkdir(parents=True)
+            store.open_task(project=project, title=f"T{index}", objective="Bound", lead="lead")
+    code, stdout, _ = run_cli_inprocess("task", "cleanup", "--db", str(db), "--project", str(root))
+    assert code == 1 and "2 more task(s) omitted" in stdout

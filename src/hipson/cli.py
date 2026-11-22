@@ -2007,6 +2007,8 @@ def command_task_cleanup(args: argparse.Namespace) -> int:
                 for assignment in task["assignments"]:
                     claims = ", ".join(_escape_cli_controls(path) for path in assignment["claims"]) or "none"
                     print(f"  {assignment['id']} [{assignment['status']}] {assignment['role']}/{assignment['mode']} | claims: {claims}")
+            if report["omitted_tasks"]:
+                print(f"{report['omitted_tasks']} more task(s) omitted; narrow the path to see them.")
         if refusal is not None:
             ledger.print_error(refusal, str(refusal), json_output=args.json)
             return 1
