@@ -83,6 +83,11 @@ Compact text saves 685 bytes and makes one more call than the 1.7.0 reference. T
 delivery carries runner activity and a populated journal, so the suggested activity read precedes
 acknowledgment in both compact formats. The call-count target remains unmet.
 
+The owner accepted this result on 2026-11-22. A worker's activity and failure journal are read before
+its result is acknowledged, even though that adds a call. Five calls is the minimum for this
+scenario, so the 1.7.0 reference, which hard-codes the IDs and skips that read, cannot be beaten on
+calls. P0-2's "fewer calls" criterion is therefore waived for this scenario. "Fewer bytes" is met.
+
 On the larger S0 fixture, the original S3 actions included nine verification calls and one activity
 read. The repaired list contains one acknowledgment, two verification calls, two task reads, and
 two findings reads. Bounded CLI and MCP JSON sizes with actions included are 29,101 bytes for now
