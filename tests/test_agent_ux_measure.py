@@ -72,12 +72,17 @@ def test_agent_ux_fixture_and_report(tmp_path):
                 assert channel["project_state_calls"] >= 0 and channel["wall_seconds"] >= 0
 
     board = report["reads"]["task.board"]
-    if __version__ == "1.7.0" and not board["compact"]["available"]:
-        assert all(not read["compact"]["available"] for read in report["reads"].values())
-        assert 1_000_000 <= board["full"]["mcp_json"]["bytes"] <= 10_000_000
-        assert board["full"]["mcp_json"]["project_state_calls"] == 3
-        assert board["full"]["cli_json"]["project_state_calls"] == 3
-        assert 0 < board["full"]["cli_text"]["bytes"] < 10_000
+    assert 1_000_000 <= board["full"]["mcp_json"]["bytes"] <= 10_000_000
+    assert board["full"]["mcp_json"]["project_state_calls"] == 3
+    assert board["full"]["cli_json"]["project_state_calls"] == 3
+    assert 0 < board["full"]["cli_text"]["bytes"] < 10_000
+    budgets = {"task.board": 32_000, "task.now": 48_000, "lead.resume": 64_000, "task.show": 4_000}
+    for name, budget in budgets.items():
+        measurement = report["reads"][name]["compact"]
+        assert measurement["available"] is True
+        for channel in channels:
+            assert 0 < measurement[channel]["bytes"] <= budget
+            assert measurement[channel]["project_state_calls"] == 0
 
     with patch.object(Ledger, "verifications", side_effect=AssertionError("loaded full evidence")):
         assert agent_ux_measure.main(["--db", str(fixture.db), "--projection", "--output", str(output)]) == 0

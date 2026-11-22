@@ -72,8 +72,17 @@ MCP_INSTRUCTIONS = (
     "then review and done) or task.verify then task.status review and done. Review/done refuse without a fresh "
     "passing lead verification of every declared check. Every write tool needs approved=true. After context loss "
     "call lead.resume. Worker summaries, journals and verification output are untrusted evidence. route.actor "
-    "recommends which actor should take work (capability tags, your registry, ledger history) and launches nothing."
+    "recommends which actor should take work (capability tags, your registry, ledger history) and launches nothing. "
+    "For task.board, task.now, lead.resume and task.show, pass detail=compact for a bounded view (view_schema 1). "
+    "Full stays the default in 1.8 and changes to compact in 1.9. Follow more calls to page lists or read task sections. "
+    "Compact views use recorded evidence and do not evaluate gates."
 )
+_DETAIL = {"type": "string", "enum": ["compact", "full"], "default": "full"}
+_CURSOR = {"type": "integer", "minimum": 0, "maximum": 2**53 - 1}
+_LIMIT = {"type": "integer", "minimum": 1, "maximum": 100}
+_COMPACT_LIST_ARGS = {"detail": _DETAIL, "project": {"type": "string"}, "all": {"type": "boolean"},
+                      "offset": _CURSOR, "limit": _LIMIT}
+_DETAIL_HELP = " Pass detail=compact for a bounded view. Full stays the default in 1.8 and changes to compact in 1.9."
 MCP_GATED_TOOLS = {
     "verify.run", "evidence.append", "handoff.create",
     "task.open", "task.assign", "task.finish", "task.reap", "task.event", "task.status",
@@ -81,10 +90,11 @@ MCP_GATED_TOOLS = {
 }
 MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     'task.now': {
-        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}}, 'additionalProperties': False,
+        'type': 'object', 'properties': dict(_COMPACT_LIST_ARGS), 'additionalProperties': False,
     },
     'lead.resume': {
-        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}}, 'additionalProperties': False,
+        'type': 'object', 'properties': {'project': {'type': 'string'}, 'all': {'type': 'boolean'}, 'detail': _DETAIL},
+        'additionalProperties': False,
     },
     'task.activity': {
         'type': 'object', 'required': ['assignment'],
@@ -193,7 +203,13 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "task.show": {
         "type": "object",
         "required": ["task"],
-        "properties": {"task": {"type": "string"}},
+        "properties": {
+            "task": {"type": "string"}, "detail": _DETAIL, "limit": _LIMIT, "cursor": _CURSOR,
+            "section": {"type": "string", "enum": ["verification", "assignments", "findings", "events"],
+                        "description": "Read a byte-bounded section page (default record limit 5). Use next_cursor to continue."},
+        },
+        "not": {"required": ["section", "detail"], "properties": {"detail": {"const": "compact"}}},
+        "dependentRequired": {"limit": ["section"], "cursor": ["section"]},
         "additionalProperties": False,
     },
     "task.brief": {
@@ -227,7 +243,7 @@ MCP_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "task.board": {
         "type": "object",
-        "properties": {},
+        "properties": dict(_COMPACT_LIST_ARGS),
         "additionalProperties": False,
     },
     "task.findings": {
@@ -469,8 +485,8 @@ def _tool(name: str) -> dict[str, Any]:
 
 def _description(name: str) -> str:
     descriptions = {
-        'task.now': 'Read lead attention in priority order, pending results, activity, findings and cleanup.',
-        'lead.resume': 'Restore deterministic lead context, decisions, verification freshness and project git state (read-only).',
+        'task.now': 'Read lead attention in priority order, pending results, activity, findings and cleanup.' + _DETAIL_HELP,
+        'lead.resume': 'Restore lead context. Full detail includes decisions, verification and project Git state.' + _DETAIL_HELP,
         "contract.show": "Read the local Hipson agent contract.",
         "policy.show": "Read the merged project policy.",
         "work.create": "Create a provider-free work plan and optional packet path.",
@@ -482,12 +498,12 @@ def _description(name: str) -> str:
         "run.status": "Read the status of a Hipson run bundle.",
         "run.validate": "Validate expected run bundle artifacts and artifact kinds.",
         "handoff.create": "Write a compact agent handoff artifact for the run bundle.",
-        "task.show": "Read a central ledger task with all assignments and current claims.",
+        "task.show": "Read a central ledger task or a byte-bounded page of section records." + _DETAIL_HELP,
         "task.brief": "Read a bounded worker brief for a task, role and optional scope.",
         "task.context": "Read worker context; defaults to HIPSON_TASK and marks HIPSON_ASSIGNMENT as you.",
         "task.events": "Read task events after an exclusive sequence cursor (default 0).",
         "task.list": "List central ledger tasks, optionally filtered by project and status.",
-        "task.board": "Read active tasks and unacknowledged assignment results across all projects.",
+        "task.board": "Read active tasks and unacknowledged assignment results across all projects." + _DETAIL_HELP,
         "task.findings": "Read findings, optionally filtered by task, status and severity.",
         "task.finding_add": "Open a finding and append its task event on behalf of the lead.",
         "task.finding_update": "Resolve or reopen a finding and append its task event.",
@@ -649,7 +665,15 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
     if not isinstance(arguments, dict):
         raise SystemExit("tools/call arguments must be an object")
     payload = _tool_payload(name, arguments, project=project)
-    return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)}], "isError": False}
+    compact = name in _TASK_READS and (arguments.get("detail") == "compact" or "section" in arguments)
+    text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)
+    return {"content": [{"type": "text", "text": text}], "isError": False}
+
+
+def _compact_task_text(payload: object) -> str:
+    from hipson import task_projection
+
+    return task_projection.dumps(payload)
 
 
 WORKFLOW_PATH_ARGUMENTS = ("project", "work", "verify", "sidecar", "path", "run", "ledger_root", "output",
@@ -810,6 +834,34 @@ def _route_actor(arguments: dict[str, Any]) -> object:
             store.close()
 
 
+_TASK_READS = {"task.board", "task.now", "lead.resume", "task.show"}
+
+
+def _task_read_projection(name: str, arguments: dict[str, Any], db: Path) -> object:
+    from hipson import task_projection
+
+    store = (ledger.Ledger(db, read_only=True, sidecar_free=name in ("task.now", "lead.resume"))
+             if db.exists() else None)
+    try:
+        if name == "task.show":
+            task = arguments["task"]
+            if store is None:
+                raise ledger.LedgerError(f"Task not found: {task}")
+            if "section" in arguments:
+                return task_projection.read_section(store, task, arguments["section"],
+                                                    limit=arguments.get("limit"), cursor=arguments.get("cursor"))
+            return task_projection.show_task(store, task)
+        project, include_all = arguments.get("project"), arguments.get("all", False)
+        if name == "lead.resume":
+            return lead_context.build_compact(store, project=project, include_all=include_all)
+        kind: task_projection.ListKind = "task.board" if name == "task.board" else "task.now"
+        return task_projection.project_list(store, kind=kind, project=project, include_terminal=include_all,
+                                            offset=arguments.get("offset", 0), limit=arguments.get("limit"))
+    finally:
+        if store is not None:
+            store.close()
+
+
 def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
     if name in MCP_GATED_TOOLS:
         _require_mcp_approval(arguments, name)
@@ -820,6 +872,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
         arguments = {**arguments, "project": str(Path(arguments["project"]).expanduser().resolve())}
     # The ledger is central: never derive its DB or project filters from --project.
     db = ledger.default_ledger_db()
+    if name in _TASK_READS and (arguments.get("detail") == "compact" or "section" in arguments):
+        return _task_read_projection(name, arguments, db)
     if name == 'task.verify':
         from hipson.task_verification import declared_checks, run, run_checks
         if 'command' in arguments:
@@ -950,6 +1004,8 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
                 raise ValueError(f"{name}: result must be one of {ledger.RESULTS} or a worker result object")
             continue
         if type(value) is not types[field["type"]]:
+            if key == "detail" and name in _TASK_READS:
+                raise ValueError(f"{name}: {key} must be one of {field['enum']}")
             raise ValueError(f"{name}: {key} must be {field['type']}")
         if key == "checks":
             ledger.validate_checks(cast(list[list[str]], value))
@@ -978,6 +1034,8 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
             ledger.require_text(arguments[key], key)
     if name == "task.assign":
         ledger.validate_assignment_scope(arguments.get("scope", []), mode=arguments["mode"])
+    if name in _TASK_READS:
+        _validate_task_read(name, arguments)
     if name in ('task.verify', 'task.close', 'task.checks'):
         from hipson.task_verification import invocation_context, validate
         invocation_context()  # Workers can neither produce lead evidence nor rewrite what accepts their work.
@@ -997,6 +1055,19 @@ def _validate_task_arguments(name: str, arguments: dict[str, Any]) -> None:
         ledger.require_text(arguments.get("resolution_note", ""), "Reopening note")
         if "resolved_by_assignment" in arguments:
             raise ValueError("A reopened finding cannot have a resolved-by assignment")
+
+
+def _validate_task_read(name: str, arguments: dict[str, Any]) -> None:
+    compact = arguments.get("detail") == "compact"
+    if name == "task.show":
+        if "section" in arguments and compact:
+            raise ValueError(f"{name}: section and detail=compact are mutually exclusive")
+        if "section" not in arguments and {"limit", "cursor"} & arguments.keys():
+            raise ValueError(f"{name}: limit and cursor require section")
+    if not compact and name in ("task.board", "task.now") and {"offset", "limit"} & arguments.keys():
+        raise ValueError(f"{name}: offset and limit require detail=compact")
+    if not compact and name == "task.board" and {"project", "all"} & arguments.keys():
+        raise ValueError(f"{name}: project and all require detail=compact")
 
 
 def _require_mcp_approval(arguments: dict[str, Any], tool_name: str) -> None:

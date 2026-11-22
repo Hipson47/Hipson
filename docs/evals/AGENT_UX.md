@@ -27,12 +27,36 @@ The S0 fixture has three verification records across its 22 checks. All three re
 Parity tests compare each fixture task to the full view and exercise the same-HEAD edit limit
 with a targeted record. The compact view reports `gate: "not_evaluated"`.
 
+## S2 compact reads
+
+Run the surface measurement offline from the S2 checkout.
+
+```sh
+UV_OFFLINE=1 uv run python scripts/agent_ux_measure.py --output docs/evals/agent-ux-1.8-s2.json
+```
+
+| Read | 1.7.0 full CLI JSON (bytes) | S2 bounded CLI JSON (bytes) | 1.7.0 full MCP JSON (bytes) | S2 bounded MCP JSON (bytes) | Full fingerprints per read, before → after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `task board` | 5,614,904 | 27,132 | 4,391,961 | 27,132 | 3 → 0 |
+| `task now` | 5,812,325 | 27,130 | 4,382,200 | 27,130 | 3 → 0 |
+| `lead resume` | 11,853,633 | 28,276 | 8,778,936 | 28,276 | 3 → 0 |
+| `task show` | 766,795 | 1,813 | 623,094 | 1,813 | 1 → 0 |
+| `task show --task T-0001 --section verification` | — | 6,905 | — | 6,905 | — → 0 |
+
+The [1.7.0 baseline](agent-ux-baseline-1.7.0.json) and [S2 report](agent-ux-1.8-s2.json) use the same
+22-task fixture. On S2, explicitly requesting full detail produced the same byte sizes as the
+baseline. Compact resume derives its context from the projection snapshot and uses the HEAD
+observations in its now page. The verification section measurement uses the default five-record
+limit. Its single record shows the first 20 of 1,051 files, including the tracked fixture marker
+in the inventory total.
+
 ## Reading the report
 
 - `schema_version` describes the measurement report format. `hipson_version` and `git_revision` identify the Hipson code and checkout HEAD. `git_dirty` records whether the checkout has changes when measurement begins. `ledger_source` is `fixture` or `provided`, and `task_show_id` identifies the task used for `task.show`.
 - `reads` contains `full` and `compact` measurements for `task.board`, `task.now`, `lead.resume`, and `task.show`. The script checks CLI help and MCP tool schemas for `detail` and passes it explicitly where supported. A missing surface is `null`. If neither surface supports a mode, `available` is `false`. The `full` entry uses the default on 1.7.0.
+- The S2 report also records `section_read`, measured separately with the same fixture and the default verification section limit, through CLI `--json` and MCP.
 - In `--projection` mode, `projection` supplies `bytes`, `project_state_calls`, and `wall_seconds` for `task.board`, `task.now`, and `task.show`. The byte count uses the UTF-8 output of `task_projection.dumps` without a trailing newline. Board also reports `largest_task_bytes` and `check_states` counts grouped by `recorded` then `current` for the full tasks on the measured page.
-- `cli_json` and `cli_text` count UTF-8 stdout bytes, including the final newline and any JSON indentation. `mcp_json` counts UTF-8 bytes of the JSON text returned by `tools/call` before JSON-RPC envelope encoding.
+- `cli_json` and `cli_text` count UTF-8 stdout bytes, including any final newline and JSON indentation. Compact CLI JSON omits the trailing newline. `mcp_json` counts UTF-8 bytes of the JSON text returned by `tools/call` before JSON-RPC envelope encoding.
 - Each surface has its own `project_state_calls` and `wall_seconds`. The count covers calls to the full `task_verification.project_state` fingerprint. Resume's separate stat-only Git checks contribute to elapsed time. Wall time includes command parsing or request dispatch, reads and rendering. Both entry points run in-process with one sample per surface and mode. Fixture setup and process startup are outside the timed calls. Compare timings on the same machine.
 - `resume_e2e` holds `scenario`, `driver`, the oracle result `passed`, and `measurement_valid` for the harness recording. `hipson_invocations` counts audited CLI calls. `read_commands` counts successful workflow reads by command, and `task_history_lookups` counts reads beyond `lead resume` and `task now`. `used_lead_resume`, `used_task_now`, and `first_hipson_command` describe how the driver found its context. `help_lookups` and `docs_lookups` count matching transcript commands.
 - `resume_e2e.metrics.hipson_output_bytes` counts the UTF-8 stdout and stderr emitted by audited Hipson CLI calls during the run, before log redaction. `hipson_read_output_bytes` counts the subset from successful workflow reads. Both exclude setup output, including the resume text embedded in the mission. These are output sizes at the recorder, with shell redirection or filtering downstream. `token_usage` is `null` for the fake driver.

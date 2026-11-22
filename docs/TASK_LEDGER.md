@@ -147,9 +147,14 @@ for wall-clock activity ages. Git and ledger are separate observations, not an a
 
 ## Compact projection (view_schema 1)
 
-The projection core reads one SQLite snapshot. S1 provides it through `hipson.task_projection`.
-S2 defines the CLI and MCP calls. Task and list views carry `gate: "not_evaluated"` and
-`gate_note: "task verify / task close evaluate the gates"`.
+Use `--detail compact` on `hipson task board`, `hipson task now`, `hipson lead resume`, or
+`hipson task show --task T-0001`. The MCP tools `task.board`, `task.now`, `lead.resume`, and
+`task.show` take `"detail": "compact"`. Full output stays the default in 1.8. Compact becomes the
+default in 1.9, and callers can keep requesting `detail=full` explicitly.
+
+Compact views read one SQLite snapshot and carry `view_schema: 1` and `hipson_version`. Task and
+list views carry `gate: "not_evaluated"` and `gate_note: "task verify / task close evaluate the gates"`.
+CLI text shows a short line per task. Use CLI `--json` or MCP text for the complete compact payload.
 
 | Area | Fields and interpretation |
 | --- | --- |
@@ -180,13 +185,62 @@ Included terminal tasks without unread results come last. ID breaks ties. Both d
 terminal tasks that still have active or unacknowledged assignments. The core can include all
 terminal tasks or project any single task by ID.
 
-Use `task_projection.dumps(obj)` for compact JSON with `ensure_ascii=False` and compact separators.
-The default budgets count UTF-8 bytes of that output, with 32,000 bytes for board and 48,000 for now.
-`project_list` accepts `offset` and a positive `limit`. A bounded page includes `truncated: true`,
-`omitted`, and a continuation `more: {"kind": ..., "offset": ...}` while rows remain. If the first
-task cannot fit, the page returns its ID, status, title, `too_large: true`, and a `task show` hint
-and advances the offset. The budget must fit the envelope and a minimal stub when a task remains.
-Use the same filters and ordering when continuing a page.
+The UTF-8 budgets are 32,000 bytes for board, 48,000 for now, and 64,000 for resume. The CLI and MCP
+use `task_projection.dumps` for compact JSON. The CLI writes that JSON without a trailing newline.
+
+### Page through board and now
+
+Board and now accept a zero-based `offset` and an optional `limit` from 1 through 100 in compact mode.
+The budget can shorten a page further. Use `--project PATH` to filter and `--all` to include all terminal
+tasks. The MCP argument names are `offset`, `limit`, `project`, and `all`.
+
+```sh
+hipson task now --detail compact --limit 3 --json
+```
+
+While rows remain, the page sets `truncated: true`, counts the remaining rows in `omitted`, and
+returns the next call as `more.tool` and `more.arguments` for MCP or `more.cli` for a POSIX shell.
+The call preserves the filters and the limit. A CLI continuation also preserves an explicit `--db`.
+Follow the call verbatim until `more` is null. Use the same ledger throughout. Now orders tasks by
+attention at read time. A task state change between calls can move it across the offset, causing a
+task to be skipped or repeated. Board pages use stable creation order. Use board with `--all` to
+enumerate every task.
+
+If the first task cannot fit, the page returns its ID, status, title, `too_large: true`, and a
+`task show --task T --detail compact` command in `hint`. The stub consumes one task position.
+`truncated` also reports a stub on the final page.
+
+### Read task records by section
+
+Compact `task show` returns the one-task projection and a `more` array with a call for each section.
+Read `verification`, `assignments`, `findings`, or `events` on its own. The response contains
+`task`, `section`, `records`, and `next_cursor`. The records use the ledger's full redaction rules.
+Verification returns stored records in sequence order, assignments and findings in chronological
+order with ID as a tiebreaker, and events in sequence order. Findings include all statuses.
+
+```sh
+hipson task show --task T-0001 --section assignments --limit 5 --json
+hipson task show --task T-0001 --section assignments --limit 5 --cursor 5 --json
+```
+
+Use the returned `next_cursor` as `--cursor` or MCP `cursor` until it is null. The cursor is the
+zero-based position of the first remaining record in the selected section. The record limit defaults
+to five and can be set up to 100. CLI `--json` and MCP section pages are also capped at 64,000 UTF-8
+bytes, including the cursor.
+
+Verification records show up to the first 20 entries in `files`, with the original count in
+`files_total` and `files_truncated` indicating whether entries were dropped. Read the full inventory
+with `task show --task T --detail full`. A record that still exceeds the byte cap gets its own page
+with shortened fields named in its `truncated_fields` list. `section` and compact detail are
+mutually exclusive.
+
+### Resume from compact context
+
+Compact resume includes the compact `now` page, per-project task counts by status, unacknowledged
+assignment IDs, and open blocking and major finding IDs. Its summaries use the same filter and
+terminal-task selection as `now` and include eligible tasks beyond the first page. It carries
+`evidence_policy` and `untrusted_fields`. Resume labels shortened summaries with `truncated` and
+per-category `omitted` counts. Follow `now.more` for more tasks and use task sections to page records.
 
 ## Change observation against scope (opt-in, 1.7)
 

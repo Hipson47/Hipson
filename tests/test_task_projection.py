@@ -7,8 +7,9 @@ import re
 import sqlite3
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, redirect_stdout
 from datetime import UTC, datetime
+from io import StringIO
 from pathlib import Path
 from threading import Barrier, Event
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hipson import flow_driver, lead_context, ledger, task_flow, task_projection, task_verification
+from hipson import cli, flow_driver, lead_context, ledger, task_context, task_flow, task_projection, task_verification
 from tests.test_flow_driver import _spec
 from tests.test_ledger_recovery import _v1_file
 from tests.test_task_flow import PASS, SECOND, _open, _project
@@ -119,14 +120,15 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert task_projection.project_task(store, terminal)["status"] == "cancelled"
         assert task_projection.project_list(store, kind="task.board", include_terminal=True)["tasks"][-1]["id"] == terminal
 
-        tiny = task_projection.project_list(store, kind="task.now", byte_budget=360)
+        tiny = task_projection.project_list(store, kind="task.now", byte_budget=512)
         assert tiny["truncated"] is True and tiny["omitted"] == 2
-        assert tiny["more"] == {"kind": "task.now", "offset": 1}
+        assert tiny["more"] == {"tool": "task.now", "arguments": {"detail": "compact", "offset": 1},
+                                "cli": "hipson task now --detail compact --offset 1 --json"}
         stub, = tiny["tasks"]
         assert stub["id"] == third and stub["too_large"] is True
         assert set(stub) == {"id", "status", "title", "too_large", "hint"} and "task show" in stub["hint"]
         encoded = task_projection.dumps(tiny).encode("utf-8")
-        assert json.loads(encoded) == tiny and len(encoded) <= 360
+        assert json.loads(encoded) == tiny and len(encoded) <= 512
 
         prefix = {**tiny, "tasks": now["tasks"][:1]}
         budget = len(task_projection.dumps(prefix).encode("utf-8"))
@@ -134,17 +136,17 @@ def test_list_budget_preserves_order_and_reuses_head_per_project(tmp_path):
         assert task_projection.project_list(store, kind="task.now", byte_budget=budget) == prefix
         assert task_projection.project_list(store, kind="task.now", byte_budget=budget - 1)["tasks"][0]["too_large"]
 
-        page = task_projection.project_list(store, kind="task.now", offset=tiny["more"]["offset"], limit=1)
+        page = task_projection.project_list(store, kind="task.now", offset=tiny["more"]["arguments"]["offset"], limit=1)
         assert [item["id"] for item in page["tasks"]] == [second]
-        assert page["more"] == {"kind": "task.now", "offset": 2}
-        final = task_projection.project_list(store, kind="task.now", offset=page["more"]["offset"], limit=1)
+        assert page["more"]["arguments"] == {"detail": "compact", "offset": 2, "limit": 1}
+        final = task_projection.project_list(store, kind="task.now", offset=page["more"]["arguments"]["offset"], limit=1)
         assert [item["id"] for item in final["tasks"]] == [first] and final["more"] is None
         assert not task_projection.project_list(store, kind="task.now", offset=3)["tasks"]
         with pytest.raises(ValueError, match="too small"):
             task_projection.project_list(store, kind="task.now", byte_budget=10)
-        with pytest.raises(ValueError, match="offset.*limit"):
+        with pytest.raises(ValueError, match="offset"):
             task_projection.project_list(store, kind="task.now", offset=-1)
-        with pytest.raises(ValueError, match="offset.*limit"):
+        with pytest.raises(ValueError, match="limit"):
             task_projection.project_list(store, kind="task.now", limit=0)
 
 
@@ -160,26 +162,33 @@ def test_projection_reads_v1_without_migration(tmp_path):
     assert db.read_bytes() == before
 
 
-def _projection_references(source, *, ledger_module=False):
+def _projection_references(source, *, ledger_module=False, read_handlers=()):
     pattern = re.compile(r"\b(?:task_projection|projection_rows)\b")
     tree = ast.parse(source)
     declarations = {id(method) for node in tree.body if ledger_module and isinstance(node, ast.ClassDef)
                     and node.name == "Ledger" for method in node.body
                     if isinstance(method, ast.FunctionDef) and method.name == "projection_rows"}
+    permitted = {id(child) for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in read_handlers
+                 for statement in node.body for child in ast.walk(statement)}
     return [node.lineno for node in ast.walk(tree)
-            if id(node) not in declarations and any(pattern.search(value)
+            if id(node) not in declarations | permitted and any(pattern.search(value)
                                                     for value in vars(node).values() if isinstance(value, str))]
 
 
 def test_gate_sources_do_not_reference_projection():
     root = Path(ledger.__file__).parent
-    allowed = {"task_projection.py", "cli.py", "mcp_server.py"}  # CLI and MCP are reserved for S2.
+    read_handlers = {
+        "cli.py": {"command_task_read"},
+        "mcp_server.py": {"_task_read_projection", "_compact_task_text"},
+        "lead_context.py": {"build_compact"},
+    }
     violations = []
     for module in sorted(root.rglob("*.py")):
         relative = module.relative_to(root).as_posix()
-        if relative not in allowed:
+        if relative != "task_projection.py":
             violations.extend(f"{relative}:{line}" for line in _projection_references(
-                module.read_text(encoding="utf-8"), ledger_module=relative == "ledger.py"))
+                module.read_text(encoding="utf-8"), ledger_module=relative == "ledger.py",
+                read_handlers=read_handlers.get(relative, ())))
     assert not violations, "\n".join(violations)
 
 
@@ -190,6 +199,8 @@ def test_gate_source_check_catches_dynamic_references():
     assert _projection_references("class Ledger:\n    def projection_rows(self): ...", ledger_module=True) == []
     assert _projection_references("class Ledger:\n    def projection_rows(self): self.projection_rows()",
                                   ledger_module=True) == [2]
+    source = "def command_task_read():\n    import task_projection\ndef command_task():\n    import task_projection"
+    assert _projection_references(source, read_handlers={"command_task_read"}) == [4]
 
 
 def test_close_and_live_content_gate_work_with_projection_disabled(tmp_path):
@@ -199,7 +210,9 @@ def test_close_and_live_content_gate_work_with_projection_disabled(tmp_path):
     def forbidden(*args, **kwargs):
         raise AssertionError("a gate reached the compact projection")
 
-    with patch.dict(os.environ), patch.multiple(task_projection, project_task=forbidden, project_list=forbidden), \
+    with patch.dict(os.environ), patch.multiple(task_projection, project_task=forbidden, project_list=forbidden,
+                                                show_task=forbidden, read_section=forbidden, resume_inputs=forbidden,
+                                                dumps=forbidden), \
             patch.object(ledger.Ledger, "projection_rows", forbidden):
         for name in ("HIPSON_ROLE", "HIPSON_TASK", "HIPSON_ASSIGNMENT"):
             os.environ.pop(name, None)
@@ -232,6 +245,17 @@ def test_close_and_live_content_gate_work_with_projection_disabled(tmp_path):
         with patch.object(flow_driver, "_launch", forbidden):
             flow = flow_driver.run(db, spec, digest, resume=flow_task)
         assert flow["status"] == "done" and flow["steps"] == ["ack", "close", "stop"], flow
+
+        with closing(ledger.Ledger(db)) as store:
+            verify_task = _open(store, project, checks=(PASS,))
+        with redirect_stdout(StringIO()) as stdout:
+            assert cli.main(["task", "verify", "--task", verify_task, "--db", str(db), "--json"]) == 0
+        record, = json.loads(stdout.getvalue())
+        assert record["exit_code"] == 0 and record["fingerprint"]
+        with closing(ledger.Ledger(db, read_only=True)) as store:
+            assert "Gate: passing (current)" in task_context.context(store, verify_task)["verification_summary"]
+            (project / "source.py").write_text("value = 3\n")
+            assert "Gate: not passing (stale)" in task_context.context(store, verify_task)["verification_summary"]
 
 
 def _evidence(store, task, project, **overrides):
@@ -580,7 +604,7 @@ def test_large_evidence_does_not_load_the_inventory(tmp_path):
         record = _evidence(store, task, project, files=files, output_tail="PRIVATE_OUTPUT_TAIL",
                            unexpected_field="PRIVATE_UNKNOWN_FIELD")
         assert 400_000 <= len(json.dumps(record).encode("utf-8")) < 420_000
-        saved, = store.projection_rows(task=task)[0]["verifications"]
+        saved, = store.projection_rows(task=task, include_terminal=True)[0]["verifications"]
         assert set(saved) == {"task", "id", "seq", "identity", "fields", "files_type", "fallback_type",
                               "malformed_fallback", "malformed_files", "duplicate_fields", "metadata_fallback"}
         assert len(saved["fields"]) < 1_024 and b"PRIVATE_" not in saved["fields"]
@@ -611,7 +635,7 @@ def test_projection_batches_tables_and_selects_latest_verifications(tmp_path):
         expected = {declared: ["V-4", "V-5"], adhoc: ["V-10"]}
         statements = []
         store.connection.set_trace_callback(statements.append)
-        rows = store.projection_rows()
+        rows = store.projection_rows(include_terminal=False)
         assert {row["id"]: [record["id"] for record in row["verifications"]] for row in rows} == expected
         for table in ("assignments", "events", "findings", "verifications"):
             selects = [query for query in statements if re.search(rf"FROM {table}\b", query)]

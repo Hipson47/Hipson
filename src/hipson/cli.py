@@ -8,9 +8,9 @@ import shlex
 import shutil
 import sqlite3
 import sys
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 from hipson import (
     __version__,
@@ -1840,6 +1840,85 @@ def command_scheduler_tick(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_task_read(args: argparse.Namespace) -> int:
+    action = args.lead_command if args.command == "lead" else args.task_command
+    section = getattr(args, "section", None)
+    offset = getattr(args, "offset", None)
+    limit = getattr(args, "limit", None)
+    cursor = getattr(args, "cursor", None)
+    try:
+        if section is not None and args.detail == "compact":
+            raise ValueError("--section and --detail compact are mutually exclusive")
+        if action == "show" and section is None and (limit is not None or cursor is not None):
+            raise ValueError("--limit and --cursor require --section")
+        if args.detail == "full" and section is None:
+            if action in ("board", "now") and (offset is not None or limit is not None):
+                raise ValueError("--offset and --limit require --detail compact")
+            if action == "board" and (args.project is not None or args.all):
+                raise ValueError("--project and --all on task board require --detail compact")
+            return command_lead_view(args) if action in ("now", "resume") else command_task(args)
+
+        from hipson import task_projection
+
+        db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
+        cli_db = str(db) if args.db else None
+        connection = (ledger.Ledger(db, read_only=True, sidecar_free=action in ("now", "resume"))
+                      if db.exists() else None)
+        with closing(connection) if connection is not None else nullcontext() as store:
+            payload: dict[str, Any]
+            if action == "show":
+                if store is None:
+                    raise ledger.LedgerError(
+                        f"Task not found: {args.task} (no ledger at {db} yet; open one with hipson task open)")
+                if section is not None:
+                    payload = task_projection.read_section(store, args.task, section, limit=limit, cursor=cursor)
+                else:
+                    payload = task_projection.show_task(store, args.task, cli_db=cli_db)
+            elif action == "resume":
+                payload = lead_context.build_compact(store, project=args.project, include_all=args.all, cli_db=cli_db)
+            else:
+                kind: task_projection.ListKind = "task.board" if action == "board" else "task.now"
+                payload = dict(task_projection.project_list(store, kind=kind, project=args.project,
+                                                            include_terminal=args.all, offset=offset or 0,
+                                                            limit=limit, cli_db=cli_db))
+        if args.json:
+            sys.stdout.write(task_projection.dumps(payload))
+        elif section is not None:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(_render_compact_tasks(payload))
+        return 0
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        print(redact_text(str(exc)), file=sys.stderr)
+        return 1
+
+
+def _render_compact_tasks(payload: dict[str, Any]) -> str:
+    page = payload.get("now", payload)
+    tasks = page.get("tasks", [page])
+    lines = []
+    for task in tasks:
+        title = _bounded_cli(task["title"], limit=160, escape_controls=True)
+        line = f"{task['id']} [{task['status']}] {title}"
+        if task.get("too_large"):
+            line += f" | Details: {_escape_cli_controls(task['hint'])}"
+        else:
+            checks = task["checks"]
+            recorded_ok = sum(item["recorded"] == "ok" for item in checks)
+            stale = sum(item["current"] == "stale" for item in checks)
+            line += (f" | checks recorded OK {recorded_ok}/{len(checks)}, stale {stale}"
+                     f" | open findings {sum(task['open_findings'].values())}")
+        lines.append(line)
+    if not lines:
+        lines.append("No tasks on this page.")
+    more = page["more"]
+    if isinstance(more, dict):
+        lines.append(f"{page['omitted']} more tasks: {_escape_cli_controls(more['cli'])}")
+    elif isinstance(more, list):
+        lines.extend(_escape_cli_controls(call["cli"]) for call in more)
+    return "\n".join(lines)
+
+
 def command_lead_view(args: argparse.Namespace) -> int:
     try:
         db = Path(args.db).expanduser().resolve() if args.db else ledger.default_ledger_db()
@@ -2159,9 +2238,19 @@ def build_parser() -> argparse.ArgumentParser:
     task_parsers["events"].add_argument("--after", type=int, default=0, help="Exclusive event sequence cursor")
     task_parsers["list"].add_argument("--project")
     task_parsers["list"].add_argument("--status", choices=ledger.STATUSES)
-    task_parsers['now'].add_argument('--project')
-    task_parsers['now'].add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
-    task_parsers['now'].set_defaults(func=command_lead_view)
+    for name in ("board", "now", "show"):
+        read = task_parsers[name]
+        read.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
+        read.add_argument("--limit", type=int, help="Maximum records on a page (1–100)")
+        read.set_defaults(func=command_task_read)
+    for name in ("board", "now"):
+        read = task_parsers[name]
+        read.add_argument("--project", help="Only include tasks in this project")
+        read.add_argument("--all", action="store_true", help="Include terminal tasks")
+        read.add_argument("--offset", type=int, help="Zero-based task offset for compact pages")
+    task_parsers["show"].add_argument("--section", choices=("verification", "assignments", "findings", "events"),
+                                      help="Read a byte-bounded section page (default record limit: 5)")
+    task_parsers["show"].add_argument("--cursor", type=int, help="Position returned as next_cursor by a section read")
 
     lead = subparsers.add_parser('lead', help='Restore lead context from the task ledger')
     lead_sub = lead.add_subparsers(dest='lead_command', required=True)
@@ -2169,8 +2258,9 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument('--project')
     resume.add_argument('--all', action='store_true', help='Expand terminal tasks; text stays bounded')
     resume.add_argument('--db', help='Task ledger SQLite path; overrides HIPSON_LEDGER')
-    resume.add_argument('--json', action='store_true', help='Print full machine-readable context')
-    resume.set_defaults(func=command_lead_view)
+    resume.add_argument('--json', action='store_true', help='Print machine-readable context')
+    resume.add_argument("--detail", choices=("compact", "full"), default="full", help="Read format (default: full)")
+    resume.set_defaults(func=command_task_read)
 
     doctor = subparsers.add_parser("doctor", help="Check local Hipson prerequisites")
     doctor.add_argument("--agent-surfaces", action="store_true", help="Report agent integration readiness")

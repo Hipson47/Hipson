@@ -69,12 +69,12 @@ def _open(store: ledger.Ledger, project: Path, title: str, *, review: bool = Fal
     )["id"]
 
 
-def build(root: Path) -> AgentUxFixture:
+def build(root: Path, *, inventory_files: int = 1050) -> AgentUxFixture:
     """Populate a fresh directory owned by the caller, usually a temporary directory."""
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     # Roughly 300 kB of JSON metadata across the files, with only a few kB of file contents.
-    heavy = _project(root / "inventory", inventory_files=1050)
+    heavy = _project(root / "inventory", inventory_files=inventory_files)
     tools = _project(root / "tools")
     docs = _project(root / "docs")
     db = root / "ledger.sqlite"

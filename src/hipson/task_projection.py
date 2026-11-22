@@ -5,22 +5,33 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
+import sqlite3
 import subprocess
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict, TypeVar, cast
 
+from hipson import __version__
 from hipson.display import escape_display_controls
 from hipson.lead_context import GIT_READ_LIMIT
 from hipson.ledger import CHECK_ARG_LIMIT, FINDING_SEVERITIES, MAX_CHECKS, Assignment, Ledger, review_state
-from hipson.redaction import redact_text
+from hipson.redaction import redact_text, redact_value
 from hipson.task_activity import LINE_LIMIT
 from hipson.task_verification import _worker_context, argv_identity
 
 VIEW_SCHEMA = 1
 ListKind = Literal["task.board", "task.now"]
 LIST_BUDGETS: dict[ListKind, int] = {"task.board": 32_000, "task.now": 48_000}
+RESUME_BUDGET = 64_000
+SECTION_BUDGET = 64_000
+MAX_CURSOR = 2**53 - 1  # Exact in MCP clients using JavaScript numbers.
+MAX_LIMIT = 100
+SECTION_LIMIT = 5
+SECTION_FILE_LIMIT = 20
+Section = Literal["verification", "assignments", "findings", "events"]
+SECTIONS: tuple[Section, ...] = ("verification", "assignments", "findings", "events")
 TERMINAL = ("done", "cancelled")
 GATE_NOTE = "task verify / task close evaluate the gates"
 REASON_LIMIT = 5
@@ -63,6 +74,7 @@ class ReviewProjection(TypedDict):
 
 class TaskProjection(TypedDict):
     view_schema: int
+    hipson_version: str
     gate: Literal["not_evaluated"]
     gate_note: str
     id: str
@@ -97,20 +109,29 @@ class TaskStub(TypedDict):
     hint: str
 
 
+class ReadCall(TypedDict):
+    tool: str
+    arguments: dict[str, str | int | bool]
+    cli: str
+
+
 class ListProjection(TypedDict):
     view_schema: int
+    hipson_version: str
     gate: Literal["not_evaluated"]
     gate_note: str
     kind: ListKind
     tasks: Sequence[TaskProjection | TaskStub]
     truncated: bool
     omitted: int
-    more: dict[str, str | int] | None
+    more: ReadCall | None
 
 
 def dumps(obj: object) -> str:
     """Serialize a compact view. Budgets count the UTF-8 bytes of this string."""
-    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    # Git paths can contain bytes that Python represents as surrogate escapes.
+    return text.encode("utf-8", errors="backslashreplace").decode("utf-8")
 
 
 def _size(obj: object) -> int:
@@ -375,7 +396,8 @@ def _project(row: dict[str, Any], head: str | None) -> TaskProjection:
     for finding in row["findings"]:
         counts[finding["severity"]] = finding["total"]
     return TaskProjection(
-        view_schema=VIEW_SCHEMA, gate="not_evaluated", gate_note=GATE_NOTE, id=row["id"], status=row["status"],
+        view_schema=VIEW_SCHEMA, hipson_version=__version__, gate="not_evaluated", gate_note=GATE_NOTE,
+        id=row["id"], status=row["status"],
         project=_bound(row["project"], 200, "project", truncated), lead=_bound(row["lead"], 200, "lead", truncated),
         title=_bound(row["title"], 160, "title", truncated), objective=_bound(row["objective"], 400, "objective", truncated),
         review_policy=row["review_policy"], checks=checks, freshness_source="recorded",
@@ -400,8 +422,130 @@ def _project_rows(rows: Sequence[dict[str, Any]]) -> list[TaskProjection]:
 
 
 def project_task(store: Ledger, task: str) -> TaskProjection:
-    result, = _project_rows(store.projection_rows(task=task))
+    result, = _project_rows(store.projection_rows(task=task, include_terminal=True))
     return result
+
+
+def _read_call(tool: str, arguments: dict[str, str | int | bool], cli_db: str | None) -> ReadCall:
+    command = ["hipson", *tool.split(".")]
+    for key, value in arguments.items():
+        if isinstance(value, str) and value.startswith("-"):
+            command.append(f"--{key}={value}")
+            continue
+        command.append(f"--{key}")
+        if value is not True:
+            command.append(str(value))
+    if cli_db is not None:
+        command.extend(["--db", cli_db])
+    return {"tool": tool, "arguments": arguments, "cli": shlex.join([*command, "--json"])}
+
+
+def show_task(store: Ledger, task: str, *, cli_db: str | None = None) -> dict[str, Any]:
+    return {**project_task(store, task),
+            "more": [_section_call(task, section, cli_db=cli_db) for section in SECTIONS]}
+
+
+def _section_call(task: str, section: str, *, cli_db: str | None = None) -> ReadCall:
+    return _read_call("task.show", {"task": task, "section": section}, cli_db)
+
+
+def _section_prefix(value: Any, budget: int) -> Any:
+    """Shorten a string or take a collection prefix within its serialized budget."""
+    if isinstance(value, str):
+        if budget < _size("…"):
+            return ""
+        low, high = 0, min(len(value) - 1, budget)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if _size(value[:middle] + "…") <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        return value[:low] + "…"
+
+    entries = value.items() if isinstance(value, dict) else enumerate(value)
+    prefix: list[tuple[str | int, Any]] = []
+    remaining = budget - 2  # Brackets or braces.
+    for key, item in entries:
+        overhead = bool(prefix) + (_size(key) + 1 if isinstance(key, str) else 0)
+        available = remaining - overhead
+        size = _size(item)
+        if size > available:
+            if available >= 2 and isinstance(item, (str, list, dict)):
+                prefix.append((key, _section_prefix(item, available)))
+            break
+        prefix.append((key, item))
+        remaining -= overhead + size
+    return dict(prefix) if isinstance(value, dict) else [item for _, item in prefix]
+
+
+def _fit_section_record(page: dict[str, Any], record: dict[str, Any]) -> None:
+    # Ledger record keys and scalars are small. Cut the largest variable fields
+    # first, retaining the record's top-level fields and the following cursor.
+    fields = sorted(((_size(value), key) for key, value in record.items()
+                     if isinstance(value, (str, list, dict)) and value), reverse=True)
+    truncated: list[str] = []
+    record["truncated_fields"] = truncated
+    for size, key in fields:
+        truncated.append(key)
+        budget = max(2, SECTION_BUDGET - (_size(page) - size))
+        prefix = _section_prefix(record[key], budget)
+        record[key] = prefix
+        if key == "files" and "files_total" in record:
+            record["files_truncated"] = len(prefix) < record["files_total"]
+        if _size(page) <= SECTION_BUDGET:
+            break
+
+
+def read_section(store: Ledger, task: str, section: str, *, limit: int | None = None,
+                 cursor: int | None = None) -> dict[str, Any]:
+    """Page stored records within the byte and count caps, in ledger order."""
+    queries: dict[str, tuple[int, str, Callable[[sqlite3.Row], Mapping[str, Any]]]] = {
+        "verification": (6, "SELECT evidence FROM verifications WHERE task = ? ORDER BY seq LIMIT ? OFFSET ?",
+                         lambda row: json.loads(row["evidence"])),
+        "assignments": (1, "SELECT * FROM assignments WHERE task = ? ORDER BY started_at, id LIMIT ? OFFSET ?",
+                        store._assignment_dict),
+        "findings": (3, "SELECT * FROM findings WHERE task = ? ORDER BY created_at, id LIMIT ? OFFSET ?", dict),
+        "events": (1, "SELECT * FROM events WHERE task = ? ORDER BY seq LIMIT ? OFFSET ?", store._event_dict),
+    }
+    if section not in queries:
+        raise ValueError(f"section must be one of {SECTIONS}")
+    limit = SECTION_LIMIT if limit is None else limit
+    cursor = 0 if cursor is None else cursor
+    _validate_page(cursor, limit, position="cursor")
+    min_version, sql, decode = queries[section]
+    records: list[dict[str, Any]] = []
+    page: dict[str, Any] = {"task": task, "section": section, "records": records, "next_cursor": None}
+    if section == "verification":
+        page["files_note"] = "Read the full file inventory with task show --detail full."
+    with store._transaction(write=False):
+        store._task(task)
+        version = store.connection.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()[0]
+        if version < min_version:
+            return page
+        rows = store.connection.execute(sql, (task, limit + 1, cursor))
+        row = next(rows, None)
+        while row is not None and len(records) < limit:
+            record = dict(decode(row))
+            if section == "verification":
+                files = record.get("files")
+                files_total = len(files) if isinstance(files, list) else 0
+                record["files_total"] = files_total
+                record["files_truncated"] = files_total > SECTION_FILE_LIMIT
+                if isinstance(files, list) and files_total > SECTION_FILE_LIMIT:
+                    record["files"] = files[:SECTION_FILE_LIMIT]
+            records.append(redact_value(record))
+            row = next(rows, None)
+            position = cursor + len(records)
+            page["next_cursor"] = position if row is not None else None
+            if _size(page) > SECTION_BUDGET:
+                if len(records) == 1:
+                    _fit_section_record(page, records[0])
+                else:
+                    records.pop()
+                    page["next_cursor"] = position - 1
+                break
+    return page
 
 
 def _now_priority(row: dict[str, Any]) -> int:
@@ -416,12 +560,14 @@ def _now_priority(row: dict[str, Any]) -> int:
     return 3 if row["status"] == "review" else 4
 
 
-def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, remaining: int) -> ListProjection:
+def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, remaining: int,
+         *, filters: dict[str, str | int | bool], cli_db: str | None) -> ListProjection:
     def envelope(count: int, *, stub: bool = False) -> ListProjection:
         omitted = remaining - count
-        return ListProjection(view_schema=VIEW_SCHEMA, gate="not_evaluated", gate_note=GATE_NOTE,
+        return ListProjection(view_schema=VIEW_SCHEMA, hipson_version=__version__, gate="not_evaluated", gate_note=GATE_NOTE,
                               kind=kind, tasks=[], truncated=omitted > 0 or stub, omitted=omitted,
-                              more={"kind": kind, "offset": offset + count} if omitted else None)
+                              more=_read_call(kind, {"detail": "compact", "offset": offset + count, **filters},
+                                              cli_db) if omitted else None)
 
     view = envelope(0)
     count = 0
@@ -438,7 +584,7 @@ def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, 
     elif tasks:
         first = tasks[0]
         stub = TaskStub(id=first["id"], status=first["status"], title=first["title"], too_large=True,
-                        hint=f"Read with task show --task {first['id']}")
+                        hint=_read_call("task.show", {"task": first["id"], "detail": "compact"}, cli_db)["cli"])
         view = envelope(1, stub=True)
         view["tasks"] = [stub]
         while stub["title"] and _size(view) > budget:
@@ -448,14 +594,41 @@ def _fit(tasks: list[TaskProjection], kind: ListKind, budget: int, offset: int, 
     return view
 
 
-def project_list(store: Ledger, *, kind: ListKind, project: str | None = None, include_terminal: bool = False,
-                 byte_budget: int | None = None, offset: int = 0, limit: int | None = None) -> ListProjection:
+def _validate_page(value: int, limit: int | None, *, position: str) -> None:
+    if not 0 <= value <= MAX_CURSOR:
+        raise ValueError(f"{position} must be between 0 and {MAX_CURSOR}")
+    if limit is not None and not 1 <= limit <= MAX_LIMIT:
+        raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
+
+
+def _list_page(rows: list[dict[str, Any]], *, kind: ListKind, project: str | None,
+               include_terminal: bool, byte_budget: int | None = None, offset: int = 0,
+               limit: int | None = None, cli_db: str | None = None) -> ListProjection:
     """Project tasks in board creation order or now attention order."""
-    if offset < 0 or (limit is not None and limit < 1):
-        raise ValueError("Projection offset must be nonnegative and limit must be positive")
-    rows = store.projection_rows(project=project, include_terminal=include_terminal)
     if kind == "task.now":
         rows.sort(key=lambda row: (_now_priority(row), row["id"]))
+    filters: dict[str, str | int | bool] = {}
+    if limit is not None:
+        filters["limit"] = limit
+    if project is not None:
+        filters["project"] = project
+    if include_terminal:
+        filters["all"] = True
     tasks = _project_rows(rows[offset:None if limit is None else offset + limit])
     return _fit(tasks, kind, LIST_BUDGETS[kind] if byte_budget is None else byte_budget,
-                offset, max(0, len(rows) - offset))
+                offset, max(0, len(rows) - offset), filters=filters, cli_db=cli_db)
+
+
+def project_list(store: Ledger | None, *, kind: ListKind, project: str | None = None, include_terminal: bool = False,
+                 byte_budget: int | None = None, offset: int = 0, limit: int | None = None,
+                 cli_db: str | None = None) -> ListProjection:
+    _validate_page(offset, limit, position="offset")
+    rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
+    return _list_page(rows, kind=kind, project=project, include_terminal=include_terminal,
+                      byte_budget=byte_budget, offset=offset, limit=limit, cli_db=cli_db)
+
+
+def resume_inputs(store: Ledger | None, *, project: str | None, include_terminal: bool,
+                  cli_db: str | None = None) -> tuple[ListProjection, list[dict[str, Any]]]:
+    rows = store.projection_rows(project=project, include_terminal=include_terminal) if store else []
+    return _list_page(rows, kind="task.now", project=project, include_terminal=include_terminal, cli_db=cli_db), rows
