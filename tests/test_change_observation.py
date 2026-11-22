@@ -17,6 +17,7 @@ import pytest
 from hipson import ledger, mcp_server, task_observation
 from hipson.task_observation import Caps, classify, findings, take
 from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_git
+from tests.test_ledger import assert_strict_schema
 from tests.test_task_verification import _project
 
 
@@ -147,6 +148,30 @@ def test_ignored_writes_that_could_run_later_keep_their_finding(tmp_path):
     assert task_observation._runs_later(str(root), "gone/.claude/x", "deleted") is True
     assert task_observation._runs_later(str(root), "gone/report.html", "deleted") is False
     assert task_observation._runs_later(str(root), "missing.html", "created") is True  # Unknown: keep.
+
+
+def test_tracked_files_and_scripts_are_never_ignored_output(tmp_path):
+    root = init_git_repo(tmp_path)
+    (root / ".gitignore").write_text("/dist/\n*.ps1\n")
+    (root / "dist").mkdir()
+    (root / "dist/app.js").write_text("tracked build")
+    run_git(root, "add", ".gitignore")
+    run_git(root, "add", "-f", "dist/app.js")
+    run_git(root, "commit", "-qm", "tracked output")
+
+    def change(root):
+        (root / "dist/app.js").write_text("edited by the worker")  # Tracked, though the pattern matches it.
+        (root / "dist/new.js").write_text("fresh output")
+        (root / "deploy.ps1").write_text("Write-Host hi")  # A script, even without exec bits (Windows).
+
+    record = _observe(root, change, scope=("src",))
+    attribution = {item["path"]: item["attribution"] for item in record["paths"]}
+    assert attribution["dist/new.js"] == "ignored"
+    assert attribution["dist/app.js"] == "out_of_scope" and attribution["deploy.ps1"] == "out_of_scope"
+    assert {item["location"] for item in findings(record, "A-0012")} == {"deploy.ps1", "dist/app.js"}
+    # A repository whose HEAD cannot be read downgrades nothing.
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/missing\n")
+    assert task_observation._git_ignored(str(root), ["dist/new.js"]) == set()
 
 
 def test_ignored_sensitive_and_hashed_paths_still_raise_a_finding(tmp_path):
@@ -431,6 +456,7 @@ def test_task_run_observe_records_changes_and_findings_end_to_end(tmp_path):
         changes = view["assignments"][0]["changes"]
         assert changes["counts"]["out_of_scope"] == {"created": 1, "modified": 1, "deleted": 0}
         assert changes["counts"]["ignored"] == {"created": 1, "modified": 0, "deleted": 0}
+        assert_strict_schema("task.schema.json", view)  # The published contract knows `ignored`.
         assert all(item["severity"] == "major" for item in view["findings"])
         assert sorted(item["title"] for item in view["findings"]) == [
             f"Observed 1 created path(s) outside the scope of assignment {view['assignments'][0]['id']}",

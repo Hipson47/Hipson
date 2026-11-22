@@ -3,7 +3,8 @@
 ## 1.8.1 - unreleased
 
 A stabilization release from the first real project built with 1.8.0 and an overnight hardening run.
-The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
+The ledger schema stays at 12. The one contract change is additive: a change observation may carry an
+`ignored` count group and `ignored` path attribution, both in `schemas/task.schema.json`.
 
 ### Fixes
 
@@ -21,7 +22,8 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
   excludes. It never applies to read-only assignments, sensitive or redacted paths, incomplete
   snapshots, runs that changed a `.gitignore`, or paths that could run later: executable files and links,
   agent, editor, hook and CI configuration (`.claude/`, `.vscode/`, `.husky/`, `.github/`, `.mcp.json`,
-  `conftest.py` and similar).
+  `conftest.py` and similar), script and binary types (`.sh`, `.ps1`, `.bat`, `.exe`, ...), and files
+  tracked in `HEAD` that happen to match an ignore pattern.
 - **Native Codex runs record the model.** `hipson agent exec --runtime codex` now reads the model
   from the run's own rollout file into the meta file's `models`.
 - **Worker results, findings and event summaries no longer store secrets that activity already
@@ -29,7 +31,9 @@ The ledger schema stays at 12, and the CLI and MCP contracts are unchanged.
   read) or the value of a secret-named environment variable (`*_TOKEN`, `*_API_KEY`, `*_PASSWORD`,
   ...) in a worker result, a finding or a resolution note was written to the ledger as is. That
   includes the event summaries that quote them. Values shorter than 8 characters are not treated as
-  secrets. Records written before 1.8.1 are not rewritten.
+  secrets, and neither are path values: names ending in `_FILE`, `_DIR`, `_DIRECTORY` or `_PATH`, or
+  values that are existing absolute paths (`GOOGLE_APPLICATION_CREDENTIALS`). Records written
+  before 1.8.1 are not rewritten.
 - **A busy ledger no longer kills or loses a worker.** When another process held the ledger write lock past
   SQLite's 10-second busy timeout (for example a lead opening or closing a task on a large project on a slow
   filesystem: 10-13 s to fingerprint 421 files on `/mnt/c` under WSL), the supervisor treated the failed

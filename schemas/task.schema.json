@@ -282,7 +282,8 @@
           "properties": {
             "in_scope": {"$ref": "#/$defs/change_counts"},
             "out_of_scope": {"$ref": "#/$defs/change_counts"},
-            "unattributed": {"$ref": "#/$defs/change_counts"}
+            "unattributed": {"$ref": "#/$defs/change_counts"},
+            "ignored": {"$ref": "#/$defs/change_counts"}
           }
         },
         "paths": {
@@ -292,7 +293,7 @@
             "properties": {
               "path": {"type": "string"},
               "change": {"enum": ["created", "modified", "deleted"]},
-              "attribution": {"enum": ["in_scope", "out_of_scope", "unattributed"]},
+              "attribution": {"enum": ["in_scope", "out_of_scope", "unattributed", "ignored"]},
               "evidence": {"enum": ["content", "metadata", "presence"]}
             }
           }

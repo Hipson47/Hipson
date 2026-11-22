@@ -432,7 +432,10 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   later in the lead's context: executable files and links, and agent, editor, hook and CI configuration
   (`.claude/`, `.codex/`, `.cursor/`, `.vscode/`, `.idea/`, `.husky/`, `.githooks/`, `.direnv/`,
   `.devcontainer/`, `.github/`, `.gitlab/`, `.circleci/`, `.agents/`, `.mcp.json`, `.gitattributes`,
-  `.gitmodules`, `.pre-commit-config.yaml`, `.envrc`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`). Any observed creation,
+  `.gitmodules`, `.pre-commit-config.yaml`, `.envrc`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`), script and binary types
+  (`.sh`, `.bash`, `.zsh`, `.ps1`, `.psm1`, `.bat`, `.cmd`, `.exe`, `.com`, `.dll`, `.so`, `.dylib`; Windows has no
+  exec bits), and files tracked in `HEAD` that match an ignore pattern. A repository whose `HEAD` cannot be
+  read downgrades nothing. Any observed creation,
   modification, or deletion of a `.gitignore` anywhere in the snapshot disables ignore classification for
   the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
   stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has

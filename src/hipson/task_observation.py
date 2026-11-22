@@ -289,13 +289,17 @@ EXECUTABLE_CONFIG_DIRS = frozenset({".claude", ".codex", ".cursor", ".vscode", "
                                     ".direnv", ".devcontainer", ".github", ".gitlab", ".circleci", ".agents"})
 EXECUTABLE_CONFIG_NAMES = frozenset({".mcp.json", ".gitattributes", ".gitmodules", ".pre-commit-config.yaml",
                                      ".envrc", "conftest.py", "sitecustomize.py", "usercustomize.py"})
+# Script and binary types, by name: Windows has no exec bits to read.
+EXECUTABLE_SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd", ".exe", ".com",
+                                 ".dll", ".so", ".dylib"})
 
 
 def _runs_later(root: str, path: str, change: str) -> bool:
     """Whether an ignored path could still change what runs later: execution-capable config, or an executable or
     linked file. Such writes keep their out-of-scope finding even when Git ignores them."""
     parts = [part.casefold() for part in path.split("/")]
-    if any(part in EXECUTABLE_CONFIG_DIRS for part in parts[:-1]) or parts[-1] in EXECUTABLE_CONFIG_NAMES:
+    if (any(part in EXECUTABLE_CONFIG_DIRS for part in parts[:-1]) or parts[-1] in EXECUTABLE_CONFIG_NAMES
+            or os.path.splitext(parts[-1])[1] in EXECUTABLE_SUFFIXES):
         return True
     if change == "deleted":
         return False
@@ -324,13 +328,25 @@ def _git_ignored(root: str, paths: Sequence[str]) -> set[str]:
             subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(git_dir)], cwd=directory,
                            env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                            timeout=GIT_IGNORE_TIMEOUT, check=True)
+            # check-ignore --no-index also matches tracked files; a tracked file is source, never ignored output.
+            in_head: set[str] = set()
+            if os.path.lexists(os.path.join(root, ".git")):
+                tracked = subprocess.run(["git", "-C", root, "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+                                         cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, timeout=GIT_IGNORE_TIMEOUT, check=False)
+                if tracked.returncode != 0:
+                    return set()  # A repository whose HEAD cannot be read: nothing is downgraded.
+                in_head = {os.fsdecode(name) for name in tracked.stdout.split(b"\0") if name}
             result = subprocess.run(["git", f"--git-dir={git_dir}", f"--work-tree={root}", "-c",
                                      f"core.excludesFile={empty}", "check-ignore", "--no-index", "-z", "--stdin"],
                                     cwd=directory, env=env, input=bytes(data), stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, timeout=GIT_IGNORE_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError):
         return set()
-    return {os.fsdecode(path[2:]) for path in result.stdout.split(b"\0") if path.startswith(b"./")} if result.returncode == 0 else set()
+    if result.returncode != 0:
+        return set()
+    return {name for path in result.stdout.split(b"\0") if path.startswith(b"./")
+            and (name := os.fsdecode(path[2:])) not in in_head}
 
 
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],

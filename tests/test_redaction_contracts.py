@@ -103,7 +103,8 @@ def test_worker_text_masks_secret_env_values_patterns_and_cut_key_blocks_exactly
             "id=keyidvalue9 f=secretpath1 n=notasecret1 m=notasecret2 s=1234567 path=/usr/bin:/bin l=lowercase77")
     assert redact_worker_text(text, environ) == (
         f"t={REDACTION} k={REDACTION} p={REDACTION} q={REDACTION} c={REDACTION} cs={REDACTION} "
-        f"id={REDACTION} f={REDACTION} n=notasecret1 m=notasecret2 s=1234567 path=/usr/bin:/bin l={REDACTION}")
+        f"id={REDACTION} f=secretpath1 n=notasecret1 m=notasecret2 s=1234567 path=/usr/bin:/bin l={REDACTION}")
+    # APP_SECRET_FILE names a file (the Docker *_FILE convention): its value is a path, not the secret.
     # Longest first: a secret that contains another is masked whole, not left as a fragment.
     nested = {"A_TOKEN": "abcdefgh", "B_TOKEN": "abcdefgh-ijkl"}
     assert redact_worker_text("x abcdefgh-ijkl y abcdefgh", nested) == f"x {REDACTION} y {REDACTION}"
@@ -111,6 +112,12 @@ def test_worker_text_masks_secret_env_values_patterns_and_cut_key_blocks_exactly
     assert redact_worker_text(cut, {}) == f"key: {REDACTION}"
     assert redact_worker_text("plain text, nothing secret", {}) == "plain text, nothing secret"
     assert redact_worker_text("Authorization: Bearer abcdefghijklmnop", {}) != "Authorization: Bearer abcdefghijklmnop"
+    credentials = Path(__file__)  # An existing absolute path, like GOOGLE_APPLICATION_CREDENTIALS holds.
+    paths = {"CREDENTIALS_DIRECTORY": "/run/credentials/app.service", "PASSWORD_STORE_DIR": "/home/u/.pass",
+             "SVC_TOKEN_FILE": "/etc/svc/token", "X_SECRET_PATH": "/srv/secret.bin",
+             "GOOGLE_APPLICATION_CREDENTIALS": str(credentials), "MISSING_CREDENTIALS": "/no/such/credentials"}
+    text = " ".join(paths.values())
+    assert redact_worker_text(text, paths) == " ".join([*list(paths.values())[:5], REDACTION])
     with patch.dict(os.environ, {"ENV_TOKEN": "fromprocessenv1"}):
         assert redact_worker_text("v=fromprocessenv1") == f"v={REDACTION}"  # Defaults to this process.
 
