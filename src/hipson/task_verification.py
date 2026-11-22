@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shlex
 import sqlite3
 import stat
@@ -555,12 +556,17 @@ def timeout_refusal(record: dict[str, Any], db: Path, *, command: list[str] | No
     return ledger.LedgerError(f'Check hit the {timeout:g}s per-check timeout', code="verify.check_timeout", fix=[retry])
 
 
+HEAD_CHANGE = re.compile(r"HEAD before=\S* after=\S*")
+
+
 def check_refusal(record: dict[str, Any], db: Path, *, command: list[str] | None = None,
                   lead: str | None = None) -> ledger.LedgerError | None:
     if 'timeout_seconds' in record:
         return timeout_refusal(record, db, command=command, lead=lead)
+    # finish() writes the HEAD entry as exactly "HEAD before=REV after=REV"; a path entry always carries a
+    # ": state" suffix, so a file named like the HEAD entry cannot imitate it.
     if record['error'] == 'HEAD moved while fingerprinting' or any(
-            change.startswith('HEAD before=') for change in record['changes']):
+            HEAD_CHANGE.fullmatch(change) for change in record['changes']):
         retry = verify_call(record['task'], lead or task_lead(db, record['task']), db, command=command)
         return ledger.LedgerError('HEAD moved during verification; verify the current HEAD',
                                   code="verify.head_moved", fix=[retry])

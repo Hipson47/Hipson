@@ -80,6 +80,7 @@ TASK_RESULT_SCHEMA: dict[str, Any] = {
         "risks": {"type": "array", "items": {"type": "string"}},
     },
 }
+TERMINAL_STATUSES = frozenset({"done", "cancelled"})
 TRANSITIONS = {
     "open": {"in_progress", "cancelled"},
     "in_progress": {"blocked", "review", "cancelled"},
@@ -1696,8 +1697,10 @@ class Ledger:
             raise LedgerError(f"Invalid task transition for {task}: {previous} -> {to} (allowed: {allowed}){hint}",
                 code="status.transition_not_allowed", fix=[
                     read_call("task.show", {"task": task, "detail": "compact"}, str(self.path)),
+                    # Terminal targets are lead decisions (cancelled cannot be undone; done runs the gate): the
+                    # fix offers only the non-terminal moves and leaves the rest to the shown task.
                     *(read_call("task.status", {"task": task, "to": target, "actor": current["lead"], "approved": True},
-                                str(self.path)) for target in sorted(TRANSITIONS[previous])),
+                                str(self.path)) for target in sorted(TRANSITIONS[previous] - TERMINAL_STATUSES)),
                 ])
         refs: list[str] = []
         view = self._view(task)

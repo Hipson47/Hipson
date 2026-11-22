@@ -244,11 +244,11 @@ def test_invalid_transitions_name_allowed_targets_and_the_close_hint(tmp_path):
             refusal = _error(lambda: store.set_status(task, to="done", actor="invoker"),
                    f"Invalid task transition for {task}: open -> done (allowed: cancelled, in_progress); "
                    f"hipson task close --task {task} verifies and closes in one step", "status.transition_not_allowed")
-            assert refusal.fix == _transition_fixes(task, store.path, ["cancelled", "in_progress"])
+            assert refusal.fix == _transition_fixes(task, store.path, ["in_progress"])
             refusal = _error(lambda: store.set_status(task, to="review", actor=LEAD),
                    f"Invalid task transition for {task}: open -> review (allowed: cancelled, in_progress)",
                    "status.transition_not_allowed")
-            assert refusal.fix == _transition_fixes(task, store.path, ["cancelled", "in_progress"])
+            assert refusal.fix == _transition_fixes(task, store.path, ["in_progress"])
             store.set_status(task, to="cancelled", actor=LEAD, summary="dropped")
             assert store.events(task)[-1]["summary"] == "open -> cancelled: dropped"
             refusal = _error(lambda: store.set_status(task, to="open", actor=LEAD), "(allowed: none (terminal))",

@@ -1338,8 +1338,9 @@ calls in compact reads. An empty array means the refusal supplies no call. A gat
 with several reasons uses the first reason's code in the JSON body. In Python,
 `CloseRefusedError.reason_codes` follows the order of `CloseRefusedError.reasons`.
 CLI `task close` and `task flow` also keep their structured command results on
-stdout with `--json`. MCP close and verification refusals that have a result
-include it in `structuredContent`. Flow run states (such as `worker_failed`) and
+stdout with `--json`. MCP close and verification refusals that recorded a result
+keep `isError: false` and the result as the first text content, as before 1.8, and
+add the refusal envelope as a second text content. Flow run states (such as `worker_failed`) and
 check exit statuses carry evidence. Rejected specs and resume requests emit the
 refusal envelope. The private verifier accepts a single stderr JSON document
 from its child, limited to documented codes the child can emit.

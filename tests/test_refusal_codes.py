@@ -387,7 +387,7 @@ def test_fix_missing_snapshot_review(tmp_path):
         project, db, store = work
         task = _task(work, review="required")
         result = _call(project, "task.close", ledger_db=db, task=task, approved=True)
-        assert result["isError"] is True and result["structuredContent"]["closed"] is False
+        assert result["isError"] is False and json.loads(result["content"][0]["text"])["closed"] is False
         body = json.loads(result["content"][1]["text"])
         assert body["code"] == "close.review_required"
         verify, review = body["fix"]
@@ -435,11 +435,12 @@ def test_fix_invalid_transition(tmp_path):
     with _work(tmp_path) as work:
         project, db, _ = work
         task = _task(work, start=False)
-        show, cancel, start = _refusal(_review_transition(project, db, task), "status.transition_not_allowed",
-                                       ["task.show", "task.status", "task.status"])
+        show, start = _refusal(_review_transition(project, db, task), "status.transition_not_allowed",
+                               ["task.show", "task.status"])
         assert show["arguments"] == {"task": task, "detail": "compact"}
         assert task in _follow(project, show)
-        assert [call["arguments"]["to"] for call in (cancel, start)] == ["cancelled", "in_progress"]
+        # No ready-made call to a terminal status: cancelled is irreversible and stays the lead's decision.
+        assert start["arguments"]["to"] == "in_progress"
         assert start["arguments"]["actor"] == LEAD
         _follow(project, start)
         assert _cli(project, db, "verify", "--task", task).returncode == 0
@@ -705,8 +706,8 @@ def _check_timeout(work, surface):
     timeout = 1 if surface == "mcp" else 0.4
     if surface == "mcp":
         result = _call(project, "task.verify", ledger_db=db, task=task, timeout=timeout, approved=True)
-        assert result["isError"] is True
-        records = result["structuredContent"]["records"]
+        assert result["isError"] is False
+        records = json.loads(result["content"][0]["text"])["records"]
         verify, = json.loads(result["content"][1]["text"])["fix"]
     else:
         proc = _cli(project, db, surface, "--task", task, "--timeout", "0.4")
@@ -733,3 +734,45 @@ def test_exit_124_before_deadline_has_no_timeout_hint(tmp_path):
         _refusal(proc, "close.checks_failed", ["task.show", "task.verify"], rc=124)
         record, = json.loads(proc.stdout)
         assert "timeout_seconds" not in record and "timeout_hint" not in record
+
+
+def test_fix_flow_retry_without_resume_points_at_the_task_and_resume(tmp_path):
+    """S4b review: the resume_required fix must address --retry without --resume, not just re-check the spec."""
+    project, db = _repo(tmp_path), tmp_path / "ledger.sqlite"
+    spec = _spec(tmp_path, project, close_to="done")
+    proc, result = _flow(project, db, spec)
+    assert proc.returncode == 0, proc.stderr
+    task = result["task"]
+    now, resume = _refusal(_cli(project, db, "flow", "--spec", str(spec), "--retry"),
+                           "flow.resume_required", ["task.now", "task.flow"], rc=64)
+    assert task in _follow(project, now)
+    assert resume["arguments"] == {"spec": str(spec), "retry": True}
+    assert shlex.split(resume["cli"])[-3:-1] == ["--resume", "TASK"] or "--resume TASK" in resume["cli"]
+    assert json.loads(_follow(project, resume, TASK=task))["task"] == task
+
+
+def test_verify_fix_never_replays_a_redacted_or_truncated_command(tmp_path):
+    """S4b review: a stored command is redacted per argument and cut at 4,096 characters; replaying it runs other argv."""
+    from hipson.task_calls import verify_call
+
+    db = tmp_path / "ledger.sqlite"
+    plain = verify_call("T-0001", LEAD, db, command=["pytest", "-q"], explicit=True)
+    assert plain["arguments"]["command"] == ["pytest", "-q"] and "COMMAND" not in plain["cli"]
+    for command in (["run", "--token=[REDACTED]"], ["run", "x" * 4096]):
+        call = verify_call("T-0001", LEAD, db, command=command, explicit=True)
+        assert "command" not in call["arguments"], call
+        assert shlex.split(call["cli"])[-2:] == ["--", "COMMAND"]
+
+
+def test_head_moved_code_comes_from_the_recorded_revision_not_a_path_name(tmp_path):
+    """S4b review: a file named 'HEAD before=...' must not make a refusal claim that HEAD moved."""
+    from hipson import task_verification
+
+    db = tmp_path / "ledger.sqlite"
+    with closing(ledger.Ledger(db)) as store:
+        task = store.open_task(project=tmp_path, title="Candidate", objective="Head", lead=LEAD)["id"]
+    forged = {"task": task, "error": None, "changes": ["HEAD before=1 after=2: missing before=file:1"]}
+    assert task_verification.check_refusal(forged, db, lead=LEAD) is None
+    moved = task_verification.check_refusal({**forged, "changes": ["HEAD before=abc after=def"]}, db, lead=LEAD)
+    assert moved is not None and moved.code == "verify.head_moved"
+    assert moved.fix[0]["tool"] == "task.verify"

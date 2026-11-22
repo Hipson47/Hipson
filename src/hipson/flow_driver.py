@@ -981,8 +981,15 @@ def command(args: argparse.Namespace) -> int:
     except FlowError as exc:
         cli_db = str(db) if db is not None else args.db
         if exc.state == 'invalid_config':
-            exc.code = 'flow.spec_invalid' if not args.retry or args.resume else 'flow.resume_required'
-            exc.fix = [read_call('task.flow', {'spec': args.spec, 'check': True}, cli_db)]
+            if not args.retry or args.resume:
+                exc.code = 'flow.spec_invalid'
+                exc.fix = [read_call('task.flow', {'spec': args.spec, 'check': True}, cli_db)]
+            else:
+                # --retry continues a flow: find its task, then resume it with the same spec.
+                exc.code = 'flow.resume_required'
+                exc.fix = [read_call('task.now', {'detail': 'compact', 'all': True}, cli_db),
+                           read_call('task.flow', {'spec': args.spec, 'retry': True}, cli_db,
+                                     template=('--resume', 'TASK'))]
         elif args.resume and any(reason.startswith(('spec differs from', 'spec project ')) for reason in exc.reasons):
             exc.code = 'flow.resume_mismatch'
             exc.fix = [read_call('task.flow', {'resume': args.resume}, cli_db, template=('--spec', 'MATCHING_SPEC'))]

@@ -63,6 +63,9 @@ def read_call(tool: str, arguments: Mapping[str, CallValue], cli_db: str | None,
     return {"tool": tool, "arguments": dict(arguments), "cli": shlex.join(command)}
 
 
+REPLAY_ARG_LIMIT = 4096  # task_verification stores each argument through safe_text(arg, 4096).
+
+
 def task_lookup_calls(db: Path) -> list[ReadCall]:
     return [read_call("task.list", {}, str(db)), read_call("task.now", {"detail": "compact"}, str(db))]
 
@@ -71,8 +74,16 @@ def project_fix_calls(task: str, db: Path) -> list[ReadCall]:
     return [read_call("task.show", {"task": task}, str(db)), read_call("task.run", {"help": True}, str(db))]
 
 
+def replayable(command: list[str] | None) -> list[str] | None:
+    """A stored command whose arguments were redacted or cut is not the argv that ran; never replay it."""
+    if not command or any("[REDACTED]" in arg or len(arg) >= REPLAY_ARG_LIMIT for arg in command):
+        return None
+    return command
+
+
 def verify_call(task: str, lead: str, db: Path, *, command: list[str] | None = None,
                 timeout: float | None = None, explicit: bool = False) -> ReadCall:
+    command = replayable(command)
     args: dict[str, CallValue] = {"task": task, "actor": lead, "approved": True}
     if command:
         args["command"] = command

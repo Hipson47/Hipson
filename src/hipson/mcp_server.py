@@ -673,7 +673,9 @@ def _call_tool(params: object, *, project: Path) -> dict[str, Any]:
         raise SystemExit("tools/call arguments must be an object")
     payload = _tool_payload(name, arguments, project=project)
     if name in ("task.close", "task.verify") and isinstance(payload, dict) and isinstance(body := payload.get("refusal"), dict):
-        return {**_error_content(body["message"], body), "structuredContent": payload}
+        # The call recorded evidence, so it is not an MCP error: keep the result first, add the envelope.
+        return {"content": [{"type": "text", "text": json.dumps(payload, ensure_ascii=False)},
+                            {"type": "text", "text": json.dumps(body, ensure_ascii=True)}], "isError": False}
     compact = name in _TASK_READS and (arguments.get("detail") == "compact" or "section" in arguments)
     text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)
     return {"content": [{"type": "text", "text": text}], "isError": False}
