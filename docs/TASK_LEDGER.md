@@ -433,6 +433,10 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
   stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has
   entries. Only `out_of_scope` paths raise findings.
+- Limitation: ignored paths, like the excluded directories (`.venv`, `venv`, `node_modules`, tool caches), are
+  not part of the verified fingerprint either. If a declared check reads a git-ignored file (a local config, a
+  vendored module), a builder can change what the check executes without a finding. Name such files in a
+  check argument or `spec.protected`, or keep them tracked.
 - `out_of_scope` changes raise one `major` finding per kind (created, modified, deleted) on the task,
   listing the paths. Like any major finding it blocks `done` until it is resolved: `fixed` after reverting,
   or `wontfix` with a reason when the change was expected. An `observed` event records the counts and a
@@ -931,6 +935,13 @@ also redact legacy rows without rewriting them. Project paths and write scope
 paths containing secret-shaped text are rejected: masking a coordination path
 would change which tree or files its claims protect. Read-only scope labels can
 be masked safely. Redaction is best effort; never supply real credentials.
+
+Writers hold SQLite's write lock while they fingerprint the project (opening a task, setting checks, changing
+status, closing). On a large tree or a slow filesystem this can take longer than the 10-second busy timeout
+(measured: 9.6 to 13 s for 421 files on `/mnt/c` under WSL, 0.05 s on ext4), and other writers then fail
+with `database is locked`. Since 1.8.1 a running worker's supervisor tolerates this: it skips busy activity
+heartbeats and retries its final record. Interactive commands report the error and can be repeated. Keep
+WSL projects on the Linux filesystem.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
 (database version 6; artifact schema version `1.0`). Writes migrate existing
