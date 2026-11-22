@@ -179,7 +179,8 @@ under a one-second batch deadline, separately from the SQLite snapshot.
 Stale tasks have at least seven full days since their latest assignment start or end, task event,
 or verification. For compact `task now` and `lead resume`, set `--stale-days N` or the MCP integer
 `stale_days` to a value from 1 to 3650. Continuations retain that threshold. Assignment heartbeats
-still appear in `last_activity_at` and do not reset task staleness. Staleness uses recorded
+still appear in `last_activity_at` and do not reset task staleness, so a task whose only worker has
+run for longer than the threshold without a ledger write is flagged too; its action is a read. Staleness uses recorded
 timestamps and never evaluates checks or fingerprints the project.
 
 Character limits count Unicode code points, including the ellipsis. Each argv element has a 200-character
@@ -274,12 +275,16 @@ directory or Git worktree. Cleanup checks the resolved path and its descendants 
 registered project paths, including paths that are already absent. It reports task IDs, projects
 and statuses, plus each task's assignments and their current claim paths. Use `--json` for compact
 JSON on stdout in place of the text report. With no ledger or no matches, the report has an empty
-`tasks` list.
+`tasks` list. Only tasks registered at the path or below it match; a task registered at a parent
+directory is not reported. The report lists at most 50 tasks and counts the rest in
+`omitted_tasks`; the refusal suggests at most 30 calls and says how many it left out.
 
 Cleanup exits 1 with `cleanup.tasks_open` if any matching task is nonterminal or any assignment
 is active, including active assignments on cancelled tasks. Inspect the suggested reads, then
-decide how to resolve the blockers. The suggested close and cancel commands are templates. For
-cancellation, replace `REASON` with the lead's explanation in `--summary`. A blocked task must
+decide how to resolve the blockers. The suggested close and cancel commands are templates: their
+MCP arguments omit `approved` and the cancellation summary on purpose, because closing or
+cancelling is the lead's decision. For cancellation, replace `REASON` with the lead's explanation
+in `--summary`. A blocked task must
 return to `in_progress` before it can close. Cleanup uses a sidecar-free read of the ledger.
 Run directory removal separately after reviewing the report. A later ledger write can change
 the result.

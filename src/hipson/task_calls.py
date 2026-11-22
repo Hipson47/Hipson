@@ -42,6 +42,12 @@ class CleanupTask(TypedDict):
 class CleanupReport(TypedDict):
     project: str
     tasks: list[CleanupTask]
+    omitted_tasks: int
+
+
+# A path such as / or a home directory can match many tasks: keep the report and the fix list bounded.
+CLEANUP_TASK_LIMIT = 50
+CLEANUP_FIX_LIMIT = 30
 
 
 # Only codes the private verification command can emit cross this boundary.
@@ -110,7 +116,7 @@ def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError 
 
     require_text(project, "Cleanup project path")
     root = str(Path(project).expanduser().resolve())
-    report = CleanupReport(project=root, tasks=[])
+    report = CleanupReport(project=root, tasks=[], omitted_tasks=0)
     if not db.exists():
         return redact_value(report), None
 
@@ -134,8 +140,12 @@ def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError 
                     id=item["id"], role=item["role"], mode=item["mode"], status=item["status"], claims=[]))
                 if item["path"] is not None:
                     assignment["claims"].append(item["path"])
-            report["tasks"].append(CleanupTask(
-                id=task["id"], project=task["project"], status=task["status"], assignments=list(assignments.values())))
+            if len(report["tasks"]) < CLEANUP_TASK_LIMIT:
+                report["tasks"].append(CleanupTask(
+                    id=task["id"], project=task["project"], status=task["status"],
+                    assignments=list(assignments.values())))
+            else:
+                report["omitted_tasks"] += 1
 
             is_open = task["status"] not in TERMINAL_STATUSES
             active_ids = [item["id"] for item in assignments.values() if item["status"] == "active"]
@@ -152,9 +162,12 @@ def cleanup_project(db: Path, project: str) -> tuple[CleanupReport, LedgerError 
             nonterminal += is_open
             active += len(active_ids)
 
+    fix = (reads + templates)[:CLEANUP_FIX_LIMIT]
+    omitted_fix = len(reads) + len(templates) - len(fix)
     refusal = LedgerError(
-        f"Cleanup refused: {nonterminal} nonterminal task(s), {active} active assignment(s).",
-        code="cleanup.tasks_open", fix=reads + templates,
+        f"Cleanup refused: {nonterminal} nonterminal task(s), {active} active assignment(s)."
+        + (f" {omitted_fix} more suggested call(s) omitted; narrow the path or read task now." if omitted_fix else ""),
+        code="cleanup.tasks_open", fix=fix,
     ) if nonterminal or active else None
     return redact_value(report), refusal
 

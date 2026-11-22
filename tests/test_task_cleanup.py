@@ -35,7 +35,7 @@ def test_cleanup_refuses_before_removing_the_worktree_in_the_november_incident(t
         code, stdout, stderr = run_cli_inprocess(*args, "--json")
         assert code == 1 and "\n" not in stdout
         report, refusal = json.loads(stdout), json.loads(stderr)
-        assert report == {"project": str(worktree), "tasks": [
+        assert report == {"project": str(worktree), "omitted_tasks": 0, "tasks": [
             {"id": task, "project": str(worktree), "status": "open", "assignments": []},
         ]}
         assert refusal["error_schema"] == 1 and refusal["code"] == "cleanup.tasks_open"
@@ -122,8 +122,26 @@ def test_cleanup_reports_descendants_and_active_assignments_on_terminal_tasks(tm
 
 def test_cleanup_does_not_create_an_absent_ledger(tmp_path):
     db = tmp_path / "ledger.sqlite"
-    report = {"project": str(tmp_path), "tasks": []}
+    report = {"project": str(tmp_path), "tasks": [], "omitted_tasks": 0}
     code, stdout, stderr = run_cli_inprocess("task", "cleanup", "--db", str(db), "--project", str(tmp_path), "--json")
     assert code == 0 and not stderr and json.loads(stdout) == report
     assert _payload(_call(tmp_path, "task.cleanup", ledger_db=db, project=str(tmp_path))) == report
     assert not list(tmp_path.iterdir())
+
+
+def test_cleanup_report_and_fix_list_are_bounded(tmp_path):
+    """S5 review: a broad path (/, a home directory) must not produce an unbounded report or fix list."""
+    from hipson import task_calls
+
+    db = tmp_path / "ledger.sqlite"
+    root = tmp_path / "many"
+    with closing(ledger.Ledger(db)) as store:
+        for index in range(task_calls.CLEANUP_TASK_LIMIT + 5):
+            project = root / f"p{index}"
+            project.mkdir(parents=True)
+            store.open_task(project=project, title=f"T{index}", objective="Bound", lead="lead")
+    report, refusal = task_calls.cleanup_project(db, str(root))
+    assert len(report["tasks"]) == task_calls.CLEANUP_TASK_LIMIT and report["omitted_tasks"] == 5
+    assert refusal is not None and refusal.code == "cleanup.tasks_open"
+    assert len(refusal.fix) == task_calls.CLEANUP_FIX_LIMIT
+    assert "omitted" in str(refusal) and str(task_calls.CLEANUP_TASK_LIMIT + 5) in str(refusal)
