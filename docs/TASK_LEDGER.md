@@ -169,6 +169,7 @@ page. Treat the marked values as evidence rather than instructions.
 | Current freshness | `stale` means HEAD moved, a builder finished after verification, or the record says the project changed during verification. Otherwise, `not_checked` means HEAD was observable and `unknown` means HEAD was unavailable. `head_matches` is null when HEAD or the recorded revision is unavailable. |
 | Review | `assignment_id` and the latest reviewer attempt's state. States are `not_required`, `missing`, `pending`, `ineligible`, `incomplete`, `live`, `changed`, `unverified` (a snapshot review exists but no lead verification is recorded for it), and `recorded_snapshot`. An eligible reviewer is independent of the lead and builders, ran in read-only mode, and started after the latest finished builder and recorded verification. |
 | Assignments | The newest eight in chronological order and an `omitted_assignments` count. Each has `id`, `role`, `actor`, `status`, `ack_state`, `started_at`, `ended_at`, `result_status`, and the structured result's one-line `summary`. A successful assignment outcome displays as `completed`. |
+| Usage | `usage` summarizes all assignment attempts, repair rounds, reported tokens and elapsed time, including assignments omitted from the compact list. |
 | Findings | `open_findings` counts all four severities. `blocking_findings` and `major_findings` each list at most 10 open IDs. Use `open_findings` for their total counts. |
 
 The projection reports `freshness_source: "recorded"` and a `freshness_note`. It only observes HEAD
@@ -199,6 +200,44 @@ terminal tasks or project any single task by ID.
 
 The UTF-8 budgets are 32,000 bytes for board, 48,000 for now, and 64,000 for resume. The CLI and MCP
 use `task_projection.dumps` for compact JSON. The CLI writes that JSON without a trailing newline.
+
+### Usage per task and assignment
+
+`task show` in full and compact detail and `task show --section assignments` include the same task
+`usage` object. The section counts all assignments on every page. These are display fields. Full
+detail adds only the task and assignment `usage` fields to its existing JSON and a usage line to
+CLI text. Usage does not evaluate gates, change statuses or run checks. Reading usage requires no
+working-tree fingerprint, and compact size and paging limits still apply.
+
+- `attempts` counts every assignment by role, including active attempts. An absent role has zero
+  attempts. `repair_rounds` counts builder assignments started after the first reviewer assignment ended.
+- `tokens` sums known counts per field from finished assignments. Each field stays null until at
+  least one assignment supplies that count. `tokens` itself is null if none report usage.
+  `without_usage` counts finished assignments without usage. When it is nonzero, `missing_reasons`
+  counts each reason.
+- `elapsed_seconds` sums assignment time from the ledger's start and end timestamps. Concurrent
+  assignments each contribute their duration. Active assignments contribute only to attempt counts.
+
+Each ended assignment in schema v12 has `usage.source`, `usage.tokens`, `usage.reason` and
+`usage.elapsed_seconds`. Token fields are `input_tokens`, `output_tokens`, `cached_tokens`
+(cache reads), `cache_write_tokens`, `reasoning_tokens`, and `total_tokens`. Unknown counters
+stay null. Sources are `codex_rollout`, `agy_json` and `claude_stream_json`. The runtime's
+explicit total wins. Hipson adds runtime-reported counters only when their definitions supply an
+exact total. Totals retain each runtime's counting convention. See the
+[runtime usage details](AGENT_RUNTIMES.md#usage-evidence).
+
+| Missing-usage reason | Meaning |
+| --- | --- |
+| `runtime_reported_no_usage` | The runtime completed but no recognized token count was reported. |
+| `rollout_not_found` | A `--rollout codex` worker had no readable transcript matching the run marker. |
+| `not_an_agent_runtime` | A regular command or manual finish supplied no runtime telemetry. |
+| `runtime_error` | A runtime failed without reporting usage, or its supervisor could not deliver telemetry before the assignment was reaped. |
+| `not_recorded` | A historical assignment predates usage recording. The summary still counts its ledger elapsed time. |
+
+Schema v12 adds one nullable `usage` column to `assignments`. `hipson init` backs up a ledger before
+migrating. Older ledgers remain readable without migration. Active and historical assignment rows
+without a usage record show `usage: null`. The adapter's `brief_tokens_estimate` is a bytes/4
+heuristic for the brief and never contributes to usage totals.
 
 ### Page through board and now
 

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Record runtime-reported tokens and ledger elapsed time per assignment in schema 12. Full and compact
+  task show and the assignments section report attempts by role, repair rounds, token totals and
+  missing-usage reasons. Native probes and flow comparisons include the usage evidence.
 - Opt in to the 14-tool lead MCP profile with `hipson mcp serve --stdio --profile lead` or
   register it with `hipson init --mcp-profile lead`. The lead profile defaults board, now,
   resume and task reads to compact detail and returns a coded refusal for unlisted tools.

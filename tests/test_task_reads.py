@@ -248,6 +248,9 @@ def test_show_sections_return_paged_records(tmp_path):
                 keys = {"task", "section", "records", "next_cursor", "evidence_policy", "untrusted_fields"}
                 if section == "verification":
                     keys.add("files_note")
+                if section == "assignments":
+                    keys.add("usage")
+                    assert page["usage"] == show["usage"]
                 assert page.keys() == keys
                 assert page["evidence_policy"] == lead_context.EVIDENCE_POLICY
                 assert set(page["untrusted_fields"]) == {f"records[].{field}" for field in SECTION_EVIDENCE_FIELDS[section]}

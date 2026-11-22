@@ -200,7 +200,12 @@ def test_ledger_mcp_full_lifecycle_and_strict_payloads(tmp_path: Path):
         assert_strict_schema("task-event.schema.json", item)
     assert command("task.events", task=task, after=event["seq"]) == events[3:]
     assert command("task.events", task=task, after=events[-1]["seq"]) == []
-    assert command("task.show", task=task) == view
+    shown = command("task.show", task=task)
+    assert shown.pop("usage") == {
+        "attempts": {"builder": 1}, "repair_rounds": 0, "tokens": None, "without_usage": 1,
+        "elapsed_seconds": finished["usage"]["elapsed_seconds"], "missing_reasons": {"not_an_agent_runtime": 1},
+    }
+    assert shown == view
     with closing(Ledger(db)) as store:
         assert view == store.show(task) and events == store.events(task)
 
@@ -361,11 +366,14 @@ def test_ledger_mcp_missing_store_reads_create_nothing(tmp_path: Path):
         assert list(tmp_path.iterdir()) == []
 
 
+EMPTY_TASK_USAGE = {"attempts": {}, "repair_rounds": 0, "tokens": None, "without_usage": 0, "elapsed_seconds": 0.0}
+
+
 def test_ledger_mcp_read_does_not_recreate_disappearing_store(tmp_path: Path):
     # '#' and '%' exercise URI escaping on every OS; '?' is not a legal Windows filename.
     db = tmp_path / ("ledger%#.sqlite" if sys.platform == "win32" else "ledger?%#.sqlite")
     opened = _open(tmp_path, db)
-    assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == opened
+    assert _payload(_call(tmp_path, "task.show", ledger_db=db, task=opened["id"])) == {**opened, "usage": EMPTY_TASK_USAGE}
 
     def remove_before_connect(path, *, create, read_only):
         path.unlink()
@@ -391,7 +399,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
             **WRITE_ARGUMENTS["task.open"], "project": str(other_project), "approved": True,
         }))
         assert not home.exists()
-        assert _payload(_call(server_project, "task.show", task=env_task["id"])) == env_task
+        assert _payload(_call(server_project, "task.show", task=env_task["id"])) == {**env_task, "usage": EMPTY_TASK_USAGE}
         assert _payload(_call(server_project, "task.list")) == [
             {key: value for key, value in env_task.items() if key not in ("claims", "assignments", "findings", "verification", "review")}
         ]
@@ -401,7 +409,7 @@ def test_ledger_mcp_central_db_precedence_and_cross_project_reads(tmp_path: Path
         assert _payload(_call(server_project, "task.board")) == []
         assert not home.exists()
         home_task = _open(other_project)
-        assert _payload(_call(server_project, "task.show", task=home_task["id"])) == home_task
+        assert _payload(_call(server_project, "task.show", task=home_task["id"])) == {**home_task, "usage": EMPTY_TASK_USAGE}
         assert (home / "ledger.sqlite").exists()
     assert list(server_project.iterdir()) == []
 
@@ -470,7 +478,7 @@ def test_ledger_mcp_real_stdio_read_and_write(tmp_path: Path):
     assert [response["id"] for response in responses] == [1, 2, 3, 4, 5, 6]
     opened, shown, events = [_payload(response["result"]) for response in responses[:3]]
     assert_strict_schema("task.schema.json", opened)
-    assert shown == opened and shown["project"] == str(tmp_path)
+    assert shown == {**opened, "usage": EMPTY_TASK_USAGE} and shown["project"] == str(tmp_path)
     assert events[0]["type"] == "opened" and len(events) == 1
     assert_strict_schema("task-event.schema.json", events[0])
     for response in responses[3:5]:

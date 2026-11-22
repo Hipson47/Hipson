@@ -1938,6 +1938,8 @@ def _render_compact_tasks(payload: dict[str, Any]) -> str:
             if flag := task["stale"]:
                 line += f" | task stale {flag['days']} days since {flag['since']}"
         lines.append(line)
+        if "usage" in payload:
+            lines.append(f"Usage: {_bounded_json(task['usage'], limit=1024, escape_controls=True)}")
     if not lines:
         lines.append("No tasks on this page.")
     more = page["more"]
@@ -2115,7 +2117,9 @@ def command_task(args: argparse.Namespace) -> int:
                     return 0
                 payload = worker_view
             elif args.task_command == "show":
-                view = store.show(args.task)
+                from hipson.task_projection import show_full
+
+                view = show_full(store, args.task)
                 if not args.json:
                     print(f"{view['id']} [{view['status']}] {_bounded_cli(view['title'], limit=120, escape_controls=True)}")
                     print(f"Objective: {_bounded_cli(view['objective'], limit=240, escape_controls=True)}")
@@ -2157,6 +2161,7 @@ def command_task(args: argparse.Namespace) -> int:
                             print(f"    {_bounded_cli(finding['location'], limit=120, escape_controls=True)}")
                     if view["claims"]:
                         print(f"Claims: {_bounded_json(view['claims'], escape_controls=True)}")
+                    print(f"Usage: {_bounded_json(view['usage'], limit=1024, escape_controls=True)}")
                     return 0
                 payload = view
             elif args.task_command == "events":

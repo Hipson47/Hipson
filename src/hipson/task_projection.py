@@ -7,12 +7,13 @@ import os
 import re
 import sqlite3
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, NotRequired, TypedDict, TypeVar, cast
 
 from hipson import __version__, ledger
+from hipson.agent_runtimes import TOKEN_FIELDS
 from hipson.display import escape_display_controls
 from hipson.lead_context import GIT_READ_LIMIT
 from hipson.ledger import (
@@ -98,6 +99,15 @@ class StaleTask(TypedDict):
     days: int
 
 
+class TaskUsage(TypedDict):
+    attempts: dict[str, int]
+    repair_rounds: int
+    tokens: dict[str, int | None] | None
+    without_usage: int
+    missing_reasons: NotRequired[dict[str, int]]
+    elapsed_seconds: float
+
+
 class TaskProjection(TypedDict):
     view_schema: int
     hipson_version: str
@@ -116,6 +126,7 @@ class TaskProjection(TypedDict):
     review: ReviewProjection
     assignments: list[AssignmentProjection]
     omitted_assignments: int
+    usage: TaskUsage
     open_findings: dict[str, int]
     blocking_findings: list[str]
     major_findings: list[str]
@@ -410,6 +421,48 @@ def _stale_flag(status: str, activity: Sequence[str | None], now: datetime | Non
     return {"since": since, "days": days} if days >= threshold else None
 
 
+def usage_totals(assignments: Iterable[Mapping[str, Any]]) -> TaskUsage:
+    attempts: dict[str, int] = {}
+    builders: list[datetime] = []
+    first_review: datetime | None = None
+    tokens: dict[str, int | None] = dict.fromkeys(TOKEN_FIELDS)
+    missing: dict[str, int] = {}
+    reported, elapsed = False, 0.0
+    for item in assignments:
+        role = item["role"]
+        attempts[role] = attempts.get(role, 0) + 1
+        started, ended = _timestamp(item["started_at"]), _timestamp(item["ended_at"])
+        if role == "builder" and started is not None:
+            builders.append(started)
+        if ended is None:
+            continue
+        if role == "reviewer" and (first_review is None or ended < first_review):
+            first_review = ended
+        usage = item["usage"]
+        if isinstance(usage, str):
+            usage = json.loads(usage)
+        if usage is None:
+            if started is not None:
+                elapsed += max(0.0, (ended - started).total_seconds())
+        else:
+            elapsed += usage["elapsed_seconds"]
+        if usage is not None and (counts := usage["tokens"]) is not None:
+            reported = True
+            for key in TOKEN_FIELDS:
+                if (value := counts.get(key)) is not None:
+                    tokens[key] = (tokens[key] or 0) + value
+        else:
+            reason = usage["reason"] if usage is not None else "not_recorded"
+            missing[reason] = missing.get(reason, 0) + 1
+    totals = TaskUsage(attempts=attempts,
+                       repair_rounds=sum(first_review is not None and start > first_review for start in builders),
+                       tokens=tokens if reported else None, without_usage=sum(missing.values()),
+                       elapsed_seconds=round(elapsed, 6))
+    if missing:
+        totals["missing_reasons"] = missing
+    return totals
+
+
 def _project(row: dict[str, Any], head: str | None, now: datetime | None, stale_days: int) -> TaskProjection:
     truncated: list[str] = []
     reasons: list[str] = []
@@ -442,6 +495,7 @@ def _project(row: dict[str, Any], head: str | None, now: datetime | None, stale_
         review_policy=row["review_policy"], checks=checks, freshness_source="recorded",
         freshness_note="Check freshness uses recorded evidence and HEAD. Working-tree content was not re-checked.",
         review=_review(row, records), assignments=assignments, omitted_assignments=len(row["assignments"]) - len(assignments),
+        usage=usage_totals(row["assignments"]),
         open_findings=counts,
         blocking_findings=[item["id"] for item in row["findings"] if item["severity"] == "blocking"],
         major_findings=[item["id"] for item in row["findings"] if item["severity"] == "major"],
@@ -471,6 +525,11 @@ def show_task(store: Ledger, task: str, *, cli_db: str | None = None) -> dict[st
     return {**project_task(store, task),
             "evidence_policy": EVIDENCE_POLICY, "untrusted_fields": list(TASK_UNTRUSTED_FIELDS),
             "more": [_section_call(task, section, cli_db=cli_db) for section in SECTIONS]}
+
+
+def show_full(store: Ledger, task: str) -> dict[str, Any]:
+    view = store.show(task)
+    return {**view, "usage": usage_totals(view["assignments"])}
 
 
 def _section_call(task: str, section: str, *, cli_db: str | None = None) -> ReadCall:
@@ -573,6 +632,10 @@ def read_section(store: Ledger, task: str, section: str, *, limit: int | None = 
         if version < min_version:
             page["unavailable"] = f"schema v{version} does not store {section}"
             return page
+        if section == "assignments":
+            sql_usage = ("SELECT role, started_at, ended_at, usage FROM assignments WHERE task = ?" if version >= 12
+                         else "SELECT role, started_at, ended_at, NULL AS usage FROM assignments WHERE task = ?")
+            page["usage"] = usage_totals(dict(item) for item in store.connection.execute(sql_usage, (task,)))
         rows = store.connection.execute(sql, (task, limit + 1, cursor))
         row = next(rows, None)
         while row is not None and len(records) < limit:

@@ -286,6 +286,31 @@ def test_init_migration_dry_run_is_read_only_then_apply_backs_up(tmp_path):
         assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == ledger.SCHEMA_VERSION
 
 
+def test_init_v11_migration_backs_up_old_assignments_once(tmp_path):
+    setup = _Setup(tmp_path)
+    with closing(ledger.Ledger(setup.db)) as store:
+        task = store.open_task(project=setup.project, title="Before usage", objective="Preserve this task")["id"]
+        assignment = store.assign(task, actor="old", role="builder", mode="ro")["id"]
+        store.finish(assignment, result="passed", summary="Finished before v12")
+        store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
+        store.connection.execute("UPDATE schema_version SET version = 11")
+    before = setup.snapshots()
+    report = setup.run("--client", "none", "--dry-run", "--json")
+    assert report["checks"]["ledger_schema"] == 11 and setup.snapshots() == before
+    report = setup.run("--client", "none", "--yes", "--json")
+    assert report["ok"] and report["actions"][0]["status"] == "applied"
+    with closing(ledger.Ledger(report["actions"][0]["backup"], read_only=True)) as backup:
+        assert backup.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+        assert backup.activity(assignment)["usage"] is None
+    with closing(ledger.Ledger(setup.db, read_only=True)) as store:
+        assert store.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+        assert store.activity(assignment)["status"] == "passed" and store.activity(assignment)["usage"] is None
+    repeated = setup.run("--client", "none", "--yes", "--json")
+    assert repeated["checks"]["ledger_schema"] == 12
+    assert repeated["actions"][0]["detail"] == "already configured"
+    assert "backup" not in repeated["actions"][0]
+
+
 def test_init_accepts_every_schema_version_the_ledger_migrates(tmp_path):
     """Setup refused v4-v9 ledgers the Ledger migrates fine, so upgrades could not run init."""
     assert ledger.SUPPORTED_SCHEMA_VERSIONS[-1] == ledger.SCHEMA_VERSION

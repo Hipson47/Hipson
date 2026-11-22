@@ -48,7 +48,8 @@ def test_dry_run_does_not_spawn_processes(tmp_path):
             check = previous["argv"][previous["argv"].index("--check") + 1]
             assert shlex.split(check)[-1] == ("tests/acceptance.py" if direct["case"] == "fix" else "tests/split.py"), case
             if runtime == "claude":
-                assert direct["argv"] == ["claude", "--print", "--output-format", "json", "--permission-mode", "acceptEdits",
+                assert direct["argv"] == ["claude", "--print", "--output-format", "stream-json", "--verbose",
+                                          "--permission-mode", "acceptEdits",
                                           "--allowedTools", f"Bash({check})", "--model", "sample", "--effort", "high"], case
             elif runtime == "codex":
                 assert direct["argv"] == ["codex", "exec", "--json", "--sandbox", "workspace-write", "--cd", direct["cwd"],
@@ -78,18 +79,18 @@ def test_dry_run_same_runtime_fallback():
 RUNTIME_USAGE_CASES = (
     ("claude", [{"type": "result", "result": "Status: completed", "num_turns": 3,
                  "usage": {"input_tokens": 8, "output_tokens": 6, "cache_read_input_tokens": 0,
-                           "cache_creation_input_tokens": 21}}], "Status: completed", (8, 6, 0, 21), 3),
+                           "cache_creation_input_tokens": 21}}], "Status: completed", (8, 6, 0, 21, None, 35), 3),
     ("codex", [{"type": "thread.started", "thread_id": "thread"},
                {"type": "item.completed", "item": {"type": "agent_message", "text": "Status: completed"}},
                {"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 5, "cached_input_tokens": 4}},
                {"type": "item.completed", "item": {"type": "agent_message", "text": "Status: incomplete"}},
                {"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 0, "cached_input_tokens": 3}}],
-     "Status: incomplete", (11, 5, 7, None), 2),  # Codex input includes cached input: 11-4 + 7-3.
+     "Status: incomplete", (11, 5, 7, None, None, 23), 2),  # Uncached input: 11-4 + 7-3.
     ("agy", [{"status": "SUCCESS", "response": "Status: completed", "usage": {"input_tokens": 9, "output_tokens": 5}}],
-     "Status: completed", (9, 5, None, None), None),
+     "Status: completed", (9, 5, None, None, None, 14), None),
     ("agy", [{"status": "ERROR", "result": "Status: completed", "usage": {"input_tokens": 12,
-              "output_tokens": 2, "cache_read_tokens": 0}, "num_turns": 1}], None, (12, 2, 0, None), 1),
-    ("claude", [{"subtype": "error_during_execution", "result": "Status: completed"}], None, (None,) * 4, None),
+              "output_tokens": 2, "cache_read_tokens": 0}, "num_turns": 1}], None, (12, 2, 0, None, None, 14), 1),
+    ("claude", [{"subtype": "error_during_execution", "result": "Status: completed"}], None, None, None),
 )
 
 
@@ -106,7 +107,11 @@ def test_runtime_json_usage(tmp_path):
         assert code == 0 and launched, case
         message, evidence = compare._runtime_evidence(runtime, stdout)
         assert message == answer, case
-        assert evidence == {"tokens": dict(zip(compare.TOKEN_KEYS, tokens, strict=True)), "turns": turns}, case
+        assert evidence["tokens"] == (dict(zip(compare.TOKEN_KEYS, tokens, strict=True)) if tokens else None), case
+        assert evidence["turns"] == turns and evidence["usage_reason"] == (None if tokens else "runtime_error"), case
+        assert bool(evidence["usage_source"])
+        arm = compare._arm_usage([evidence])
+        assert arm == {"tokens": evidence["tokens"], "usage_missing_reasons": {} if tokens else {"runtime_error": 1}}
 
 
 FAKE_RUN = r"""
@@ -184,8 +189,9 @@ def test_live_hidden_trim_measures_review_and_redacts_report(tmp_path):
     ]
     assert [session["runtime"] for session in flow["sessions"]] == ["claude", "agy", "claude", "agy"]
     assert [run["turns"] for run in data["runs"]] == [2, 2, None]
-    assert direct["tokens"] == previous["tokens"] == dict(zip(compare.TOKEN_KEYS, (4, 3, 2, 1), strict=True))
-    assert flow["tokens"] == dict(zip(compare.TOKEN_KEYS, (22, 10, 10, None), strict=True))
+    assert direct["tokens"] == previous["tokens"] == dict(zip(compare.TOKEN_KEYS, (4, 3, 2, 1, None, 10), strict=True))
+    assert flow["tokens"] == dict(zip(compare.TOKEN_KEYS, (22, 10, 10, None, None, 38), strict=True))
+    assert all(run["usage_missing_reasons"] == {} for run in data["runs"])
     assert flow["brief_bytes"] == sum(session["brief_bytes"] for session in flow["sessions"])
     assert data["summary"]["A"]["sum"]["check_runs"] is None
     assert data["summary"]["C"]["median"]["input_tokens"] == 22
@@ -202,7 +208,7 @@ def test_live_oracle_reports_removed_acceptance_test(tmp_path):
     assert truth == {"ok": False, "tests_intact": False, "out_of_scope": ["tests/acceptance.py"]}
 
 
-def test_offline_report_contract_is_unchanged(tmp_path):
+def test_offline_report_labels_absent_usage(tmp_path):
     if sys.platform != "linux":
         raise SkipTest(LINUX_ONLY_REASON)
     output = tmp_path / "offline.json"
@@ -222,4 +228,5 @@ def test_offline_report_contract_is_unchanged(tmp_path):
                    "ground_truth_ok": True, "false_completion": False, "lost_good_work": False,
                    "accepted_scope_violation": False, "accepted_tampered_tests": False,
                    "accepted_without_independent_review": False, "done_without_review_in_ledger": 0,
-                   "lead_commands": 1, "worker_runs": 2, "check_runs": 1, "tokens": None}
+                   "lead_commands": 1, "worker_runs": 2, "check_runs": 1, "tokens": None,
+                   "usage_reason": "not_an_agent_runtime"}

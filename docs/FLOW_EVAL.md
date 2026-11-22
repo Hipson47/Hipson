@@ -14,7 +14,8 @@ is unchanged, and nothing outside `src/parser` changed.
 
 **What this measures:** what each procedure enforces against fixed behaviours. **What it does not measure:**
 how a live model follows a prompt (a careful agent may do better than A1/A2, a careless one worse), model
-quality, or tokens. It uses no model; `tokens` is `null` in every run. One run per cell: the procedures and
+quality, or tokens. Offline runs report `tokens: null` with `usage_reason: "not_an_agent_runtime"`.
+One run per cell: the procedures and
 workers are deterministic, so repetition adds no information here; it is not a statistical sample.
 
 ## Reviewer briefs and repair findings
@@ -108,6 +109,10 @@ was marked dirty only by the regenerated offline report beside it). One sample p
 | hidden-trim A | yes / ok | 8.3 | 1 | 6 | 87.2k | 537 |
 | hidden-trim B | yes / ok | 18.6 | 1 | 18 | 328.7k | 1,788 |
 | hidden-trim C | yes / ok | 25.3 | 2 | 28.5k | 200.9k | 1,508 |
+
+New live reports read worker token evidence from the ledger for arms B and C and from runtime stdout
+for arm A. Each run reports available token counters and `usage_missing_reasons`, with a null
+`tokens` field when the arm observes no usage.
 
 `Uncached input` is input not read from a cache for every runtime (Codex reports `input_tokens` including its
 `cached_input_tokens`; the script subtracts them). Claude also writes about 28k tokens to its cache per session.

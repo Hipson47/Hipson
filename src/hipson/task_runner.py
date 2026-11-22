@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, NoReturn
 
-from hipson import ledger, review_snapshot, task_activity, task_checkpoint, task_observation, worker_env
+from hipson import agent_runtimes, ledger, review_snapshot, task_activity, task_checkpoint, task_observation, worker_env
 from hipson.redaction import redact_text
 from hipson.task_calls import CallValue, ReadCall, project_fix_calls, read_call
 from hipson.task_posix import ProcessTree
@@ -369,7 +369,37 @@ def _project_check(project: str) -> dict[str, object]:
     return {"expected": str(expected), "actual": str(actual), "matches": matches}
 
 
-def _rollout_facts(nonce: str, started: float, refs: list[str]) -> str:
+_MISSING_ROLLOUT = " model=? effort=? (rollout not found)"
+
+
+def _rollout_usage(content: str, nonce: str, *, failed: bool) -> ledger.RuntimeUsage:
+    before, _, after = content.partition(nonce)
+
+    def latest(text: str) -> dict[str, int | None] | None:
+        for line in reversed(text.splitlines()):
+            if '"token_count"' not in line:
+                continue
+            try:
+                event = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            payload = event.get("payload") if isinstance(event, dict) else None
+            if (isinstance(payload, dict) and event.get("type") == "event_msg"
+                    and payload.get("type") == "token_count" and isinstance(info := payload.get("info"), dict)
+                    and isinstance(total := info.get("total_token_usage"), dict)):
+                return agent_runtimes.token_counts("codex", total)
+        return None
+
+    counts = latest(after) or {}
+    if (baseline := latest(before)) is not None:
+        # A resumed rollout includes previous turns. Subtract its last pre-brief cumulative report.
+        for key, value in counts.items():
+            previous = baseline[key]
+            counts[key] = value - previous if value is not None and previous is not None and value >= previous else None
+    return agent_runtimes.usage_report("codex_rollout", counts, failed=failed)
+
+
+def _rollout_facts(nonce: str, started: float, refs: list[str], *, failed: bool) -> tuple[str, ledger.RuntimeUsage]:
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     for path in (home / "sessions").rglob("*.jsonl"):
         try:
@@ -383,18 +413,56 @@ def _rollout_facts(nonce: str, started: float, refs: list[str]) -> str:
         model = re.search(r'"model"\s*:\s*"([^"\n]*)"', content)
         effort = re.search(r'"reasoning_effort"\s*:\s*"([^"\n]*)"', content)
         refs.append(str(path))
-        return f" model={model[1] if model else '?'} effort={effort[1] if effort else '?'}"
-    return " model=? effort=? (rollout not found)"
+        return (f" model={model[1] if model else '?'} effort={effort[1] if effort else '?'}",
+                _rollout_usage(content, nonce, failed=failed))
+    return _MISSING_ROLLOUT, {"source": "codex_rollout", "tokens": None, "reason": "rollout_not_found"}
+
+
+def _adapter_source(command: list[str]) -> str | None:
+    executable = Path(command[0]).stem.casefold()
+    args = command[1:]
+    if args[:1] == ["-P"]:
+        args = args[1:]
+    if args[:2] == ["-m", "hipson.cli"]:
+        args = args[2:]
+    elif executable != "hipson":
+        return None
+    if args[:2] == ["agent", "exec"]:
+        for index, arg in enumerate(args[2:], 2):
+            if arg == "--runtime" and index + 1 < len(args):
+                return agent_runtimes.USAGE_SOURCES.get(args[index + 1])
+            if arg.startswith("--runtime="):
+                return agent_runtimes.USAGE_SOURCES.get(arg.split("=", 1)[1])
+    return None
+
+
+def _adapter_usage(path: Path | None, source: str | None) -> ledger.RuntimeUsage | None:
+    if path is not None:
+        try:
+            agent_runtimes._check_state_path(path)
+            with open(path, encoding="utf-8", opener=agent_runtimes._open_state_file) as stream:
+                usage = json.loads(stream.read(4096))
+        except (agent_runtimes.RuntimeFailure, OSError, ValueError, RecursionError):
+            usage = None
+        if (isinstance(usage, dict) and usage.get("source") in agent_runtimes.USAGE_SOURCES.values()
+                and (source is None or usage["source"] == source)):
+            tokens = usage.get("tokens")
+            counts = {key: agent_runtimes._token_count(tokens.get(key))
+                      for key in agent_runtimes.TOKEN_FIELDS} if isinstance(tokens, dict) else {}
+            return agent_runtimes.usage_report(usage["source"], counts, failed=usage.get("reason") == "runtime_error")
+    return {"source": source, "tokens": None, "reason": "runtime_error"} if source else None
 
 
 def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, signum: int,
             note: str, nonce: str, started: float, snapshot: dict, project: str,
-            child_signal: int = 0) -> None:
+            child_signal: int = 0, usage_path: Path | None = None, source: str | None = None) -> None:
     refs = list(args.ref)
-    try:
-        facts = _rollout_facts(nonce, started, refs) if args.rollout else ""
-    except OSError:
-        facts = " model=? effort=? (rollout not found)"
+    facts, usage = "", _adapter_usage(usage_path, source)
+    if args.rollout:
+        try:
+            facts, usage = _rollout_facts(nonce, started, refs, failed=bool(code or signum))
+        except OSError:
+            facts, usage = _MISSING_ROLLOUT, {"source": "codex_rollout", "tokens": None, "reason": "rollout_not_found"}
     name = signal.Signals(signum).name.removeprefix("SIG") if signum else str(code)
     result = "cancelled" if signum else "passed" if code == 0 else "failed"
     summary = f"worker process exit={name}{facts}{note}; process result only, not lead verification"
@@ -429,14 +497,14 @@ def _finish(db: Path, args: argparse.Namespace, assignment: str, code: int, sign
         with closing(ledger.Ledger(db)) as store:
             try:
                 store.finish(assignment, result=result, summary=summary, refs=refs, worker_result=report,
-                             failure_journal=journal)
+                             failure_journal=journal, usage=usage)
             except Exception:
                 if report is None:
                     raise
                 _message("result file rejected; recording process outcome without worker evidence")
                 journal['result_state'] = 'rejected'
                 store.finish(assignment, result=result, summary=summary + "; result file rejected", refs=refs,
-                             failure_journal=journal)
+                             failure_journal=journal, usage=usage)
     except (ledger.LedgerError, OSError, sqlite3.Error) as exc:
         _run_error(args, exc, f"could not finish {assignment}: {exc}; run 'hipson task reap'")
         return
@@ -676,6 +744,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
     nonce, started = f"ledger-run-{uuid.uuid4()}", time.time()
     activity: task_activity.Activity | None = None
     progress_dir: tempfile.TemporaryDirectory[str] | None = None
+    usage_path: Path | None = None
     progress = None
     child_signal = 0
     snapshot: dict = {}
@@ -750,6 +819,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                 _message(f"{assignment} checkpoint: {saved['files']} files, {saved['bytes']} bytes "
                          f"(restore: hipson task restore --assignment {assignment})")
         progress_path = Path(progress_dir.name) / 'progress'
+        usage_path = progress_path.with_name("usage.json")
         progress = progress_path.open('w+b', buffering=0)
         activity = task_activity.Activity(progress)
         snapshot = activity.snapshot()
@@ -764,7 +834,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
         inherited = {key: value for key, value in os.environ.items() if not git_redirecting_variable(key)}
         env = inherited if verifying else {**worker_base, "HIPSON_ROLE": "worker", "HIPSON_TASK": args.task, "HIPSON_ASSIGNMENT": assignment,
                "HIPSON_RUN_OWNER": str(os.getpid()), "HIPSON_RUN_DB": str(db),
-               'HIPSON_PROGRESS_FILE': str(progress_path)}
+               'HIPSON_PROGRESS_FILE': str(progress_path), "HIPSON_RUN_USAGE_FILE": str(usage_path)}
         review = None if verifying else getattr(args, "review_snapshot", None)
         if review is not None:  # The reviewer starts in its snapshot; the task project stays identifiable.
             env.update(HIPSON_REVIEW_SNAPSHOT=str(review_snapshot.workdir(review[0], review[1])),
@@ -890,7 +960,7 @@ def _execute_owned(db: Path, args: argparse.Namespace, command: list[str], misma
                    snapshot, str(check['expected']), safe)
         elif assignment and safe:
             _finish(db, args, assignment, code, signum, note, nonce, started, snapshot,
-                    str(check['expected']), child_signal)
+                    str(check['expected']), child_signal, usage_path, _adapter_source(command))
         elif assignment:
             _message(f"worker processes survived KILL; leaving {assignment} active (run 'hipson task reap' later)")
         if progress:

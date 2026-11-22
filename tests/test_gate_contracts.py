@@ -819,12 +819,55 @@ def test_checkpoint_events_and_case_aware_assign_exact_contract(tmp_path):
 
 
 def test_v11_schema_constants_are_exact():
-    assert ledger.SCHEMA_VERSION == 11 and ledger.REVIEW_POLICIES == ("none", "required")
+    assert ledger.REVIEW_POLICIES == ("none", "required")
     assert ledger.MIGRATION_V10_TO_V11 == (
         "ALTER TABLE tasks ADD COLUMN review_policy TEXT NOT NULL DEFAULT 'none'"
         " CHECK (review_policy IN ('none', 'required'))",
         "UPDATE schema_version SET version = 11 WHERE singleton = 1")
     assert {"review_policy", "flow"} <= ledger.RESERVED_EVENT_TYPES
+
+
+@patch.object(task_verification, "project_state", return_value=dict(STATE))
+def test_v12_usage_record_and_migration_exact_contract(_project_state, tmp_path):
+    assert ledger.SCHEMA_VERSION == 12
+    assert ledger.MIGRATION_V11_TO_V12 == (
+        "ALTER TABLE assignments ADD COLUMN usage TEXT",
+        "UPDATE schema_version SET version = 12 WHERE singleton = 1",
+    )
+    assert ledger.MIGRATIONS[-1] == ledger.MIGRATION_V11_TO_V12
+    store, task = _store(tmp_path)
+    db = store.path
+    start, end = "2026-11-22T12:00:00Z", "2026-11-22T12:00:03.125Z"
+    reported = {"source": "agy_json", "reason": None, "tokens": {
+        "input_tokens": 16, "output_tokens": 4, "cached_tokens": 8, "cache_write_tokens": None,
+        "reasoning_tokens": None, "total_tokens": 20,
+    }}
+    assert ledger._assignment_usage(reported, end, start) == {**reported, "elapsed_seconds": 0.0}
+    with closing(store):
+        for report, expected in (
+            (reported, {**reported, "elapsed_seconds": 3.125}),
+            (None, {"source": None, "tokens": None, "reason": "not_an_agent_runtime", "elapsed_seconds": 3.125}),
+        ):
+            with patch.object(ledger, "_timestamp", return_value=start):
+                assigned = store.assign(task, actor="w", role="explorer", mode="ro")
+            assert assigned["usage"] is None
+            with patch.object(ledger, "_timestamp", return_value=end):
+                kwargs = {} if report is None else {"usage": report}
+                finished = store.finish(assigned["id"], result="passed", summary="finished", **kwargs)
+            assert finished["usage"] == expected
+            assert finished["started_at"] == start and finished["ended_at"] == end
+            stored = store.connection.execute("SELECT usage FROM assignments WHERE id = ?", (assigned["id"],))
+            assert json.loads(stored.fetchone()[0]) == expected
+
+        store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
+        store.connection.execute("UPDATE schema_version SET version = 11")
+    with closing(ledger.Ledger(db, read_only=True)) as old:
+        assert old.activity(assigned["id"])["usage"] is None
+    with closing(ledger.Ledger(db)) as migrated:
+        assert migrated.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+        assert migrated.activity(assigned["id"])["usage"] is None
+    with closing(ledger.Ledger(db)) as reopened:
+        assert reopened.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
 
 
 def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):
@@ -1318,12 +1361,13 @@ def test_assignment_delivery_retains_exact_details_and_historical_ack_state(tmp_
                         "owner_boot_id": "boot", "owner_host": "host", "owner_pid_namespace": "pid:[101]",
                         "lease_until": "2026-11-22T12:10:00Z", "result": None, "activity": None,
                         "failure_journal": None, "acknowledged_at": None, "ack_note": "", "changes": None,
-                        "environment": environment, "needs": ["review"], "ack_state": "not_required"}
+                        "environment": environment, "needs": ["review"], "ack_state": "not_required", "usage": None}
             assert assigned == expected
             later = store.assign(task, actor="worker", role="builder", mode="rw", scope=["src"])["id"]
             clock.return_value = ended
             result = store.finish(item, result="passed", summary="Reviewed", refs=["result.json"])
-            expected.update(status="passed", ended_at=ended, ack_state="unacknowledged")
+            expected.update(status="passed", ended_at=ended, ack_state="unacknowledged",
+                            usage={"source": None, "tokens": None, "reason": "not_an_agent_runtime", "elapsed_seconds": 20.0})
             assert result == expected
             store.connection.execute("UPDATE assignments SET result = ? WHERE id = ?", (json.dumps(report), item))
             expected["result"] = report
@@ -1345,4 +1389,5 @@ def test_assignment_delivery_retains_exact_details_and_historical_ack_state(tmp_
             assert store._assignment_dict(legacy_row) == {
                 **expected, "owner_pid": None, "owner_boot_id": None, "owner_host": None,
                 "owner_pid_namespace": None, "lease_until": None, "result": None, "environment": None, "needs": None,
+                "usage": None,
             }

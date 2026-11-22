@@ -41,7 +41,7 @@ runtime's own non-interactive command on the same fixture showed the same capabi
 | Read-only mode (reviewer) | verified: plan mode, the write did not happen | verified: read-only sandbox refused the write ("Read-only file system") | **not enforced**: in `--mode plan` the reviewer created the file in 2 of 2 probe runs |
 | Session continuation | verified: `--resume`, code word recalled; also from another working directory (review snapshots) | verified after a fix: `exec resume` refuses `--sandbox`, so Hipson now passes `-c sandbox_mode=...` (same mode) | verified: `--conversation`, code word recalled |
 | A missing session | `No conversation found with session ID` (exit 1): Hipson reports it and the next `--continue-session` starts a new session | refused outside a trusted or Git directory; snapshots are Git checkouts | not probed |
-| Usage telemetry | `usage`, `modelUsage` (models used), turns | `turn.completed.usage` (input includes cached input); no model or turn count in `exec --json` | `usage`, turns; no model name |
+| Usage telemetry | Terminal `stream-json` result with `usage`, `modelUsage` and turns | Rollout `token_count` or `exec --json` `turn.completed.usage` | JSON result `usage` and turns |
 | MCP tools, plugins | configured and listed (`hipson agent runtimes`); not execution-verified | configured and listed; not execution-verified | configured and listed; not execution-verified |
 | Code intelligence, browser, computer use | not exercised by headless workers; unverified | unverified | unverified |
 | Controlled isolation | `--setting-sources project --strict-mcp-config --no-session-persistence`, refused when the project has `.claude/settings*.json` (they would load); `--bare` needs an API key | `--ephemeral --ignore-user-config --ignore-rules` | **unsupported**: no documented configuration-free run |
@@ -149,8 +149,9 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   and saved in the meta file's `detail`. `task run` records the exit code and the flow stops with
   `worker_failed` / `reviewer_failed`.
 - Evidence beside the result (`<result>.meta.json`): runtime, profile, role, mode, ledger, project, session,
-  models, usage, the names of denied tools (never their inputs), duration, brief size and a bytes/4 token
-  estimate. A nonzero exit is never a success, even after a valid-looking result; Codex's last-message file is
+  models, raw usage, normalized `usage_report`, the names of denied tools (never their inputs), duration,
+  brief size and a bytes/4 `brief_tokens_estimate` heuristic. A nonzero exit is never a success, even after
+  a valid-looking result; Codex's last-message file is
   removed before and after each run so a stale one cannot be ingested. `verified` evidence records the CLI
   version and counts only while that version is installed.
 - Sessions: a new run gets a fresh session id, recorded with its task and assignment in the meta file;
@@ -165,6 +166,30 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
   that fails (`OSError`) is a `provider_error` with meta; an Antigravity prompt over 100,000 bytes (it is an argv
   element) is refused before launch, and so is an agy that resolves to a `.cmd`/`.bat` script on Windows
   (cmd.exe would cut the multi-line prompt at its first line break).
+
+## Usage evidence
+
+- `codex_rollout` uses the cumulative `total_token_usage` from a matching `task run --rollout codex`
+  transcript. When the transcript contains an earlier cumulative snapshot, Hipson subtracts it. The
+  `agent exec` adapter uses the invocation's `turn.completed.usage` events from `codex exec --json`,
+  including when the session is resumed or ephemeral. Input includes cached input, and output
+  includes reasoning. With both counters present, input plus output gives the total.
+- `agy_json` uses the JSON result's `usage`. Cache reads and thinking are recorded separately.
+  The reported total takes precedence. If the total is absent, reported input plus output gives the
+  same measure, which excludes cache reads.
+- `claude_stream_json` uses the terminal result event's `usage`. Claude reports uncached input,
+  cache reads, cache writes and output separately. All four are needed to derive an absent total.
+  Reported thinking is part of output. The adapter also accepts a single JSON result object.
+
+An assignment can deliver token evidence even when its structured result fails. If it supplies no
+recognized counts, the ledger records a null `tokens` field and a reason. See the
+[reason table and task totals](TASK_LEDGER.md#usage-per-task-and-assignment). Assignment elapsed time
+comes from ledger timestamps. The adapter's process duration and brief estimate are separate fields.
+
+`scripts/native_probe.py` adds `evidence.usage_report` to live probe rows, reading the assignment's ledger
+record for Hipson runs and normalizing runtime stdout for manual runs. Manual rows leave
+`usage_report.elapsed_seconds` null and retain the probe's separately measured `duration_s`.
+The live flow comparison reports each arm's observed tokens and the counts of missing-usage reasons.
 
 ## Live runs through Hipson (2026-11-19, one sample each; not a benchmark)
 

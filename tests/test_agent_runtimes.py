@@ -504,6 +504,7 @@ def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evid
     assert proc.returncode == 0 and result["state"] == "accepted", (proc.stderr, result)
     calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
     assert [call["argv"][call["argv"].index("--permission-mode") + 1] for call in calls] == ["acceptEdits", "plan"]
+    assert all(call["argv"][call["argv"].index("--output-format") + 1] == "stream-json" for call in calls)
     assert all(call["prompt_has_rules"] for call in calls)
     assert not any("--setting-sources" in call["argv"] for call in calls)  # Native: the user's configuration.
     # The only added permission is the lead's declared check, exactly, and only for the writer.
@@ -517,6 +518,11 @@ def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evid
     assert verified["structured_output"]["assignment"] == "A-0002"
     view, _ = _view(db)
     assert view["review"]["passing"] and view["status"] == "review"
+    for assignment in view["assignments"]:
+        usage = assignment["usage"]
+        assert usage["source"] == "claude_stream_json" and usage["reason"] is None
+        assert usage["tokens"]["output_tokens"] == 7 and usage["tokens"]["total_tokens"] is None
+        assert usage["elapsed_seconds"] >= 0 and meta["brief_tokens_estimate"] > 0
 
 
 def test_flow_grants_agy_checks_to_the_builder_only(tmp_path):

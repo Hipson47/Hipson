@@ -36,7 +36,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
-from hipson.agent_runtimes import RUNTIMES  # noqa: E402
+from hipson.agent_runtimes import RUNTIMES, _result_payload, stdout_usage  # noqa: E402
 from hipson.ledger import Ledger  # noqa: E402
 from hipson.task_activity import safe_text  # noqa: E402
 from scripts.agent_e2e import prepare_fixture  # noqa: E402
@@ -223,7 +223,7 @@ def run_case(case: tuple[str, str, list[str], str], strategy: str, base: Path) -
             "accepted_without_independent_review": accepted and not facts["reviewed"],
             "done_without_review_in_ledger": facts["done_without_review"],
             "lead_commands": len(lead.calls), "worker_runs": workers, "check_runs": checks,
-            "duration_seconds": round(duration, 3), "tokens": None}
+            "duration_seconds": round(duration, 3), "tokens": None, "usage_reason": "not_an_agent_runtime"}
 
 
 def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -243,6 +243,8 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "worker_runs": sum(run["worker_runs"] for run in mine),
             "check_runs": sum(run["check_runs"] for run in mine),
             "duration_seconds": round(sum(run["duration_seconds"] for run in mine), 3),
+            "tokens": None,
+            "usage_reason": "not_an_agent_runtime",
         }
     return summary
 
@@ -259,7 +261,7 @@ MODEL_TIMEOUT = 180
 CHECK_TIMEOUT = 60
 LIVE_REPAIRS = 1
 HIPSON = [PY, "-P", "-m", "hipson.cli"]
-TOKEN_KEYS = ("input", "output", "cached_input", "cache_creation_input")
+TOKEN_KEYS = ("input", "output", "cached_input", "cache_creation_input", "reasoning", "total")
 
 
 def _live_text(value: Any, limit: int = 400) -> str | None:
@@ -290,7 +292,7 @@ def _live_command(strategy: str, workdir: Path, db: Path, check: list[str], opti
                   'the requested change is complete, or "Status: incomplete" otherwise. Then summarize your work.\n')
         flags = _model_flags(options, codex=builder == "codex")
         if builder == "claude":
-            return [builder, "--print", "--output-format", "json", "--permission-mode", "acceptEdits",
+            return [builder, "--print", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
                     "--allowedTools", f"Bash({check_text})", *flags], prompt, {}
         if builder == "codex":
             return [builder, "exec", "--json", "--sandbox", "workspace-write", "--cd", str(workdir), *flags, "-"], prompt, {}
@@ -342,19 +344,17 @@ def _count(*values: Any) -> int | None:
     return next((value for value in values if type(value) is int and value >= 0), None)
 
 
-def _tokens(usage: Any) -> dict[str, int | None]:
-    """One meaning for every runtime: `input` is uncached input, `cached_input` is read from cache.
-
-    Codex's `input_tokens` includes its `cached_input_tokens`; Claude's and Antigravity's exclude cache reads.
-    """
-    usage = usage if isinstance(usage, dict) else {}
-    raw, cached = _count(usage.get("input_tokens")), _count(usage.get("cached_input_tokens"))
+def _tokens(report: dict[str, Any]) -> dict[str, int | None] | None:
+    usage = report.get("tokens")
+    if usage is None:
+        return None
+    inp, cached = usage["input_tokens"], usage["cached_tokens"]
+    if report.get("source") == "codex_rollout" and cached is not None:
+        inp = inp - cached if inp is not None and inp >= cached else None
     return {
-        "input": max(0, raw - cached) if raw is not None and cached is not None else raw,
-        "output": _count(usage.get("output_tokens")),
-        "cached_input": _count(usage.get("cached_input_tokens"), usage.get("cache_read_input_tokens"),
-                               usage.get("cache_read_tokens")),
-        "cache_creation_input": _count(usage.get("cache_creation_input_tokens")),
+        "input": inp, "output": usage["output_tokens"], "cached_input": cached,
+        "cache_creation_input": usage["cache_write_tokens"], "reasoning": usage["reasoning_tokens"],
+        "total": usage["total_tokens"],
     }
 
 
@@ -363,37 +363,46 @@ def _known_total(values: list[int | None]) -> int | None:
     return sum(known) if known and len(known) == len(values) else None
 
 
-def _runtime_evidence(runtime: str, stdout: str) -> tuple[str | None, dict[str, Any]]:
+def _usage_evidence(report: dict[str, Any]) -> dict[str, Any]:
+    return {"tokens": _tokens(report), "usage_reason": report.get("reason"), "usage_source": report.get("source")}
+
+
+def _runtime_evidence(runtime: str, stdout: str, *, failed: bool = False) -> tuple[str | None, dict[str, Any]]:
     if runtime == "codex":
         answer = None
-        turns = []
+        turns = 0
         for line in stdout.splitlines():
             event = _json_object(line)
             if event.get("type") == "turn.completed":
-                turns.append(_tokens(event.get("usage")))
+                turns += 1
             if event.get("type") == "item.completed":
                 item = event.get("item")
                 if isinstance(item, dict) and item.get("type") == "agent_message":
                     answer = item.get("text")
-        return answer if isinstance(answer, str) else None, {
-            "tokens": {key: _known_total([turn[key] for turn in turns]) for key in TOKEN_KEYS},
-            "turns": len(turns) or None,
-        }
-
-    payload = _json_object(stdout)
-    if runtime == "claude":
-        answer = None if payload.get("is_error") or payload.get("subtype", "success") != "success" else payload.get("result")
     else:
-        answer = next((payload[key] for key in ("result", "response", "output", "text")
-                       if isinstance(payload.get(key), str)), None)
-        if payload.get("status", "SUCCESS") != "SUCCESS":
-            answer = None
+        raw = _result_payload(runtime, stdout)
+        payload = raw if isinstance(raw, dict) else {}
+        if runtime == "claude":
+            failed |= bool(payload.get("is_error") or payload.get("subtype", "success") != "success")
+            answer = None if failed else payload.get("result")
+        else:
+            failed |= payload.get("status", "SUCCESS") != "SUCCESS"
+            answer = None if failed else next((payload[key] for key in ("result", "response", "output", "text")
+                                               if isinstance(payload.get(key), str)), None)
+        turns = _count(payload.get("num_turns"))
     return answer if isinstance(answer, str) else None, {
-        "tokens": _tokens(payload.get("usage")), "turns": _count(payload.get("num_turns")),
+        **_usage_evidence(stdout_usage(runtime, stdout, failed=failed)),
+        "turns": (turns or None) if runtime == "codex" else turns,
     }
 
 
-def _ledger_evidence(db: Path, strategy: str, workers: int | None) -> tuple[list[dict[str, Any]], int | None, str | None]:
+def _ledger_evidence(db: Path, strategy: str, workers: int | None) -> tuple[
+        list[dict[str, Any]], int | None, str | None, list[dict[str, Any]]]:
+    usage = {}
+    if db.is_file():
+        with closing(Ledger(db, read_only=True)) as store:
+            usage = {row["id"]: json.loads(row["usage"]) if row["usage"] else {"reason": "runtime_error"}
+                     for row in store.connection.execute("SELECT id, usage FROM assignments")}
     paths = ([db.parent / "do-result.json.meta.json"] if strategy == "B"
              else sorted((db.parent / f".{db.name}.flows").glob("*/*.result.json.meta.json")))
     records = [(path, meta) for path in paths if (meta := _json_file(path))]
@@ -406,10 +415,25 @@ def _ledger_evidence(db: Path, strategy: str, workers: int | None) -> tuple[list
         # The adapter can write preflight failures before it starts the model process.
         if meta.get("exit_code") is not None or meta.get("session"):
             runtime = meta.get("runtime")
+            recorded = usage.get(meta.get("assignment"), {})
             sessions.append({"runtime": runtime if isinstance(runtime, str) and runtime in RUNTIMES else None,
                              "brief_bytes": _count(meta.get("brief_bytes")),
-                             "tokens": _tokens(meta.get("usage")), "turns": _count(meta.get("num_turns"))})
-    return sessions, len(sessions) if workers == len(records) else None, summary
+                             **_usage_evidence(recorded), "turns": _count(meta.get("num_turns"))})
+    return sessions, len(sessions) if workers == len(records) else None, summary, [
+        _usage_evidence(item) for item in usage.values()]
+
+
+def _arm_usage(reports: list[dict[str, Any]]) -> dict[str, Any]:
+    observed = []
+    missing: dict[str, int] = {}
+    for report in reports or [{"tokens": None, "usage_reason": "runtime_error"}]:
+        if (counts := report["tokens"]) is not None:
+            observed.append(counts)
+        else:
+            reason = report["usage_reason"]
+            missing[reason] = missing.get(reason, 0) + 1
+    return {"tokens": {key: _known_total([item[key] for item in observed]) for key in TOKEN_KEYS} if observed else None,
+            "usage_missing_reasons": missing}
 
 
 def _live_process(argv: list[str], workdir: Path, env: dict[str, str], stdin: str | None,
@@ -487,7 +511,8 @@ def _run_live(case: str, strategy: str, base: Path, options: argparse.Namespace)
     code, stdout, launched = _live_process(argv, workdir, env, stdin, strategy)
     duration = round(time.monotonic() - started, 3)
     if strategy == "A":
-        summary, evidence = _runtime_evidence(options.live, stdout)
+        summary, evidence = _runtime_evidence(options.live, stdout, failed=code != 0)
+        reports = [evidence] if launched else []
         claim = (summary or "").lstrip().split("\n", 1)[0].strip().casefold()
         accepted = code == 0 and claim == "status: completed"
         prompt = argv[2] if options.live == "agy" else stdin
@@ -499,7 +524,7 @@ def _run_live(case: str, strategy: str, base: Path, options: argparse.Namespace)
         accepted = code == 0 and (result.get("closed") is True if strategy == "B" else result.get("state") == "accepted")
         facts = ledger_facts(fixture)
         workers, checks = facts["workers"], facts["checks_run"]
-        sessions, count, summary = _ledger_evidence(fixture.ledger, strategy, workers)
+        sessions, count, summary, reports = _ledger_evidence(fixture.ledger, strategy, workers)
         reasons = result.get("reasons")
         if not accepted and isinstance(reasons, list) and reasons and isinstance(reasons[0], str):
             summary = reasons[0]
@@ -510,8 +535,7 @@ def _run_live(case: str, strategy: str, base: Path, options: argparse.Namespace)
             "false_completion": accepted and not truth["ok"], "scope_violation": scope_violation,
             "tampered_tests": not truth["tests_intact"], "duration_seconds": duration, "exit_code": code,
             "model_sessions": count, "worker_runs": workers, "check_runs": checks,
-            "tokens": {key: _known_total([session["tokens"][key] for session in sessions]) if complete else None
-                       for key in TOKEN_KEYS},
+            **_arm_usage(reports),
             "brief_bytes": _known_total([session["brief_bytes"] for session in sessions]) if complete else None,
             "turns": _known_total([session["turns"] for session in sessions]) if complete else None,
             "sessions": sessions, "summary": _live_text(summary)}
@@ -524,12 +548,18 @@ def _summarize_live(runs: list[dict[str, Any]]) -> dict[str, Any]:
         metrics = ("accepted", "ground_truth_ok", "false_completion", "scope_violation", "tampered_tests",
                    "duration_seconds", "model_sessions", "worker_runs", "check_runs", "brief_bytes", "turns")
         samples = {key: [run[key] for run in mine if run[key] is not None] for key in metrics}
-        samples.update({f"{key}_tokens": [run["tokens"][key] for run in mine if run["tokens"][key] is not None]
+        samples.update({f"{key}_tokens": [run["tokens"][key] for run in mine
+                                          if run["tokens"] is not None and run["tokens"][key] is not None]
                         for key in TOKEN_KEYS})
+        missing: dict[str, int] = {}
+        for run in mine:
+            for reason, count in run["usage_missing_reasons"].items():
+                missing[reason] = missing.get(reason, 0) + count
         summary[strategy] = {"runs": len(mine), "reported": {key: len(values) for key, values in samples.items()},
                              "sum": {key: round(sum(values), 3) if values else None for key, values in samples.items()},
                              "median": {key: round(median(values), 3) if values else None
-                                        for key, values in samples.items()}}
+                                        for key, values in samples.items()},
+                             "usage_missing_reasons": missing}
     return summary
 
 
@@ -581,9 +611,9 @@ def _live_main(options: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     with tempfile.TemporaryDirectory(prefix="hipson-flow-live-") as base:
         runs = [_run_live(case, strategy, Path(base), options) for case in cases for strategy in LIVE_STRATEGIES]
     report = {**config, **_report_context(), "runtime_versions": versions,
-              "note": "Input counts retain the runtime's usage convention. Claude and agy report uncached input "
-                      "separately from cache reads. Run totals require telemetry from every recorded session. "
-                      "Strategy sums and medians use the reported runs only.",
+              "note": "Input excludes reported cache reads. Total uses each runtime's own convention. "
+                      "Counters aggregate the sessions reporting usage. A counter missing from any of those "
+                      "sessions stays null. Strategy sums and medians use the reported runs only.",
               "summary": _summarize_live(runs), "runs": runs}
     serialized = json.dumps(report, indent=2) + "\n"
     if options.output:

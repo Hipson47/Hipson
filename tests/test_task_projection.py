@@ -160,6 +160,11 @@ def test_projection_reads_v1_without_migration(tmp_path):
     assert task["checks"] == [] and task["review_policy"] == "none"
     assert task["assignments"][1]["ack_state"] == "not_required"
     assert task["assignments"][1]["summary"] is None
+    assert task["usage"] == {
+        "attempts": {"builder": 1, "reviewer": 1},
+        "repair_rounds": 0, "tokens": None, "without_usage": 1,
+        "missing_reasons": {"not_recorded": 1}, "elapsed_seconds": 1.0,
+    }
     assert db.read_bytes() == before
 
 
@@ -177,11 +182,17 @@ _READ_DISPATCH = {
         "command_task_read": (("action == 'resume'", "payload = lead_context.build_compact("
                                "store, project=project, include_all=args.all, cli_db=cli_db, text=not args.json, "
                                "stale_days=stale_days)"),),
+        "command_task": (
+            ("args.task_command == 'show'", "from hipson.task_projection import show_full"),
+            ("args.task_command == 'show'", "view = show_full(store, args.task)"),
+        ),
     },
     "mcp_server.py": {
         "_call_tool": ((None, "text = _compact_task_text(payload) if compact else json.dumps(payload, ensure_ascii=False)"),),
         "_task_tool_payload": (("name in _TASK_READS and (arguments.get('detail') == 'compact' or 'section' in arguments)",
-                                "return _task_read_projection(name, arguments, db)"),),
+                                "return _task_read_projection(name, arguments, db)"),
+                               ("name == 'task.show'", "from hipson.task_projection import show_full"),
+                               ("name == 'task.show'", "return show_full(store, arguments['task'])")),
         "_task_read_projection": (("name == 'lead.resume'", "return lead_context.build_compact("
                                    "store, project=project, include_all=include_all, stale_days=stale_days)"),),
     },
@@ -190,7 +201,7 @@ _READ_DISPATCH = {
 
 def _projection_references(source, *, module=""):
     low_level = re.compile(r"\b(?:task_projection|projection_rows)\b|^(?:hipson\.)?next_actions$")
-    handlers = re.compile(r"\b(?:command_task_read|_task_read_projection|_compact_task_text|build_compact)\b")
+    handlers = re.compile(r"\b(?:command_task_read|_task_read_projection|_compact_task_text|build_compact|show_full)\b")
     tree = ast.parse(source)
     declarations = {id(method) for node in tree.body if module == "ledger.py" and isinstance(node, ast.ClassDef)
                     and node.name == "Ledger" for method in node.body
@@ -215,11 +226,12 @@ def _projection_references(source, *, module=""):
                 dispatch.update(id(child) for child in ast.walk(match))
     return [node.lineno for node in ast.walk(tree)
             if id(node) not in declarations and any(
-                (module not in {"task_projection.py", "next_actions.py"} and id(node) not in permitted
+                (module not in {"task_projection.py", "next_actions.py"} and id(node) not in permitted | dispatch
                  # workflow.py uses this name for the unrelated work plan checklist.
                  and (module != "workflow.py" or value != "next_actions" or isinstance(node, (ast.alias, ast.ImportFrom)))
                  and low_level.search(value))
-                or (id(node) not in dispatch and handlers.search(value))
+                or (id(node) not in dispatch and handlers.search(value)
+                    and not (module == "task_projection.py" and value == "show_full" and isinstance(node, ast.FunctionDef)))
                 for value in vars(node).values() if isinstance(value, str))]
 
 

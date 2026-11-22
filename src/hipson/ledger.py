@@ -27,7 +27,7 @@ from hipson.home import detect_hipson_home
 from hipson.redaction import redact_text, redact_value
 from hipson.task_calls import ReadCall, gate_fix_calls, read_call, task_lookup_calls
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 BUSY_TIMEOUT_MS = 10_000
 SQLITE_MAX_INTEGER = 2**63 - 1
 STATUSES = ("open", "in_progress", "blocked", "review", "done", "cancelled")
@@ -135,6 +135,7 @@ SCHEMA: tuple[str, ...] = (
         changes TEXT,
         environment TEXT,
         needs TEXT,
+        usage TEXT,
         CHECK ((status = 'active' AND ended_at IS NULL) OR (status <> 'active' AND ended_at IS NOT NULL))
     )""",
     """CREATE TABLE claims (
@@ -244,9 +245,14 @@ MIGRATION_V10_TO_V11 = (
     " CHECK (review_policy IN ('none', 'required'))",
     "UPDATE schema_version SET version = 11 WHERE singleton = 1",
 )
+MIGRATION_V11_TO_V12 = (
+    "ALTER TABLE assignments ADD COLUMN usage TEXT",
+    "UPDATE schema_version SET version = 12 WHERE singleton = 1",
+)
 MIGRATIONS = (
     MIGRATION_V1_TO_V2, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4, MIGRATION_V4_TO_V5, MIGRATION_V5_TO_V6,
     MIGRATION_V6_TO_V7, MIGRATION_V7_TO_V8, MIGRATION_V8_TO_V9, MIGRATION_V9_TO_V10, MIGRATION_V10_TO_V11,
+    MIGRATION_V11_TO_V12,
 )
 # One version per migration, plus the current one. Derived so the Ledger guard and `hipson init`
 # cannot drift apart again, and listing SCHEMA_VERSION separately keeps the refusal fail-closed:
@@ -320,6 +326,16 @@ class Finding(TypedDict):
     resolved_at: str | None
 
 
+class RuntimeUsage(TypedDict):
+    source: str | None
+    tokens: dict[str, int | None] | None
+    reason: str | None
+
+
+class AssignmentUsage(RuntimeUsage):
+    elapsed_seconds: float
+
+
 class Assignment(TypedDict):
     id: str
     task: str
@@ -344,6 +360,7 @@ class Assignment(TypedDict):
     changes: dict[str, Any] | None
     environment: dict[str, Any] | None
     needs: list[str] | None
+    usage: AssignmentUsage | None
 
 
 class ReapedAssignment(TypedDict):
@@ -832,6 +849,11 @@ def _timestamp() -> str:
     return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def _assignment_usage(usage: RuntimeUsage, started: str, ended: str) -> AssignmentUsage:
+    elapsed = (datetime.fromisoformat(ended) - datetime.fromisoformat(started)).total_seconds()
+    return {**usage, "elapsed_seconds": max(0.0, elapsed)}
+
+
 def _boot_id() -> str | None:
     try:
         if sys.platform == "linux":
@@ -1091,6 +1113,9 @@ class Ledger:
                     if version[0] in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10):
                         for statement in MIGRATION_V10_TO_V11:
                             self.connection.execute(statement)
+                    if version[0] < 12:
+                        for statement in MIGRATION_V11_TO_V12:
+                            self.connection.execute(statement)
         except BaseException:
             self.close()
             raise
@@ -1344,8 +1369,9 @@ class Ledger:
             'uncertainty': 'Supervisor unavailable; exit status and project changes were not observed.',
         })
         self.connection.execute(
-            "UPDATE assignments SET status = 'cancelled', ended_at = ?, failure_journal = ? WHERE id = ?",
-            (now, json.dumps(journal), item["id"]),
+            "UPDATE assignments SET status = 'cancelled', ended_at = ?, failure_journal = ?, usage = ? WHERE id = ?",
+            (now, json.dumps(journal), json.dumps(_assignment_usage(
+                {"source": None, "tokens": None, "reason": "runtime_error"}, item["started_at"], now)), item["id"]),
         )
         self.connection.execute("DELETE FROM claims WHERE assignment = ?", (item["id"],))
         self._append_event(item["task"], item["actor"], "reaped", f"{item['id']}: {journal['reason']}", [item["id"]])
@@ -1438,6 +1464,7 @@ class Ledger:
         self, assignment: str, *, result: str, summary: str, refs: Sequence[str] = (),
         worker_result: object = None,
         failure_journal: dict[str, Any] | None = None,
+        usage: RuntimeUsage | None = None,
     ) -> Assignment:
         if result not in RESULTS:
             raise LedgerError(f"Assignment result must be one of {RESULTS}", code="assignment.result_invalid")
@@ -1450,10 +1477,14 @@ class Ledger:
             if current["status"] != "active":
                 raise LedgerError(f"Assignment {assignment} is already finished ({current['status']})",
                     code="assignment.already_finished")
+            now = _timestamp()
+            observed = _assignment_usage(usage if usage is not None else {
+                "source": None, "tokens": None, "reason": "not_an_agent_runtime",
+            }, current["started_at"], now)
             self.connection.execute(
-                "UPDATE assignments SET status = ?, ended_at = ?, result = ?, failure_journal = ? WHERE id = ?",
-                (result, _timestamp(), json.dumps(report) if report is not None else None,
-                 json.dumps(journal) if journal is not None else None, assignment),
+                "UPDATE assignments SET status = ?, ended_at = ?, result = ?, failure_journal = ?, usage = ? WHERE id = ?",
+                (result, now, json.dumps(report) if report is not None else None,
+                 json.dumps(journal) if journal is not None else None, json.dumps(observed), assignment),
             )
             self.connection.execute("DELETE FROM claims WHERE assignment = ?", (assignment,))
             counts = ""
@@ -1895,8 +1926,9 @@ class Ledger:
                       "NULL AS result_status, NULL AS result_summary")
             activity = ("acknowledged_at, ack_note, json_extract(activity, '$.heartbeat_at') AS heartbeat_at"
                         if version >= 5 else "NULL AS acknowledged_at, NULL AS ack_note, NULL AS heartbeat_at")
+            usage = "usage" if version >= 12 else "NULL AS usage"
             for assignment in select(
-                f"""SELECT task, id, actor, role, mode, status, started_at, ended_at, {result}, {activity}
+                f"""SELECT task, id, actor, role, mode, status, started_at, ended_at, {result}, {activity}, {usage}
                     FROM assignments WHERE task IN ({{ids}}) ORDER BY started_at, id"""  # nosec B608
             ):
                 row = tasks[assignment["task"]]
@@ -2159,6 +2191,7 @@ class Ledger:
             'needs': json.loads(row['needs']) if 'needs' in row.keys() and row['needs'] is not None else None,
             'ack_state': ('not_required' if row['status'] == 'active' else 'acknowledged' if acknowledged
                           else 'not_required' if legacy or historical else 'unacknowledged'),
+            'usage': json.loads(row['usage']) if 'usage' in row.keys() and row['usage'] is not None else None,
         }
 
     @staticmethod

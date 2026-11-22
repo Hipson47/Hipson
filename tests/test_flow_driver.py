@@ -414,6 +414,7 @@ def test_v10_ledgers_migrate_to_the_review_policy_column(tmp_path):
     with closing(ledger.Ledger(db)) as store:
         store.open_task(project=tmp_path, title='Old', objective='Before review policies')
         store.connection.execute('BEGIN IMMEDIATE')
+        store.connection.execute('ALTER TABLE assignments DROP COLUMN usage')
         store.connection.execute('ALTER TABLE tasks DROP COLUMN review_policy')
         store.connection.execute('UPDATE schema_version SET version = 10')
         store.connection.commit()
@@ -421,7 +422,7 @@ def test_v10_ledgers_migrate_to_the_review_policy_column(tmp_path):
         assert store.show('T-0001')['review_policy'] == 'none'
         assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 10
     with closing(ledger.Ledger(db)) as store:
-        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == 11
+        assert store.connection.execute('SELECT version FROM schema_version').fetchone()[0] == ledger.SCHEMA_VERSION
         assert store.show('T-0001')['review'] == {'required': False, 'passing': True, 'accepted': None,
                                                   'current': None, 'reasons': []}
 

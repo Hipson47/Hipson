@@ -190,7 +190,7 @@ def _parse_json(text: str) -> Any:
     start = min((index for index in (text.find("["), text.find("{")) if index >= 0), default=-1)
     try:
         return json.loads(text[start:]) if start >= 0 else None
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -330,7 +330,7 @@ def build_command(name: str, *, profile: str, mode: str, prompt: str, schema_pat
     schema = schema_path.read_text(encoding="utf-8")
     checks = checks or []
     if name == "claude":
-        argv = [executable, "--print", "--output-format", "json", "--json-schema", schema,
+        argv = [executable, "--print", "--output-format", "stream-json", "--verbose", "--json-schema", schema,
                 "--permission-mode", "plan" if mode == "ro" else "acceptEdits"]
         argv += ["--resume", resume] if resume else ["--session-id", session] if session else []
         argv += ["--model", model] if model else []
@@ -516,13 +516,73 @@ def _agy_model_diagnostic(payload: Any, stderr: str) -> str | None:
     return None
 
 
+USAGE_SOURCES = {"codex": "codex_rollout", "agy": "agy_json", "claude": "claude_stream_json"}
+TOKEN_FIELDS = ("input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens")
+
+
+def _token_count(value: object) -> int | None:
+    return value if type(value) is int and 0 <= value <= ledger.SQLITE_MAX_INTEGER else None
+
+
+def token_counts(name: str, raw: object) -> dict[str, int | None]:
+    """Keep the runtime's counter definitions, including its explicit total when present."""
+    usage = raw if isinstance(raw, dict) else {}
+    details = usage.get("output_tokens_details")
+    cached_key, write_key, reasoning = {
+        "codex": ("cached_input_tokens", "cache_write_input_tokens", usage.get("reasoning_output_tokens")),
+        "agy": ("cache_read_tokens", "cache_write_tokens", usage.get("thinking_tokens")),
+        "claude": ("cache_read_input_tokens", "cache_creation_input_tokens",
+                   details.get("thinking_tokens") if isinstance(details, dict) else None),
+    }[name]
+    inp, out = _token_count(usage.get("input_tokens")), _token_count(usage.get("output_tokens"))
+    cached, written = _token_count(usage.get(cached_key)), _token_count(usage.get(write_key))
+    total = _token_count(usage.get("total_tokens"))
+    if total is None and inp is not None and out is not None:
+        if name != "claude":
+            total = inp + out
+        elif cached is not None and written is not None:
+            total = inp + out + cached + written
+    return dict(zip(TOKEN_FIELDS, (inp, out, cached, written, _token_count(reasoning), total), strict=True))
+
+
+def _result_payload(name: str, stdout: str) -> Any:
+    payload = _parse_json(stdout)
+    if name != "claude":
+        return payload
+    if isinstance(payload, dict) and payload.get("type", "result") == "result":
+        return payload
+    # Only the terminal result carries run totals. Assistant and message events can repeat usage.
+    return next((event for line in reversed(stdout.splitlines())
+                 if isinstance(event := _parse_json(line), dict) and event.get("type") == "result"), None)
+
+
+def usage_report(source: str, counts: dict[str, int | None], *, failed: bool) -> ledger.RuntimeUsage:
+    if any(value is not None for value in counts.values()):
+        return {"source": source, "tokens": counts, "reason": None}
+    return {"source": source, "tokens": None, "reason": "runtime_error" if failed else "runtime_reported_no_usage"}
+
+
+def stdout_usage(name: str, stdout: str, *, failed: bool) -> ledger.RuntimeUsage:
+    if name == "codex":
+        turns = [token_counts(name, event.get("usage")) for line in stdout.splitlines()
+                 if isinstance(event := _parse_json(line), dict) and event.get("type") == "turn.completed"]
+        counts: dict[str, int | None] = {}
+        for key in TOKEN_FIELDS:
+            known = [value for turn in turns if (value := turn[key]) is not None]
+            counts[key] = sum(known) if known and len(known) == len(turns) else None
+    else:
+        payload = _result_payload(name, stdout)
+        counts = token_counts(name, payload.get("usage") if isinstance(payload, dict) else None)
+    return usage_report(USAGE_SOURCES[name], counts, failed=failed)
+
+
 def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -> tuple[ledger.TaskResult, dict[str, Any]]:
     """Validate the structured result against the task-result contract and collect session/usage evidence."""
     meta: dict[str, Any] = {"session": None, "usage": None, "models": None, "cost_usd_list": None,
                             "permission_denials": None, "num_turns": None}
     raw: Any = None
     if name == "claude":
-        payload = _parse_json(stdout)
+        payload = _result_payload(name, stdout)
         if not isinstance(payload, dict):
             raise RuntimeFailure(classify(code, stdout + stderr) if code else _evidence(stdout + stderr)
                                  or "malformed_output", "no JSON result object on stdout")
@@ -615,6 +675,7 @@ def _recorded(task: str, assignment: str) -> tuple[ledger.Assignment, list[list[
 def exec_worker(args: argparse.Namespace) -> int:
     """`hipson agent exec`: one native run inside a `task run` assignment; never outside one."""
     def fail(kind: str, detail: str) -> int:
+        publish_usage(failed=True)
         if note := meta.get("check_grants_note"):
             detail = f"{note} {detail}"
         detail = redact_text(detail)[:600]
@@ -632,6 +693,18 @@ def exec_worker(args: argparse.Namespace) -> int:
     cwd = os.getcwd()
     meta: dict[str, Any] = {"runtime": args.runtime, "profile": args.profile, "task": task, "assignment": assignment,
                             "ledger": _ledger_path(), "project": _project(cwd)}
+    stdout = ""
+
+    def publish_usage(*, failed: bool) -> None:
+        usage = stdout_usage(args.runtime, stdout, failed=failed)
+        meta["usage_report"] = usage
+        # The supervisor owns this per-run path even when the adapter uses its own --result path.
+        if usage_path := os.environ.get("HIPSON_RUN_USAGE_FILE"):
+            try:
+                _write_state(Path(usage_path), json.dumps(usage))
+            except RuntimeFailure:
+                pass  # Telemetry cannot change the worker result.
+
     if os.environ.get("HIPSON_ROLE") != "worker" or not task or not assignment:
         print("hipson agent exec: run it as a worker command of hipson task run (or task flow), so the ledger "
               "records the assignment", file=sys.stderr)
@@ -645,6 +718,7 @@ def exec_worker(args: argparse.Namespace) -> int:
     # Mode and role come from the recorded assignment: a reviewer assignment never runs with edit permission.
     if item["role"] not in ("builder", "reviewer") or (args.role and args.role != item["role"]):
         return fail("unsupported", f"{assignment} is a {item['role']} assignment; --role {args.role} does not match")
+    publish_usage(failed=True)  # A signal may stop the adapter before it can write the final report.
     role, mode = item["role"], item["mode"]
     meta.update(role=role, mode=mode)
     if mode == "ro":  # Claude plan mode and Codex read-only sandbox refused the write in live probes; agy did not.
@@ -723,6 +797,7 @@ def exec_worker(args: argparse.Namespace) -> int:
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.
     meta.update(facts, outcome="ok")
+    publish_usage(failed=False)
     try:
         _write_state(result_path, json.dumps(report) + "\n")
         _write_meta(meta_path, meta)

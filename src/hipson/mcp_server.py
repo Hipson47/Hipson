@@ -1076,7 +1076,8 @@ def _task_tool_payload(name: str, arguments: dict[str, Any]) -> object:
                 force=arguments.get("force", False), reason=arguments.get("reason", ""),
             )
         if name == "task.show":
-            return store.show(arguments["task"])
+            from hipson.task_projection import show_full
+            return show_full(store, arguments["task"])
         if name == "task.brief":
             return task_context.brief(store, arguments["task"], role=arguments["role"], scope=arguments.get("scope", []))
         if name == "task.context":

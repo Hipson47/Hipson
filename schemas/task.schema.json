@@ -35,6 +35,7 @@
     "updated_at": { "type": "string", "format": "date-time" },
     "revision": { "type": "integer", "minimum": 1 },
     "assignments": { "type": "array", "items": { "$ref": "#/$defs/assignment" } },
+    "usage": { "$ref": "#/$defs/task_usage" },
     "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" }, "description": "Open findings only; use task.findings for resolved history." },
     "verification": {
       "type": "object", "additionalProperties": false,
@@ -168,7 +169,59 @@
         "environment": { "$ref": "#/$defs/environment" },
         "needs": { "type": ["array", "null"], "maxItems": 16,
                    "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,39}$" },
-                   "description": "Capability tags of this run (task run --needs, else the task's at assignment)" }
+                   "description": "Capability tags of this run (task run --needs, else the task's at assignment)" },
+        "usage": {
+          "type": ["object", "null"], "additionalProperties": false,
+          "required": ["source", "tokens", "reason", "elapsed_seconds"],
+          "properties": {
+            "source": { "enum": [null, "codex_rollout", "agy_json", "claude_stream_json"] },
+            "tokens": { "$ref": "#/$defs/usage_tokens" },
+            "reason": { "enum": [null, "runtime_reported_no_usage", "rollout_not_found", "not_an_agent_runtime", "runtime_error"] },
+            "elapsed_seconds": { "type": "number", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "usage_tokens": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["input_tokens", "output_tokens", "cached_tokens", "cache_write_tokens", "reasoning_tokens", "total_tokens"],
+      "properties": {
+        "input_tokens": { "$ref": "#/$defs/token_count" },
+        "output_tokens": { "$ref": "#/$defs/token_count" },
+        "cached_tokens": { "$ref": "#/$defs/token_count" },
+        "cache_write_tokens": { "$ref": "#/$defs/token_count" },
+        "reasoning_tokens": { "$ref": "#/$defs/token_count" },
+        "total_tokens": { "$ref": "#/$defs/token_count" }
+      }
+    },
+    "token_count": { "type": ["integer", "null"], "minimum": 0 },
+    "task_usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempts", "repair_rounds", "tokens", "without_usage", "elapsed_seconds"],
+      "properties": {
+        "attempts": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "builder": { "type": "integer", "minimum": 1 },
+            "reviewer": { "type": "integer", "minimum": 1 },
+            "explorer": { "type": "integer", "minimum": 1 },
+            "researcher": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "repair_rounds": { "type": "integer", "minimum": 0 },
+        "tokens": { "$ref": "#/$defs/usage_tokens" },
+        "without_usage": { "type": "integer", "minimum": 0 },
+        "missing_reasons": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "runtime_reported_no_usage": { "type": "integer", "minimum": 1 },
+            "rollout_not_found": { "type": "integer", "minimum": 1 },
+            "not_an_agent_runtime": { "type": "integer", "minimum": 1 },
+            "runtime_error": { "type": "integer", "minimum": 1 },
+            "not_recorded": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "elapsed_seconds": { "type": "number", "minimum": 0 }
       }
     },
     "environment": {
