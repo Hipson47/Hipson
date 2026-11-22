@@ -46,6 +46,8 @@ ALLOWLIST = {
         "The enclosing policy parser decides whether bad encoding warrants a refusal.",
     ("task_runner._finish", "Exception"): "Re-raise after marking a failed worker finalization.",
     ("task_runner._execute_owned", "OSError"): "Re-raise a job attachment failure after killing the child.",
+    ("task_runner._execute_owned", "sqlite3.OperationalError"):
+        "Re-raise a heartbeat error that is not a busy ledger; a busy ledger only skips the heartbeat.",
     ("task_runner._active", "OSError('worker process tracking is unavailable')"):
         "Both process trackers being absent violates the supervisor invariant.",
     ("task_runner._stop", "OSError('worker process tracking is unavailable')"):
