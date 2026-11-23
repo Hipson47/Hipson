@@ -33,7 +33,8 @@ from pathlib import Path
 from typing import Any
 
 from hipson import ledger
-from hipson.redaction import redact_incomplete_private_keys, redact_text
+from hipson.display import bounded_text
+from hipson.redaction import redact_incomplete_private_keys, redact_text, redact_worker_text
 
 PROFILES = ("native", "controlled")
 # Observed live (agy 1.5.12, 2026-11-19): a reviewer in --mode plan created a file when its brief asked it to.
@@ -42,6 +43,10 @@ READ_ONLY_GAP = ("--mode plan is not an enforced read-only sandbox (observed liv
                  "observation, not on agy")
 MAX_BRIEF_BYTES = 256 * 1024
 MAX_AGY_PROMPT_BYTES = 100_000
+MAX_CODEX_ROLLOUT_BYTES = 16 * 1024 * 1024
+MAX_ROLLOUT_MODELS = 8
+MAX_MODEL_CHARS = 80
+CODEX_THREAD_ID = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", re.IGNORECASE)
 
 # Flags each capability needs, looked up in the runtime's own help output (documented, not verified).
 RUNTIMES: dict[str, dict[str, Any]] = {
@@ -83,10 +88,11 @@ EXIT = {"ok": 0, "malformed_output": 2, "provider_error": 3, "auth_required": 4,
         "permission_denied": 6, "unsupported": 64, "model_unavailable": 64, "timeout": 124}
 AGY_MODEL_REJECTION = re.compile(r"invalid model selection|not recognized as a known model", re.I)
 MAX_AGY_DIAGNOSTIC_CHARS = 600
+PERMISSION_DENIAL = re.compile(r"permission.{0,40}(denied|cannot prompt)|auto-denied", re.I)
 _PATTERNS = [  # Order matters: the most specific evidence wins.
     ("rate_limited", re.compile(r"usage limit|rate.?limit|\b429\b|quota", re.I)),
     ("auth_required", re.compile(r"not logged in|please (run )?/?login|unauthori[sz]ed|\b401\b|authentication", re.I)),
-    ("permission_denied", re.compile(r"permission.{0,40}(denied|cannot prompt)|auto-denied", re.I)),
+    ("permission_denied", PERMISSION_DENIAL),
 ]
 
 
@@ -576,16 +582,62 @@ def stdout_usage(name: str, stdout: str, *, failed: bool) -> ledger.RuntimeUsage
     return usage_report(USAGE_SOURCES[name], counts, failed=failed)
 
 
+def _codex_rollout_models(thread_id: object, started: float) -> list[str] | None:
+    if not isinstance(thread_id, str) or not CODEX_THREAD_ID.fullmatch(thread_id):
+        return None
+    try:
+        home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        for path in (home / "sessions").rglob(f"rollout-*-{thread_id}.jsonl"):
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_mtime < started:
+                    continue
+                models: set[str] = set()
+                remaining = MAX_CODEX_ROLLOUT_BYTES
+                with open(path, "rb", opener=_open_state_file) as source:
+                    while remaining and (line := source.readline(remaining + 1)) and len(line) <= remaining:
+                        remaining -= len(line)
+                        try:
+                            event = json.loads(line)
+                        except (ValueError, RecursionError):
+                            continue
+                        if isinstance(event, dict) and event.get("type") == "turn_context":
+                            payload = event.get("payload")
+                            if isinstance(payload, dict) and isinstance(model := payload.get("model"), str) and model.strip():
+                                # A worker could plant a rollout: keep the evidence small and inert.
+                                models.add(bounded_text(model, limit=MAX_MODEL_CHARS, escape_controls=True))
+                                if len(models) >= MAX_ROLLOUT_MODELS:
+                                    break
+                return sorted(models) or None
+            except OSError:
+                continue
+    except (OSError, RuntimeError):
+        pass  # Missing or unreadable telemetry cannot change the worker result.
+    return None
+
+
 def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -> tuple[ledger.TaskResult, dict[str, Any]]:
     """Validate the structured result against the task-result contract and collect session/usage evidence."""
+    def failure(kind: str, detail: str) -> RuntimeFailure:
+        if kind == "permission_denied":
+            denied = next((line for stream in (stdout, stderr) for line in stream.split("\n")
+                           if PERMISSION_DENIAL.search(line)), None)
+            if denied is not None:
+                detail += ("; runtime output (untrusted): "
+                           f"{bounded_text(redact_worker_text(denied), limit=300, escape_controls=True)}")
+            if name == "agy":
+                detail += ("; Antigravity auto-denies commands outside its allow list in headless mode; "
+                           "grant the command in agy's settings or use another builder runtime.")
+        return RuntimeFailure(kind, detail)
+
     meta: dict[str, Any] = {"session": None, "usage": None, "models": None, "cost_usd_list": None,
                             "permission_denials": None, "num_turns": None}
     raw: Any = None
     if name == "claude":
         payload = _result_payload(name, stdout)
         if not isinstance(payload, dict):
-            raise RuntimeFailure(classify(code, stdout + stderr) if code else _evidence(stdout + stderr)
-                                 or "malformed_output", "no JSON result object on stdout")
+            raise failure(classify(code, stdout + stderr) if code else _evidence(stdout + stderr)
+                          or "malformed_output", "no JSON result object on stdout")
         raw_denials = payload.get("permission_denials")
         denials: list[Any] = raw_denials if isinstance(raw_denials, list) else []
         meta.update(session=payload.get("session_id"), usage=payload.get("usage"),
@@ -595,10 +647,10 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
                     permission_denials=[redact_text(str(item.get("tool_name", "?")))[:80]
                                         for item in denials if isinstance(item, dict)])
         if code:
-            raise RuntimeFailure(classify(code, stdout + stderr), f"claude exited {code} after printing a result")
+            raise failure(classify(code, stdout + stderr), f"claude exited {code} after printing a result")
         if payload.get("is_error") or payload.get("subtype") != "success":
-            raise RuntimeFailure(classify(1, json.dumps(payload.get("result", "")) + stderr),
-                                 f"subtype={payload.get('subtype')} api_error={payload.get('api_error_status')}")
+            raise failure(classify(1, json.dumps(payload.get("result", "")) + stderr),
+                          f"subtype={payload.get('subtype')} api_error={payload.get('api_error_status')}")
         raw = payload.get("structured_output")
     elif name == "codex":
         for line in stdout.splitlines():
@@ -610,7 +662,7 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
             if event.get("type") == "turn.completed":
                 meta["usage"] = event.get("usage")
         if code:
-            raise RuntimeFailure(classify(code, stdout + stderr), f"codex exec exit {code}")
+            raise failure(classify(code, stdout + stderr), f"codex exec exit {code}")
         if not last_path.is_file():
             raise RuntimeFailure("malformed_output", "codex wrote no --output-last-message file in this run")
         try:
@@ -627,12 +679,12 @@ def normalize(name: str, code: int, stdout: str, stderr: str, last_path: Path) -
                 if diagnostic := _agy_model_diagnostic(payload, stderr):
                     raise RuntimeFailure("model_unavailable", diagnostic)
             detail = payload.get("status") if isinstance(payload, dict) else f"exit {code}"
-            raise RuntimeFailure(kind, f"agy {detail}")
+            raise failure(kind, f"agy {detail}")
         meta.update(session=payload.get("conversation_id"), usage=payload.get("usage"),
                     num_turns=payload.get("num_turns"))
         raw = payload.get("structured_output")
     if raw is None:
-        raise RuntimeFailure(_evidence(stdout + stderr) or "malformed_output", "no structured_output in the runtime result")
+        raise failure(_evidence(stdout + stderr) or "malformed_output", "no structured_output in the runtime result")
     try:
         return ledger.validate_task_result(raw), meta
     except ledger.LedgerError as exc:
@@ -648,6 +700,8 @@ WORKER_RULES = ("Worker rules: you are a worker for a Hipson lead. Stay within t
                 "independently afterwards: if your work is complete but you could not run a check (for example a "
                 "permission was not granted), report status completed and name the unverified check under risks. "
                 "Use partial or blocked only when the work itself is unfinished or impossible.")
+REVIEWER_RULES = ("List only defects, risks or gaps that need a decision in findings. "
+                  "Confirmations that something works belong in the summary.")
 
 
 def _ledger_path() -> str | None:
@@ -733,7 +787,8 @@ def exec_worker(args: argparse.Namespace) -> int:
     work = result_path.parent
     schema_path = work / f"{result_path.stem}.schema.json"
     last_path = work / f"{result_path.stem}.{session}.last.json"  # Codex only; unique per run, never pre-existing.
-    prompt = f"{WORKER_RULES}\n\n{brief.decode('utf-8', errors='replace')}"
+    rules = f"{WORKER_RULES}\n{REVIEWER_RULES}" if role == "reviewer" else WORKER_RULES
+    prompt = f"{rules}\n\n{brief.decode('utf-8', errors='replace')}"
     with ExitStack() as settings_files:
         try:
             _check_state_path(result_path)
@@ -771,6 +826,7 @@ def exec_worker(args: argparse.Namespace) -> int:
             return fail("auth_required", f"{args.runtime} reports it is not logged in ({auth['evidence']}); log in with "
                         "the runtime itself, then retry")
         meta.update(session_requested=resume or session, resumed=bool(resume))
+        started_wall = time.time()
         started = time.monotonic()
         try:
             # Runtimes emit UTF-8 JSON; the Windows locale code page would garble or reject it.
@@ -796,6 +852,8 @@ def exec_worker(args: argparse.Namespace) -> int:
         return fail(exc.kind, detail)
     finally:
         last_path.unlink(missing_ok=True)  # The raw message may hold unredacted text; the result file is redacted.
+    if args.runtime == "codex":
+        facts["models"] = _codex_rollout_models(facts["session"], started_wall)
     meta.update(facts, outcome="ok")
     publish_usage(failed=False)
     try:

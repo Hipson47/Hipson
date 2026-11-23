@@ -85,6 +85,13 @@ files if present, then copy the pre-migration backup over the ledger file before
 
 ## Known limitations
 
+1.8.1 fixes are listed in the [changelog](../CHANGELOG.md). Two limitations stay open:
+
+- Ledger writers fingerprint the project while holding the write lock, so on a slow filesystem other
+  writers can time out with `database is locked`. Workers survive it since 1.8.1. See the task ledger docs.
+- Git-ignored and excluded paths are neither observed as findings nor fingerprinted; checks that read them
+  should name them or keep them tracked.
+
 - Compact reads show recorded evidence and may leave current check status unevaluated. Use
   lead verification for a fresh result and read the relevant task section for the full evidence.
   Cleanup is a point-in-time read. A later ledger write can change its result.

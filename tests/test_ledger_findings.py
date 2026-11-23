@@ -662,3 +662,37 @@ def test_mcp_finding_and_result_validation_precedes_store_access(tmp_path: Path)
     assert _payload(_call(tmp_path, "task.findings", ledger_db=db)) == []
     _assert_error(_call(tmp_path, "task.findings", ledger_db=db, task="T-0001"), "Task not found")
     assert not db.parent.exists()
+
+
+def test_worker_results_findings_and_notes_persist_without_env_secrets_or_cut_key_blocks(tmp_path):
+    import os
+    import sqlite3
+
+    cut = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsecretbody"
+    with patch.dict(os.environ, {"SVC_TOKEN": "zq9plainvalue77"}):
+        store = ledger.Ledger(tmp_path / "ledger.sqlite")
+        task = store.open_task(project=tmp_path, title="Gate", objective="Persistence")["id"]
+        db = store.path
+        with closing(store):
+            result = ledger.validate_task_result({
+                "status": "completed", "summary": "env zq9plainvalue77 and " + cut, "files_changed": [{"path": "a zq9plainvalue77", "change": "modified"}],
+                "commands": [{"command": "echo zq9plainvalue77", "exit_code": 0}], "risks": ["key " + cut],
+                "findings": [{"severity": "minor", "title": "t zq9plainvalue77", "detail": cut, "location": "x"}]})
+            assert result["summary"] == "env [REDACTED] and [REDACTED]"
+            assert result["files_changed"] == [{"path": "a [REDACTED]", "change": "modified"}] and result["risks"] == ["key [REDACTED]"]
+            assert result["commands"][0]["command"] == "echo [REDACTED]"
+            assert result["findings"][0]["title"] == "t [REDACTED]" and result["findings"][0]["detail"] == "[REDACTED]"
+            assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
+            store.finish(assignment, result="passed", summary="done", worker_result=result)
+            finding = store.add_finding(task, actor="w", severity="minor", title="title zq9plainvalue77",
+                                        detail="detail " + cut, location="loc zq9plainvalue77")
+            assert (finding["title"], finding["detail"], finding["location"]) == (
+                "title [REDACTED]", "detail [REDACTED]", "loc [REDACTED]")
+            updated = store.update_finding(finding["id"], actor="lead", status="wontfix",
+                                           resolution_note="note zq9plainvalue77 " + cut)
+            assert updated["resolution_note"] == "note [REDACTED] [REDACTED]"
+            store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        raw = db.read_bytes()
+        assert b"zq9plainvalue77" not in raw and b"MIIEowIBAAKCAQEAsecretbody" not in raw
+        with closing(sqlite3.connect(db)) as check:
+            assert check.execute("SELECT count(*) FROM findings").fetchone()[0] == 2  # The result's own and the added one.

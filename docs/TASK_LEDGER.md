@@ -251,9 +251,13 @@ environments and other machines that sync it. Hipson 1.7.0 refuses a v12 ledger 
 To go back, stop every Hipson that uses the ledger, delete `<ledger>-wal` and `<ledger>-shm` if
 they exist (SQLite would otherwise replay v12 frames onto the restored file), and copy the
 pre-migration backup over the ledger file. Anything written after the migration is lost. Backups are
-created with mode 0600 and never overwritten. A failed copy is removed rather than left behind
-(SQLite may leave a stray `<backup>-journal` file next to it). If the backup cannot be written, for example
-on a full disk, writers cannot open the older ledger until it can; reads still work.
+created with mode 0600 and never overwritten. The copy is written to a hidden working file,
+`.<ledger>.v<old>-backup-<UTC timestamp>-<pid>-<thread>.partial`, and gets its backup name only once it is
+complete, so a file named `<ledger>.v<old>-backup-*` is always a whole copy. A failed copy is removed. A
+writer killed during the copy (SIGKILL, out of memory, power loss) can leave the hidden `.partial` file
+and its `-journal`. They are never a backup, hold ledger data, and can be deleted. The ledger itself is
+untouched and the next writer takes a fresh backup. If the backup cannot be written, for example on a
+full disk, writers cannot open the older ledger until it can; reads still work.
 
 Usage is evidence, not a gate. A worker that can write to its run directory could overwrite the
 adapter's usage handoff file before a killed adapter replaces it, and the Codex rollout lookup takes
@@ -418,9 +422,29 @@ actually changed. It is opt-in: `hipson task run --observe` (also `task do --obs
   assignment starts, the comparison is completed by `hipson task reap` (CLI or MCP) or the next `task run`.
 - Each created, modified or deleted path is classified: `in_scope` (inside the `rw` assignment's claimed
   scope), `unattributed` (inside the scope of another `rw` assignment in the same project that was alive
-  between this assignment's start and its final snapshot; never blamed on this worker), or `out_of_scope`.
-  A read-only (`ro`) assignment has no write scope, so every change outside other writers' claimed paths
-  counts as `out_of_scope`.
+  between this assignment's start and its final snapshot), `ignored` (otherwise outside scope, but Git
+  ignores the path; `rw` assignments only), or `out_of_scope` (all other changes). A read-only (`ro`)
+  assignment has no write scope and may not change anything, so its changes outside other writers' claimed
+  paths stay `out_of_scope` even when Git ignores them.
+- The ignore check reads the project's `.gitignore` files in isolation from the project's Git directory
+  and any global or repository-local excludes. It uses a bounded path list and times out. Sensitive paths
+  and paths stored as digests always keep their original scope classification, as do paths that could run
+  later in the lead's context: executable files and links, and agent, editor, hook and CI configuration
+  (`.claude/`, `.codex/`, `.cursor/`, `.vscode/`, `.idea/`, `.husky/`, `.githooks/`, `.direnv/`,
+  `.devcontainer/`, `.github/`, `.gitlab/`, `.circleci/`, `.agents/`, `.mcp.json`, `.gitattributes`,
+  `.gitmodules`, `.pre-commit-config.yaml`, `.envrc`, `conftest.py`, `sitecustomize.py`, `usercustomize.py`), script and binary types
+  (`.sh`, `.bash`, `.zsh`, `.ps1`, `.psm1`, `.bat`, `.cmd`, `.exe`, `.com`, `.dll`, `.so`, `.dylib`; Windows has no
+  exec bits), and files tracked in `HEAD` that match an ignore pattern, also when the project is a
+  subdirectory of the repository. A repository whose `HEAD` cannot be read, or a Git that cannot tell,
+  downgrades nothing. Any observed creation,
+  modification, or deletion of a `.gitignore` anywhere in the snapshot disables ignore classification for
+  the whole observation, as does an incomplete snapshot or an unavailable ignore check. Ignored paths
+  stay in the observation's paths, counts, and summary. The `ignored` count group is present when it has
+  entries. Only `out_of_scope` paths raise findings.
+- Limitation: ignored paths, like the excluded directories (`.venv`, `venv`, `node_modules`, tool caches), are
+  not part of the verified fingerprint either. If a declared check reads a git-ignored file (a local config, a
+  vendored module), a builder can change what the check executes without a finding. Name such files in a
+  check argument or `spec.protected`, or keep them tracked.
 - `out_of_scope` changes raise one `major` finding per kind (created, modified, deleted) on the task,
   listing the paths. Like any major finding it blocks `done` until it is resolved: `fixed` after reverting,
   or `wontfix` with a reason when the change was expected. An `observed` event records the counts and a
@@ -715,6 +739,14 @@ resuming continues. A builder allowed to write the acceptance tests needs them l
 test a check reaches only indirectly (a whole suite) is protected only when listed. Later rewrites by the checks
 themselves (a report file they name) are not blamed on the builder.
 
+The saved baseline lives in a directory the builder can reach, so the flow also records its SHA-256 in the
+ledger (`protected baseline N: sha256 <hex>`) before it launches builder N. When that event exists, a baseline file
+that is missing, unreadable or different stops the flow with `needs_lead` (it cannot prove the acceptance
+inputs are untouched; inspect the builder's changes, then continue manually or start a new flow), and the
+`protected-N.clean` marker is ignored: a clean comparison is recorded as `protected baseline N: unchanged after
+A-...` and later comparisons are skipped only when that event exists. A flow without the event (started
+before this check) keeps the file-only behavior.
+
 Snapshot creation fails closed, refusing the reviewer before an assignment exists (`task run` exit 75, the flow
 `verification_inconclusive`), for: content over the fingerprint hash budget, special files, symlinks that point
 out of the project, Git submodules, a repository without a commit, and Git operations that fail or time out
@@ -911,6 +943,15 @@ also redact legacy rows without rewriting them. Project paths and write scope
 paths containing secret-shaped text are rejected: masking a coordination path
 would change which tree or files its claims protect. Read-only scope labels can
 be masked safely. Redaction is best effort; never supply real credentials.
+
+Writers hold SQLite's write lock while they fingerprint the project (opening a task, setting checks, changing
+status, closing). On a large tree or a slow filesystem this can take longer than the 10-second busy timeout
+(measured: 9.6 to 13 s for 421 files on `/mnt/c` under WSL, 0.05 s on ext4), and other writers then fail
+with `database is locked`. Since 1.8.1 a running worker's supervisor tolerates this: it skips busy activity
+heartbeats and makes up to six attempts at its final result record; a busy change observation or
+reviewed-tree record is completed later by `hipson task reap`. Interactive commands report the error and
+can be repeated. Keep
+WSL projects on the Linux filesystem.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
 (database version 6; artifact schema version `1.0`). Writes migrate existing
@@ -1580,6 +1621,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `ledger.path_unresolvable` | The configured database path cannot be resolved. | Use a valid database path. |
 | `ledger.rollback_journal` | A rollback journal prevents a read-only snapshot. | Retry after the writable owner finishes recovery. |
 | `ledger.schema_unsupported` | The database has an unsupported ledger schema. | Use a compatible Hipson version or migrate with the supported upgrade path. |
+| `ledger.backup_name_unavailable` | Every pre-migration backup name for this timestamp was already taken. | Remove or move old `<ledger>.v*-backup-*` files, then retry. |
 | `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
 | `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
 | `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |

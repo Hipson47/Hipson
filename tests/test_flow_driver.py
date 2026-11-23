@@ -1,5 +1,6 @@
 """hipson task flow: spec contract, review gate, bounded repair, recovery and refusal states."""
 
+import hashlib
 import json
 import os
 import signal
@@ -8,6 +9,7 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from typing import Any
 from unittest import SkipTest
 from unittest.mock import patch
 
@@ -790,3 +792,103 @@ def test_round_three_review_fixes(tmp_path):
         assert len(store.verifications('T-0001')) == records
     # Accepted only while the task is still review/done when the result is read.
     assert flow_driver._result(db, 'T-0001', 'accepted', ['x'], [])['state'] == 'needs_lead'
+
+
+def _use_builder_script(spec, actions):
+    """Replace the builder with a script that trims correctly, then runs `actions` (Python source)."""
+    builder = spec.parent / 'scripted-builder.py'
+    builder.write_text(f'''
+import json
+import os
+from pathlib import Path
+
+result = Path(os.environ['HIPSON_FLOW_RESULT'])
+flow_dir = result.parent
+Path('src/parser/pairs.py').write_text(
+    "def parse_pair(text):\\n    return tuple(part.strip() for part in text.split(':'))\\n")
+{actions}
+result.write_text(json.dumps({{
+    'status': 'completed', 'summary': 'scripted builder', 'files_changed': [],
+    'commands': [], 'findings': [], 'risks': []}}))
+''', encoding='utf-8')
+    config = json.loads(spec.read_text())
+    config['builder']['command'] = [PY, str(builder)]
+    spec.write_text(json.dumps(config))
+    return spec
+
+
+EDIT = "Path('tests/acceptance.py').write_text('pass\\n')\n"
+DELETE = "(flow_dir / 'protected-1.json').unlink()\n"
+REWRITE = ("import hashlib\nsaved = flow_dir / 'protected-1.json'\n"
+           "state = json.loads(saved.read_text())\n"
+           "state['tests/acceptance.py'] = hashlib.sha256(Path('tests/acceptance.py').read_bytes()).hexdigest()\n"
+           "saved.write_text(json.dumps(state))\n")
+CLEAN = "(flow_dir / 'protected-1.clean').touch()\n"
+
+
+def _assert_no_lead_verification(db):
+    with closing(ledger.Ledger(db, read_only=True)) as store:
+        assert not store.verifications('T-0001')
+    assert [item['role'] for item in _view(db)[0]['assignments']] == ['builder']
+
+
+def test_a_builder_cannot_disable_protected_paths_through_the_flow_directory(tmp_path):
+    cases = {'edit-and-delete-json': EDIT + DELETE, 'edit-and-rewrite-json': EDIT + REWRITE, 'delete-json-only': DELETE}
+    for case, actions in cases.items():
+        case_dir = tmp_path / case
+        case_dir.mkdir()
+        project, db = _repo(case_dir), case_dir / 'ledger.sqlite'
+        proc, result = _flow(project, db, _use_builder_script(_spec(case_dir, project), actions))
+        assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress', (case, result)
+        reason = result['reasons'][0]
+        assert 'protected-path baseline for builder A-0001' in reason and 'changed outside the flow' in reason, case
+        assert 'inspect' in reason and 'start a new flow' in reason, case
+        _assert_no_lead_verification(db)
+
+
+def test_a_builder_cannot_skip_the_comparison_with_a_clean_marker(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    proc, result = _flow(project, db, _use_builder_script(_spec(tmp_path, project), EDIT + CLEAN))
+    assert proc.returncode == 4 and result['state'] == 'needs_lead' and result['status'] == 'in_progress', result
+    assert 'changed protected paths' in result['reasons'][0] and 'tests/acceptance.py' in result['reasons'][0]
+    _assert_no_lead_verification(db)
+
+
+def test_a_clean_build_records_the_baseline_and_the_unchanged_comparison_in_the_ledger(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    (project / 'reports').mkdir()
+    (project / 'reports/out.txt').write_text('old\n')
+    _git(project, 'add', '.')
+    _git(project, '-c', 'user.name=T', '-c', 'user.email=t@e', 'commit', '-qm', 'report')
+    writer = [PY, '-c', "import sys, time; open(sys.argv[1], 'w').write(str(time.time()))", 'reports/out.txt']
+    proc, result = _flow(project, db, _spec(tmp_path, project, checks=(TRIM_CHECK, writer)))
+    # The writer check changes a tracked file during verification, so the outcome is inconclusive; what matters
+    # here is that the rewrite is not blamed on the builder once the ledger recorded the clean comparison.
+    assert result['state'] == 'verification_inconclusive', result
+    assert not any('protected' in reason for reason in result['reasons']), result
+    _, events = _view(db)
+    summaries = [event['summary'] for event in events if event['type'] == 'flow']
+    baseline = [text for text in summaries if text.startswith('protected baseline 1: sha256 ')]
+    saved = flow_driver._flow_dir(db, 'T-0001') / 'protected-1.json'
+    assert baseline == [f'protected baseline 1: sha256 {hashlib.sha256(saved.read_bytes()).hexdigest()}']
+    assert any(text.startswith('protected baseline 1: unchanged after A-') for text in summaries)
+
+
+def test_without_a_ledger_baseline_the_file_only_protection_keeps_its_legacy_behavior(tmp_path):
+    project, db = _repo(tmp_path), tmp_path / 'ledger.sqlite'
+    flow_dir = flow_driver._flow_dir(db, 'T-0001')
+    flow_dir.mkdir(parents=True)
+    view: Any = {'id': 'T-0001', 'project': str(project),
+                 'assignments': [{'role': 'builder', 'status': 'completed', 'id': 'A-0001'}]}
+    # No baseline file and no baseline event: nothing is blamed on the builder.
+    assert flow_driver.protected_changes(db, view, {}, []) == []
+    # A legacy baseline file is still compared and still honors the clean marker.
+    (flow_dir / 'protected-1.json').write_text(json.dumps({'tests/acceptance.py': 'stale'}))
+    assert flow_driver.protected_changes(db, view, {}, []) == ['tests/acceptance.py']
+    (flow_dir / 'protected-1.clean').touch()
+    assert flow_driver.protected_changes(db, view, {}, []) == []
+    # With a baseline event the clean marker and a missing file are no longer trusted.
+    events: Any = [{'type': 'flow', 'summary': 'protected baseline 1: sha256 ' + '0' * 64}]
+    (flow_dir / 'protected-1.json').unlink()
+    changed, problem, unchanged = flow_driver.protected_check(db, view, events)
+    assert changed == [] and problem and 'missing or was changed outside the flow' in problem and unchanged is None

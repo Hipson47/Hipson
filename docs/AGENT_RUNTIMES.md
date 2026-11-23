@@ -147,10 +147,15 @@ runtime configuration: restore it with `git checkout -- PATH`, then resume).
 - Failure classes from the runtime's own words and exit codes: `rate_limited` (5), `auth_required` (4),
   `permission_denied` (6), `malformed_output` (2), `timeout` (124), `provider_error` (3), `unsupported` (64),
   and `model_unavailable` (64) for Antigravity model selection failures. The redacted CLI diagnostic is printed
-  and saved in the meta file's `detail`. `task run` records the exit code and the flow stops with
-  `worker_failed` / `reviewer_failed`.
+  and saved in the meta file's `detail`. A `permission_denied` diagnostic quotes the first output line that
+  names the denial, redacted and capped at 300 characters. For Antigravity it adds that headless mode
+  auto-denies commands outside its allow list, which are granted in agy's own settings. `task run`
+  records the exit code and the flow stops with `worker_failed` / `reviewer_failed`.
+- Reviewer runs get one more worker rule: findings list only defects, risks or gaps that need a decision.
+  Confirmations that something works belong in the summary.
 - Evidence beside the result (`<result>.meta.json`): runtime, profile, role, mode, ledger, project, session,
-  models, raw usage, normalized `usage_report`, the names of denied tools (never their inputs), duration,
+  models (Claude from its result's model usage, Codex from the `turn_context` entries of the run's own rollout
+  under `$CODEX_HOME/sessions`, matched by thread id and bounded to 16 MiB; null when not found), raw usage, normalized `usage_report`, the names of denied tools (never their inputs), duration,
   brief size and a bytes/4 `brief_tokens_estimate` heuristic. A nonzero exit is never a success, even after
   a valid-looking result; Codex's last-message file is
   removed before and after each run so a stale one cannot be ingested. `verified` evidence records the CLI

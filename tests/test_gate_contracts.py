@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import shlex
+import threading
 from contextlib import closing
 from unittest.mock import patch
 
@@ -575,9 +576,21 @@ def _record_changes_contract(tmp_path):
             f"{other}: changes incomplete; 0 outside scope, 0 unattributed; incomplete, not a clean result")
         third = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
         store.finish(third, result="passed", summary="ok")
-        store.record_changes(third, _changes("clean"))
+        clean = _changes("clean")
+        clean["counts"]["ignored"] = {"created": 0, "modified": 0, "deleted": 0}
+        store.record_changes(third, clean)
         assert store.events(task)[-1]["summary"] == f"{third}: changes clean; 0 outside scope, 0 unattributed"
         assert store.events(task)[-1]["refs"] == [third]
+        fourth = store.assign(task, actor="w", role="reviewer", mode="ro", scope=[])["id"]
+        store.finish(fourth, result="passed", summary="ok")
+        ignored = _changes(paths=[{"path": "report.html", "change": "created", "attribution": "ignored",
+                                   "evidence": "presence"}], omitted=5)
+        ignored["counts"]["ignored"] = {"created": 1, "modified": 2, "deleted": 3}
+        store.record_changes(fourth, ignored)
+        assert store.events(task)[-1]["summary"] == (
+            f"{fourth}: changes changes; 0 outside scope, 0 unattributed, 6 ignored; "
+            "paths: ignored created report.html (+5 more in task show --json)")
+        assert store.events(task)[-1]["refs"] == [fourth]
 
 
 def _overlapping_writers_contract(tmp_path):
@@ -868,6 +881,117 @@ def test_v12_usage_record_and_migration_exact_contract(_project_state, tmp_path)
         assert migrated.activity(assigned["id"])["usage"] is None
     with closing(ledger.Ledger(db)) as reopened:
         assert reopened.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 12
+
+
+def _old_ledger(path):
+    # A fixed project state, like every contract here: this file mutation-tests the ledger, not fingerprints.
+    with closing(ledger.Ledger(path)) as store, \
+            patch.object(task_verification, "project_state", return_value=dict(STATE)):
+        store.open_task(project=path.parent, title="kept", objective="survives the backup")
+        store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
+        store.connection.execute("UPDATE schema_version SET version = 11")
+
+
+def _names(directory):
+    return sorted(item.name for item in directory.iterdir() if item.name.startswith(("ledger", ".ledger"))
+                  and item.name not in ("ledger.sqlite-wal", "ledger.sqlite-shm"))
+
+
+def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path):
+    import os
+    import sqlite3
+    import stat
+    from datetime import UTC, datetime
+
+    fixed = datetime(2026, 11, 22, 21, 0, 0, 7, tzinfo=UTC)
+    stamp = "20261122T210000000007Z"
+    base = f"ledger.sqlite.v11-backup-{stamp}"
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is UTC
+            return fixed
+
+    def check_case(directory, *, taken=0, links=True, refuse_renames=0, killed=False, migrated=False, attempts=None):
+        real_connect, real_rename = sqlite3.connect, ledger.os.rename
+        db = directory / "ledger.sqlite"
+        _old_ledger(db)
+        working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}-{threading.get_ident()}.partial"
+        earlier = [base + (f"-{index}" if index else "") for index in range(taken)]
+        for name in earlier:
+            (directory / name).write_bytes(b"earlier")
+        seen, refused = [], []
+
+        class Watch(sqlite3.Connection):
+            def backup(self, target, *args, **kwargs):
+                seen.append(_names(directory))  # What exists while the copy runs.
+                if killed:
+                    raise KeyboardInterrupt
+                super().backup(target, *args, **kwargs)
+                if migrated:
+                    target.execute("UPDATE schema_version SET version = 12")
+                    target.commit()
+
+        def connect(*args, **kwargs):
+            return real_connect(*args, factory=Watch, **kwargs) if str(args[0]) == str(db) else real_connect(*args, **kwargs)
+
+        def rename(source, target):
+            if len(refused) < refuse_renames:
+                refused.append(os.path.basename(target))
+                raise FileExistsError(target)  # Windows: another writer took the name after the check.
+            return real_rename(source, target)
+
+        link = (patch.object(ledger.os, "link", ledger.os.link) if links
+                else patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")))
+        bound = (patch.object(ledger, "BACKUP_NAME_ATTEMPTS", attempts) if attempts is not None
+                 else patch.object(ledger, "BACKUP_NAME_ATTEMPTS", ledger.BACKUP_NAME_ATTEMPTS))
+        with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), \
+                link, bound, patch.object(ledger.os, "rename", side_effect=rename):
+            if killed:
+                with pytest.raises(KeyboardInterrupt):
+                    ledger.Ledger(db)
+            elif attempts is not None:
+                with pytest.raises(ledger.LedgerError) as refusal:
+                    ledger.Ledger(db)
+                assert refusal.value.code == "ledger.backup_name_unavailable"
+                assert str(refusal.value) == f"No free backup name next to ledger.sqlite after {attempts} attempts"
+            else:
+                ledger.Ledger(db).close()
+        assert seen[0] == sorted(["ledger.sqlite", working, *earlier])  # No backup name before the copy ends.
+        names = _names(directory)
+        assert not any(name.endswith(".partial") or ".partial-" in name for name in names), names
+        backups = [name for name in names if "-backup-" in name and name not in earlier]
+        for name in earlier:
+            assert (directory / name).read_bytes() == b"earlier"  # Never overwritten.
+        if killed or migrated or attempts is not None:
+            assert backups == []
+            with closing(real_connect(db)) as check:  # Not migrated without a backup.
+                assert check.execute("SELECT version FROM schema_version").fetchone()[0] == (12 if migrated else 11)
+            return
+        suffix = taken + refuse_renames
+        expected = base + (f"-{suffix}" if suffix else "")
+        assert refused == [base + (f"-{index}" if index else "") for index in range(taken, suffix)]
+        assert backups == [expected], names
+        if os.name == "posix":
+            assert stat.S_IMODE((directory / expected).stat().st_mode) == 0o600
+        with closing(real_connect(directory / expected)) as copy:
+            assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
+            assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
+
+    cases = {
+        "plain": {}, "taken": {"taken": 1}, "two_taken": {"taken": 2},
+        "no_links": {"links": False}, "no_links_taken": {"links": False, "taken": 1},
+        "no_links_two_taken": {"links": False, "taken": 2},
+        "rename_refused": {"links": False, "refuse_renames": 1},
+        "rename_refused_twice": {"links": False, "taken": 1, "refuse_renames": 2},
+        "killed": {"killed": True}, "migrated_meanwhile": {"migrated": True},
+        "exhausted": {"taken": 3, "attempts": 3}, "exhausted_no_links": {"taken": 2, "links": False, "attempts": 2},
+    }
+    for case, options in cases.items():
+        directory = tmp_path / case
+        directory.mkdir()
+        check_case(directory, **options)
 
 
 def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):

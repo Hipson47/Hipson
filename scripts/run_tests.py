@@ -64,6 +64,11 @@ def main() -> int:
     # Keep diagnostics readable on native Windows consoles and redirected CI logs.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
+    from tests.support import isolate_test_environment
+
+    # The same isolation as tests/conftest.py gives pytest: this runner is what CI and `task verify` checks run.
+    # Kept afterwards, like pytest's: a Windows ledger handle closed late must not fail the run.
+    isolate_test_environment(tempfile.mkdtemp(prefix="hipson-tests-"))
     return run_tests(discover_tests())
 
 

@@ -7,16 +7,17 @@ import os
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 from unittest import SkipTest
 from unittest.mock import patch
 
 import pytest
 
-from hipson import ledger, task_observation
+from hipson import ledger, mcp_server, task_observation
 from hipson.task_observation import Caps, classify, findings, take
-from tests.test_hipson_helpers import REPO_ROOT, init_git_repo
+from tests.test_hipson_helpers import REPO_ROOT, init_git_repo, run_git
+from tests.test_ledger import assert_strict_schema
 from tests.test_task_verification import _project
 
 
@@ -65,6 +66,211 @@ def test_out_of_scope_create_modify_and_delete_each_raise_one_finding(tmp_path):
     ]
     assert raised[0]["detail"].startswith("docs/extra.md, notes.txt.") and raised[0]["location"] == "docs/extra.md"
     assert "not attribution" in raised[2]["detail"]
+
+
+def test_ignored_creations_modifications_and_deletions_stay_in_observation(tmp_path):
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text("/e2e/screenshots/\n/test-results/\n/src/*.png\n/docs/*.png\n")
+    created = root / "e2e/screenshots/check\nshot.png" if os.name != "nt" else root / "e2e/screenshots/check shot.png"
+    modified = root / "playwright-report/index.html"
+    deleted = root / "test-results/.last-run.json"
+    for path in (created, modified, deleted):
+        path.parent.mkdir(parents=True)
+    (modified.parent / ".gitignore").write_text("/index.html\n")
+    modified.write_text("before")
+    deleted.write_text("{}")
+
+    def change(root):
+        created.write_bytes(b"png")
+        modified.write_text("after")
+        deleted.unlink()
+        for path in ("notes.txt", "src/expected.png", "docs/concurrent.png"):
+            (root / path).write_text("new")
+
+    record = _observe(root, change, others=[("A-0042", ["docs"])])
+    assert record["counts"]["ignored"] == {"created": 1, "modified": 1, "deleted": 1}
+    assert {item["path"]: (item["attribution"], item["change"]) for item in record["paths"]} == {
+        created.relative_to(root).as_posix(): ("ignored", "created"),
+        "playwright-report/index.html": ("ignored", "modified"),
+        "test-results/.last-run.json": ("ignored", "deleted"),
+        "src/expected.png": ("in_scope", "created"),
+        "docs/concurrent.png": ("unattributed", "created"),
+        "notes.txt": ("out_of_scope", "created"),
+    }
+    assert [item["location"] for item in findings(record, "A-0007")] == ["notes.txt"]
+    assert "ignored: 1 created, 1 modified, 1 deleted" in task_observation.summary(record)
+
+
+def test_a_read_only_assignment_writing_ignored_output_still_raises_a_finding(tmp_path):
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text("/playwright-report/\n")
+
+    def change(root):
+        (root / "playwright-report").mkdir()
+        (root / "playwright-report/index.html").write_text("report")
+
+    record = _observe(root, change, mode="ro", scope=())
+    assert "ignored" not in record["counts"]
+    assert record["paths"] == [{"path": "playwright-report/index.html", "change": "created",
+                                "attribution": "out_of_scope", "evidence": "presence"}]
+    raised, = findings(record, "A-0009")
+    assert raised["title"] == "Observed 1 created path(s) outside the scope of read-only assignment A-0009"
+    rw = _observe(_tree(tmp_path / "rw"), lambda root: None)
+    assert rw["status"] == "clean" and "ignored" not in rw["counts"]
+
+
+def test_ignored_writes_that_could_run_later_keep_their_finding(tmp_path):
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text("*.local.json\n.vscode/\n.mcp.json\n/tools/\n/out/\n")
+    for directory in (".claude", ".vscode", "tools", "out"):
+        (root / directory).mkdir()
+
+    def change(root):
+        (root / ".claude/settings.local.json").write_text('{"hooks": {}}')
+        (root / ".vscode/tasks.json").write_text("{}")
+        (root / ".mcp.json").write_text("{}")
+        (root / "tools/run.sh").write_text("#!/bin/sh\n")
+        if os.name == "posix":
+            os.chmod(root / "tools/run.sh", 0o755)
+            (root / "out/link").symlink_to(root / "README.md")
+        (root / "out/report.html").write_text("plain output")
+
+    record = _observe(root, change)
+    attribution = {item["path"]: item["attribution"] for item in record["paths"]}
+    assert attribution["out/report.html"] == "ignored"  # Plain build output is still harmless.
+    # A script keeps its finding by its suffix on every platform; the link (and the exec bit) only exist on POSIX.
+    kept = [".claude/settings.local.json", ".vscode/tasks.json", ".mcp.json", "tools/run.sh"]
+    if os.name == "posix":
+        kept += ["out/link"]
+    for path in kept:
+        assert attribution[path] == "out_of_scope", path
+    raised, = findings(record, "A-0011")
+    assert raised["title"] == f"Observed {len(kept)} created path(s) outside the scope of assignment A-0011"
+    assert task_observation._runs_later(str(root), "gone/.claude/x", "deleted") is True
+    assert task_observation._runs_later(str(root), "gone/report.html", "deleted") is False
+    assert task_observation._runs_later(str(root), "missing.html", "created") is True  # Unknown: keep.
+
+
+def test_tracked_files_and_scripts_are_never_ignored_output(tmp_path):
+    root = init_git_repo(tmp_path)
+    (root / ".gitignore").write_text("/dist/\n*.ps1\n")
+    (root / "dist").mkdir()
+    (root / "dist/app.js").write_text("tracked build")
+    run_git(root, "add", ".gitignore")
+    run_git(root, "add", "-f", "dist/app.js")
+    run_git(root, "commit", "-qm", "tracked output")
+
+    def change(root):
+        (root / "dist/app.js").write_text("edited by the worker")  # Tracked, though the pattern matches it.
+        (root / "dist/new.js").write_text("fresh output")
+        (root / "deploy.ps1").write_text("Write-Host hi")  # A script, even without exec bits (Windows).
+
+    record = _observe(root, change, scope=("src",))
+    attribution = {item["path"]: item["attribution"] for item in record["paths"]}
+    assert attribution["dist/new.js"] == "ignored"
+    assert attribution["dist/app.js"] == "out_of_scope" and attribution["deploy.ps1"] == "out_of_scope"
+    assert {item["location"] for item in findings(record, "A-0012")} == {"deploy.ps1", "dist/app.js"}
+    # A project that is a subdirectory of the repository (a monorepo package) protects its tracked files too.
+    package = root / "packages" / "web"
+    package.mkdir(parents=True)
+    (package / ".gitignore").write_text("*.log\n")
+    (package / "kept.log").write_text("tracked")
+    run_git(root, "add", "packages/web/.gitignore")
+    run_git(root, "add", "-f", "packages/web/kept.log")
+    run_git(root, "commit", "-qm", "package")
+    (package / "fresh.log").write_text("untracked output")
+    assert task_observation._git_ignored(str(package), ["kept.log", "fresh.log"]) == {"fresh.log"}
+    # A repository whose HEAD cannot be read downgrades nothing.
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/missing\n")
+    assert task_observation._git_ignored(str(root), ["dist/new.js"]) == set()
+    assert task_observation._git_ignored(str(package), ["fresh.log"]) == set()
+
+
+def test_ignored_sensitive_and_hashed_paths_still_raise_a_finding(tmp_path):
+    root = _tree(tmp_path)
+    (root / ".gitignore").write_text(".env\n*.txt\n")
+    secret = "ghp_" + "a" * 36
+
+    def change(root):
+        for path in (".env", f"credentials-{secret}.txt", "plain.txt"):
+            (root / path).write_text("new")
+
+    record = _observe(root, change)
+    assert record["counts"]["ignored"]["created"] == 1
+    raised, = findings(record, "A-0007")
+    assert raised["title"].startswith("Observed 2 created path(s)")
+    assert raised["detail"].startswith(".env, credentials-[REDACTED].txt.")
+    assert secret not in json.dumps(record)
+
+
+def test_any_gitignore_change_disables_downgrades_even_under_hashed_in_scope_dir(tmp_path):
+    for kind in ["created", "modified", "deleted"]:
+        root = _tree(tmp_path / kind)
+        (root / ".gitignore").write_text("*.png\n")
+        nested = root / "src" / ("ghp_" + "a" * 36) / ".gitignore"
+        nested.parent.mkdir()
+        if kind != "created":
+            nested.write_text("old\n")
+
+        def change(root, kind=kind, nested=nested):
+            if kind == "deleted":
+                nested.unlink()
+            else:
+                nested.write_text("new\n")
+            (root / "output.png").write_bytes(b"png")
+
+        record = _observe(root, change)
+        assert record["counts"]["in_scope"][kind] == 1 and "ignored" not in record["counts"], kind
+        assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"], kind
+
+
+def test_git_ignore_check_excludes_repo_global_and_injected_git_configuration(tmp_path):
+    root = init_git_repo(tmp_path)
+    (root / ".gitignore").write_text("tree.txt\n")
+    info = root / ".git/info"
+    info.mkdir(exist_ok=True)
+    (info / "exclude").write_text("local.txt\n")
+    global_config = tmp_path / "gitconfig"
+    global_excludes = tmp_path / "global-excludes"
+    global_excludes.write_text("global.txt\n")
+    run_git(root, "config", "--file", str(global_config), "core.excludesFile", str(global_excludes))
+
+    def change(root):
+        for path in ("tree.txt", "local.txt", "global.txt"):
+            (root / path).write_text("new")
+
+    injected = {"GIT_CONFIG_GLOBAL": str(global_config), "GIT_TEMPLATE_DIR": str(root / ".git"),
+                "GIT_COMMON_DIR": str(root / ".git")}
+    with patch.dict(os.environ, injected):
+        record = _observe(root, change)
+    assert {item["path"]: item["attribution"] for item in record["paths"]} == {
+        "tree.txt": "ignored", "local.txt": "out_of_scope", "global.txt": "out_of_scope",
+    }
+
+
+def test_git_ignore_check_fails_closed(tmp_path):
+    for failure in ["missing", "timeout", "nonzero", "input_limit"]:
+        root = _tree(tmp_path / failure)
+        (root / ".gitignore").write_text("*.png\n")
+
+        def git(argv, failure=failure, **kwargs):
+            if failure == "missing":
+                raise FileNotFoundError(argv[0])
+            if "init" in argv:
+                return subprocess.CompletedProcess(argv, 0)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            if failure == "nonzero":
+                return subprocess.CompletedProcess(argv, 128, stdout=b"./output.png\0")
+            pytest.fail("Git should not launch when the input exceeds the budget")
+
+        with ExitStack() as stack:
+            if failure == "input_limit":
+                stack.enter_context(patch.object(task_observation, "MAX_IGNORE_INPUT", 1))
+            stack.enter_context(patch.object(task_observation.subprocess, "run", git))
+            record = _observe(root, lambda root: (root / "output.png").write_bytes(b"png"))
+        assert "ignored" not in record["counts"], failure
+        assert [item["location"] for item in findings(record, "A-0007")] == ["output.png"], failure
 
 
 def test_any_write_by_a_read_only_assignment_raises_a_finding(tmp_path):
@@ -245,9 +451,11 @@ def _env(tmp_path: Path) -> dict[str, str]:
 def test_task_run_observe_records_changes_and_findings_end_to_end(tmp_path):
     project = _project(tmp_path)
     (project / "src").mkdir()
+    (project / ".gitignore").write_text("report.html\n")
     store, task = _ledger(tmp_path, project)
     store.close()
     worker = ("from pathlib import Path; Path('src/new.py').write_text('x'); Path('outside.txt').write_text('y'); "
+              "Path('report.html').write_text('report'); "
               "Path('source.py').write_text('value = 2\\n')")
     run = subprocess.run([sys.executable, "-P", "-m", "hipson.cli", "task", "run", "--task", task, "--actor", "codex",
                           "--role", "builder", "--mode", "rw", "--scope", "src", "--observe", "--",
@@ -259,6 +467,9 @@ def test_task_run_observe_records_changes_and_findings_end_to_end(tmp_path):
         view = store.show(task)
         changes = view["assignments"][0]["changes"]
         assert changes["counts"]["out_of_scope"] == {"created": 1, "modified": 1, "deleted": 0}
+        assert changes["counts"]["ignored"] == {"created": 1, "modified": 0, "deleted": 0}
+        assert_strict_schema("task.schema.json", view)  # The published contract knows `ignored`.
+        assert all(item["severity"] == "major" for item in view["findings"])
         assert sorted(item["title"] for item in view["findings"]) == [
             f"Observed 1 created path(s) outside the scope of assignment {view['assignments'][0]['id']}",
             f"Observed 1 modified path(s) outside the scope of assignment {view['assignments'][0]['id']}"]
@@ -267,13 +478,18 @@ def test_task_run_observe_records_changes_and_findings_end_to_end(tmp_path):
                            cwd=project, env=_env(tmp_path), capture_output=True, text=True, timeout=60)
     assert "Changes changes: in scope: 1 created; out of scope: 1 created, 1 modified" in shown.stdout
     assert "out_of_scope created: outside.txt" in shown.stdout
+    assert "ignored: 1 created" in shown.stdout and "ignored created: report.html" in shown.stdout
     now = subprocess.run([sys.executable, "-P", "-m", "hipson.cli", "task", "now", "--all"],
                          cwd=project, env=_env(tmp_path), capture_output=True, text=True, timeout=60)
     assert now.returncode == 0, now.stderr
     assert "observed changes: in scope: 1 created; out of scope: 1 created, 1 modified" in now.stdout
     now_json = subprocess.run([sys.executable, "-P", "-m", "hipson.cli", "task", "now", "--all", "--json"],
                               cwd=project, env=_env(tmp_path), capture_output=True, text=True, timeout=60)
-    assert '"out_of_scope"' in now_json.stdout and '"changes"' in now_json.stdout  # MCP task.now shares this JSON.
+    assert '"out_of_scope"' in now_json.stdout and '"ignored"' in now_json.stdout
+    with patch.dict(os.environ, HIPSON_LEDGER=str(tmp_path / "ledger.sqlite")):
+        mcp_full = mcp_server._task_tool_payload("task.show", {"task": task})
+        mcp_section = mcp_server._task_tool_payload("task.show", {"task": task, "section": "assignments"})
+    assert mcp_full["assignments"][0]["changes"] == mcp_section["records"][0]["changes"] == changes
 
 
 def test_task_run_without_observe_records_nothing(tmp_path):

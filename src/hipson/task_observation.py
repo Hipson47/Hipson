@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
@@ -33,11 +34,13 @@ MAX_HASH_BYTES = 256 * 1024 * 1024
 MAX_DEPTH = 64
 MAX_LISTED = 200
 MAX_REASONS = 20
+MAX_IGNORE_INPUT = 1024 * 1024
+GIT_IGNORE_TIMEOUT = 5
 # Version control (directory or worktree pointer file), local environments and tool caches: a worker
 # installing dependencies or a test run writing caches is not a scoped source edit.
 EXCLUDED_NAMES = frozenset({".git", ".venv", "venv", "node_modules", *_TOOL_CACHE_DIRS})
 CHANGES = ("created", "modified", "deleted")
-GROUPS = ("in_scope", "out_of_scope", "unattributed")
+GROUPS = ("in_scope", "out_of_scope", "unattributed", "ignored")
 UNCERTAINTY = ("Filesystem observation of the project tree before and after the run, not attribution: the lead or "
                "another process may also have written. Changes in paths claimed by overlapping assignments are "
                "unattributed.")
@@ -279,12 +282,88 @@ def _covered(key: str, scope: Sequence[str]) -> bool:
     return any(item == "." or _prefix_of(_match(item.rstrip("/")), key) for item in scope)
 
 
+# Often git-ignored, yet read and executed later in the lead's own context (editor and agent settings with hooks,
+# MCP server lists, Git hooks, environment loaders, dev containers, CI definitions): a write there is never
+# treated as harmless build output.
+EXECUTABLE_CONFIG_DIRS = frozenset({".claude", ".codex", ".cursor", ".vscode", ".idea", ".husky", ".githooks",
+                                    ".direnv", ".devcontainer", ".github", ".gitlab", ".circleci", ".agents"})
+EXECUTABLE_CONFIG_NAMES = frozenset({".mcp.json", ".gitattributes", ".gitmodules", ".pre-commit-config.yaml",
+                                     ".envrc", "conftest.py", "sitecustomize.py", "usercustomize.py"})
+# Script and binary types, by name: Windows has no exec bits to read.
+EXECUTABLE_SUFFIXES = frozenset({".sh", ".bash", ".zsh", ".ps1", ".psm1", ".bat", ".cmd", ".exe", ".com",
+                                 ".dll", ".so", ".dylib"})
+
+
+def _runs_later(root: str, path: str, change: str) -> bool:
+    """Whether an ignored path could still change what runs later: execution-capable config, or an executable or
+    linked file. Such writes keep their out-of-scope finding even when Git ignores them."""
+    parts = [part.casefold() for part in path.split("/")]
+    if (any(part in EXECUTABLE_CONFIG_DIRS for part in parts[:-1]) or parts[-1] in EXECUTABLE_CONFIG_NAMES
+            or os.path.splitext(parts[-1])[1] in EXECUTABLE_SUFFIXES):
+        return True
+    if change == "deleted":
+        return False
+    try:
+        info = os.lstat(os.path.join(root, *path.split("/")))
+    except OSError:
+        return True  # Unknown: keep the finding.
+    return stat.S_ISLNK(info.st_mode) or bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+
+
+def _git_ignored(root: str, paths: Sequence[str]) -> set[str]:
+    """Consult only in-tree .gitignore files, with no real Git directory, index or user configuration."""
+    data = bytearray()
+    for path in paths:
+        encoded = os.fsencode("./" + path)  # Force a relative path even when the name starts with pathspec magic.
+        if len(data) + len(encoded) + 1 > MAX_IGNORE_INPUT:
+            return set()
+        data.extend(encoded + b"\0")
+    env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    try:
+        with tempfile.TemporaryDirectory(prefix="hipson-ignore-") as directory:
+            git_dir = Path(directory) / "git"
+            empty = Path(directory) / "excludes"
+            empty.touch()
+            subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(git_dir)], cwd=directory,
+                           env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=GIT_IGNORE_TIMEOUT, check=True)
+            # check-ignore --no-index also matches tracked files; a tracked file is source, never ignored output.
+            # The project may be a subdirectory of a repository (a monorepo package): ask Git, not the directory.
+            plain = {**env, "LC_ALL": "C", "LANGUAGE": "C"}
+            inside = subprocess.run(["git", "-C", root, "rev-parse", "--is-inside-work-tree"], cwd=directory,
+                                    env=plain, stdin=subprocess.DEVNULL, capture_output=True,
+                                    timeout=GIT_IGNORE_TIMEOUT, check=False)
+            in_head: set[str] = set()
+            if inside.returncode == 0 and inside.stdout.strip() == b"true":
+                # ls-tree from the project directory lists HEAD paths relative to it.
+                tracked = subprocess.run(["git", "-C", root, "ls-tree", "-r", "-z", "--name-only", "HEAD"],
+                                         cwd=directory, env=plain, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.DEVNULL, timeout=GIT_IGNORE_TIMEOUT, check=False)
+                if tracked.returncode != 0:
+                    return set()  # A repository whose HEAD cannot be read: nothing is downgraded.
+                in_head = {os.fsdecode(name) for name in tracked.stdout.split(b"\0") if name}
+            elif b"not a git repository" not in (inside.stderr or b""):
+                return set()  # Git could not tell whether files are tracked: nothing is downgraded.
+            result = subprocess.run(["git", f"--git-dir={git_dir}", f"--work-tree={root}", "-c",
+                                     f"core.excludesFile={empty}", "check-ignore", "--no-index", "-z", "--stdin"],
+                                    cwd=directory, env=env, input=bytes(data), stdout=subprocess.PIPE,
+                                    stderr=subprocess.DEVNULL, timeout=GIT_IGNORE_TIMEOUT, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {name for path in result.stdout.split(b"\0") if path.startswith(b"./")
+            and (name := os.fsdecode(path[2:])) not in in_head}
+
+
 def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope: Sequence[str],
              others: Sequence[tuple[str, Sequence[str]]]) -> dict[str, Any]:
-    """Bounded observation record: rw changes inside the assignment's scope are expected, everything else is not."""
+    """Classify observed changes by scope, overlapping writers and stable in-tree ignore rules."""
     changes, metadata, reasons = diff(before, after)
-    counts = {group: dict.fromkeys(CHANGES, 0) for group in GROUPS}
+    counts = {group: dict.fromkeys(CHANGES, 0) for group in GROUPS if group != "ignored"}
     listed: list[dict[str, str]] = []
+    candidates: list[dict[str, str]] = []
     concurrent: set[str] = set()
     for change in CHANGES:
         for key in changes[change]:
@@ -299,8 +378,22 @@ def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope:
             else:
                 group = "out_of_scope"
             counts[group][change] += 1
-            listed.append({"path": display, "change": change, "attribution": group,
-                           "evidence": "metadata" if key in metadata else "content" if change == "modified" else "presence"})
+            item = {"path": display, "change": change, "attribution": group,
+                    "evidence": "metadata" if key in metadata else "content" if change == "modified" else "presence"}
+            listed.append(item)
+            # A read-only assignment may not change anything, ignored output included.
+            if (mode == "rw" and group == "out_of_scope" and not _hashed(key) and key == display
+                    and not is_sensitive_path(key) and not _runs_later(after["root"], key, change)):
+                candidates.append(item)
+    # The ignore rules must be unchanged throughout the observed tree, even in another assignment's scope.
+    if candidates and not reasons and not any(_same(key.rsplit("/", 1)[-1], ".gitignore")
+                                              for keys in changes.values() for key in keys):
+        ignored = _git_ignored(after["root"], [item["path"] for item in candidates])
+        for item in candidates:
+            if item["path"] in ignored:
+                item["attribution"] = "ignored"
+                counts["out_of_scope"][item["change"]] -= 1
+                counts.setdefault("ignored", dict.fromkeys(CHANGES, 0))[item["change"]] += 1
     # Out-of-scope paths first: they are what the lead must look at.
     listed.sort(key=lambda item: (item["attribution"] != "out_of_scope", item["attribution"], item["path"]))
     total = sum(sum(group.values()) for group in counts.values())
@@ -318,7 +411,8 @@ def classify(before: dict[str, Any], after: dict[str, Any], *, mode: str, scope:
 def unobserved(mode: str, reason: str) -> dict[str, Any]:
     return {"status": "unobserved", "observed_at": ledger._timestamp(), "mode": mode, "truncated": False,
             "incomplete_reasons": [reason], "files_before": 0, "files_after": 0,
-            "counts": {group: dict.fromkeys(CHANGES, 0) for group in GROUPS}, "paths": [], "omitted": 0,
+            "counts": {group: dict.fromkeys(CHANGES, 0) for group in GROUPS if group != "ignored"},
+            "paths": [], "omitted": 0,
             "concurrent_assignments": [], "caps": {}, "excluded_dirs": [],
             "uncertainty": f"{reason}; project changes are unknown."}
 

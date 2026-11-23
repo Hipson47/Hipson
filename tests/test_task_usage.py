@@ -140,7 +140,11 @@ def test_task_show_usage_totals_include_unpaged_assignments_and_preserve_full_vi
                           "codex_rollout": {"assignments": 1, **_expected("", 20, 5, 4, None, 2, 25)["tokens"]},
                       },
                       "missing_reasons": {"not_an_agent_runtime": 8}, "elapsed_seconds": 10.0}
-    assert "Usage: " in _show(db, task, "--detail", "full")
+    line = ("Usage: attempts builder=3, explorer=7, reviewer=1 | repair rounds 2 | elapsed 10s | "
+            "agy_json 10 total tokens (12 cached, 2 output) | codex_rollout 25 total tokens (4 cached, 5 output) | "
+            "without usage 8")
+    full_text = _show(db, task, "--detail", "full")
+    assert line in full_text.splitlines() and '"attempts"' not in full_text
     with patch.object(task_verification, "project_state", side_effect=AssertionError("fingerprint computed")):
         compact = json.loads(_show(db, task, "--detail", "compact", "--json"))
         text = _show(db, task, "--detail", "compact")
@@ -152,7 +156,37 @@ def test_task_show_usage_totals_include_unpaged_assignments_and_preserve_full_vi
     assert compact["omitted_assignments"] == 3 and len(assignments["records"]) == 1
     assert assignments["records"][0]["usage"]["reason"] == "not_an_agent_runtime"
     assert len(task_projection.dumps(assignments).encode()) <= task_projection.SECTION_BUDGET
-    assert "Usage: " in text
+    assert line in text.splitlines() and '"attempts"' not in text
+
+
+def test_usage_line_names_unknown_values_and_stays_bounded():
+    unknown = {"attempts": None, "repair_rounds": None, "elapsed_seconds": None, "tokens_by_source": {},
+               "without_usage": 0}
+    assert cli._render_task_usage(unknown) == ("Usage: attempts unknown | repair rounds unknown | elapsed unknown | "
+                                               "tokens unknown")
+    sources = {f"source_{index:03}\u001b[31m": {"total_tokens": None, "cached_tokens": 1, "output_tokens": None}
+               for index in range(40)}
+    many = {"attempts": {}, "repair_rounds": 0, "elapsed_seconds": 1.5, "tokens_by_source": sources,
+            "without_usage": 3}
+    rendered = cli._render_task_usage(many)
+    assert rendered.startswith("Usage: attempts none | repair rounds 0 | elapsed 1.5s | source_000")
+    assert "unknown total tokens (1 cached, unknown output)" in rendered
+    assert "\u001b" not in rendered and len(rendered) <= len("Usage: ") + 512
+
+
+def test_closed_tasks_show_no_stale_check_count():
+    def task(task_id, status):
+        return {"id": task_id, "status": status, "title": "t",
+                "checks": [{"recorded": "ok", "current": "stale"}, {"recorded": "failed", "current": "not_checked"}],
+                "open_findings": {"minor": 1}, "stale": None}
+
+    page = {"tasks": [task("T-0001", "done"), task("T-0002", "cancelled"), task("T-0003", "review"),
+                      task("T-0004", "in_progress")], "more": None}
+    lines = cli._render_compact_tasks(page).splitlines()
+    assert lines[:4] == ["T-0001 [done] t | checks recorded OK 1/2 | open findings 1",
+                         "T-0002 [cancelled] t | checks recorded OK 1/2 | open findings 1",
+                         "T-0003 [review] t | checks recorded OK 1/2, stale 1 | open findings 1",
+                         "T-0004 [in_progress] t | checks recorded OK 1/2, stale 1 | open findings 1"]
 
 
 def test_totals_stay_per_source_and_a_cancelled_reviewer_starts_no_repair_count(tmp_path):

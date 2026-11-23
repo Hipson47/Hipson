@@ -16,6 +16,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -24,7 +25,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, TypedDict, cast
 
 from hipson.home import detect_hipson_home
-from hipson.redaction import redact_text, redact_value
+from hipson.redaction import redact_text, redact_value, redact_worker_text
 from hipson.task_calls import ReadCall, gate_fix_calls, read_call, task_lookup_calls
 
 SCHEMA_VERSION = 12
@@ -790,7 +791,7 @@ def validate_task_result(value: object) -> TaskResult:
 
     def redact(item: Any) -> Any:
         if isinstance(item, str):
-            return redact_text(item)
+            return redact_worker_text(item)
         if isinstance(item, list):
             return [redact(child) for child in item]
         if isinstance(item, dict):
@@ -1029,6 +1030,10 @@ def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: 
     raise LedgerError(message, code="ledger.snapshot_changed")
 
 
+# Bounded, so a filesystem that keeps reporting names as taken cannot spin a writer forever.
+BACKUP_NAME_ATTEMPTS = 100
+
+
 def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path | None:
     """Copy an older ledger with SQLite's backup API before any writer migrates it, not only hipson init.
 
@@ -1041,28 +1046,39 @@ def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path
     if row is None or row[0] >= SCHEMA_VERSION or row[0] not in SUPPORTED_SCHEMA_VERSIONS:
         return None
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-    counter = 0
-    while True:  # Never overwrite an earlier backup; a concurrent writer gets the next suffix.
-        target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}" + (f"-{counter}" if counter else ""))
-        try:
-            # The ledger holds briefs, journals and worker output: keep backups private, like init's.
-            os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
-        except FileExistsError:
-            counter += 1
-            continue
-        break
+    # Copy into a hidden working file and give it a backup name only once the copy is complete: a writer killed
+    # mid-copy (SIGKILL, OOM, power loss) runs no cleanup, and its partial file must never look like a backup.
+    # Process and thread in the name: two migrators can never share a working file, even within one microsecond.
+    working = path.with_name(f".{path.name}.v{row[0]}-backup-{stamp}-{os.getpid()}-{threading.get_ident()}.partial")
+    # The ledger holds briefs, journals and worker output: keep backups private, like init's.
+    os.close(os.open(working, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     try:
-        with closing(sqlite3.connect(target)) as destination:
+        with closing(sqlite3.connect(working)) as destination:
             connection.backup(destination)
             copied = destination.execute("SELECT version FROM schema_version WHERE singleton = 1").fetchone()
-    except BaseException:
-        target.unlink(missing_ok=True)  # A partial copy must not look like a good backup.
-        raise
-    if copied is None or copied[0] != row[0]:
-        # Another writer migrated in between; its own backup holds the old version, this copy does not.
-        target.unlink(missing_ok=True)
-        return None
-    return target
+        if copied is None or copied[0] != row[0]:
+            # Another writer migrated in between; its own backup holds the old version, this copy does not.
+            return None
+        for counter in range(BACKUP_NAME_ATTEMPTS):  # Never overwrite an earlier backup; take the next suffix.
+            target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}" + (f"-{counter}" if counter else ""))
+            try:
+                os.link(working, target)  # Fails instead of replacing an existing backup.
+            except FileExistsError:
+                continue
+            except OSError:
+                # No hard links on this filesystem: rename. os.rename refuses an existing target on Windows; on
+                # POSIX only a same-microsecond backup by another writer could race, holding the same version.
+                if os.path.lexists(target):
+                    continue
+                try:
+                    os.rename(working, target)
+                except FileExistsError:
+                    continue
+            return target
+        raise LedgerError(f"No free backup name next to {path.name} after {BACKUP_NAME_ATTEMPTS} attempts",
+            code="ledger.backup_name_unavailable")
+    finally:
+        working.unlink(missing_ok=True)  # After a link or a failure; a rename already moved it.
 
 
 class Ledger:
@@ -1441,6 +1457,7 @@ class Ledger:
                 current["task"], "hipson", "observed",
                 f"{assignment}: changes {changes['status']}; {unexpected} outside scope, "
                 f"{sum(counts.get('unattributed', {}).values())} unattributed"
+                + (f", {ignored} ignored" if (ignored := sum(counts.get("ignored", {}).values())) else "")
                 + ("; incomplete, not a clean result" if changes["status"] == "incomplete" else "")
                 + (f"; paths: {listed}" if listed else "")
                 + (f" (+{omitted} more in task show --json)" if omitted else "")
@@ -1575,8 +1592,8 @@ class Ledger:
         now = _timestamp()
         self.connection.execute(
             """INSERT INTO findings VALUES (?, ?, ?, ?, ?, ?, ?, 'open', NULL, '', ?, ?, NULL)""",
-            (finding, task, source_assignment, severity, redact_text(title), redact_text(detail),
-             redact_text(location), now, now),
+            (finding, task, source_assignment, severity, redact_worker_text(title), redact_worker_text(detail),
+             redact_worker_text(location), now, now),
         )
         self._append_event(task, actor, "finding_opened", f"{finding} [{severity}]: {title}", [finding])
         self._reopen_for_finding(task, finding=finding, severity=severity, actor=actor)
@@ -1617,7 +1634,7 @@ class Ledger:
             self.connection.execute(
                 """UPDATE findings SET status = ?, resolved_by_assignment = ?, resolution_note = ?,
                    updated_at = ?, resolved_at = ? WHERE id = ?""",
-                (status, resolved_by_assignment, redact_text(resolution_note), now,
+                (status, resolved_by_assignment, redact_worker_text(resolution_note), now,
                  None if status == "open" else now, finding),
             )
             self._append_event(
@@ -2156,7 +2173,9 @@ class Ledger:
         now = _timestamp()
         cursor = self.connection.execute(
             "INSERT INTO events (task, actor, type, summary, refs, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
-            (task, redact_text(actor), redact_text(type), redact_text(summary), json.dumps(redact_value(list(refs))), now),
+            # Summaries quote worker text (finding titles, notes, flow reasons): the same redaction as results.
+            (task, redact_text(actor), redact_text(type), redact_worker_text(summary), json.dumps(redact_value(list(refs))),
+             now),
         )
         self.connection.execute("UPDATE tasks SET revision = revision + 1, updated_at = ? WHERE id = ?", (now, task))
         row = self.connection.execute("SELECT * FROM events WHERE seq = ?", (cursor.lastrowid,)).fetchone()

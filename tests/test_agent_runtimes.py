@@ -184,7 +184,10 @@ schema = json.loads(args[args.index('--json-schema') + 1])
 assert schema['required'] == ['status', 'summary', 'files_changed', 'commands', 'findings', 'risks']
 log = os.environ['FAKE_LOG']
 with open(log, 'a') as handle:
-    handle.write(json.dumps({'argv': args, 'prompt_has_rules': 'Worker rules:' in prompt}) + '\n')
+    handle.write(json.dumps({'argv': args, 'prompt_has_rules': 'Worker rules:' in prompt,
+                            'prompt_has_reviewer_rules': (
+                                'List only defects, risks or gaps that need a decision in findings.' in prompt
+                                and 'Confirmations that something works belong in the summary.' in prompt)}) + '\n')
 mode = args[args.index('--permission-mode') + 1]
 result = {'status': 'completed', 'summary': mode, 'files_changed': [], 'commands': [], 'findings': [], 'risks': []}
 if mode == 'acceptEdits':
@@ -223,6 +226,104 @@ def _worker(tmp_path, *, checks=()):
         os.environ.pop("HIPSON_PROJECT", None)
         os.environ.pop("FAKE_MODE", None)
         yield brief, result, run
+
+
+def test_exec_codex_records_only_models_from_a_matching_recent_rollout(tmp_path):
+    thread_id = "fedcba98-7654-4321-8abc-0123456789ab"
+    other_id = "abcdef01-2345-4321-8abc-0123456789ab"
+    contexts = [
+        {"type": "session_meta", "payload": {"model": "not-a-turn"}},
+        {"type": "turn_context", "model": "wrong-level", "payload": {"model": "model-z"}},
+        {"type": "turn_context", "payload": {"model": "model-a"}},
+        {"type": "turn_context", "payload": {"model": "model-z"}},
+        {"type": "turn_context", "payload": {"model": 123}},
+    ]
+    for case in ["fresh", "default_home", "missing_id", "invalid_id", "stale", "no_rollout"]:
+        case_dir = tmp_path / f"case-{case}"
+        case_dir.mkdir()
+        emitted = None if case == "missing_id" else "*" if case == "invalid_id" else thread_id
+        fake = f"""
+from pathlib import Path
+
+sessions = Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex') / 'sessions' / '2026' / '11' / '22'
+sessions.mkdir(parents=True)
+other = sessions / 'rollout-2026-11-22T12-00-00-{other_id}.jsonl'
+other.write_text(json.dumps({{'type': 'turn_context', 'payload': {{'model': 'wrong-thread'}}}}), encoding='utf-8')
+if {case != 'no_rollout'!r}:
+    matched = sessions / 'rollout-2026-11-22T12-00-00-{thread_id}.jsonl'
+    matched.write_text('malformed line\\n' + '\\n'.join(map(json.dumps, {contexts!r})), encoding='utf-8')
+    if {case == 'stale'!r}:
+        os.utime(matched, (1, 1))
+if {emitted is not None!r}:
+    print(json.dumps({{'type': 'thread.started', 'thread_id': {emitted!r}}}))
+print(json.dumps({{'type': 'turn.completed', 'model': 'not-from-rollout'}}))
+Path(args[args.index('--output-last-message') + 1]).write_text(json.dumps({RESULT!r}), encoding='utf-8')
+"""
+        home_env = ({"HOME": str(case_dir), "USERPROFILE": str(case_dir)} if case == "default_home"
+                    else {"CODEX_HOME": str(case_dir / "codex-home")})
+        with patch.dict(os.environ, home_env):
+            if case == "default_home":
+                os.environ.pop("CODEX_HOME", None)
+            with _worker(case_dir) as (_, result, run), patch.dict(os.environ, _env(_fake_cli(case_dir, "codex", fake))):
+                assert run("codex") == 0, case
+        meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+        assert meta["outcome"] == "ok", case
+        assert meta["models"] == (["model-a", "model-z"] if case in ("fresh", "default_home") else None), case
+
+
+def test_codex_rollout_model_read_is_byte_bounded(tmp_path):
+    thread = "fedcba98-7654-4321-8abc-0123456789ab"
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    first = b'{"type":"turn_context","payload":{"model":"first"}}\n'
+    second = b'{"type":"turn_context","payload":{"model":"over-budget"}}\n'
+    (sessions / f"rollout-test-{thread}.jsonl").write_bytes(first + second)
+    with (patch.dict(os.environ, {"CODEX_HOME": str(tmp_path)}),
+          patch.object(runtimes, "MAX_CODEX_ROLLOUT_BYTES", len(first) + len(second) - 2)):
+        assert runtimes._codex_rollout_models(thread, 0) == ["first"]
+    # A planted rollout cannot flood the meta file: at most 8 models of at most 80 characters, controls escaped.
+    lines = [json.dumps({"type": "turn_context", "payload": {"model": f"m{index:02}" + "x" * 200}})
+             for index in range(20)]
+    lines.append(json.dumps({"type": "turn_context", "payload": {"model": "evil\u001b[31m"}}))
+    (sessions / f"rollout-test-{thread}.jsonl").write_text("\n".join(lines) + "\n")
+    with patch.dict(os.environ, {"CODEX_HOME": str(tmp_path)}):
+        models = runtimes._codex_rollout_models(thread, 0)
+    assert models is not None and len(models) == runtimes.MAX_ROLLOUT_MODELS == 8
+    assert all(len(model) <= runtimes.MAX_MODEL_CHARS == 80 for model in models)
+    assert [model[:3] for model in models] == [f"m{index:02}" for index in range(8)]
+
+
+def test_agy_permission_failure_reports_first_redacted_line_and_headless_hint(tmp_path):
+    secret = "ghp_" + "a" * 36
+    denial = f"jetski: command with {secret}\x1b[0m\twas auto-denied " + "z" * 400
+    fake = f"""
+print(json.dumps({{'status': 'SUCCESS'}}))
+print('unrelated diagnostic', file=sys.stderr)
+print({denial!r}, file=sys.stderr)
+print('second auto-denied diagnostic', file=sys.stderr)
+"""
+    with _worker(tmp_path) as (_, result, run), patch.dict(os.environ, _env(_fake_cli(tmp_path, "agy", fake))):
+        assert run("agy") == runtimes.EXIT["permission_denied"]
+    meta = json.loads(result.with_name(result.name + ".meta.json").read_text())
+    assert meta["outcome"] == "permission_denied"
+    original, line, hint = meta["detail"].split("; ", 2)
+    assert original == "no structured_output in the runtime result"
+    label = "runtime output (untrusted): "
+    assert line.startswith(label + r"jetski: command with [REDACTED]\u001b[0m\twas auto-denied ")
+    assert len(line) <= len(label) + 300
+    assert hint == ("Antigravity auto-denies commands outside its allow list in headless mode; "
+                    "grant the command in agy's settings or use another builder runtime.")
+    assert secret not in json.dumps(meta)
+
+
+def test_other_runtime_permission_failures_include_the_denial_without_agy_hint(tmp_path):
+    denial = "Command permission was denied"
+    for runtime in ["claude", "codex"]:
+        with pytest.raises(runtimes.RuntimeFailure) as error:
+            runtimes.normalize(runtime, 7, denial, "other permission denied", tmp_path / "last")
+        assert error.value.kind == "permission_denied", runtime
+        assert error.value.detail.endswith(f"; runtime output (untrusted): {denial}"), runtime
+        assert "Antigravity" not in error.value.detail, runtime
 
 
 def test_exec_refuses_symlinked_runtime_state(tmp_path):
@@ -506,6 +607,7 @@ def test_flow_runs_native_runtime_workers_end_to_end_with_session_and_usage_evid
     assert [call["argv"][call["argv"].index("--permission-mode") + 1] for call in calls] == ["acceptEdits", "plan"]
     assert all(call["argv"][call["argv"].index("--output-format") + 1] == "stream-json" for call in calls)
     assert all(call["prompt_has_rules"] for call in calls)
+    assert [call["prompt_has_reviewer_rules"] for call in calls] == [False, True]
     assert not any("--setting-sources" in call["argv"] for call in calls)  # Native: the user's configuration.
     # The only added permission is the lead's declared check, exactly, and only for the writer.
     grants = [call["argv"][i + 1] for call in calls for i, arg in enumerate(call["argv"]) if arg == "--allowedTools"]
