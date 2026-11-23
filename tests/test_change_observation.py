@@ -138,9 +138,10 @@ def test_ignored_writes_that_could_run_later_keep_their_finding(tmp_path):
     record = _observe(root, change)
     attribution = {item["path"]: item["attribution"] for item in record["paths"]}
     assert attribution["out/report.html"] == "ignored"  # Plain build output is still harmless.
-    kept = [".claude/settings.local.json", ".vscode/tasks.json", ".mcp.json"]
+    # A script keeps its finding by its suffix on every platform; the link (and the exec bit) only exist on POSIX.
+    kept = [".claude/settings.local.json", ".vscode/tasks.json", ".mcp.json", "tools/run.sh"]
     if os.name == "posix":
-        kept += ["tools/run.sh", "out/link"]
+        kept += ["out/link"]
     for path in kept:
         assert attribution[path] == "out_of_scope", path
     raised, = findings(record, "A-0011")
