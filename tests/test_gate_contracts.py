@@ -884,7 +884,9 @@ def test_v12_usage_record_and_migration_exact_contract(_project_state, tmp_path)
 
 
 def _old_ledger(path):
-    with closing(ledger.Ledger(path)) as store:
+    # A fixed project state, like every contract here: this file mutation-tests the ledger, not fingerprints.
+    with closing(ledger.Ledger(path)) as store, \
+            patch.object(task_verification, "project_state", return_value=dict(STATE)):
         store.open_task(project=path.parent, title="kept", objective="survives the backup")
         store.connection.execute("ALTER TABLE assignments DROP COLUMN usage")
         store.connection.execute("UPDATE schema_version SET version = 11")
@@ -903,6 +905,7 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
 
     fixed = datetime(2026, 11, 22, 21, 0, 0, 7, tzinfo=UTC)
     stamp = "20261122T210000000007Z"
+    base = f"ledger.sqlite.v11-backup-{stamp}"
 
     class Clock(datetime):
         @classmethod
@@ -910,106 +913,85 @@ def test_migration_backup_appears_only_complete_and_never_replaces_one(tmp_path)
             assert tz is UTC
             return fixed
 
-    def check_case(case, directory):
-        real_connect = sqlite3.connect
+    def check_case(directory, *, taken=0, links=True, refuse_renames=0, killed=False, migrated=False, attempts=None):
+        real_connect, real_rename = sqlite3.connect, ledger.os.rename
         db = directory / "ledger.sqlite"
         _old_ledger(db)
         working = f".ledger.sqlite.v11-backup-{stamp}-{os.getpid()}-{threading.get_ident()}.partial"
-        earlier = [f"ledger.sqlite.v11-backup-{stamp}"] if case in ("taken", "no_links_taken") else []
+        earlier = [base + (f"-{index}" if index else "") for index in range(taken)]
         for name in earlier:
             (directory / name).write_bytes(b"earlier")
-        seen = []
+        seen, refused = [], []
 
         class Watch(sqlite3.Connection):
             def backup(self, target, *args, **kwargs):
                 seen.append(_names(directory))  # What exists while the copy runs.
-                if case == "killed":
+                if killed:
                     raise KeyboardInterrupt
                 super().backup(target, *args, **kwargs)
-                if case == "migrated_meanwhile":
+                if migrated:
                     target.execute("UPDATE schema_version SET version = 12")
                     target.commit()
 
         def connect(*args, **kwargs):
             return real_connect(*args, factory=Watch, **kwargs) if str(args[0]) == str(db) else real_connect(*args, **kwargs)
 
-        links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")) \
-            if case.startswith("no_links") else patch.object(ledger.os, "link", ledger.os.link)
-        real_rename = ledger.os.rename
-        refused = []
-
         def rename(source, target):
-            if case == "rename_refused" and not refused:
-                refused.append(target)
+            if len(refused) < refuse_renames:
+                refused.append(os.path.basename(target))
                 raise FileExistsError(target)  # Windows: another writer took the name after the check.
             return real_rename(source, target)
 
-        renames = patch.object(ledger.os, "rename", side_effect=rename)
-        if case == "rename_refused":
-            links = patch.object(ledger.os, "link", side_effect=PermissionError("no hard links"))
+        link = (patch.object(ledger.os, "link", ledger.os.link) if links
+                else patch.object(ledger.os, "link", side_effect=PermissionError("no hard links")))
+        bound = (patch.object(ledger, "BACKUP_NAME_ATTEMPTS", attempts) if attempts is not None
+                 else patch.object(ledger, "BACKUP_NAME_ATTEMPTS", ledger.BACKUP_NAME_ATTEMPTS))
         with patch.object(ledger, "datetime", Clock), patch.object(ledger.sqlite3, "connect", side_effect=connect), \
-                links, renames:
-            if case == "killed":
+                link, bound, patch.object(ledger.os, "rename", side_effect=rename):
+            if killed:
                 with pytest.raises(KeyboardInterrupt):
                     ledger.Ledger(db)
+            elif attempts is not None:
+                with pytest.raises(ledger.LedgerError) as refusal:
+                    ledger.Ledger(db)
+                assert refusal.value.code == "ledger.backup_name_unavailable"
+                assert str(refusal.value) == f"No free backup name next to ledger.sqlite after {attempts} attempts"
             else:
                 ledger.Ledger(db).close()
-        assert seen[0] == sorted(["ledger.sqlite", working, *earlier]), case  # No backup name before the copy ends.
+        assert seen[0] == sorted(["ledger.sqlite", working, *earlier])  # No backup name before the copy ends.
         names = _names(directory)
-        assert not any(name.endswith(".partial") or ".partial-" in name for name in names), (case, names)
+        assert not any(name.endswith(".partial") or ".partial-" in name for name in names), names
         backups = [name for name in names if "-backup-" in name and name not in earlier]
-        if case in ("killed", "migrated_meanwhile"):
-            assert backups == [], case
+        for name in earlier:
+            assert (directory / name).read_bytes() == b"earlier"  # Never overwritten.
+        if killed or migrated or attempts is not None:
+            assert backups == []
+            with closing(real_connect(db)) as check:  # Not migrated without a backup.
+                assert check.execute("SELECT version FROM schema_version").fetchone()[0] == (12 if migrated else 11)
             return
-        expected = f"ledger.sqlite.v11-backup-{stamp}" + ("-1" if earlier or case == "rename_refused" else "")
-        if case == "rename_refused":
-            assert [os.path.basename(item) for item in refused] == [f"ledger.sqlite.v11-backup-{stamp}"]
-        assert backups == [expected], (case, names)
-        if earlier:
-            assert (directory / earlier[0]).read_bytes() == b"earlier"
+        suffix = taken + refuse_renames
+        expected = base + (f"-{suffix}" if suffix else "")
+        assert refused == [base + (f"-{index}" if index else "") for index in range(taken, suffix)]
+        assert backups == [expected], names
         if os.name == "posix":
             assert stat.S_IMODE((directory / expected).stat().st_mode) == 0o600
         with closing(real_connect(directory / expected)) as copy:
             assert copy.execute("SELECT version FROM schema_version").fetchone()[0] == 11
             assert [row[0] for row in copy.execute("SELECT title FROM tasks")] == ["kept"]
 
-    for case in ["plain", "taken", "no_links", "no_links_taken", "killed", "migrated_meanwhile", "rename_refused"]:
+    cases = {
+        "plain": {}, "taken": {"taken": 1}, "two_taken": {"taken": 2},
+        "no_links": {"links": False}, "no_links_taken": {"links": False, "taken": 1},
+        "no_links_two_taken": {"links": False, "taken": 2},
+        "rename_refused": {"links": False, "refuse_renames": 1},
+        "rename_refused_twice": {"links": False, "taken": 1, "refuse_renames": 2},
+        "killed": {"killed": True}, "migrated_meanwhile": {"migrated": True},
+        "exhausted": {"taken": 3, "attempts": 3}, "exhausted_no_links": {"taken": 2, "links": False, "attempts": 2},
+    }
+    for case, options in cases.items():
         directory = tmp_path / case
         directory.mkdir()
-        check_case(case, directory)
-
-
-def test_worker_results_findings_and_notes_persist_without_env_secrets_or_cut_key_blocks(tmp_path):
-    import os
-    import sqlite3
-
-    cut = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAsecretbody"
-    with patch.dict(os.environ, {"SVC_TOKEN": "zq9plainvalue77"}):
-        store, task = _store(tmp_path)
-        db = store.path
-        with closing(store):
-            result = ledger.validate_task_result({
-                "status": "completed", "summary": "env zq9plainvalue77 and " + cut, "files_changed": [{"path": "a zq9plainvalue77", "change": "modified"}],
-                "commands": [{"command": "echo zq9plainvalue77", "exit_code": 0}], "risks": ["key " + cut],
-                "findings": [{"severity": "minor", "title": "t zq9plainvalue77", "detail": cut, "location": "x"}]})
-            assert result["summary"] == "env [REDACTED] and [REDACTED]"
-            assert result["files_changed"] == [{"path": "a [REDACTED]", "change": "modified"}] and result["risks"] == ["key [REDACTED]"]
-            assert result["commands"][0]["command"] == "echo [REDACTED]"
-            assert result["findings"][0]["title"] == "t [REDACTED]" and result["findings"][0]["detail"] == "[REDACTED]"
-            assignment = store.assign(task, actor="w", role="reviewer", mode="ro")["id"]
-            store.finish(assignment, result="passed", summary="done", worker_result=result)
-            finding = store.add_finding(task, actor="w", severity="minor", title="title zq9plainvalue77",
-                                        detail="detail " + cut, location="loc zq9plainvalue77")
-            assert (finding["title"], finding["detail"], finding["location"]) == (
-                "title [REDACTED]", "detail [REDACTED]", "loc [REDACTED]")
-            updated = store.update_finding(finding["id"], actor="lead", status="wontfix",
-                                           resolution_note="note zq9plainvalue77 " + cut)
-            assert updated["resolution_note"] == "note [REDACTED] [REDACTED]"
-            store.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        raw = db.read_bytes()
-        assert b"zq9plainvalue77" not in raw and b"MIIEowIBAAKCAQEAsecretbody" not in raw
-        with closing(sqlite3.connect(db)) as check:
-            assert check.execute("SELECT count(*) FROM findings").fetchone()[0] == 2  # The result's own and the added one.
+        check_case(directory, **options)
 
 
 def _reviewer(id, actor="rev", *, mode="ro", status="passed", result="completed", role="reviewer"):

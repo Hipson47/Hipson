@@ -1030,6 +1030,10 @@ def _sidecar_read_only_connection(path: Path, deadline: float, *, sidecar_free: 
     raise LedgerError(message, code="ledger.snapshot_changed")
 
 
+# Bounded, so a filesystem that keeps reporting names as taken cannot spin a writer forever.
+BACKUP_NAME_ATTEMPTS = 100
+
+
 def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path | None:
     """Copy an older ledger with SQLite's backup API before any writer migrates it, not only hipson init.
 
@@ -1055,26 +1059,24 @@ def _backup_before_migration(connection: sqlite3.Connection, path: Path) -> Path
         if copied is None or copied[0] != row[0]:
             # Another writer migrated in between; its own backup holds the old version, this copy does not.
             return None
-        counter = 0
-        while True:  # Never overwrite an earlier backup; a concurrent writer gets the next suffix.
+        for counter in range(BACKUP_NAME_ATTEMPTS):  # Never overwrite an earlier backup; take the next suffix.
             target = path.with_name(f"{path.name}.v{row[0]}-backup-{stamp}" + (f"-{counter}" if counter else ""))
             try:
                 os.link(working, target)  # Fails instead of replacing an existing backup.
             except FileExistsError:
-                counter += 1
                 continue
             except OSError:
                 # No hard links on this filesystem: rename. os.rename refuses an existing target on Windows; on
                 # POSIX only a same-microsecond backup by another writer could race, holding the same version.
                 if os.path.lexists(target):
-                    counter += 1
                     continue
                 try:
                     os.rename(working, target)
                 except FileExistsError:
-                    counter += 1
                     continue
             return target
+        raise LedgerError(f"No free backup name next to {path.name} after {BACKUP_NAME_ATTEMPTS} attempts",
+            code="ledger.backup_name_unavailable")
     finally:
         working.unlink(missing_ok=True)  # After a link or a failure; a rename already moved it.
 

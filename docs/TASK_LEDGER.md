@@ -1621,6 +1621,7 @@ per-check timeout, up to the supported maximum of 86400 seconds.
 | `ledger.path_unresolvable` | The configured database path cannot be resolved. | Use a valid database path. |
 | `ledger.rollback_journal` | A rollback journal prevents a read-only snapshot. | Retry after the writable owner finishes recovery. |
 | `ledger.schema_unsupported` | The database has an unsupported ledger schema. | Use a compatible Hipson version or migrate with the supported upgrade path. |
+| `ledger.backup_name_unavailable` | Every pre-migration backup name for this timestamp was already taken. | Remove or move old `<ledger>.v*-backup-*` files, then retry. |
 | `ledger.sidecar_free_requires_read_only` | A sidecar-free database connection was opened as writable. | Open it with `read_only=True`. |
 | `ledger.snapshot_changed` | The read-only snapshot could not stabilize within the retry budget. | Retry the read. |
 | `ledger.wal_pending` | A nonempty WAL prevents a sidecar-free read. | Retry after the writable owner recovers and checkpoints or closes the store. |

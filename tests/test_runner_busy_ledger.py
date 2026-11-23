@@ -59,8 +59,9 @@ def _run_worker(tmp_path: Path, *, after_lock: float, lock_seconds: float):
     errors: list[str] = []
     holder = threading.Thread(target=_hold_write_lock, args=(db, started, locked, lock_seconds, errors))
     # A short busy timeout makes the lock outlast it without a slow test; the shape of the failure is the same.
-    runner = ("import sys\nfrom hipson import cli, ledger\nledger.BUSY_TIMEOUT_MS = 200\n"
-              "raise SystemExit(cli.main(sys.argv[1:]))\n")
+    # 60 attempts of 0.2 s: the final record outlasts any lock the test holds, however slow the CI machine.
+    runner = ("import sys\nfrom hipson import cli, ledger, task_runner\nledger.BUSY_TIMEOUT_MS = 200\n"
+              "task_runner.FINISH_BUSY_ATTEMPTS = 60\nraise SystemExit(cli.main(sys.argv[1:]))\n")
     argv = [sys.executable, "-c", runner, "task", "run", "--db", str(db), "--task", task, "--actor", "w",
             "--role", "builder", "--mode", "rw", "--scope", ".", "--result-file", str(result_file), "--",
             sys.executable, "-c", WORKER, str(result_file), str(started), str(locked), str(after_lock)]
@@ -86,9 +87,9 @@ def test_a_busy_ledger_during_heartbeats_never_stops_the_worker(tmp_path):
 
 
 def test_the_final_record_waits_out_a_busy_ledger_instead_of_leaving_the_assignment_active(tmp_path):
-    # The worker ends as soon as the lock is taken, so its final record meets the lock (0.7 s, the busy timeout
-    # 0.2 s): the first attempts fail busy and a retry records it.
-    code, assignment, stderr, _ = _run_worker(tmp_path, after_lock=0.0, lock_seconds=0.7)
+    # The worker ends as soon as the lock is taken and the lock stays 3 s, longer than the supervisor needs to reach
+    # its final record even on a slow macOS runner: the first attempts fail busy and a retry records it.
+    code, assignment, stderr, _ = _run_worker(tmp_path, after_lock=0.0, lock_seconds=3.0)
     assert code == 0, stderr
     assert "retrying the final record" in stderr and "could not finish" not in stderr, stderr
     assert assignment["status"] == "passed" and assignment["result"]["status"] == "completed", stderr
