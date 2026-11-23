@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.8.1 - unreleased
+## 1.8.1 - 2026-11-23
 
 A stabilization release from the first real project built with 1.8.0 and an overnight hardening run.
 The ledger schema stays at 12. The one contract change is additive: a change observation may carry an
