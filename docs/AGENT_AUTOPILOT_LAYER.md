@@ -1,5 +1,7 @@
 # Agent Autopilot Layer
 
+> **Deprecated since 1.7, removed in 2.0.** The `autopilot`, `release claim`, `hermes` and `scheduler` commands described here are hidden and print a warning; see [DEPRECATIONS.md](DEPRECATIONS.md). Use the task ledger instead: `hipson task do` / `hipson task close` for implementation and acceptance, and `hipson kit review` for review bundles.
+
 Hipson Agent Autopilot Layer v0 turns the CLI control plane into an
 agent-discoverable workflow layer. The coding agent remains Codex, Cursor,
 Claude Code, or an MCP client. Hipson supplies the local contract, packet

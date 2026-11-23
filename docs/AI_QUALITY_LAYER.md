@@ -78,7 +78,7 @@ They should not be used for:
 Every AI quality pass must preserve these rules:
 
 - no provider call happens without an explicit provider action, such as a sidecar
-  command or a kit/autopilot run with `--run-sidecar`;
+  command or a `kit review` run with `--run-sidecar`;
 - the dry-run preview comes first;
 - packets are bounded and redacted;
 - free/model-selected output is advisory;

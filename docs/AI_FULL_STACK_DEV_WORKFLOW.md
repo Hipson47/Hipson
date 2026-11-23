@@ -1,5 +1,7 @@
 # AI Full-Stack Dev Workflow
 
+> **Deprecated since 1.7, removed in 2.0.** The `autopilot`, `release claim`, `hermes` and `scheduler` commands used in the autopilot and release-claim sections here are hidden and print a warning; see [DEPRECATIONS.md](DEPRECATIONS.md). Use the task ledger instead: `hipson task do` / `hipson task close` for implementation and acceptance, and `hipson kit review` for review bundles.
+
 Hipson is the local-first control plane for AI-native full-stack development. It
 does not replace the coding agent. It gives the agent a bounded workflow between
 the repository and optional model-backed review.

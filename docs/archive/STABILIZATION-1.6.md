@@ -8,7 +8,7 @@ derived each finding from code before fixing it; every fix has a regression test
 ratings in C and D concern optional workflow features rather than the ledger.
 
 Status: **fixed** (with test), **mitigated** (partial fix, follow-up named), **deprecated** (the command is
-hidden since 1.7 and removed in 2.0, see [DEPRECATIONS.md](DEPRECATIONS.md)), **open** (not yet changed).
+hidden since 1.7 and removed in 2.0, see [DEPRECATIONS.md](../DEPRECATIONS.md)), **open** (not yet changed).
 Items marked *1.7* were resolved after the owner's decision on 2026-10-28 (ledger tasks T-0061..T-0063).
 
 ## A. Ledger and lifecycle (5 major, all fixed)

@@ -2,8 +2,8 @@
 
 Reference setup and historical handoff snapshot. The verification counts below
 are earlier recorded results, not checks of the current checkout. Use the
-[documentation index](README.md), [task ledger](TASK_LEDGER.md), and
-[changelog](../CHANGELOG.md) for current interfaces and work tracking.
+[documentation index](../README.md), [task ledger](../TASK_LEDGER.md), and
+[changelog](../../CHANGELOG.md) for current interfaces and work tracking.
 
 ## Context
 This repo is the local Hipson Orchestrator Hub.

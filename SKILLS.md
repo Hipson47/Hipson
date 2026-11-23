@@ -1,5 +1,7 @@
 # Hipson Agent Skills
 
+For the lead's ledger workflow (`hipson task`, MCP `task.*`), see `docs/TASK_LEDGER.md`.
+
 ## Lead and Worker Modes
 
 Enter worker mode when the task brief says you are a worker for a lead, contains `Worker rules:`,

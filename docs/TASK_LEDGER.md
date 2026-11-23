@@ -954,13 +954,17 @@ can be repeated. Keep
 WSL projects on the Linux filesystem.
 
 SQLite uses WAL, foreign keys, a 10-second busy timeout, and a version table
-(database version 6; artifact schema version `1.0`). Writes migrate existing
+(database version 12; artifact schema version `1.0`). Writes migrate existing
 stores in place in one transaction. The v1→v2 step adds four nullable assignment
 ownership/lease columns; v2→v3 adds a nullable JSON `assignments.result` column,
 the `findings` table, and its task/status/severity index. The v3→v4 step adds
 nullable `assignments.owner_pid_namespace`. The v4→v5 step adds nullable JSON `activity`
 and `failure_journal`, nullable `acknowledged_at`, and `ack_note` (default empty).
 The v5→v6 step adds an append-only `verifications` table and task/sequence index.
+The v6→v7 step adds `tasks.checks` (the declared acceptance checks), v7→v8 adds nullable
+`assignments.changes`, v8→v9 adds nullable `assignments.environment`, v9→v10 adds `tasks.needs` and
+`assignments.needs`, v10→v11 adds `tasks.review_policy` (default `none`), and v11→v12 adds nullable
+`assignments.usage`.
 All existing rows, claims, events, and done statuses remain. Old assignments receive NULL values for added
 nullable columns; ended legacy assignments retain the 1.4 `not_required` acknowledgement exemption.
 A failure in any step rolls back both DDL and version updates. Unknown

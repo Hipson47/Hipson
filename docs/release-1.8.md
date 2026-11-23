@@ -108,3 +108,9 @@ files if present, then copy the pre-migration backup over the ledger file before
   config and keeps Git, with one retry, only for unusual values. Watch the first Windows runs.
 - `task cleanup` on a path with many open tasks suggests reads for the first ones and close or
   cancel templates for the first open task only; narrow the path to act on the others.
+
+## 1.8.1
+
+Hipson 1.8.1 (2026-11-23) is a stabilization release. The ledger schema stays at 12, upgrade with
+`uv tool upgrade hipson`, and no migration is needed. The full list of fixes is in the
+[changelog](../CHANGELOG.md). Its test suite has 1,225 tests, and both runners pass 1,225 of 1,225.

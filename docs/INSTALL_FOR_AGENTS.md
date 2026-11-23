@@ -1,7 +1,23 @@
 # Install For Agents
 
-Install Hipson once, then install managed instructions for the agent surfaces
-you use:
+## Quick setup
+
+`hipson init` is the recommended setup. It checks prerequisites, creates or migrates the ledger and registers
+the `hipson` MCP server with the lead client, then verifies it. Use `--client claude` (Claude Code as the lead),
+`--client codex`, or `--client none` for the ledger only; `--dry-run` previews the plan and `--yes` skips the prompt.
+
+```bash
+hipson init --client claude --dry-run
+hipson init --client claude
+```
+
+To register the smaller lead tool list, add `--mcp-profile lead` (for an existing registration, append
+`--profile lead` to the `hipson mcp serve` arguments). See
+[TASK_LEDGER.md](TASK_LEDGER.md#lead-mcp-profile).
+
+## Managed instructions
+
+To also install managed instructions for the agent surfaces you use:
 
 ```bash
 hipson install agents --all --dry-run

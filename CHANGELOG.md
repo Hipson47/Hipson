@@ -220,7 +220,7 @@ ledger to schema 11 after a backup; 1.6 cannot open it afterwards.
 - A `task close` refusal for a check that ran out of time names the per-check timeout and `--timeout`.
 - Worker briefs show a readable gate summary (one line per acceptance check) instead of raw verification
   JSON; CLI JSON and MCP keep the full `verification` field and add `verification_summary`.
-- Fix the kept workflow primitives from the 1.6 stabilization review ([docs/STABILIZATION-1.6.md](docs/STABILIZATION-1.6.md)):
+- Fix the kept workflow primitives from the 1.6 stabilization review ([docs/STABILIZATION-1.6.md](docs/archive/STABILIZATION-1.6.md)):
   evidence and audit gates derive from the work's own command results and the human decision (a bare
   `status: passed`, another work's verification or an old quality report no longer pass); `run status` is
   blocked after a failed packet preflight and recommends only supported commands; `kit review` (and resume)
