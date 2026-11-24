@@ -1,5 +1,7 @@
 # Agent-Native Core
 
+> **Deprecated since 1.7, removed in 2.0.** The `autopilot`, `release claim`, `hermes` and `scheduler` commands, and the parts of this document that cover them, are hidden and print a warning; see [DEPRECATIONS.md](DEPRECATIONS.md). Use the task ledger instead: `hipson task do` / `hipson task close` for implementation and acceptance, and `hipson kit review` for review bundles.
+
 Agent-Native Core is the stable local layer that lets coding agents work with a
 repository without turning model output into authority.
 

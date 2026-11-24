@@ -1,6 +1,7 @@
 # Hipson usage reference
 
 Full command reference and workflow guide. The project overview and the task ledger quick start are in the top-level [README](../README.md); the ledger itself is documented in [TASK_LEDGER.md](TASK_LEDGER.md).
+For the `task`, `lead` and `task flow` commands, use TASK_LEDGER.md; this file covers the local workflow commands.
 
 Since 1.7, `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes` are deprecated: hidden from
 `hipson --help` and MCP, still callable with a warning, removed in 2.0. Their sections below are marked
@@ -8,7 +9,7 @@ Since 1.7, `autopilot`, `release`, `scheduler`, `chat`, `learn` and `hermes` are
 
 ## Feature list
 
-- **Provider-free 1.1 local-first core** for bounded, human-reviewed AI software work.
+- **Provider-free local-first core** for bounded, human-reviewed AI software work.
 - **First-class agent contract** through `hipson contract show --json`, exposing
   workflow, artifact, risk, path, provider, memory, verification, and adapter policy.
 - **AI Review Control Kit v0** through `hipson kit review`, producing a single
@@ -510,7 +511,7 @@ python scripts/run_tests.py
 
 ## CI
 
-GitHub Actions validates Python 3.11 and 3.12, runs Ruff, mypy, Bandit,
+GitHub Actions validates Python 3.11 and 3.12 on Linux, plus Python 3.12 on macOS and Windows, runs Ruff, mypy, Bandit,
 pip-audit, the local test runner, pytest, and the configured mutmut target set,
 then compiles source files, builds wheel/sdist artifacts, smoke-tests the
 installed wheel CLI, and checks both deterministic and dry-run LLM routing.

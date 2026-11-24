@@ -4,7 +4,7 @@ Hipson's product is the lead's task ledger (`hipson task`, `hipson lead`, MCP `t
 `hipson init` and the local workflow primitives (`work`, `route`, `scan`, `packet`, `verify run`,
 `evidence`, `audit`, `kit review`, `run`, `memory`, `skill`, `doctor`, `policy`, `session`, `tool`,
 `sidecar`, `provider`, `quality`). The experimental surfaces below had open functional defects in the 1.6
-stabilization review ([STABILIZATION-1.6.md](STABILIZATION-1.6.md)) and overlap the ledger.
+stabilization review ([STABILIZATION-1.6.md](archive/STABILIZATION-1.6.md)) and overlap the ledger.
 
 Since 1.7 they are **deprecated**: hidden from `hipson --help`, the lead quick reference, the agent
 contract and MCP; still callable, with a one-line warning on stderr (stdout and JSON output are

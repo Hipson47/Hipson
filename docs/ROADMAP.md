@@ -16,32 +16,27 @@ improve success and raised cost by over 20% ([Evaluating AGENTS.md](https://arxi
 and output counts or perceived speed are poor productivity measures
 ([METR RCT](https://metr.org/blog/2025-07-10-early-2025-ai-experienced-os-dev-study/)).
 
-## 1.4: lead visibility and recovery
+## Shipped
 
-- **Assignment activity and failure journal.** The runner records heartbeats, last output and last
-  completed action as bounded, redacted, untrusted observations; when a worker ends without a
-  result it records what exists (exit status, changed files, `git diff --stat`, log tail) and the
-  uncertainty, never an invented outcome. Stale progress never releases claims.
-- **One "now" view.** Active assignments with last activity, pending worker results, tasks that
-  need a lead decision or cleanup, project filter, commit subjects next to full SHAs.
-- **`hipson lead resume`.** Deterministic, read-only state for a lead after context loss: open
-  tasks, active owners, results not yet acknowledged, open blocking/major findings, failed
-  attempts, decisions, verification freshness. Worker results need an explicit acknowledgement, so a
-  delivered-but-unread result stays visible.
-- Measured by new agent e2e scenarios: a lead resuming mid-task, a worker that dies without a
-  result, a result that arrives while the lead is busy.
+- **1.4: lead visibility and recovery.** Assignment activity and failure journal, the `task now` view, and
+  `hipson lead resume` with explicit result acknowledgement.
+- **1.5: acceptance bound to evidence.** `review` and `done` reference the candidate revision and the
+  verification actually run; stale verification is flagged; false-completion e2e cases.
+- **1.8: agent-facing reads and whole-task usage.** Compact reads with ranked next actions, the `lead` MCP
+  profile, and recorded tokens and elapsed time per task. See the [1.8 release notes](release-1.8.md).
 
-## 1.5: acceptance bound to evidence
+Details for each are in the release notes ([1.4](release-1.4.md), [1.5](release-1.5.md), [1.8](release-1.8.md)).
 
-- `review` and `done` reference the candidate revision and the verification actually run
-  (command, exit, time, revision); stale verification is flagged.
-- Agent e2e adds false-completion cases: zero-exit incomplete work, altered tests, verification run
-  on an older revision; the reference solution must pass and the broken one must fail.
+## Next
 
-## 1.8: whole-task usage
-
-- Record reported tokens and elapsed assignment time. Show attempts, repair rounds, usage coverage
-  and elapsed time per task. Native probes and live flow comparisons report available token counts.
+- **Known 1.8 limitations** ([release-1.8.md](release-1.8.md#known-limitations)): ledger writers fingerprint the
+  project while holding the write lock, so a slow filesystem can make other writers time out; Git-ignored and
+  excluded paths are neither observed as findings nor fingerprinted.
+- **1.9:** make compact the general default read detail, as planned in the
+  [task ledger docs](TASK_LEDGER.md#compact-projection-view_schema-1). The MCP tool profile is a separate
+  setting; changing its default is reserved for a later release.
+- **2.0:** remove the commands deprecated in 1.7: `autopilot`, `release claim`, `scheduler`, `chat`, `learn` and
+  `hermes` ([DEPRECATIONS.md](DEPRECATIONS.md)).
 
 ## Later
 

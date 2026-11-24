@@ -4,7 +4,7 @@ Status: proposal, not started. Base: `main` at `bdfebd3` (1.7.0 released).
 
 ## Thesis
 
-Hipson's user is the lead agent (see [ROADMAP](ROADMAP.md)). An agent does not see a screen. It sees
+Hipson's user is the lead agent (see [ROADMAP](../ROADMAP.md)). An agent does not see a screen. It sees
 tool definitions, tool results and error messages, and pays for every byte of them in context and every
 second in wall-clock time. So in 1.8 Hipson's "interface" is its MCP and CLI contract, and it gets the
 care a product gives its UI:
@@ -115,7 +115,7 @@ Acceptance:
 - The e2e scenario "lead resumes mid-task" is first recorded on 1.7.0 as a committed baseline artifact
   (tool calls, bytes read). On 1.8 compact text must read fewer bytes. The owner waived the fewer-calls
   target so the lead reads worker activity and the failure journal before acknowledging the result.
-  See the [owner decision](evals/AGENT_UX.md#owner-decision-on-resume-call-count).
+  See the [owner decision](../evals/AGENT_UX.md#owner-decision-on-resume-call-count).
 
 ### P1-3 Refusals that name the fix
 
@@ -166,7 +166,7 @@ Acceptance:
 ### P2-6 A smaller default tool surface
 
 - **A `lead` MCP profile.** It covers the task lifecycle and the reads, about 12 of the 34 tools, with shorter
-  descriptions and schemas. It leaves out deprecated surfaces (see [DEPRECATIONS](DEPRECATIONS.md)).
+  descriptions and schemas. It leaves out deprecated surfaces (see [DEPRECATIONS](../DEPRECATIONS.md)).
 - **Rollout.** In 1.8 the profile is opt-in (`--profile lead`) and `full` stays the default. Switching the default is
   a breaking change, so it waits for a later minor release and is announced in the changelog.
 

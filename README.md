@@ -7,7 +7,7 @@
 [![CI](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml/badge.svg)](https://github.com/Hipson47/Hipson/actions/workflows/ci.yml)
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776ab)
 ![Runtime dependencies: none](https://img.shields.io/badge/runtime%20deps-none-2ea043)
-![Tests: 1068, zero Linux CI skips](https://img.shields.io/badge/tests-1068%20%7C%200%20Linux%20CI%20skips-2ea043)
+![Tests: 1225, zero Linux CI skips](https://img.shields.io/badge/tests-1225%20%7C%200%20Linux%20CI%20skips-2ea043)
 ![Bounded mutation score: 68.66%](https://img.shields.io/badge/bounded%20mutation-68.66%25-yellow)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/Hipson47/Hipson/blob/main/LICENSE)
 
@@ -87,8 +87,8 @@ branch `feat/task-ledger`, 2026-10-25:
 |---|---|
 | Work recorded in the ledger | 7 tasks, 11 worker assignments (5 builder, 4 reviewer, 2 explorer), 48 events |
 | Independent review rounds | Each code slice reviewed by a fresh read-only Codex run before commit (15 findings); a final whole-branch review by Codex and Antigravity (12 findings, 9 fixed, 3 judged non-issues); one more concurrency bug found by a stress test and fixed with a regression test |
-| Test suite | 1,195 tests in the 1.8.0 RC, up from 404 when the ledger landed. Both `pytest` and the dependency-free `scripts/run_tests.py` run them. CI requires zero skips on Linux and checks a skip allowlist on macOS and Windows. A clean-wheel smoke runs on all three |
-| Mutation gate | Four modules (approvals, evidence, redaction, sandbox) have a committed baseline of 68.66% (1,593 / 2,320 killed, at most 727 survivors, 0 without tests, 0 timeouts). The ledger-core gate (`ledger.py`, `task_verification.py`) has a committed baseline of 80.28% (2,744 / 3,418 killed, at most 667 survivors). The 1.8.0 RC ledger-core run passed at 84.03% on Python 3.13 (3,426 / 4,077 killed, 644 survivors, 7 without tests, 0 timeouts). Both gates run on Linux with Python 3.12 in CI |
+| Test suite | 1,225 tests in 1.8.1 (1,195 in the 1.8.0 RC), up from 404 when the ledger landed. Both `pytest` and the dependency-free `scripts/run_tests.py` run them. CI requires zero skips on Linux and checks a skip allowlist on macOS and Windows. A clean-wheel smoke runs on all three |
+| Mutation gate | Four modules (approvals, evidence, redaction, sandbox) have a committed baseline of 68.66% (1,593 / 2,320 killed, at most 727 survivors, 0 without tests, 0 timeouts). The ledger-core gate (`ledger.py`, `task_verification.py`) has a committed baseline of 80.28% (2,744 / 3,418 killed, at most 667 survivors). The 1.8.0 RC ledger-core run passed at 84.03% on Python 3.13 (3,426 / 4,077 killed, 644 survivors, 7 without tests, 0 timeouts). The 1.8.1 release-candidate CI run passed both gates: the four-module gate killed 1,812 of 2,458 (646 survivors, cap 727), and the ledger-core gate killed 3,478 of 4,108 (84.66%, 623 survivors, 0 timeouts). The committed baselines stay at 68.66% and 80.28%. Both gates run on Linux with Python 3.12 in CI |
 | Agent e2e | Ten offline missions include false completion, altered tests, stale verification and declared acceptance checks, with reference and broken solutions. Published live Codex baseline (gpt-6.1-sol): 3/3 original missions; new live measurements are lead-run. [docs/AGENT_E2E.md](https://github.com/Hipson47/Hipson/blob/main/docs/AGENT_E2E.md) |
 | Static gates | `ruff`, `mypy`, `bandit`, `pip-audit`, `compileall`, wheel build (CI on Python 3.11 and 3.12) |
 | Runtime dependencies | none (`dependencies = []`) |
@@ -196,7 +196,11 @@ Claude defaults to project scope (`.mcp.json`); `--scope user` selects its user 
 `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`). Existing registrations are left alone;
 config edits get unique backups first. Restart the lead client after setup, then open your first task below.
 
-### Upgrade from 1.7
+### Upgrade from 1.8.0 or 1.7
+
+From 1.8.0 to 1.8.1, run `uv tool upgrade hipson` (or `pip install --upgrade hipson`). The ledger schema stays at 12, so no migration is needed.
+
+From 1.7:
 
 ```bash
 uv tool upgrade hipson        # or: pip install --upgrade hipson
@@ -254,7 +258,8 @@ Agents can request compact board, now, resume and task reads. Compact now and re
 `next_actions`, and coded refusals suggest fix calls where available. Compact reads flag stale tasks,
 `task cleanup` checks a project before removal, and task show reports per-task usage by runtime source.
 The opt-in `lead` MCP profile gives a lead 14 tools and defaults these reads to compact detail.
-See the [1.8 release notes](https://github.com/Hipson47/Hipson/blob/main/docs/release-1.8.md).
+See the [1.8 release notes](https://github.com/Hipson47/Hipson/blob/main/docs/release-1.8.md); 1.8.1 fixes are in the
+[changelog](https://github.com/Hipson47/Hipson/blob/main/CHANGELOG.md).
 
 To let Hipson drive a coding agent through build, your checks, an independent review of exactly the verified
 tree and bounded repairs, see `hipson task flow` in
@@ -303,7 +308,7 @@ The ledger lives at `$HIPSON_LEDGER` or `~/.config/hipson/ledger.sqlite`
 
 Hipson ships a stdio MCP server; its `initialize` response carries the lead lifecycle as instructions.
 Start and recover: `lead.resume`, `task.now`. Read tools: `task.show`, `task.brief`, `task.context`,
-`task.events`, `task.activity`, `task.list`, `task.board`, `task.findings`.
+`task.events`, `task.activity`, `task.list`, `task.board`, `task.findings`, `task.cleanup`.
 Write tools (each requires `approved=true`): `task.open`, `task.status`, `task.checks`, `task.verify`,
 `task.close`, `task.ack`, `task.assign`, `task.finish`, `task.event`, `task.reap`, `task.finding_add`,
 `task.finding_update`. Workers are launched by `hipson task run`, not through MCP.

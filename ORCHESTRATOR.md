@@ -23,7 +23,7 @@ keep the existing standalone behavior.
    - Executor: implement a bounded task.
    - Reviewer: inspect diff and verification.
 5. Use subagents for bounded read-only review, exploration, or isolated implementation.
-6. Fold context into the target repo progress file or this hub's `docs/hipson-progress.md`.
+6. Record state in the task ledger (`hipson task`, see `docs/TASK_LEDGER.md`), or fold it into the target repo's progress file or changelog.
 
 ## Core Rules
 - Do not scan the entire user profile when a repo path is known.
@@ -34,26 +34,10 @@ keep the existing standalone behavior.
 - Do not claim verification unless the command was run.
 - Do not expose secrets or broaden API access without a reason.
 
-## Hermes Bridge
-Hermes Agent may act as an intake, messaging, scheduler, and status layer, but
-Hipson remains the workflow authority and Codex remains the coding/review agent.
-The default control surface remains Codex: the user talks to Codex as before,
-and Codex decides whether Hermes is useful for a given task.
-
-Use:
-
-```bash
-hipson hermes intake --project ~/code/<project> --task "<task>"
-```
-
-Use that bridge for tasks that benefit from cross-session status, scheduling,
-Telegram/gateway dispatch, or async bus events. Ordinary coding, review,
-verification, and packet work can go straight through `hipson work --task`.
-Hermes-originated work must still follow the Hipson route, packet, verification,
-and review contract. The JSONL bridge lives at
-`~/.config/hipson/hermes-bus/events.jsonl`; the installable Hermes skill lives at
-`~/.hermes/skills/hipson-codex-orchestrator/SKILL.md` after running
-`hipson hermes install-skill`.
+## Hermes Bridge (deprecated)
+`hipson hermes` is deprecated since 1.7 and removed in 2.0 (see `docs/DEPRECATIONS.md`). It is not part of the
+recommended path. Track status in the task ledger (`hipson task now`, `hipson task events`); ordinary coding,
+review, verification and packet work goes straight through `hipson work --task` or the ledger.
 
 ## Hipson Compact
 Default to compact communication to preserve model context and usage limits.
@@ -92,7 +76,7 @@ python3 scripts/hipson_agents.py run --agent reviewer_lite --packet /tmp/packet.
 ## Outputs
 - `scans/latest.md`: latest multi-repo scan.
 - `scans/latest.json`: machine-readable scan summary.
-- `docs/hipson-progress.md`: local orchestrator handoff.
+- `docs/hipson-progress.md`: historical progress reference; current state lives in the task ledger.
 
 ## Knowledge Skills
 - `skills/hipson-gpt/`: Hipson browser knowledge package, now structured as local hub skills.

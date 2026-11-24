@@ -1,5 +1,7 @@
 # Hermes Agent Integration
 
+> **Deprecated since 1.7, removed in 2.0.** The `hermes` commands described here are hidden and print a warning; see [DEPRECATIONS.md](DEPRECATIONS.md). Use the task ledger instead (`hipson task now`, `hipson task events`; `hipson task do` / `hipson task close` for implementation and acceptance, `hipson kit review` for review bundles).
+
 Hermes is wired into Hipson as an orchestration layer, not as a replacement for
 Hipson or Codex. The default user experience stays Codex-first: the user talks
 to Codex as before, and Codex decides when Hermes adds value.
